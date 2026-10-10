@@ -1,5 +1,29 @@
 import SwiftUI
 
+/// Match the addon media types used by the other Apple search surfaces. Keep unknown types in Other;
+/// a collection returned by an addon remains its real metadata target, separate from a hub browse target.
+private enum TVSearchResultGroup: String, CaseIterable {
+    case movies, series, collections, other
+
+    init(type: String) {
+        switch type {
+        case "movie": self = .movies
+        case "series": self = .series
+        case "collection", "collections": self = .collections
+        default: self = .other
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .movies: return String(localized: "Movies")
+        case .series: return String(localized: "Series")
+        case .collections: return String(localized: "Collections")
+        case .other: return String(localized: "Other")
+        }
+    }
+}
+
 // SearchHistoryStore moved to SourcesShared/SearchHistoryStore.swift so the iOS/Mac search screen
 // can reuse it (#90 ported to touch + Mac). Same per-profile, sync-backed store.
 
@@ -10,6 +34,8 @@ struct SearchView: View {
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected
     @EnvironmentObject private var profiles: ProfileStore
+    @ObservedObject private var collectionsHub = CollectionsHubModel.shared
+    @ObservedObject private var catalogPrefs = CatalogPreferences.shared
     @State private var showOpenLink = false
     @State private var query = ""
     @State private var searchTask: Task<Void, Never>?
@@ -53,7 +79,7 @@ struct SearchView: View {
             .padding(.top, Theme.Space.lg)
             .padding(.bottom, Theme.Space.xl)
         }
-        .searchable(text: $query, prompt: "Movies or series")
+        .searchable(text: $query, prompt: "Movies, series or collections")
         .searchSuggestions {
             ForEach(suggestionTitles, id: \.self) { title in
                 Text(title).searchCompletion(title)
@@ -61,10 +87,12 @@ struct SearchView: View {
         }
         .onSubmit(of: .search) {
             searchTask?.cancel()
+            searchDebouncePending = false
             core.suggestSearch(query)
             searchNow(query)
         }
         .onAppear {
+            collectionsHub.load()
             core.loadSearchSuggestions()
             history = SearchHistoryStore.load(profileID: profiles.activeID)
         }
@@ -104,12 +132,18 @@ struct SearchView: View {
     }
 
     @ViewBuilder private var resultGrid: some View {
-        if !hasSearchQuery || core.searchResults.isEmpty {
+        let collections = matchingCollections
+        let sections = resultSections(collections: collections)
+        if !hasSearchQuery || sections.isEmpty {
             emptyState
         } else {
             VStack(alignment: .leading, spacing: Theme.Space.xl) {
-                ForEach(resultSections, id: \.title) { section in
-                    resultRow(title: section.title, items: section.items)
+                ForEach(sections, id: \.group) { section in
+                    resultRow(group: section.group, items: section.items,
+                              collections: section.group == .collections ? collections : [])
+                }
+                if core.searchResults.isEmpty && isWaitingForCurrentQuery {
+                    emptyState
                 }
             }
         }
@@ -129,11 +163,20 @@ struct SearchView: View {
         .padding(.top, Theme.Space.xl)
     }
 
-    private func resultRow(title: String, items: [CoreMeta]) -> some View {
+    private func resultRow(group: TVSearchResultGroup, items: [CoreMeta], collections: [HubTarget]) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            Text(title).sectionTitleStyle()
+            Text(group.title).sectionTitleStyle()
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: Theme.Space.lg) {
+                LazyHStack(alignment: .top, spacing: Theme.Space.lg) {
+                    ForEach(collections, id: \.self) { target in
+                        NavigationLink { TVCategoryBrowse(target: target) } label: {
+                            collectionTile(target)
+                        }
+                        .buttonStyle(CardFocusStyle())
+                        .simultaneousGesture(TapGesture().onEnded { _ in saveToHistory(query) })
+                        .accessibilityLabel(Text(LocalizedStringKey(target.title)))
+                        .accessibilityHint("Opens this collection")
+                    }
                     ForEach(items) { item in
                         PosterCard(title: item.name, poster: item.poster, type: item.type, id: item.id,
                                    menu: .catalog)
@@ -149,22 +192,58 @@ struct SearchView: View {
         }
     }
 
-    private var resultSections: [(title: String, items: [CoreMeta])] {
-        let movies = core.searchResults.filter { $0.type == "movie" }
-        let series = core.searchResults.filter { $0.type == "series" }
-        let other = core.searchResults.filter { $0.type != "series" && $0.type != "movie" }
-        return [
-            ("Movies", movies),
-            ("Series", series),
-            ("Other", other),
-        ].filter { !$0.items.isEmpty }
+    private func resultSections(collections: [HubTarget]) -> [(group: TVSearchResultGroup, items: [CoreMeta])] {
+        let grouped = Dictionary(grouping: core.searchResults, by: { TVSearchResultGroup(type: $0.type) })
+        return TVSearchResultGroup.allCases.compactMap { group in
+            let items = grouped[group] ?? []
+            guard !items.isEmpty || (group == .collections && !collections.isEmpty) else { return nil }
+            return (group: group, items: items)
+        }
+    }
+
+    /// Filter the existing shared inventory locally. Typing never loads a category's content or starts
+    /// a second search; the only network work is the hub's ordinary cadence-cached load on appearance.
+    private var matchingCollections: [HubTarget] {
+        guard hasSearchQuery, CollectionsHubModel.isAvailable else { return [] }
+        var targets: [HubTarget] = []
+        if !catalogPrefs.isCategoryHidden(HubCategoryKey.discoverSection) {
+            targets += collectionsHub.discover.filter { !catalogPrefs.isCategoryHidden(HubCategoryKey.discover($0)) }.map(HubTarget.discover)
+        }
+        if !catalogPrefs.isCategoryHidden(HubCategoryKey.streamingSection) {
+            targets += collectionsHub.providers.map { .service(id: $0.providerID, name: $0.name) }
+        }
+        if !catalogPrefs.isCategoryHidden(HubCategoryKey.genresSection) {
+            targets += collectionsHub.genres.filter { !catalogPrefs.isCategoryHidden(HubCategoryKey.genre($0)) }.map(HubTarget.genre)
+        }
+        if !catalogPrefs.isCategoryHidden(HubCategoryKey.decadesSection) {
+            targets += collectionsHub.decades.filter { !catalogPrefs.isCategoryHidden(HubCategoryKey.decade($0)) }.map(HubTarget.decade)
+        }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return targets.filter {
+            $0.title.localizedStandardContains(trimmed)
+                || String(localized: LocalizedStringResource(stringLiteral: $0.title)).localizedStandardContains(trimmed)
+        }
+    }
+
+    @ViewBuilder private func collectionTile(_ target: HubTarget) -> some View {
+        switch target {
+        case .discover(let list):
+            DiscoverCardTile(list: list, backdrop: collectionsHub.discoverBackdrops[list])
+        case .service(let id, _):
+            if let provider = collectionsHub.providers.first(where: { $0.providerID == id }) {
+                TVServiceTile(provider: provider)
+            }
+        case .genre(let genre):
+            TVGenreTile(genre: genre, backdrop: collectionsHub.genreBackdrops[genre.title])
+        case .decade(let decade):
+            TVDecadeTile(decade: decade, cover: collectionsHub.decadeCovers[decade.title])
+        }
     }
 
     private var emptyText: String {
         if isWaitingForCurrentQuery { return "Searching..." }
-        return query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "Start typing to search across everything your add-ons cover."
-            : "No matches for \"\(query)\"."
+        return hasSearchQuery ? "No matches for \"\(query)\"."
+            : "Start typing to search across everything your add-ons cover."
     }
 
     private var isTyping: Bool {
