@@ -100,6 +100,12 @@ struct LibraryView: View {
                     VStack(alignment: .leading, spacing: Theme.Space.md) {
                         Color.clear.frame(height: 0).scrollToTopAnchor()   // re-select Library tab -> scroll here
                         Text("Library").screenTitleStyle().padding(.horizontal, Theme.Space.screenEdge)
+                        // Watchlist is the profile's watch-later ledger, separate from saved Library titles.
+                        NavigationLink { TVWatchlistView() } label: {
+                            Label("Watchlist", systemImage: "star")
+                        }
+                        .buttonStyle(ChipButtonStyle(selected: false))
+                        .padding(.horizontal, Theme.Space.screenEdge)
                         // Offline downloads (#30): a section ABOVE the saved-titles grid, shown only when at
                         // least one download exists. Plays from the local file with pause/resume/delete +
                         // total storage used, and carries the storage-eviction caption. Device-local only.
