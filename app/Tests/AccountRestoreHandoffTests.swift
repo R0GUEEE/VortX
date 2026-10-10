@@ -71,6 +71,7 @@ extension FixtureTask where Success == Never, Failure == Never {
         set { applied[credentialAuthority.capture()] = newValue }
     }
     var mountStarts: [CredentialScopeRegistry.Capture: Int] = [:]
+    var ensureStarts: [CredentialScopeRegistry.Capture: Int] = [:]
     var pullStarts: [CredentialScopeRegistry.Capture: Int] = [:]
     var pushes = 0
     var heldMounts: [CredentialScopeRegistry.Capture: [CheckedContinuation<Bool, Never>]] = [:]
@@ -80,8 +81,16 @@ extension FixtureTask where Success == Never, Failure == Never {
     func isCurrent(_ capture: CredentialScopeRegistry.Capture) -> Bool { credentialAuthority.isCurrent(capture) }
     func hasPendingAccountDocApply(for capture: CredentialScopeRegistry.Capture) -> Bool { pending.contains(capture) }
     func ensureNativeCheckpoint(credentialCapture capture: CredentialScopeRegistry.Capture) async -> Bool {
+        ensureStarts[capture, default: 0] += 1
+        if CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: ProfileStore.shared.activeID) {
+            return true // An already certified dependency resolves without a cold-mount request.
+        }
         mountStarts[capture, default: 0] += 1
-        return await withCheckedContinuation { heldMounts[capture, default: []].append($0) }
+        let acknowledged = await withCheckedContinuation { heldMounts[capture, default: []].append($0) }
+        // Contract of the dependency, not a second restore implementation: a mount response alone
+        // cannot certify a native session. The held result can succeed only with its certificate.
+        return acknowledged && CoreBridge.shared.hasCertifiedNativeSession(
+            capture: capture, profileID: ProfileStore.shared.activeID)
     }
     func syncDown(force: Bool, credentialCapture capture: CredentialScopeRegistry.Capture) async -> Bool {
         precondition(force, "restore must request a forced pull")
@@ -207,10 +216,74 @@ extension FixtureTask where Success == Never, Failure == Never {
         let uncertain = _Concurrency.Task { @MainActor in await uncertified.restoreAccountDocIfNeeded() }
         await waitUntil("uncertified first pull") { uncertified.pullStarts[uncertainCapture] == 1 }
         uncertified.releasePull(uncertainCapture, applied: true, certified: false)
+        await waitUntil("uncertified first mount") { uncertified.mountStarts[uncertainCapture] == 1 }
+        expect(uncertified.accountRestoreState == .restoring && !uncertified.publications.contains(.ready),
+               "applied first document waits for missing native mount rather than handing off")
+        uncertified.releaseMount(uncertainCapture, success: false, certify: false)
         expect(await uncertain.value == false, "applied document without certified native session cannot return success")
         expect(uncertified.accountRestoreState == .failed && !uncertified.publications.contains(.ready),
                "applied but uncertified first document publishes failure, not ready")
         expect(uncertified.pushes == 0, "uncertified first document issues no push dependency call")
+        expect(uncertified.ensureStarts[uncertainCapture] == 1 && uncertified.pullStarts[uncertainCapture] == 1,
+               "failed first-document mount does not spin duplicate pulls or mounts")
+
+        resetDependencies()
+        let acknowledgedOnly = RestoreManagerFixture()
+        let acknowledgedCapture = acknowledgedOnly.credentialAuthority.capture()
+        let acknowledgment = _Concurrency.Task { @MainActor in await acknowledgedOnly.restoreAccountDocIfNeeded() }
+        await waitUntil("acknowledged but uncertified pull") { acknowledgedOnly.pullStarts[acknowledgedCapture] == 1 }
+        acknowledgedOnly.releasePull(acknowledgedCapture, applied: true, certified: false)
+        await waitUntil("acknowledged but uncertified mount") { acknowledgedOnly.mountStarts[acknowledgedCapture] == 1 }
+        acknowledgedOnly.releaseMount(acknowledgedCapture, success: true, certify: false)
+        expect(await acknowledgment.value == false,
+               "mount acknowledgement without native certification cannot hand off")
+        expect(acknowledgedOnly.accountRestoreState == .failed && !acknowledgedOnly.publications.contains(.ready),
+               "acknowledged but uncertified mount publishes failure, never ready")
+        expect(acknowledgedOnly.pushes == 0 && acknowledgedOnly.ensureStarts[acknowledgedCapture] == 1,
+               "acknowledged but uncertified mount neither pushes nor retries the dependency")
+    }
+
+    static func definitivelyEmptyAccountWaitsForMount() async {
+        resetDependencies()
+        let manager = RestoreManagerFixture()
+        let capture = manager.credentialAuthority.capture()
+        var finished = false
+        let first = _Concurrency.Task { @MainActor in
+            let result = await manager.restoreAccountDocIfNeeded()
+            finished = true
+            return result
+        }
+        await waitUntil("definitively empty pull") { manager.pullStarts[capture] == 1 }
+        // Production syncDown returns false for a definitive empty account but opens the document
+        // gate. That is a known absence, not a failed pull and not a certified native session.
+        manager.releasePull(capture, applied: true, certified: false, result: false)
+        await waitUntil("definitively empty native mount") { manager.mountStarts[capture] == 1 }
+        expect(!finished && manager.accountRestoreState == .restoring && !manager.publications.contains(.ready),
+               "definitively empty account waits for native mount before setup/ready")
+        let joined = _Concurrency.Task { @MainActor in await manager.restoreAccountDocIfNeeded() }
+        await _Concurrency.Task<Never, Never>.yield()
+        expect(manager.pullStarts[capture] == 1 && manager.mountStarts[capture] == 1,
+               "empty-account concurrent callers join one pull and one held mount")
+        manager.releaseMount(capture, success: true, certify: true)
+        let firstResult = await first.value, joinedResult = await joined.value
+        expect(firstResult && joinedResult && manager.accountRestoreState == .ready,
+               "definitively empty account becomes ready only after acknowledged certified mount")
+        expect(manager.pushes == 0, "empty-account restore does not seed or push before an explicit upload workflow")
+
+        resetDependencies()
+        let failed = RestoreManagerFixture()
+        let failedCapture = failed.credentialAuthority.capture()
+        let operation = _Concurrency.Task { @MainActor in await failed.restoreAccountDocIfNeeded() }
+        await waitUntil("failed empty pull") { failed.pullStarts[failedCapture] == 1 }
+        failed.releasePull(failedCapture, applied: true, certified: false, result: false)
+        await waitUntil("failed empty mount") { failed.mountStarts[failedCapture] == 1 }
+        failed.releaseMount(failedCapture, success: false, certify: false)
+        expect(await operation.value == false && failed.accountRestoreState == .failed,
+               "definitively empty account with false native mount result remains failed")
+        expect(!failed.publications.contains(.ready) && failed.pushes == 0,
+               "failed empty-account mount never publishes ready or requests a push")
+        expect(failed.ensureStarts[failedCapture] == 1 && failed.pullStarts[failedCapture] == 1,
+               "failed empty-account handoff attempts exactly one pull and one native ensure")
     }
 
     static func replacementRejectsStaleReady() async {
@@ -267,16 +340,23 @@ extension FixtureTask where Success == Never, Failure == Never {
                 boundary.releasePull(boundaryCapture, applied: false, certified: false, result: false)
             }
         }
+        await waitUntil("uncertified final fallback mount") { boundary.mountStarts[boundaryCapture] == 1 }
+        expect(boundary.accountRestoreState == .restoring && !boundary.publications.contains(.ready),
+               "final fallback waits for native certification after the late document receipt")
+        boundary.releaseMount(boundaryCapture, success: false, certify: false)
         expect(await final.value == false, "final fallback cannot return success from document receipt alone")
         expect(boundary.accountRestoreState == .failed && !boundary.publications.contains(.ready),
                "final fallback still publishes failure when native certification is absent")
         expect(boundary.pushes == 0, "uncertified final fallback issues no push dependency call")
+        expect(boundary.ensureStarts[boundaryCapture] == 1 && boundary.pullStarts[boundaryCapture] == 5,
+               "final fallback attempts one native ensure only after exactly five pulls")
     }
 
     static func main() async {
         await historicalReceiptWaitsForMount()
         await failedHistoricalMountCannotReady()
         await firstDocumentRequiresCertification()
+        await definitivelyEmptyAccountWaitsForMount()
         await replacementRejectsStaleReady()
         await exhaustedRetriesStayFailed()
         print("AccountRestoreHandoffTests: \(checks) actual extracted production checks passed; offline dependency fixtures only")
