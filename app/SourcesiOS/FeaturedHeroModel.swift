@@ -85,7 +85,7 @@ final class FeaturedHeroModel: ObservableObject {
     /// an id already present refreshes its value without duplicating its order slot.
     private static func cacheEnrichment(_ item: FeaturedHeroItem, for id: String) {
         if enrichmentCache[id] == nil { enrichmentOrder.append(id) }
-        enrichmentCache[id] = item
+        enrichmentCache[id] = enrichmentCache[id]?.mergingSeed(item) ?? item
         while enrichmentOrder.count > enrichmentCacheCap {
             let oldest = enrichmentOrder.removeFirst()
             enrichmentCache.removeValue(forKey: oldest)
@@ -125,6 +125,12 @@ final class FeaturedHeroModel: ObservableObject {
     func seed(_ candidates: [FeaturedHeroItem], reduceMotion: Bool) {
         motionEnabled = !reduceMotion
         let capped = Array(candidates.prefix(Self.heroPoolCap))
+        for item in capped where Self.enrichmentCache[item.id]?.type == item.type {
+            Self.cacheEnrichment(item, for: item.id)
+        }
+        if capped.contains(where: { fresh in pool.contains { $0.id == fresh.id && $0.type != fresh.type } }) {
+            cancelAllEnrichments()
+        }
         // An empty pool means the screen has no content (e.g. after sign-out clears the rows). Clear
         // the hero and halt rotation so a stale featured title, with a working Play button, can't
         // linger. Home renders the hero unconditionally, so without this it would keep cycling
@@ -140,7 +146,17 @@ final class FeaturedHeroModel: ObservableObject {
             return
         }
 
-        if capped.map(\.id) == seededIds && hero != nil {
+        if capped.map(\.id) == seededIds && hero != nil
+            && capped.allSatisfy({ fresh in pool.contains { $0.id == fresh.id && $0.type == fresh.type } }) {
+            // Membership is stable, not metadata: a later catalog emit can supply a missing score.
+            // Upgrade in place without shuffling the pool, resetting the timer or changing the title.
+            pool = pool.map { old in
+                capped.first(where: { $0.id == old.id && $0.type == old.type }).map { old.mergingSeed($0) } ?? old
+            }
+            if let current = hero,
+               let fresh = capped.first(where: { $0.id == current.id && $0.type == current.type }) {
+                hero = current.mergingSeed(fresh)
+            }
             // Same screen content, so don't churn the pool or yank the backdrop. BUT a prior stop() (a tab
             // switch / disappear) cancels rotationTask, and this early-return used to leave it dead, so the
             // hero froze on one item when the screen reappeared with unchanged content (the "iOS hero stuck,
@@ -177,7 +193,7 @@ final class FeaturedHeroModel: ObservableObject {
         pendingSeedTask = Task { [weak self] in
             try? await Task.sleep(for: Self.seedDebounce)
             guard !Task.isCancelled else { return }
-            await self?.applyPendingSeed()
+            self?.applyPendingSeed()
         }
     }
 
@@ -204,6 +220,7 @@ final class FeaturedHeroModel: ObservableObject {
         if let currentID = hero?.id, let idx = pool.firstIndex(where: { $0.id == currentID }) {
             rotationIndex = idx
             page = idx
+            hero = hero?.mergingSeed(pool[idx])
         } else {
             rotationIndex = 0
             page = 0
@@ -328,7 +345,14 @@ final class FeaturedHeroModel: ObservableObject {
     /// Swap the hero to `item`, upgrading to the cached enriched version when available, and kick off
     /// a background enrichment fetch when it isn't.
     private func show(_ item: FeaturedHeroItem, animated: Bool) {
-        let resolved = Self.enrichmentCache[item.id] ?? item
+        if hero?.id == item.id, hero?.type != item.type {
+            enrichmentTasks.removeValue(forKey: item.id)?.cancel()
+            enrichmentTokens.removeValue(forKey: item.id)
+        }
+        let resolved = Self.enrichmentCache[item.id]?.mergingSeed(item) ?? item
+        if Self.enrichmentCache[item.id]?.type == item.type {
+            Self.cacheEnrichment(resolved, for: item.id)
+        }
         if animated && motionEnabled {
             withAnimation(.easeOut(duration: Self.heroCrossfade)) { hero = resolved }
         } else {
@@ -343,7 +367,7 @@ final class FeaturedHeroModel: ObservableObject {
     /// (issue #54). Cached to the session cache; applied live only if the title is still the one on
     /// screen. Self-contained (no dependency on the tvOS `FocusedItemModel`), so tvOS is untouched.
     private func enrichIfNeeded(_ item: FeaturedHeroItem) {
-        guard Self.enrichmentCache[item.id] == nil, enrichmentTasks[item.id] == nil else { return }
+        guard Self.enrichmentCache[item.id]?.type != item.type, enrichmentTasks[item.id] == nil else { return }
         let candidates = Self.metaURLs(for: item)
         guard !candidates.isEmpty else {
             NSLog("%@", "[Hero] no meta candidates for \(item.name) (id=\(item.id), type=\(item.type)); id scheme not covered by Cinemeta or any installed meta add-on")
@@ -404,10 +428,14 @@ final class FeaturedHeroModel: ObservableObject {
         token: UInt64
     ) {
         guard isCurrentEnrichment(id: item.id, token: token), !Task.isCancelled else { return }
-        let enriched = item.enriched(with: result.meta)
+        // The request may have started from a sparse preview. Merge the latest seed before publishing
+        // so its newly supplied rating cannot be lost to this otherwise-current async completion.
+        let latest = pool.first(where: { $0.id == item.id && $0.type == item.type })
+            ?? (hero?.id == item.id && hero?.type == item.type ? hero : nil)
+        let enriched = item.enriched(with: result.meta).mergingSeed(latest ?? item)
         NSLog("%@", "[Hero] enriched \(item.name): rating=\(enriched.imdbRating ?? "-") year=\(enriched.releaseInfo ?? "-") runtime=\(enriched.runtime ?? "-") genres=\(enriched.genres.count) via \(result.host)")
         Self.cacheEnrichment(enriched, for: item.id)
-        guard hero?.id == item.id else { return }
+        guard hero?.id == item.id, hero?.type == item.type else { return }
         // No animation here: this is an in-place content upgrade of the SAME hero, not a swap, so
         // cross-fading would flicker the already-visible backdrop.
         hero = enriched
@@ -633,6 +661,25 @@ struct FeaturedHeroItem: Identifiable, Equatable, Hashable {
             genres: (meta.genres?.isEmpty == false) ? meta.genres! : genres,
             trailerYouTubeID: meta.trailerYouTubeID ?? trailerYouTubeID,
             defaultVideoId: meta.defaultVideoId ?? defaultVideoId)
+    }
+
+    /// A cached enrichment augments a fresh preview; it never substitutes for it wholesale. A supplied
+    /// finite IMDb score wins over the cached score, while a sparse preview retains known enrichment.
+    func mergingSeed(_ fresh: FeaturedHeroItem) -> FeaturedHeroItem {
+        guard id == fresh.id, type == fresh.type else { return fresh }
+        let supplied = fresh.imdbRating?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rating = supplied.flatMap { text -> String? in
+            guard let value = Double(text), value.isFinite, (0...10).contains(value) else { return nil }
+            return text
+        } ?? imdbRating
+        return FeaturedHeroItem(
+            id: id, type: type, name: fresh.name, poster: fresh.poster ?? poster,
+            backdrop: backdrop ?? fresh.backdrop, logo: logo ?? fresh.logo,
+            description: description ?? fresh.description, releaseInfo: fresh.releaseInfo ?? releaseInfo,
+            runtime: runtime ?? fresh.runtime, imdbRating: rating,
+            genres: fresh.genres.isEmpty ? genres : fresh.genres,
+            trailerYouTubeID: trailerYouTubeID ?? fresh.trailerYouTubeID,
+            defaultVideoId: defaultVideoId ?? fresh.defaultVideoId)
     }
 
     /// A copy of this seed item with its catalog id replaced by a resolved IMDb `tt` id (tmdb:->tt done

@@ -125,6 +125,8 @@ private func makeProductionHarness(root: URL, buildDirectory: URL) -> URL {
         "    private static func cacheEnrichment(_ item: FeaturedHeroItem, for id: String)",
         "    private static func metaURLs(for item: FeaturedHeroItem)",
         "    func enriched(with meta: FeaturedHeroMetaTransfer)",
+        "    func mergingSeed(_ fresh: FeaturedHeroItem)",
+        "    private func applyPendingSeed()",
     ]
     var members: [String] = []
     for signature in signatures {
@@ -153,6 +155,8 @@ private func makeProductionHarness(root: URL, buildDirectory: URL) -> URL {
     let cache = members[11]
     let metaURLs = members[12]
     let enriched = members[13]
+    let mergingSeed = members[14]
+    let applyPendingSeed = members[15]
 
     var harness = #"""
 import Foundation
@@ -215,7 +219,7 @@ struct FeaturedHeroItem: Identifiable, Equatable, Hashable, Sendable {
     let defaultVideoId: String?
 
 """#
-    harness += enriched + #"""
+    harness += enriched + "\n\n" + mergingSeed + #"""
 }
 
 struct Animation {}
@@ -266,8 +270,6 @@ final class FeaturedHeroProductionHarness {
         rotationTask = nil
     }
 
-    private func applyPendingSeed() async {}
-
     private static func fetchEnrichment(candidates: [URL]) async -> EnrichmentResult? {
         guard let url = candidates.first else { return nil }
         let id = url.deletingPathExtension().lastPathComponent
@@ -280,13 +282,14 @@ final class FeaturedHeroProductionHarness {
     harness += seed + "\n\n" + applySeed + "\n\n" + stop + "\n\n" + cancelObsolete + "\n\n" + cancelAll
     harness += "\n\n" + show + "\n\n" + feature + "\n\n" + enrich + "\n\n" + publish + "\n\n" + isCurrent + "\n\n" + finish
     harness += "\n\n" + cache + "\n\n" + metaURLs
+    harness += "\n\n" + applyPendingSeed
     harness += #"""
 }
 
-private func item(_ id: String) -> FeaturedHeroItem {
+private func item(_ id: String, rating: String? = nil, type: String = "movie") -> FeaturedHeroItem {
     FeaturedHeroItem(
-        id: id, type: "movie", name: id, poster: nil, backdrop: nil, logo: nil,
-        description: nil, releaseInfo: nil, runtime: nil, imdbRating: nil, genres: [],
+        id: id, type: type, name: id, poster: nil, backdrop: nil, logo: nil,
+        description: nil, releaseInfo: nil, runtime: nil, imdbRating: rating, genres: [],
         trailerYouTubeID: nil, defaultVideoId: nil)
 }
 
@@ -329,7 +332,7 @@ private enum FeaturedHeroProductionLifecycleCases {
         // are released after cancellation and must fail the production cancellation/token fences.
         let heldModel = FeaturedHeroProductionHarness()
         let heldIDs = (0..<5).map { "held-\($0)" }
-        heldModel.start(heldIDs.map(item))
+        heldModel.start(heldIDs.map { item($0) })
         require(await waitForStarts(heldIDs, each: 1), "production seed starts all five held enrichments")
         heldModel.stop()
         require(heldModel.activeEnrichmentCount == 0, "production stop retires all five owned leases")
@@ -418,6 +421,46 @@ private enum FeaturedHeroProductionLifecycleCases {
         await featuredHeroHeldFetchGate.release(id: retryItem.id, result: result("cached"))
         require(await waitForCache(retryModel, id: retryItem.id, description: "cached"),
                 "successful production retry warms cache")
+
+        // A metadata-only re-emit must refresh a supplied score without changing membership or the
+        // visible title. The pending enrichment was started from nil and must preserve the new score.
+        let ratingModel = FeaturedHeroProductionHarness()
+        let sparse = item("rating-id")
+        ratingModel.start([sparse])
+        require(await waitForStarts([sparse.id], each: 1), "rating production lease starts from sparse preview")
+        ratingModel.start([item(sparse.id, rating: "8.4")])
+        require(ratingModel.hero?.imdbRating == "8.4", "same-membership seed supplies IMDb in place")
+        await featuredHeroHeldFetchGate.release(id: sparse.id, result: result("rated enrichment"))
+        require(await waitForCache(ratingModel, id: sparse.id, description: "rated enrichment"),
+                "sparse held enrichment returns")
+        require(ratingModel.hero?.imdbRating == "8.4", "late sparse enrichment retains current supplied IMDb")
+        ratingModel.feature(item(sparse.id, rating: "8.8"))
+        require(ratingModel.hero?.imdbRating == "8.8", "fresh score wins over whole-item session cache")
+        ratingModel.feature(item(sparse.id))
+        require(ratingModel.hero?.imdbRating == "8.8", "sparse fresh preview retains latest known score")
+        let otherType = item(sparse.id, rating: "7.1", type: "series")
+        require(item(sparse.id, rating: "8.8").mergingSeed(otherType) == otherType,
+                "same ID with different type never borrows cached movie fields")
+        require(item("valid", rating: "8.1").mergingSeed(item("valid", rating: "NaN")).imdbRating == "8.1",
+                "invalid fresh score cannot erase valid known score")
+        ratingModel.stop()
+
+        let typeModel = FeaturedHeroProductionHarness()
+        let correctedID = "corrected-type"
+        typeModel.start([item(correctedID)])
+        require(await waitForStarts([correctedID], each: 1), "movie typed pool lease starts")
+        typeModel.start([item(correctedID, rating: "7.1", type: "series")])
+        require(await waitForStarts([correctedID], each: 2), "same ID corrected media type replaces pool and starts new lease")
+        require(typeModel.hero?.type == "series" && typeModel.hero?.imdbRating == "7.1",
+                "same ID series correction cannot stay in movie-only early return")
+        await featuredHeroHeldFetchGate.release(id: correctedID, result: result("retired movie"))
+        try? await Task.sleep(for: .milliseconds(10))
+        require(typeModel.cachedItems[correctedID] == nil, "retired movie result cannot warm series cache")
+        await featuredHeroHeldFetchGate.release(id: correctedID, result: result("current series"))
+        require(await waitForCache(typeModel, id: correctedID, description: "current series"),
+                "current corrected series lease publishes")
+        require(typeModel.cachedItems[correctedID]?.type == "series", "corrected cache keeps media type")
+        typeModel.stop()
 
         print("ok: extracted production hero leases, stop/reseed retry, stale-token, and cache contracts passed")
     }

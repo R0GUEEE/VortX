@@ -53,6 +53,37 @@ enum CinemaArtworkGeometry {
     }
 }
 
+/// A hero is a self-contained rounded media card. Its artwork does not share the navigation strip's
+/// crop: the reserved header may borrow an ambient treatment, while this viewport remains confined.
+enum CinemaHeroCardGeometry {
+    static let inset: CGFloat = 16
+    static let radius: CGFloat = 28
+    static func innerWidth(viewport: CGFloat) -> CGFloat { max(1, viewport - inset * 2) }
+}
+
+private struct CinemaHeroCardTreatment: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: CinemaHeroCardGeometry.radius, style: .continuous)
+        content
+            .background(shape.fill(Theme.Palette.accent.opacity(reduceTransparency ? 0.022 : 0.045)))
+            .overlay {
+                LinearGradient(colors: [Theme.Palette.accent.opacity(0.075), .clear,
+                                         Theme.Palette.accent.opacity(0.018)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .clipShape(shape).allowsHitTesting(false)
+            }
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(Theme.Palette.accent.opacity(reduceTransparency ? 0.24 : 0.16), lineWidth: 0.8)
+                .allowsHitTesting(false))
+            .shadow(color: .black.opacity(0.32), radius: 20, y: 12)
+    }
+}
+
+extension View {
+    func cinemaHeroCard() -> some View { modifier(CinemaHeroCardTreatment()) }
+}
+
 /// The decorative continuation cannot change this layout reservation or the controls' viewport.
 struct CinemaNavigationReservedShell<Navigation: View, Content: View>: View {
     let navigation: Navigation

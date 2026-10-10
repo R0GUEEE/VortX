@@ -59,6 +59,9 @@ struct DetailView: View {
     /// `collection`. Movies only; nil hides the rail. Reset with the collection on a title change.
     @State private var collectionNeighbors: (previous: MetaPreview?, next: MetaPreview?)?
     @State private var mdbRatings: MDBListRatings?
+    @State private var ratingsKey: RatingRequestKey?
+    @State private var ratingsTask: Task<Void, Never>?
+    @State private var ratingsGeneration: UUID?
     @State private var watchAvail: TMDBClient.WatchAvailability?
     @State private var financials: TMDBClient.Financials?
     @State private var releaseDates: TMDBClient.ReleaseDates?   // theatrical + digital, TMDB-fetched (movies only)
@@ -218,6 +221,8 @@ struct DetailView: View {
             refreshLanguageChips()
         }
         .onDisappear {
+            ratingsGeneration = nil
+            ratingsTask?.cancel(); ratingsTask = nil
             langChipsDebounce?.cancel()
             // Scrolling the series episode list auto-hides the tab bar at the UIKit level. When the
             // user presses Back the NavigationStack pops but the bar can stay hidden at its scroll-
@@ -226,7 +231,8 @@ struct DetailView: View {
         }
         // Re-dispatch streams under the AUTHORITATIVE meta.type once it arrives (Collections-hub fix): if the
         // hub's TMDB guess was wrong, meta.type corrects it and the request re-fires under the type add-ons use.
-        .onChange(of: fencedMeta?.type) { loadMovieStreamsIfNeeded() }
+        .onChange(of: fencedMeta?.type) { loadMovieStreamsIfNeeded(); loadRatings() }
+        .onChange(of: currentRatingsRequest) { loadRatings() }
         .onChange(of: fencedMeta?.id) {
             captureHero()
             langChips = []; langChipsKey = ""   // new title: reset the language chips before recomputing
@@ -580,23 +586,37 @@ struct DetailView: View {
     /// Fetch MDBList ratings for this title (no-op without a key / imdb id). Fail-soft: leaves the row
     /// hidden on any miss. Skipped for live channels, which carry no ratings.
     private func loadRatings() {
-        guard !LiveTypes.contains(type), let imdb = ratingsImdbID, mdbRatings == nil else { return }
-        Task {
+        guard let requested = currentRatingsRequest else {
+            ratingsGeneration = nil
+            ratingsTask?.cancel(); ratingsTask = nil
+            ratingsKey = nil; mdbRatings = nil
+            return
+        }
+        if ratingsKey == requested && (ratingsTask != nil || mdbRatings != nil) { return }
+        ratingsTask?.cancel()
+        if ratingsKey != requested { mdbRatings = nil }
+        ratingsKey = requested
+        let generation = UUID()
+        ratingsGeneration = generation
+        ratingsTask = Task { @MainActor in
             // VortX's keyless ratings service first (IMDb / RT / Metacritic / TMDB, no user key needed), then
             // reach for the user's own MDBList key ONLY to fill what VortX did not return. Mirrors iOS so both
             // surfaces show the same ratings row for every user, keyed or not (tvOS previously showed nothing
             // unless an MDBList key was set).
-            let vx = await VortXRatingsClient.ratings(imdbID: imdb, type: type)
+            let vx = await VortXRatingsClient.ratings(imdbID: requested.id, type: requested.type)
             let needsMore = vx == nil || vx?.rottenTomatoes == nil || vx?.metacritic == nil
-            let mdb = needsMore ? await MDBListClient.ratings(imdbID: imdb, type: type) : nil
-            let merged = MDBListRatings(
-                imdb: vx?.imdb ?? mdb?.imdb,
-                rottenTomatoes: vx?.rottenTomatoes ?? mdb?.rottenTomatoes,
-                metacritic: vx?.metacritic ?? mdb?.metacritic,
-                tmdb: vx?.tmdb ?? mdb?.tmdb
-            )
-            await MainActor.run { mdbRatings = merged.hasAny ? merged : nil }
+            guard !Task.isCancelled else { return }
+            let mdb = needsMore ? await MDBListClient.ratings(imdbID: requested.id, type: requested.type) : nil
+            guard !Task.isCancelled, ratingsGeneration == generation,
+                  currentRatingsRequest == requested else { return }
+            mdbRatings = RatingPresentationPolicy.merged(vx, secondary: mdb)
+            ratingsTask = nil
         }
+    }
+
+    private var currentRatingsRequest: RatingRequestKey? {
+        guard !LiveTypes.contains(effectiveType), let imdb = ratingsImdbID else { return nil }
+        return RatingRequestKey(id: imdb, type: effectiveType)
     }
 
     /// Fetch the movie budget + box office (no-op for series / no key / no imdb id). Fail-soft; the row hides on a miss.
@@ -1645,7 +1665,9 @@ struct DetailView: View {
     /// never blanks. Both branches lead with the same accent star, so the extra scores fade in beside it with
     /// no reflow. Per-score fail-soft: a title with only IMDb keeps showing only IMDb.
     @ViewBuilder private func primaryRatings(_ m: CoreMetaItem) -> some View {
-        if let r = mdbRatings, case let tokens = RatingsFormat.tokens(r), !tokens.isEmpty {
+        if let r = RatingPresentationPolicy.merged(ratingsKey == currentRatingsRequest ? mdbRatings : nil,
+                                                   fallbackIMDb: m.imdbRating),
+           case let tokens = RatingsFormat.tokens(r), !tokens.isEmpty {
             HStack(spacing: Theme.Space.md) {
                 ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
                     HStack(spacing: 5) {
@@ -1657,11 +1679,6 @@ struct DetailView: View {
                         Text(token.value).foregroundStyle(Theme.Palette.textPrimary)
                     }
                 }
-            }
-        } else if let imdb = m.imdbRating {
-            HStack(spacing: 6) {
-                Image(systemName: "star.fill").foregroundStyle(Theme.Palette.accent)
-                Text(imdb).foregroundStyle(Theme.Palette.textPrimary)
             }
         }
     }

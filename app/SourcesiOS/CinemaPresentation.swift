@@ -82,6 +82,8 @@ struct CinemaQuickView: View {
     @State private var watchlistStatus: String?
     @State private var watchlistFailure: String?
     @State private var loadedSynopsis: String?
+    @State private var loadedRatings: MDBListRatings?
+    @State private var loadedRatingsKey: RatingRequestKey?
     @StateObject private var watchlistAction = ProfileMutationPresentation()
 
     private var watchlistType: String? { LibraryWatchedMutationPolicy.normalizedCatalogType(item.type) }
@@ -94,9 +96,15 @@ struct CinemaQuickView: View {
     }
 
     private var facts: [String] {
-        [item.releaseInfo, item.imdbRating.map { "★ \($0)" }, item.type.capitalized]
+        [item.releaseInfo, previewIMDb.map { "★ \($0)" }, item.type.capitalized]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    private var ratingRequest: RatingRequestKey { .init(id: item.id, type: item.type) }
+    private var previewIMDb: String? {
+        RatingPresentationPolicy.merged(loadedRatingsKey == ratingRequest ? loadedRatings : nil,
+                                       fallbackIMDb: item.imdbRating)?.imdb.map { String(format: "%.1f", $0) }
     }
 
     var body: some View {
@@ -131,6 +139,15 @@ struct CinemaQuickView: View {
         .accessibilityLabel("Quick view for \(item.name)")
         .onAppear(perform: refreshWatchlist)
         .task(id: item.type + ":" + item.id) { await loadMissingSynopsis() }
+        .task(id: ratingRequest) {
+            #if !CINEMA_UI_SMOKE_RENDERER
+            let requested = ratingRequest
+            loadedRatingsKey = requested; loadedRatings = nil
+            let value = await CardRatingStore.shared.ratings(id: requested.id, type: requested.type)
+            guard !Task.isCancelled, loadedRatingsKey == requested else { return }
+            loadedRatings = value
+            #endif
+        }
         .onReceive(NotificationCenter.default.publisher(for: LibraryAutoAdd.watchlistChangedNote)) { _ in
             refreshWatchlist()
         }
@@ -551,9 +568,16 @@ struct CinemaSearchResults: View {
 
 private struct CinemaSearchResultCard: View {
     let item: RailItem
+    @State private var loadedRatings: MDBListRatings?
+    @State private var loadedRatingsKey: RatingRequestKey?
+    private var ratingRequest: RatingRequestKey { .init(id: item.id, type: item.type) }
+    private var previewIMDb: String? {
+        RatingPresentationPolicy.merged(loadedRatingsKey == ratingRequest ? loadedRatings : nil,
+                                       fallbackIMDb: item.imdbRating)?.imdb.map { String(format: "%.1f", $0) }
+    }
 
     private var facts: [String] {
-        [item.releaseInfo, item.imdbRating.map { "★ \($0)" }, item.type.capitalized]
+        [item.releaseInfo, previewIMDb.map { "★ \($0)" }, item.type.capitalized]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }
@@ -572,6 +596,15 @@ private struct CinemaSearchResultCard: View {
         .padding(Theme.Space.sm)
         .vortxCinemaCard()
         .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.card + 4, style: .continuous))
+        .task(id: ratingRequest) {
+            #if !CINEMA_UI_SMOKE_RENDERER
+            let requested = ratingRequest
+            loadedRatingsKey = requested; loadedRatings = nil
+            let value = await CardRatingStore.shared.ratings(id: requested.id, type: requested.type)
+            guard !Task.isCancelled, loadedRatingsKey == requested else { return }
+            loadedRatings = value
+            #endif
+        }
     }
 
     private var artwork: some View {

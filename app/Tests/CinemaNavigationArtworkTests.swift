@@ -88,6 +88,37 @@ enum CinemaNavigationArtworkTests {
         expect(EnvironmentValues().cinemaNavigationArtworkInset == 0,
                "standalone/TV consumers do not acquire a navigation reservation")
 
+        for (name, width, height) in [("phone-card", 390.0, 520.0), ("ipad-card", 1024.0, 450.0),
+                                      ("mac-card", 1440.0, 620.0), ("short-mac-card", 900.0, 280.0)] {
+            let inner = CinemaHeroCardGeometry.innerWidth(viewport: width)
+            expect(inner == width - 32, "hero inner width is the viewport minus two fixed gutters")
+            let card = VStack(spacing: 0) {
+                Color.red
+                Button {} label: { Color.green.frame(height: 44) }
+                    .buttonStyle(.plain)
+            }
+            .frame(width: inner, height: height)
+            .cinemaHeroCard()
+            .padding(.horizontal, CinemaHeroCardGeometry.inset)
+            .frame(width: width, height: height)
+            let renderer = ImageRenderer(content: card)
+            renderer.scale = 1
+            let bitmap = NSBitmapImageRep(cgImage: renderer.cgImage!)
+            expect(bitmap.pixelsWide == Int(width) && bitmap.pixelsHigh == Int(height),
+                   "actual rounded card cannot make its parent viewport oversized")
+            expect(pixel(bitmap, x: Int(width / 2), y: 50).redComponent > 0.9,
+                   "confined artwork keeps its visible center on every device width")
+            expect(pixel(bitmap, x: 0, y: 0).redComponent < 0.5,
+                   "no sharp artwork corner escapes the outside gutter")
+            expect(pixel(bitmap, x: 17, y: 1).redComponent < 0.5,
+                   "actual upper media-card corner is rounded")
+            expect(pixel(bitmap, x: Int(width / 2), y: Int(height) - 43).greenComponent > 0.7
+                && pixel(bitmap, x: Int(width / 2), y: Int(height) - 2).greenComponent > 0.7,
+                   "actual center 44-point control stays inside the rounded card")
+            try bitmap.representation(using: .png, properties: [:])!
+                .write(to: URL(fileURLWithPath: directory + "/" + name + ".png"))
+        }
+
         let panFull = try renderLayer(image, width: 1024, height: 530, artworkHeight: 530,
                                       name: "pan-full", directory: directory,
                                       restingPan: true, acceptedFallback: true)
@@ -161,7 +192,7 @@ enum CinemaNavigationArtworkTests {
             && rootSource.contains("measuredTabContent.frame(maxWidth: .infinity, maxHeight: .infinity)\n                        bottomTabBarRow"),
                "phone/narrow iPad retain their existing bottom-navigation control viewport")
         expect(rootSource.contains("artwork?.owner == navigationArtworkOwner ? artwork : nil")
-            && rootSource.components(separatedBy: "navigationArtwork = nil").count == 3,
+            && rootSource.components(separatedBy: "navigationArtwork.clear()").count == 3,
                "shell independently rejects old route/owner artwork and clears tab/profile transitions")
         expect(featured.contains("navigationImage.key == heroTintKey")
             && featured.contains("requested == heroTintKey,")
@@ -187,9 +218,10 @@ enum CinemaNavigationArtworkTests {
                "detail uses the existing restrained accessibility-aware atmosphere policy")
         expect(featured.contains(".mask(CinemaHeroDissolve())") && detail.contains(".mask(CinemaHeroDissolve())"),
                "both actual hero implementations dissolve their complete image/scrim into the parent canvas")
-        expect(rootSource.contains(".clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))")
-            && rootSource.contains(".padding(.horizontal, 16)"),
-               "approved phone inset rounded hero remains in the real Home composition")
+        expect(featured.contains(".cinemaHeroCard()")
+            && featured.contains(".padding(.horizontal, CinemaHeroCardGeometry.inset)")
+            && detail.components(separatedBy: ".cinemaHeroCard()").count == 4,
+               "shared rounded treatment covers browse, detail and both episode device layouts")
         print("CinemaNavigationArtworkTests: \(checks) checks passed; native crop/timing and actual SwiftUI dissolve; no app/device smoothness claim")
     }
 }

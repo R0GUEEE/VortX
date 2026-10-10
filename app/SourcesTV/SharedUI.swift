@@ -234,10 +234,13 @@ extension CoreCWItem {
     /// ("62% watched") from the incoming library hero.
     private static func resolve(_ hero: FocusedHero) -> FocusedHero {
         loadCacheIfNeeded()
-        guard let cached = enrichmentCache[hero.id] else { return hero }
+        guard let cached = enrichmentCache[hero.id], cached.type == hero.type else { return hero }
         touchEnrichment(hero.id)
         let watchedTail = hero.metaLine.components(separatedBy: "  ·  ").first { $0.hasSuffix("% watched") }
-        let line = watchedTail.map { "\(cached.metaLine)  ·  \($0)" } ?? cached.metaLine
+        let stable = cached.metaLine.components(separatedBy: "  ·  ").filter { !$0.hasSuffix("% watched") }
+            .joined(separator: "  ·  ")
+        let rated = RatingPresentationPolicy.mergingIMDbLine(stable, freshLine: hero.metaLine)
+        let line = watchedTail.map { "\(rated)  ·  \($0)" } ?? rated
         return FocusedHero(id: hero.id, type: hero.type, title: hero.title,
                            backdrop: cached.backdrop ?? hero.backdrop,
                            metaLine: line, overview: cached.overview ?? hero.overview,
@@ -254,7 +257,9 @@ extension CoreCWItem {
         loadCacheIfNeeded()
         var parts: [String] = []
         if let releaseInfo, !releaseInfo.isEmpty { parts.append(releaseInfo) }
-        if let imdbRating, !imdbRating.isEmpty { parts.append("★ \(imdbRating)") }
+        if let imdbRating, RatingPresentationPolicy.imdb(imdbRating) != nil { parts.append("★ \(imdbRating)") }
+        else if let cached = enrichmentCache[id], cached.type == type,
+                let token = RatingPresentationPolicy.imdbToken(in: cached.metaLine) { parts.append(token) }
         if let runtime, !runtime.isEmpty { parts.append(runtime) }
         parts.append(type.capitalized)
         let genreLine = (genres?.isEmpty == false) ? genres!.prefix(3).joined(separator: " · ") : nil
@@ -288,7 +293,16 @@ extension CoreCWItem {
     /// Insert or refresh a hero and mark it most-recently-used, evicting the least-recently-used entries once
     /// the cap is exceeded so neither the in-memory map nor the persisted copy grows without bound.
     private static func storeEnrichment(_ id: String, _ hero: FocusedHero) {
-        enrichmentCache[id] = hero
+        if let cached = enrichmentCache[id], cached.type == hero.type,
+           RatingPresentationPolicy.imdbToken(in: hero.metaLine) == nil {
+            enrichmentCache[id] = FocusedHero(
+                id: hero.id, type: hero.type, title: hero.title, backdrop: hero.backdrop,
+                metaLine: RatingPresentationPolicy.mergingIMDbLine(hero.metaLine, freshLine: cached.metaLine),
+                overview: hero.overview, genreLine: hero.genreLine, logo: hero.logo,
+                allowsUltraHD: hero.allowsUltraHD)
+        } else {
+            enrichmentCache[id] = hero
+        }
         touchEnrichment(id)
         enforceEnrichmentCap()
     }
@@ -357,12 +371,13 @@ extension CoreCWItem {
                       meta.description != nil || meta.background != nil else { continue }
                 var parts: [String] = []
                 if let year = meta.releaseInfo, !year.isEmpty { parts.append(year) }
-                if let rating = meta.imdbRating, !rating.isEmpty { parts.append("★ \(rating)") }
+                if let rating = meta.imdbRating, RatingPresentationPolicy.imdb(rating) != nil { parts.append("★ \(rating)") }
+                else if let token = RatingPresentationPolicy.imdbToken(in: hero.metaLine) { parts.append(token) }
                 if let runtime = meta.runtime, !runtime.isEmpty { parts.append(runtime) }
                 // Keep the type, but drop any progress tail: it is stale by the next read, and
                 // resolve() re-attaches the live one.
                 let stableTail = hero.metaLine.components(separatedBy: "  ·  ")
-                    .filter { !$0.hasSuffix("% watched") }.joined(separator: "  ·  ")
+                    .filter { !$0.hasSuffix("% watched") && !$0.hasPrefix("★ ") }.joined(separator: "  ·  ")
                 if !stableTail.isEmpty { parts.append(stableTail) }
                 let genreLine = (meta.genres?.isEmpty == false)
                     ? meta.genres!.prefix(3).joined(separator: " · ") : nil

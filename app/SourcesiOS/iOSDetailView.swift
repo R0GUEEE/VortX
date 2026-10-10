@@ -677,6 +677,9 @@ struct iOSDetailView: View {
     /// transform/opacity only.
     @State private var castExpanded = true
     @State private var mdbRatings: MDBListRatings?
+    @State private var ratingsKey: RatingRequestKey?
+    @State private var ratingsTask: Task<Void, Never>?
+    @State private var ratingsGeneration: UUID?
     /// Full cast with who-played-who + headshots (TMDB credits via the keyless edge), rendered as the
     /// horizontally scrollable cast rail. The meta's plain name list is the fallback so the rail never
     /// blanks without TMDB. `creditsKey` de-dupes the fetch per imdb id.
@@ -1070,9 +1073,11 @@ struct iOSDetailView: View {
         // the add-ons actually index the title under. The hasStreams guard keys on the effective streamId, so
         // this cannot loop.
         .onChange(of: meta?.type) { _ in
+            loadRatings()
             if effectiveType != "series" { loadMovieStreamsIfNeeded() }
             else { torboxSearch.clearResults(); sourceIndex.clearResults(); mediaServers.clearResults() }
         }
+        .onChange(of: currentRatingsRequest) { _ in loadRatings() }
         .onChange(of: meta?.id) { _ in
             if effectiveType != "series" { loadMovieStreamsIfNeeded() }
             else if let m = meta, let videos = m.videos {
@@ -1098,6 +1103,8 @@ struct iOSDetailView: View {
         // iOS while MOVIES (no child push) and macOS (different onDisappear timing) worked. The next
         // detail's loadMeta replaces the resident meta anyway, so leaving it loaded is harmless.
         .onDisappear {
+            ratingsGeneration = nil
+            ratingsTask?.cancel(); ratingsTask = nil
             cancelPendingQuickWatch()
             torrentPrime?.cancel(); sourceRefreshDebounce?.cancel(); langChipsDebounce?.cancel()
         }
@@ -1400,22 +1407,17 @@ struct iOSDetailView: View {
     }
     #endif
 
-    /// The pinnable cinematic banner: full-bleed backdrop (with the ambient trailer clip) plus the
-    /// title / meta / ratings / clamped-synopsis overlay and the circular back/overflow chrome. On macOS
-    /// this is the FIXED layer of the pinned-hero scroll model; on iOS it is the top of the single column.
+    /// A confined media card containing artwork, ambient trailer, title/facts and back/overflow chrome.
+    /// Actions and longer copy remain outside it, in the page's existing scrolling column.
     private func heroBanner(width: CGFloat, height: CGFloat) -> some View {
         let band = heroBandHeight(width: width, viewport: height)
+        let cardWidth = CinemaHeroCardGeometry.innerWidth(viewport: width)
         return ZStack(alignment: .bottomLeading) {
-            backdrop(height: band)
+            backdrop(height: band, confined: true)
                 // #44: cross-fade a muted, looping trailer clip over the still backdrop a beat after it
                 // shows. Mounted ONLY for VOD with a resolved YouTube id and when motion is allowed; the
                 // still backdrop underneath is the permanent fallback. Live channels never get a trailer.
                 .overlay { heroTrailerClip(height: band) }
-                // Edge-to-edge cinematic hero: the art bleeds UP under the status bar / notch so there is no
-                // canvas-colored strip above it on a notched iPhone. Only the backdrop art (and its trailer
-                // overlay) ignores the top safe area; heroChrome stays an overlay on the ZStack below, which
-                // still respects the inset, so the back / overflow discs clear the notch.
-                .ignoresSafeArea(edges: .top)
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
                 titleOrLogo
                 metaRow
@@ -1434,13 +1436,14 @@ struct iOSDetailView: View {
             }
             .padding(.horizontal, Theme.Space.md)
             .padding(.bottom, Theme.Space.lg + heroActionOverlap(width: width, viewport: height))
-            .frame(width: width, alignment: .leading)
+            .frame(width: cardWidth, alignment: .leading)
         }
-        // Circular translucent chrome: back chevron top-left, overflow top-right. Overlaid on the ZStack
-        // (NOT the backdrop) so it keeps the safe-area inset the backdrop now ignores; its own top padding
-        // then insets the discs below the status bar / notch, so the hero reads like a cinematic media app.
+        // Chrome stays inside the same rounded bounds; the entire card respects the page's safe area.
         .overlay(alignment: .topLeading) { heroChrome }
-        .frame(width: width, alignment: .leading)
+        .frame(width: cardWidth, alignment: .leading)
+        .cinemaHeroCard()
+        .padding(.horizontal, CinemaHeroCardGeometry.inset)
+        .padding(.top, Theme.Space.xs)
     }
 
     private func heroActionOverlap(width: CGFloat, viewport: CGFloat) -> CGFloat {
@@ -1621,7 +1624,7 @@ struct iOSDetailView: View {
 
     /// Full-bleed artwork with the same two scrims tvOS uses: a vertical canvas fade so the lower text
     /// block stays readable, and a leading canvas fade for the title column.
-    private func backdrop(height: CGFloat) -> some View {
+    private func backdrop(height: CGFloat, confined: Bool = false) -> some View {
         // Fall back through: meta background -> meta poster -> the hub card's seed backdrop ->
         // metahub-by-tt (so a meta=nil unreleased title still paints art) -> the seed logo's poster.
         // Without this the hero blanked to surface1 whenever Cinemeta meta was nil (Cocktail 2,
@@ -1636,8 +1639,8 @@ struct iOSDetailView: View {
             url: bg,
             contentMode: (effectiveType == "series" && (meta?.background?.isEmpty ?? true)) ? .fit : .fill
         )
-        .frame(height: CinemaArtworkGeometry.expandedHeight(band: height, navigation: navigationArtworkInset))
-        .offset(y: -navigationArtworkInset)
+        .frame(height: CinemaArtworkGeometry.expandedHeight(band: height, navigation: confined ? 0 : navigationArtworkInset))
+        .offset(y: confined ? 0 : -navigationArtworkInset)
         .frame(height: height, alignment: .top)
         // The backdrop is the ZStack's WIDTH ANCHOR: it greedily takes the full viewport width and
         // pins to the leading edge, so the ZStack's leading edge is the screen's leading edge. Before
@@ -1981,7 +1984,9 @@ struct iOSDetailView: View {
     /// arrives the star stays put and the extra scores simply appear beside it (no vertical reflow / jank).
     /// Per-score fail-soft: a title carrying only IMDb keeps showing only IMDb.
     @ViewBuilder private var primaryRatings: some View {
-        if let r = mdbRatings, case let tokens = RatingsFormat.tokens(r), !tokens.isEmpty {
+        if let r = RatingPresentationPolicy.merged(ratingsKey == currentRatingsRequest ? mdbRatings : nil,
+                                                   fallbackIMDb: meta?.imdbRating),
+           case let tokens = RatingsFormat.tokens(r), !tokens.isEmpty {
             HStack(spacing: 8) {
                 ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
                     HStack(spacing: 3) {
@@ -1993,11 +1998,6 @@ struct iOSDetailView: View {
                         Text(token.value).foregroundStyle(Theme.Palette.textPrimary)
                     }
                 }
-            }
-        } else if let imdb = meta?.imdbRating {
-            HStack(spacing: 6) {
-                Image(systemName: "star.fill").foregroundStyle(Theme.Palette.accent)
-                Text(imdb).foregroundStyle(Theme.Palette.textPrimary)
             }
         }
     }
@@ -2170,6 +2170,10 @@ struct iOSDetailView: View {
     /// (resume). `watchedSet` below adds the optional Trakt mirror on top for display.
     private var localWatchedSet: Set<String> {
         guard let m = meta else { return [] }
+        if core.usesNativeProfileState {
+            guard core.metaDetails?.meta?.id == m.id else { return [] }
+            return Set(core.metaDetails?.watchedVideoIds ?? [])
+        }
         return profiles.activeUsesEngineHistory
             ? core.metaDetails.map { core.effectiveWatchedVideoIDs(for: $0) } ?? []
             : profiles.watchedVideoIds(forMeta: m.id)
@@ -2248,7 +2252,7 @@ struct iOSDetailView: View {
                 }
                 #endif
                 trailerButton
-                iOSLibraryChip()
+                iOSLibraryChip(expectedID: metaRequestID, expectedType: effectiveType)
                 iOSWatchlistChip()
                 ratingChip
                 // "I'm watching this" on Trakt, for a cinema or someone else's TV. A series checks into an
@@ -2518,7 +2522,7 @@ struct iOSDetailView: View {
                 .buttonStyle(ChipButtonStyle())
 
                 trailerButton
-                iOSLibraryChip()
+                iOSLibraryChip(expectedID: metaRequestID, expectedType: effectiveType)
                 iOSWatchlistChip()
                 ratingChip
                 // "I'm watching this" on Trakt, for a cinema or someone else's TV. A movie checks in whole,
@@ -2912,21 +2916,35 @@ struct iOSDetailView: View {
     /// user's own MDBList key if they set one. Fail-soft: leaves the row hidden on any miss. Skipped for
     /// live channels, which carry no ratings.
     private func loadRatings() {
-        guard !LiveTypes.contains(type), let imdb = ratingsImdbID, mdbRatings == nil else { return }
-        Task {
-            let vx = await VortXRatingsClient.ratings(imdbID: imdb, type: type)
+        guard let requested = currentRatingsRequest else {
+            ratingsGeneration = nil
+            ratingsTask?.cancel(); ratingsTask = nil
+            ratingsKey = nil; mdbRatings = nil
+            return
+        }
+        if ratingsKey == requested && (ratingsTask != nil || mdbRatings != nil) { return }
+        ratingsTask?.cancel()
+        if ratingsKey != requested { mdbRatings = nil }
+        ratingsKey = requested
+        let generation = UUID()
+        ratingsGeneration = generation
+        ratingsTask = Task { @MainActor in
+            let vx = await VortXRatingsClient.ratings(imdbID: requested.id, type: requested.type)
             // Only reach for the user's MDBList key to fill what VortX did not return (e.g. RT / Metacritic
             // before the server key is set), so most users need no key at all.
             let needsMore = vx == nil || vx?.rottenTomatoes == nil || vx?.metacritic == nil
-            let mdb = needsMore ? await MDBListClient.ratings(imdbID: imdb, type: type) : nil
-            let merged = MDBListRatings(
-                imdb: vx?.imdb ?? mdb?.imdb,
-                rottenTomatoes: vx?.rottenTomatoes ?? mdb?.rottenTomatoes,
-                metacritic: vx?.metacritic ?? mdb?.metacritic,
-                tmdb: vx?.tmdb ?? mdb?.tmdb
-            )
-            await MainActor.run { mdbRatings = merged.hasAny ? merged : nil }
+            guard !Task.isCancelled else { return }
+            let mdb = needsMore ? await MDBListClient.ratings(imdbID: requested.id, type: requested.type) : nil
+            guard !Task.isCancelled, ratingsGeneration == generation,
+                  currentRatingsRequest == requested else { return }
+            mdbRatings = RatingPresentationPolicy.merged(vx, secondary: mdb)
+            ratingsTask = nil
         }
+    }
+
+    private var currentRatingsRequest: RatingRequestKey? {
+        guard !LiveTypes.contains(effectiveType), let imdb = ratingsImdbID else { return nil }
+        return RatingRequestKey(id: imdb, type: effectiveType)
     }
 
     /// Fetch the movie budget + box office (no-op for series / no key / no imdb id). Fail-soft; the row hides on a miss.
@@ -3762,6 +3780,31 @@ struct iOSDetailView: View {
     /// get a card just under the viewport so the next episode peeks into the rail; regular iPad layouts
     /// get a wider card without making the horizontal focus path needlessly long.
     @State private var episodeRailFirstVisible = 0
+    @State private var episodeRailInitialPosition = EpisodeRailInitialPositionPolicy()
+    @StateObject private var manualWatchedAction = ProfileMutationPresentation()
+
+    private var episodeRailScope: String {
+        "\(profiles.activeID):\(account.credentialBoundaryGeneration):\(metaRequestID)"
+    }
+
+    private var episodeRailHistoryReady: Bool {
+        guard meta?.id == metaRequestID else { return false }
+        #if VORTX_NATIVE_DATA_ENGINE
+        if core.usesNativeProfileState {
+            return core.metaDetails?.meta?.id == metaRequestID && core.metaDetails?.watchedVideoIds != nil
+                && core.nativePlaybackTargetIsCurrent(.capture(core: core))
+        }
+        #endif
+        return true
+    }
+
+    private struct EpisodeRailFocusRequest: Equatable {
+        let scope: String
+        let season: Int
+        let ids: [String]
+        let watched: Set<String>
+        let ready: Bool
+    }
 
     private struct EpisodeRailPositions: PreferenceKey {
         static let defaultValue: [String: CGFloat] = [:]
@@ -3775,6 +3818,8 @@ struct iOSDetailView: View {
             let seasons = Array(Set(videos.compactMap { $0.season })).sorted()
             let watched = watchedSet
             let visibleEpisodes = episodes(videos)
+            let focusRequest = EpisodeRailFocusRequest(scope: episodeRailScope, season: season,
+                ids: visibleEpisodes.map(\.id), watched: localWatchedSet, ready: episodeRailHistoryReady)
             let cardWidth = CinemaRailLayout.episodeWidth(viewport: viewportWidth,
                                                          inset: Theme.Space.md, spacing: Theme.Space.md)
             let pageSize = CinemaRailLayout.visibleEpisodes(viewport: viewportWidth, cardWidth: cardWidth,
@@ -3834,6 +3879,12 @@ struct iOSDetailView: View {
                 if selectingEpisodes { episodeSelectionBar(videos) }
                 #endif
 
+                if manualWatchedAction.isRunning {
+                    ProgressView("Updating watched status…").font(Theme.Typography.label)
+                } else if let error = manualWatchedAction.errorMessage {
+                    Text(error).font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
+                }
+
                 Color.clear
                     .frame(height: 1)
                     .id(Self.episodesTopAnchor)
@@ -3884,6 +3935,10 @@ struct iOSDetailView: View {
                             .padding(.vertical, Theme.Space.xs)
                         }
                         .coordinateSpace(name: "cinema-episode-rail")
+                        .simultaneousGesture(DragGesture(minimumDistance: 4).onChanged { value in
+                            guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                            episodeRailInitialPosition.userInteracted(scope: episodeRailScope, season: season)
+                        })
                         .onPreferenceChange(EpisodeRailPositions.self) { positions in
                             if let index = visibleEpisodes.firstIndex(where: {
                                 guard let x = positions[$0.id] else { return false }
@@ -3905,9 +3960,17 @@ struct iOSDetailView: View {
                             }
                         }
                     }
-                    .onChange(of: season) { _ in
-                        episodeRailFirstVisible = 0
-                        if let first = visibleEpisodes.first { railProxy.scrollTo(first.id, anchor: .leading) }
+                    .task(id: focusRequest) {
+                        // Allow the lazy rail to lay out before its initial scroll. Cancellation and
+                        // the one-shot policy prevent a late history update from stealing the position.
+                        await Task.yield()
+                        guard !Task.isCancelled, season == focusRequest.season,
+                              episodeRailScope == focusRequest.scope,
+                              let index = episodeRailInitialPosition.claim(
+                                scope: focusRequest.scope, season: focusRequest.season, ids: focusRequest.ids,
+                                watched: focusRequest.watched, ready: focusRequest.ready) else { return }
+                        episodeRailFirstVisible = index
+                        railProxy.scrollTo(focusRequest.ids[index], anchor: .leading)
                     }
                 }
                 .accessibilityElement(children: .contain)
@@ -3926,6 +3989,8 @@ struct iOSDetailView: View {
             }
             .onChange(of: watched) { _ in publishSeriesWatchRollup() }   // a mark flips the show-level badge (#143)
             .onChange(of: season) { _ in didApplySeason = true }
+            .onDisappear { manualWatchedAction.cancel() }
+            .onChange(of: episodeRailScope) { _ in manualWatchedAction.cancel() }
         }
     }
 
@@ -3945,6 +4010,7 @@ struct iOSDetailView: View {
 
     private func pageEpisodes(forward: Bool, episodes: [CoreVideo], pageSize: Int, proxy: ScrollViewProxy) {
         guard !episodes.isEmpty else { return }
+        episodeRailInitialPosition.userInteracted(scope: episodeRailScope, season: season)
         let index = CinemaRailLayout.pageStart(current: episodeRailFirstVisible, direction: forward ? 1 : -1,
                                                visible: pageSize, count: episodes.count)
         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
@@ -4046,8 +4112,30 @@ struct iOSDetailView: View {
 
     @ViewBuilder private func episodeActions(_ v: CoreVideo, isWatched: Bool) -> some View {
                 Button(isWatched ? "Mark as Unwatched" : "Mark as Watched") {
+                    #if VORTX_NATIVE_DATA_ENGINE
+                    let target = PlaybackMutationTarget.capture(core: core)
+                    let expected = detailTarget
+                    let profileID = profiles.activeID
+                    let isCurrent = {
+                        profiles.activeID == profileID && target.stillOwnsCurrentContext(core: core)
+                            && core.metaDetails?.meta?.id == expected.id
+                            && core.metaDetails?.meta?.type == expected.type
+                    }
+                    manualWatchedAction.start(operation: {
+                        guard isCurrent() else { return false }
+                        do {
+                            try await core.markNativeVideoWatched(v, !isWatched, expected: expected, target: target)
+                            return isCurrent()
+                        } catch { return false }
+                    }, failureMessage: {
+                        isCurrent() ? "Couldn't update watched status. Please try again."
+                                    : "Profile or title changed. Please try again."
+                    })
+                    #else
                     core.markVideoWatched(v, !isWatched, expected: detailTarget)
+                    #endif
                 }
+                .disabled(manualWatchedAction.isRunning)
                 #if !os(tvOS)
                 // #119: one-episode auto-pick download from the list (best source via the same
                 // ranked pipeline), without opening the episode's source page.
@@ -5120,10 +5208,10 @@ struct iOSEpisodeStreams: View {
         // below on the canvas, same structure as iOSDetailView.hero, so a long episode synopsis can't push
         // the backdrop down behind the text.
         let overlap = SourcePresentationPolicy.mobileHeroActionOverlap(width: width, viewport: viewport)
+        let cardWidth = CinemaHeroCardGeometry.innerWidth(viewport: width)
         return VStack(alignment: .leading, spacing: overlap > 0 ? 0 : Theme.Space.md) {
             ZStack(alignment: .bottomLeading) {
                 backdrop(height: SourcePresentationPolicy.mobileHeroHeight(width: width, viewport: viewport))
-                    .ignoresSafeArea(edges: .top)
                 VStack(alignment: .leading, spacing: Theme.Space.sm) {
                     Text(meta.name.uppercased())
                         .font(Theme.Typography.eyebrow).tracking(1.5)
@@ -5138,7 +5226,7 @@ struct iOSEpisodeStreams: View {
                 }
                 .padding(.horizontal, Theme.Space.md)
                 .padding(.bottom, Theme.Space.lg + overlap)
-                .frame(width: width, alignment: .leading)
+                .frame(width: cardWidth, alignment: .leading)
             }
             #if os(iOS)
             .overlay(alignment: .topLeading) {
@@ -5147,7 +5235,10 @@ struct iOSEpisodeStreams: View {
                     .padding(Theme.Space.md)
             }
             #endif
-            .frame(width: width, alignment: .leading)
+            .frame(width: cardWidth, alignment: .leading)
+            .cinemaHeroCard()
+            .padding(.horizontal, CinemaHeroCardGeometry.inset)
+            .padding(.top, Theme.Space.xs)
 
             #if os(iOS)
             if overlap > 0 {
@@ -5267,9 +5358,9 @@ struct iOSEpisodeStreams: View {
     /// chrome) with the show eyebrow + episode title + meta overlaid at the bottom, sized to a near-fullscreen
     /// band. Mirrors `iOSDetailView.heroBanner`; the episode's own `.macBackAffordance()` supplies Back.
     private func macEpisodeBanner(width: CGFloat, height: CGFloat) -> some View {
-        ZStack(alignment: .bottomLeading) {
+        let cardWidth = CinemaHeroCardGeometry.innerWidth(viewport: width)
+        return ZStack(alignment: .bottomLeading) {
             backdrop(height: height)
-                .ignoresSafeArea(edges: .top)
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
                 Text(meta.name.uppercased())
                     .font(Theme.Typography.eyebrow).tracking(1.5)
@@ -5284,9 +5375,12 @@ struct iOSEpisodeStreams: View {
             }
             .padding(.horizontal, Theme.Space.md)
             .padding(.bottom, Theme.Space.lg)
-            .frame(width: width, alignment: .leading)
+            .frame(width: cardWidth, alignment: .leading)
         }
-        .frame(width: width, alignment: .leading)
+        .frame(width: cardWidth, alignment: .leading)
+        .cinemaHeroCard()
+        .padding(.horizontal, CinemaHeroCardGeometry.inset)
+        .padding(.top, Theme.Space.xs)
     }
 
     /// The episode overview, in the same scrolling canvas as the Mac hero (iOS keeps it inside `hero`).
@@ -7455,21 +7549,55 @@ private struct iOSEmptyRow: View {
 
 /// Add / remove the open title from the engine library, the touch/Mac twin of the tvOS LibraryChip.
 private struct iOSLibraryChip: View {
+    let expectedID: String
+    let expectedType: String
     @EnvironmentObject private var core: CoreBridge
+    @EnvironmentObject private var profiles: ProfileStore
+    @StateObject private var libraryAction = ProfileMutationPresentation()
 
     var body: some View {
         let saved = core.detailInLibrary
         Button {
+            #if VORTX_NATIVE_DATA_ENGINE
+            let target = PlaybackMutationTarget.capture(core: core)
+            let profileID = profiles.activeID
+            let meta = core.metaDetails?.meta
+            let isCurrent = {
+                profiles.activeID == profileID && target.stillOwnsCurrentContext(core: core)
+                    && core.metaDetails?.meta?.id == expectedID
+                    && core.metaDetails?.meta?.type == expectedType
+            }
+            libraryAction.start(operation: {
+                guard isCurrent(), let meta else { return false }
+                do {
+                    try await core.setNativeLibraryMembership(
+                        id: meta.id, type: meta.type, name: meta.name, poster: meta.poster,
+                        present: !saved, target: target)
+                    return isCurrent()
+                } catch { return false }
+            }, failureMessage: {
+                isCurrent() ? "Couldn't update Library. Please try again."
+                            : "Profile or title changed. Please try again."
+            })
+            #else
             if saved {
                 core.removeDetailFromLibrary()   // removes from library + mirrors to external watchlists
             } else {
                 core.addDetailToLibrary()
             }
+            #endif
         } label: {
             Label(saved ? "In Library" : "Add to Library",
                   systemImage: saved ? "bookmark.fill" : "bookmark")
         }
         .buttonStyle(ChipButtonStyle(selected: saved))
+        .disabled(libraryAction.isRunning)
+        .onDisappear { libraryAction.cancel() }
+        .onChange(of: profiles.activeID) { _ in libraryAction.cancel() }
+        .onChange(of: expectedType + ":" + expectedID) { _ in libraryAction.cancel() }
+        if let error = libraryAction.errorMessage {
+            Text(error).font(.caption).foregroundStyle(Theme.Palette.textSecondary)
+        }
     }
 }
 

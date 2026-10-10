@@ -13,8 +13,8 @@ import SwiftUI
 /// larger tvOS card can carry the full set. Values are looked up by id from VortX's own keyless ratings
 /// service (ratings.vortx.tv, the SAME numbers the baker uses), async and fail-soft: nothing shows until a
 /// rating resolves, a miss (non-`tt` id, offline, or no rating) simply shows nothing, and a title carrying
-/// only IMDb shows only IMDb (per-score fail-soft). Results are memoized per id for the process so scrolling
-/// a rail never refetches and a recycled cell repaints instantly.
+/// only IMDb shows only IMDb (per-score fail-soft). Successful results are memoized per typed endpoint;
+/// concurrent cards coalesce one request, while an offline/transient miss can retry on a later appearance.
 ///
 /// The DRAWING lives in `RatingBadgePlate` below, which takes formatted tokens and nothing else. Splitting
 /// it out is what lets the badge be rendered deterministically (a snapshot harness composes the real plate
@@ -32,8 +32,11 @@ struct CardRatingBadge: View {
     /// How many scores this card size can carry legibly. A small iOS tile shows the two most salient (the
     /// star + one more, typically RT); a larger tvOS card asks for all four. Capped in `RatingsFormat`.
     var maxScores: Int = 2
+    var fallbackIMDb: String? = nil
 
     @State private var ratings: MDBListRatings?
+    @State private var ratingsKey: RatingRequestKey?
+    private var requestKey: RatingRequestKey { .init(id: id, type: type) }
 
     // A ZStack (a concrete layout container), NOT a bare Group: a `Group` whose only child is a false `if`
     // collapses to `EmptyView`, and SwiftUI does not run `.task` on an EmptyView, so the rating would never
@@ -41,19 +44,26 @@ struct CardRatingBadge: View {
     // lifecycle, so the task fires on mount, resolves the rating, and the badge fades in.
     var body: some View {
         ZStack {
-            if active, let ratings, case let tokens = RatingsFormat.tokens(ratings, limit: maxScores), !tokens.isEmpty {
+            if active, let displayed = RatingPresentationPolicy.merged(
+                ratingsKey == requestKey ? ratings : nil, fallbackIMDb: fallbackIMDb),
+               case let tokens = RatingsFormat.tokens(displayed, limit: maxScores), !tokens.isEmpty {
                 RatingBadgePlate(tokens: tokens, glyphSize: glyphSize, textSize: textSize)
             }
         }
         // Key on id AND active so the lookup (re)runs when the card recycles to a new id and when `active`
         // flips true after the backdrop resolves; skips the network entirely while inactive.
-        .task(id: BadgeKey(id: id, active: active)) {
-            guard active, id.hasPrefix("tt") else { ratings = nil; return }
-            ratings = await CardRatingStore.shared.ratings(id: id, type: type)
+        .task(id: BadgeKey(request: requestKey, active: active)) {
+            let requested = requestKey
+            ratingsKey = requested
+            ratings = nil
+            guard active, id.hasPrefix("tt") else { return }
+            let value = await CardRatingStore.shared.ratings(id: id, type: type)
+            guard !Task.isCancelled, ratingsKey == requested else { return }
+            ratings = value
         }
     }
 
-    private struct BadgeKey: Equatable { let id: String; let active: Bool }
+    private struct BadgeKey: Equatable { let request: RatingRequestKey; let active: Bool }
 }
 
 /// The badge itself: ONE capsule of VortXGlass, sized tight to its scores, floating over the artwork.
@@ -211,22 +221,28 @@ struct RatingBadgePlate: View {
 final class CardRatingStore {
     static let shared = CardRatingStore()
 
-    /// id -> the full cross-provider ratings model, or nil for a remembered miss (so a title with no rating
-    /// is not refetched on every reappear). The double optional from a dictionary read distinguishes "known
-    /// miss" from "unseen".
-    private var cache: [String: MDBListRatings?] = [:]
-    private var inflight: [String: Task<MDBListRatings?, Never>] = [:]
+    /// Keep successful values only. The client cannot distinguish an unrated title from a temporary
+    /// transport failure, so remembering nil would prevent recovery on the next appearance.
+    private var cache: [RatingRequestKey: MDBListRatings] = [:]
+    private var inflight: [RatingRequestKey: Task<MDBListRatings?, Never>] = [:]
+    private let load: @MainActor (String, String) async -> MDBListRatings?
+
+    init(load: @escaping @MainActor (String, String) async -> MDBListRatings? = {
+        await VortXRatingsClient.ratings(imdbID: $0, type: $1)
+    }) { self.load = load }
 
     func ratings(id: String, type: String) async -> MDBListRatings? {
-        if let known = cache[id] { return known }
-        if let task = inflight[id] { return await task.value }
+        let key = RatingRequestKey(id: id, type: type)
+        guard key.enabled else { return nil }
+        if let known = cache[key] { return known }
+        if let task = inflight[key] { return await task.value }
         let task = Task<MDBListRatings?, Never> {
-            await VortXRatingsClient.ratings(imdbID: id, type: type)
+            await load(id, key.type)
         }
-        inflight[id] = task
+        inflight[key] = task
         let value = await task.value
-        inflight[id] = nil
-        cache[id] = value
+        inflight[key] = nil
+        if let value { cache[key] = value }
         return value
     }
 }

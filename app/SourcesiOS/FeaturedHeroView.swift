@@ -161,6 +161,13 @@ struct FeaturedHeroView: View {
     private var heroHeight: CGFloat { Self.heroHeight }
 
     var body: some View {
+        confinedHero
+            .cinemaHeroCard()
+            .padding(.horizontal, CinemaHeroCardGeometry.inset)
+            .padding(.top, Theme.Space.xs)
+    }
+
+    private var confinedHero: some View {
         ZStack(alignment: .bottomLeading) {
             // The still backdrop image is the base art layer and the permanent fallback: the muted clip
             // (#44) only paints OVER it when a trailer id resolves, so a missing / slow / blocked embed
@@ -183,14 +190,8 @@ struct FeaturedHeroView: View {
         .preference(key: CinemaNavigationArtworkKey.self, value: navigationArtwork)
         .onChange(of: heroTintKey) { _ in navigationImage = nil }
         .onChange(of: navigationArtworkOwner) { _ in navigationImage = nil }
-        // Let just the first band bleed to the very top so the hero art runs behind the chrome (the
-        // cinematic media-app look) instead of starting below it. On macOS that's behind the hidden
-        // title-bar / traffic-light region; on iOS it's behind the frosted status-bar / nav bar. Only
-        // .top/.container, so the rails below keep normal insets. This is what removes the BLACK GAP the
-        // owner saw above the iPhone hero (H19a): the hero-height bump was double-counting the safe-area
-        // inset, leaving the status-bar strip as bare canvas above the band. The dual scrim (below) keeps
-        // the status bar / window controls legible over the art.
-        .ignoresSafeArea(.container, edges: .top)
+        // The artwork now stays inside this card. The shell can borrow its accepted bitmap as an
+        // ambient navigation wash without pretending that two differently sized viewports share a crop.
         // Mac branding now lives ONLY in the persistent top bar (iOSRootView.macTopBar); the old
         // hero-corner wordmark rendered a SECOND logo on every primary screen (owner report).
         // The rare "no trailer available right now" notice (both trailer paths out). A small capsule,
@@ -335,9 +336,7 @@ struct FeaturedHeroView: View {
                     navigationImage = NavigationImage(key: requested, owner: requestedOwner, image: image, panEpoch: epoch)
                 })
             }
-            .frame(width: geo.size.width, height: CinemaArtworkGeometry.expandedHeight(
-                band: geo.size.height, navigation: navigationArtworkInset))
-            .offset(y: -navigationArtworkInset)
+            .frame(width: geo.size.width, height: geo.size.height)
             .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
             .clipped()
         }
