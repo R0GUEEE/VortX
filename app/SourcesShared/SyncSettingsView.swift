@@ -62,6 +62,17 @@ struct SyncSettingsView: View {
             Text("This account's profiles differ from this device. Merge both to keep every profile (recommended), or force one side.")
         }
         .task { await sync.refreshAccount() }
+        .onReceive(NotificationCenter.default.publisher(for: VortXSyncManager.credentialScopeDidChangeNote)) { _ in
+            // Async outcomes from the previous account must not repaint a replacement session.
+            syncNote = nil
+            syncing = false
+            showConflict = false
+        }
+        .onChange(of: sync.lastSyncAt) { stamp in
+            // A new durable receipt can retire a previous manual-action failure;
+            // an old successful stamp must not hide a newer failed attempt.
+            if stamp != nil, sync.synchronizationIsComplete { syncNote = nil }
+        }
     }
 
     // MARK: Signed in
@@ -90,7 +101,10 @@ struct SyncSettingsView: View {
 
         // Keep failures visible and retryable. A completed account round-trip may still have
         // a local change waiting, so do not show the backup claim until synchronization is complete.
-        if let syncNote {
+        if let failure = sync.backupUploadFailure {
+            // Observe the manager's live failure, not a copied string that survives an accepted retry.
+            Text(failure.message).font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
+        } else if let syncNote {
             Text(syncNote).font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
         } else {
             Text(MoveSeeding.backedUpLine(
@@ -227,14 +241,20 @@ struct SyncSettingsView: View {
     /// so it just pushes as before. An unreachable account doc is a DISTINCT retry state: it must not
     /// be misread as "no conflict" and silently pushed over a roster that was never compared.
     private func syncNow() {
+        let session = CredentialScopeRegistry.shared.capture()
         Task { @MainActor in
+            guard CredentialScopeRegistry.shared.isCurrent(session) else { return }
             syncing = true
-            guard await sync.retryAccountRestore() else {
+            let restored = await sync.retryAccountRestore()
+            guard CredentialScopeRegistry.shared.isCurrent(session) else { return }
+            guard restored else {
                 syncNote = "Couldn't load your account data yet. Your saved data has not been replaced. Try again."
                 syncing = false
                 return
             }
-            switch await sync.rosterConflictWithAccount() {
+            let conflict = await sync.rosterConflictWithAccount()
+            guard CredentialScopeRegistry.shared.isCurrent(session) else { return }
+            switch conflict {
             case .conflict:
                 syncing = false
                 showConflict = true
@@ -243,7 +263,8 @@ struct SyncSettingsView: View {
                 syncing = false
             case .noConflict:
                 let pushed = await sync.pushThisDevice()
-                syncNote = pushed
+                guard CredentialScopeRegistry.shared.isCurrent(session) else { return }
+                syncNote = pushed || sync.backupUploadFailure != nil
                     ? nil
                     : "Couldn't sync your latest changes. They are still saved on this device. Try again."
                 syncing = false

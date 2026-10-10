@@ -220,11 +220,13 @@ final class VortXSyncManager: ObservableObject {
     /// the seeding banner / SyncSettingsView repaint live. nil = this account has never completed a sync
     /// from this device (or signed out).
     @Published private(set) var lastSyncAt: Date?
+    @Published private(set) var backupUploadFailure: SyncBackupUploadFailure?
 
     /// Transport success does not mean every locally retained preference has converged.
     var pendingSettingsMessage: String? {
-#if VORTX_NATIVE_DATA_ENGINE
         guard isSignedIn else { return nil }
+        if let backupUploadFailure { return backupUploadFailure.message }
+#if VORTX_NATIVE_DATA_ENGINE
         return !nativeUnsupportedSettings.isEmpty || !dirtySettings.isEmpty || nativePreferenceIntentStatus != "idle"
             ? "Some changes still need to sync." : nil
 #else
@@ -1518,6 +1520,7 @@ final class VortXSyncManager: ObservableObject {
     private func lastSyncKey(for accountId: String?) -> String { "vortx.sync.lastSuccessAt." + (accountId ?? "") }
     /// Re-seed the published `lastSyncAt` from the persisted per-account stamp (sign-in / Keychain restore).
     private func reloadLastSyncStamp() {
+        backupUploadFailure = nil // A transport issue belongs to the previous session, not another account.
         let t = UserDefaults.standard.double(forKey: lastSyncKey(for: account?.id))
         lastSyncAt = t > 0 ? Date(timeIntervalSince1970: t) : nil
     }
@@ -2287,6 +2290,7 @@ final class VortXSyncManager: ObservableObject {
                 self.dataKey = nil
                 self.isSignedIn = false
                 self.lastSyncAt = nil
+                self.backupUploadFailure = nil
             })
     }
 
@@ -2923,7 +2927,9 @@ final class VortXSyncManager: ObservableObject {
         let (code, json) = await request("PUT", "/v1/backup", body: ["document": ct, "version": version], auth: true, credentialCapture: capture)
         guard isCurrent(capture), !hasPendingAccountDocApply(for: capture) else { return .error }
         guard code == 200 else {
-            DiagnosticsLog.log("sync", "upload result=failed stage=transport status=\(code)")
+            let failure = SyncBackupUploadFailure.classify(status: code, serverCode: json?["error"] as? String)
+            backupUploadFailure = failure
+            DiagnosticsLog.log("sync", "upload result=failed stage=transport status=\(code) reason=\(failure.diagnosticCode) plaintextBytes=\(pt.count) ciphertextBytes=\(ct.utf8.count)")
             return .error
         }
         // accepted defaults to true so an older worker without the field (which stored the write) still
@@ -2951,8 +2957,9 @@ final class VortXSyncManager: ObservableObject {
             lastSyncedVersion = max(lastSyncedVersion, version)
             persistLastSyncedVersion()   // survive relaunch so the version guard stays consistent
             if Self.writeSyncDocV2 { Self.markSawDocV2(capturedAccountID) }  // H-1: account's stored doc is now v2
+            backupUploadFailure = nil // Clear only after actual acceptance and local durable receipts.
             stampSyncSuccess()           // the account now holds this device's doc: "last synced" = now
-            DiagnosticsLog.log("sync", "upload result=accepted")
+            DiagnosticsLog.log("sync", "upload result=accepted plaintextBytes=\(pt.count) ciphertextBytes=\(ct.utf8.count)")
             return .accepted(version: version)
         }
         // Rejected (a concurrent write won). The worker echoes the current stored version so we can retry
