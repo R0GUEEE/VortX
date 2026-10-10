@@ -163,8 +163,26 @@ struct DiscoverView: View {
         if filters.isActive, !raw.isEmpty {
             filterSummary(shown: shown.count)
         }
+        if discover.hasFailedPage, !discover.isLoadingPage {
+            VStack(spacing: Theme.Space.md) {
+                Text("Couldn’t load this catalog. Try again.")
+                    .font(Theme.Typography.body).foregroundStyle(Theme.Palette.textSecondary)
+                Button {
+                    if let request = discover.retryRequest { core.selectDiscover(request) }
+                    else { core.loadDiscover() }
+                } label: { Text("Retry") }
+                .buttonStyle(ChipButtonStyle(selected: false))
+            }
+            .padding(Theme.Space.xxl).frame(maxWidth: .infinity)
+        }
         if raw.isEmpty {
-            BigSpinner().padding(Theme.Space.xxl).frame(maxWidth: .infinity)
+            if discover.isLoadingPage {
+                BigSpinner().padding(Theme.Space.xxl).frame(maxWidth: .infinity)
+            } else if !discover.hasFailedPage {
+                Text(discover.selectable.catalogs.isEmpty ? "No catalogs are available." : "No results in this catalog.")
+                    .font(Theme.Typography.body).foregroundStyle(Theme.Palette.textSecondary)
+                    .padding(Theme.Space.xxl).frame(maxWidth: .infinity)
+            }
         } else if shown.isEmpty {
             emptyFiltered
         } else {

@@ -1591,6 +1591,10 @@ struct CoreStreamSourceGroup: Identifiable, Equatable, Sendable {
 struct CoreDiscover: Decodable {
     let selectable: CoreDiscoverSelectable
     let catalog: [CoreCatalogPage]          // Vec<ResourceLoadable<Vec<MetaItemPreview>>> (pages)
+    /// Native failed-page request, preserved verbatim so retry retains catalog, genre and offset.
+    /// Optional for compatibility with older projections.
+    let retryRequest: CoreRequest?
+    var hasFailedPage: Bool { catalog.contains { if case .err = $0.content { return true }; return false } }
     var items: [CoreMeta] { catalog.compactMap { $0.content?.ready }.flatMap { $0 } }
     /// True while any catalog page is still loading (e.g. a just-dispatched next-page request). Lets the
     /// bridge tell a mid-load emit (same item count, more coming) apart from a settled end-of-catalog

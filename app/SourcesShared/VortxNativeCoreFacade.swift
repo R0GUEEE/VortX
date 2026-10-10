@@ -930,23 +930,22 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             let chosen: (VortxResourceAddon, VortxResourceRequest)?
             if let supplied, let request = try? path(supplied["path"]), let addon = registrySnapshot.first(where: { .string($0.transportUrl) == supplied["base"] }), validCatalogRequest(request, addon: addon) { chosen = (addon, request) }
             else if supplied == nil { chosen = requests.first } else { return fail("invalid_catalog_request") }
-            guard let chosen else { return fail("no_catalogs") }
-            guard let loading = try? loadingEntry(chosen.0, chosen.1) else { return fail("invalid_catalog_request") }
-            let initial = discoverProjection(pages: [loading], chosen: chosen, requests: requests)
-            return enqueue(field, initial: initial) { [self] in
-                let board = try await session.loadCatalog(.discover, request: chosen.1, addons: [chosen.0])
-                let pages = board["catalogs"]?.array?.flatMap { $0.array ?? [] } ?? []
-                return [field: discoverProjection(pages: pages, chosen: chosen, requests: requests)]
+            guard let chosen else {
+                guard let ticket = begin(field) else { return false }
+                publish([field: .object(["catalog": .array([]), "selectable": .object([
+                    "types": .array([]), "catalogs": .array([]), "extra": .array([]), "next_page": .null])])], field: field, ticket: ticket)
+                return true
             }
+            let previous = values[field]?["catalog"]?.array ?? []
+            let retryPage = supplied != nil && supplied == values[field]?["retryRequest"]
+                && chosen.1.extra.contains { $0.first == "skip" }
+                && previous.first?["request"] != supplied
+            return enqueueDiscover(chosen: chosen, requests: requests, append: retryPage)
         }
         if name == "CatalogWithFilters", string(action["args"]?["action"]) == "LoadNextPage", field == "discover" {
             guard let pages = values[field]?["catalog"]?.array else { return fail("missing_selection") }
             guard let next = nextCatalogPage(pages) else { return true }
-            let requests = catalogRequests(extra: [], type: nil)
-            return enqueue(field) { [self] in
-                let board = try await session.loadCatalog(.discover, request: next.1, addons: [next.0], append: true)
-                return [field: discoverProjection(pages: board["catalogs"]?.array?.flatMap { $0.array ?? [] } ?? [], chosen: next, requests: requests)]
-            }
+            return enqueueDiscover(chosen: next, requests: catalogRequests(extra: [], type: nil), append: true)
         }
         if name == "Load", model == "LibraryWithFilters", field == "library" {
             let request = action["args"]?["args"]?["request"]
@@ -1159,7 +1158,37 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             return .object(["name": .string(name), "options": .array(choices)])
         }
         let next = nextCatalogPage(pages).map { VortxJSON.object(["request": catalogRequest($0.0, $0.1)]) } ?? .null
-        return .object(["catalog": .array(pages), "selectable": .object(["types": .array(types), "catalogs": .array(catalogs), "extra": .array(extras), "next_page": next])])
+        let retry = pages.first(where: { $0["content"]?["type"] == .string("Err") })?["request"] ?? .null
+        return .object(["catalog": .array(pages), "retryRequest": retry,
+                        "selectable": .object(["types": .array(types), "catalogs": .array(catalogs), "extra": .array(extras), "next_page": next])])
+    }
+    /// Keep Discover decodable through a failed first page. Its selectable controls and exact
+    /// failed request (including genre/skip) remain available to retry, under enqueue's ticket fence.
+    private func enqueueDiscover(chosen: (VortxResourceAddon, VortxResourceRequest),
+                                 requests: [(VortxResourceAddon, VortxResourceRequest)], append: Bool) -> Bool {
+        guard let loading = try? loadingEntry(chosen.0, chosen.1) else { return fail("invalid_catalog_request") }
+        let previous = values["discover"]?["catalog"]?.array ?? []
+        let sameSelection = previous.first?["request"] == catalogRequest(chosen.0, chosen.1)
+        let retained = append || sameSelection ? previous.filter { $0["content"]?["type"] == .string("Ready") } : []
+        let initial = discoverProjection(pages: retained + [loading], chosen: chosen, requests: requests)
+        return enqueue("discover", initial: initial) { [self] in
+            let pages: [VortxJSON]
+            do {
+                let board = try await session.loadCatalog(.discover, request: chosen.1, addons: [chosen.0], append: append)
+                let received = board["catalogs"]?.array?.flatMap { $0.array ?? [] } ?? []
+                // A transport can return an Err group without throwing. Retain last good content
+                // for a refresh failure just as for a thrown failure; success replaces it normally.
+                pages = !append && received.contains(where: { $0["content"]?["type"] == .string("Err") })
+                    ? retained + received : received
+            } catch {
+                try Task.checkCancellation()
+                if case VortxNativeError.superseded = error { throw error }
+                let failed = try VortxResourceProjection.entry(.failed(addonId: chosen.0.id,
+                    failure: .from(error)), request: chosen.1, registry: [chosen.0])
+                pages = retained + [failed]
+            }
+            return ["discover": discoverProjection(pages: pages, chosen: chosen, requests: requests)]
+        }
     }
     private func loadingEntry(_ addon: VortxResourceAddon, _ request: VortxResourceRequest) throws -> VortxJSON {
         .object(["request": .object(["base": .string(addon.transportUrl), "path": try VortxResourceProjection.path(request)]), "content": .object(["type": .string("Loading")])])
