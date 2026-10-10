@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
-const members = ['nativeGlobalEdits', 'nativeDirtySettingIsExported', 'clearPushedDirtySettings', 'ensureNativeCheckpoint',
+const members = ['nativeGlobalEdits', 'nativeGlobalValue', 'nativeDirtySettingsForExport', 'nativeDirtySettingIsExported', 'clearPushedDirtySettings', 'ensureNativeCheckpoint',
   'syncUp', 'finishSyncUp', 'mergeLocalIntoDoc', 'pullDocVersionedResult', 'pushSyncDocAt', 'pushDerivedDoc', 'requestSyncSoon'];
 if (process.argv[2] === '--extract') {
   const source = await readFile(process.argv[3], 'utf8');
@@ -15,13 +15,14 @@ if (process.argv[2] === '--extract') {
     // Older source settles uploads inline. Do not inject the new completion helper into a
     // baseline that does not call it; current source must still supply its actual helper.
     if (name === 'finishSyncUp' && start < 0 && !source.includes('finishSyncUp(operationID)')) return [];
+    if (name === 'nativeGlobalValue' && start < 0 && !source.includes('nativeGlobalValue(key)')) return [];
+    if (name === 'nativeDirtySettingsForExport' && start < 0 && !source.includes('nativeDirtySettingsForExport(globalEdits')) return [];
     assert(start >= 0, `missing production method ${name}`);
     const end = source.indexOf('\n    }', start); assert(end > start);
     return [source.slice(start, end + 6)];
   });
   selected.push('private enum VersionedPull { case doc(doc: [String: Any], version: Int); case empty; case failed(retryable: Bool) }',
-    'private enum PushOutcome { case accepted(version: Int); case rejected(storedVersion: Int?); case error }',
-    'private struct DerivedSyncDoc { let document: [String: Any]; let baseRevision: Int? }');
+    'private enum PushOutcome { case accepted(version: Int); case rejected(storedVersion: Int?); case error }');
   const profiles = await readFile('app/SourcesShared/Profiles.swift', 'utf8');
   const preferenceFixture = await readFile('app/Tests/NativePreferenceAcknowledgementTests.swift', 'utf8');
   const block = (text, marker) => {
@@ -29,6 +30,9 @@ if (process.argv[2] === '--extract') {
     const end = text.indexOf('\n    }', start); assert(end > start, marker);
     return text.slice(start, end + 6);
   };
+  selected.push(block(source, '    private struct DerivedSyncDoc {'),
+    source.slice(source.indexOf('    private func dirtySettingsKey('), source.indexOf('    private var dirtySettings:')),
+    block(source, '    private var dirtySettings:'));
   const environment = preferenceFixture.slice(preferenceFixture.indexOf('private struct PlaybackMutationTarget'), preferenceFixture.indexOf('@MainActor private final class CoreBridge'))
     + preferenceFixture.slice(preferenceFixture.indexOf('@MainActor private final class ThemeManager'), preferenceFixture.indexOf('@MainActor private final class PreferenceHarness'))
     + preferenceFixture.slice(preferenceFixture.indexOf('@MainActor private final class PreferenceHarness'), preferenceFixture.indexOf('@main private enum'))

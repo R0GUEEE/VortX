@@ -60,7 +60,7 @@ if (process.argv[2] === '--extract') {
     '    private func openSyncDocument(', '    private static func decodeDecryptedSyncDocument(', '    private static func documentVersion(',
     '    private func pullDocVersionedResult(', '    private func pullDocVersionedRetrying(',
     '    private func pushSyncDocAt(', '    private func commitNativePulledDocument(', '    private func applyNativeGlobals(',
-    '    static func ownedAddons(', '    func syncDown('];
+    '    static func ownedAddons(', '    func syncDown(', '    private func handle(', '    private func startPoll()'];
   let combined = await readFile('app/Tests/AppleSyncReceivePublicationPeer.swift', 'utf8');
   combined += '\nextension VortXSyncManager {\n'
     + ['    private enum VersionedPull ', '    private enum PushOutcome ', '    private struct PendingDebridApply:',
@@ -68,6 +68,9 @@ if (process.argv[2] === '--extract') {
       .map(marker => member(manager, marker)).join('\n')
     + '\n' + managerMethods.map(marker => member(manager, marker)).join('\n')
     + '\n    func uploadForFixture(_ document: [String: Any], version: Int) async -> Bool { if case .accepted = await pushSyncDocAt(document, version: version) { return true }; return false }\n}\n';
+  combined += '\nextension VortXSyncManager {\n'
+    + '    func broadcastForFixture(version: Int) { handle(.string("{\\"type\\":\\"updated\\",\\"version\\":\\(version)}"), credentialCapture: credentialAuthority.capture()) }\n'
+    + '    func pollForFixture() { startPoll() }\n}\n';
   const coreMembers = ['    func hasCertifiedNativeSession(', '    func captureNativePlaybackTarget(',
     '    func nativePlaybackTargetIsCurrent(', '    private func currentNativePlaybackBinding(',
     '    private func nativePlaybackBinding(', '    func mergeNativeAccountDocument(', '    private func refreshNativeProfiles(',
@@ -215,7 +218,13 @@ try {
       }
       const sent = await peer(`sequence-a-v${stage}`, 'upload-sequence', { stage, version: stage }, 'sequence-a');
       check(sent.accepted && sent.version === stage && sent.stamped === 1, `revision ${stage} acknowledged by actual encrypted uploader`);
-      const pulled = await receiver.send('pull'); revisions.push(pulled);
+      const pulled = await receiver.send(stage === 2 ? 'broadcast-while-pending' : 'pull'); revisions.push(pulled);
+      if (stage === 2) {
+        check(pulled.broadcastDeferredDuringUpload && pulled.pollDeferredWhileQueued,
+          'actual updated handler and poll refuse receive while upload is busy and while local push remains pending');
+        check(pulled.pollCaughtUpAfterQueueDrained && pulled.malformedStampRetained,
+          'actual poll catches up after transport queue drains while malformed local value and dirty stamp remain quarantined');
+      }
       await writeFile(join(root, `sequence-b-v${stage}-result.json`), JSON.stringify(pulled, null, 2));
       check(pulled.version === stage && pulled.certified && pulled.hasApplied && pulled.outcome === 'completed', `revision ${stage} actual syncDown ACK follows certified native receive`);
       check(pulled.profileID === '10000000-0000-0000-0000-000000000041' && pulled.selectionCurrent,
@@ -289,6 +298,7 @@ try {
     baseline, wire, revisions, stale, receiverActor: receiver.ready.actor,
     binarySHA256: sha256(await readFile(binary)), limits: ['macOS static C ABI and extracted Apple source',
       'ProfileStore sink invokes actual discovery apply but excludes full dirty/quarantine admission and rendered catalog board resource content',
+      'Exact updated handler and poll bodies run with a shortened injected poll interval; upload-busy and queue-drained flags are fixture inputs, independently proved by manager upload tests',
       'UserDefaults notifications and sync observer/self-echo suppression are not exercised by the RAM environment',
       'Stale carrier test proves retained join and queued causal-repair marker; automatic repair upload is not exercised',
       'Provider credentials, legacy migration, detail paths and physical Apple devices are outside this proof'] }, null, 2));

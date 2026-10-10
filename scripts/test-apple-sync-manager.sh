@@ -26,9 +26,15 @@ xcrun swiftc -swift-version 6 -parse-as-library -strict-concurrency=complete -wa
     app/SourcesShared/VortxNativeSession.swift app/SourcesShared/VortxNativeProfiles.swift app/SourcesShared/ProfileAddonPreferences.swift \
     app/SourcesShared/VortxNativeProfileEditHost.swift app/SourcesShared/VortxProfileOverlayWitness.swift app/SourcesShared/NativePreferenceIntentStore.swift \
     app/SourcesShared/VortXSyncCrypto.swift app/SourcesShared/NativeForegroundSyncPolicy.swift \
-    app/SourcesShared/SyncDocumentRevisionPolicy.swift app/SourcesShared/SettingsDirtyKeys.swift \
+    app/SourcesShared/SyncDocumentRevisionPolicy.swift app/SourcesShared/SettingsDirtyKeys.swift app/SourcesShared/SyncBackupUploadFailure.swift \
     "$fixture_dir/UserProfile.swift" "$fixture_dir/Discovery.swift" "$fixture_dir/Combined.swift" \
     "$library" -framework Security -framework SystemConfiguration -o "$fixture_dir/manager-peer"
-node test/apple-sync-manager.mjs "$fixture_dir/manager-peer" "$fixture_dir"
+if [[ ${VORTX_SYNC_DIRTY_GLOBALS_ONLY:-0} == 1 ]]; then
+    node test/apple-sync-dirty-globals.mjs "$fixture_dir/manager-peer" "$fixture_dir"
+else
+    node test/apple-sync-manager.mjs "$fixture_dir/manager-peer" "$fixture_dir"
+    node test/apple-sync-dirty-globals.mjs "$fixture_dir/manager-peer" "$fixture_dir"
+fi
 test "$(shasum -a 256 "$library" | awk '{print $1}')" = "$VORTX_SYNC_TEST_LIBRARY_SHA256"
 test "$(shasum -a 256 "$headers/vortx_ffi.h" | awk '{print $1}')" = "$VORTX_SYNC_TEST_HEADER_SHA256"
+printf 'Retained manager receipts %s\n' "$fixture_dir"

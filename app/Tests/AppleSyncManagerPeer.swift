@@ -27,15 +27,27 @@ private enum DiagnosticsLog { static func log(_ category: String, _ text: String
     static let standard = FixtureDefaults()
     final class FixtureDefaults {
         private(set) var values: [String: Any] = [:]
+        private var file: URL?
+        func open(_ directory: String) throws {
+            let file = URL(fileURLWithPath: directory).appendingPathComponent("synthetic-defaults.plist")
+            self.file = file
+            if FileManager.default.fileExists(atPath: file.path) {
+                values = try PropertyListSerialization.propertyList(from: Data(contentsOf: file), format: nil) as! [String: Any]
+            }
+        }
+        private func persist() {
+            guard let file else { return }
+            try! PropertyListSerialization.data(fromPropertyList: values, format: .binary, options: 0).write(to: file, options: .atomic)
+        }
         func object(forKey: String) -> Any? { values[forKey] }
         func dictionary(forKey: String) -> [String: Any]? { values[forKey] as? [String: Any] }
         func persistentDomain(forName: String) -> [String: Any]? { values }
-        func set(_ value: Any?, forKey: String) { values[forKey] = value }
-        func removeObject(forKey: String) { values.removeValue(forKey: forKey) }
+        func set(_ value: Any?, forKey: String) { values[forKey] = value; persist() }
+        func removeObject(forKey: String) { values.removeValue(forKey: forKey); persist() }
     }
 }
 private enum SettingsBackup {
-    static func isSyncable(_ key: String) -> Bool { true }
+    static func isSyncable(_ key: String) -> Bool { key != "fixture.device-local" && !key.hasPrefix("vortx.sync.") }
     static func migratedKey(_ key: String) -> String { key }
 }
 // ProfileStore's fixture environment and its production acknowledgement/retry methods are
@@ -110,6 +122,7 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
         var projectionSaveFails: Bool?; var pendingPlayback: Bool?; var pendingDiscovery: Bool?
         var preferenceCommand: String?; var preferenceValue: String?
         var projectionStamp: Double?; var projectionValue: String?
+        var globalScenario: String?; var globalDuringPUT: String?
     }
     struct Edit: Decodable { let profileID: String?; let fields: [String: VortxJSON] }
     struct Account { let id: String }
@@ -119,7 +132,6 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
     var dataKey: Data? = AppleSyncManagerPeer.key
     var isSignedIn = true
     var hasAppliedAccountDoc = true
-    var dirtySettings: [String: Double] = [:]
     private var settingsShadow: [String: Any] = [:]
     var nativeLegacyWatchlistPending = Set<String>()
     var nativeUnsupportedSettings: [String] = []
@@ -130,6 +142,7 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
     var nativePreparedSeedCapture: CredentialScopeRegistry.Capture?
     var lastSyncedVersion = 0
     var stamped = 0
+    var backupUploadFailure: SyncBackupUploadFailure?
     var ensureCalls = 0
     var putVersions: [Int] = []
     var isApplyingRemote = false
@@ -325,6 +338,14 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
             req.httpBody = try body.map { try JSONSerialization.data(withJSONObject: $0) }
             if method == "PUT" {
                 putVersions.append(body?["version"] as? Int ?? -1)
+                if putVersions.count == 1, let change = command.globalDuringPUT {
+                    if change == "repair-omitted" {
+                        UserDefaults.standard.set(true, forKey: "stremiox.autoSkip")
+                    } else if change == "newer-valid" {
+                        UserDefaults.standard.set(false, forKey: "vortx.player.badSourceAutoRetry")
+                        dirtySettings["vortx.player.badSourceAutoRetry"] = 21
+                    }
+                }
                 if let actions = command.editDuringPUT, putVersions.count == 1 {
                     try await edit(actions)
                     nativePushQueue.request(); nativeDurablePushPending = true
@@ -339,6 +360,38 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
         } catch { return (0, nil) }
     }
     func run() async throws -> [String: VortxJSON] {
+        if let scenario = command.globalScenario {
+            try UserDefaults.standard.open(command.directory)
+            if scenario == "malformed" {
+                let seeds: [(String, Any, Double)] = [
+                    ("stremiox.autoSkip", "malformed-bool", 11),
+                    ("stremiox.directLinksOnly", Data([0xff, 0x00, 0x7b]), 12),
+                    ("stremiox.autoSkipDelaySeconds", Date(timeIntervalSince1970: 123), 13),
+                    ("stremiox.catalog.posterWidthPreset", "compact", 14),
+                    ("stremiox.videoSize", Double.infinity, 15),
+                    ("fixture.unsupported", "retained unknown", 16),
+                    ("stremiox.activeProfileId", "device-only", 17),
+                    ("fixture.device-local", Data([0x99]), 18),
+                    ("vortx.player.badSourceAutoRetry", true, 20)
+                ]
+                for (key, value, stamp) in seeds {
+                    UserDefaults.standard.set(value, forKey: key); dirtySettings[key] = stamp
+                }
+                UserDefaults.standard.removeObject(forKey: "stremiox.keepPlayingInBackground")
+                dirtySettings["stremiox.keepPlayingInBackground"] = 19
+            } else if scenario == "scalar" {
+                UserDefaults.standard.set("malformed-bool", forKey: "stremiox.autoSkip")
+                dirtySettings["stremiox.autoSkip"] = 11
+            } else if scenario == "correct" {
+                UserDefaults.standard.set(true, forKey: "stremiox.autoSkip")
+                UserDefaults.standard.set(false, forKey: "stremiox.directLinksOnly")
+                UserDefaults.standard.set(3, forKey: "stremiox.autoSkipDelaySeconds")
+                UserDefaults.standard.set("fit", forKey: "stremiox.videoSize")
+            } else if scenario == "newer" {
+                UserDefaults.standard.set(true, forKey: "vortx.player.badSourceAutoRetry")
+                dirtySettings["vortx.player.badSourceAutoRetry"] = 20
+            }
+        }
         if let stamp = command.projectionStamp {
             let key = "stremiox.theme.accent"
             UserDefaults.standard.set(command.projectionValue ?? "violet", forKey: key)
@@ -712,6 +765,12 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
         result["preferenceSaves"] = .integer(Int64(ProfileStore.shared.saves))
         result["preferenceIntentStatus"] = .string(nativePreferenceIntentStatus)
         result["nativeUnsupportedSettings"] = .array(nativeUnsupportedSettings.map(VortxJSON.string))
+        if command.globalScenario != nil {
+            result["globalDirtyStamps"] = .object(dirtySettings.mapValues(VortxJSON.number))
+            result["globalLocalValues"] = .object(try UserDefaults.standard.values.filter { !$0.key.hasPrefix("vortx.sync.") }.mapValues {
+                .string(try PropertyListSerialization.data(fromPropertyList: [$0], format: .binary, options: 0).base64EncodedString())
+            })
+        }
         if let store = try? nativePreferenceStore(capture: credentialAuthority.capture()), let intents = try? store.pending() {
             result["pendingPreferenceIntentCount"] = .integer(Int64(intents.count))
             result["pendingPreferenceGroups"] = .array(intents.map { .string($0.group.rawValue) })

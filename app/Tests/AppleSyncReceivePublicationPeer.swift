@@ -198,6 +198,8 @@ struct SIMKLContinueWatchingShadow {
     var activeSyncDown: (id: UUID, capture: CredentialScopeRegistry.Capture)?
     var activeSyncUp: (id: UUID, capture: CredentialScopeRegistry.Capture)?
     var lastSyncedVersion = 0; var stamped = 0
+    var pollTask: Task<Void, Never>?
+    let pollIntervalNanos: UInt64 = 20_000_000
     var backupUploadFailure: SyncBackupUploadFailure?
     var dirtySettings: [String: Double] = [:]; var appliedSettingsBaseline: Set<String> = []
     private var pendingDebridApply: PendingDebridApply?
@@ -411,6 +413,38 @@ struct SIMKLContinueWatchingShadow {
                 try emit(["ready": true, "actor": hostActor])
                 while let instruction = readLine() {
                     if instruction == "close" { break }
+                    if instruction == "broadcast-while-pending" {
+                        let expectedVersion = manager.lastSyncedVersion + 1
+                        let priorVersion = manager.lastSyncedVersion
+                        UserDefaults.standard.set("malformed-bool", forKey: "stremiox.autoSkip")
+                        manager.dirtySettings["stremiox.autoSkip"] = 91
+                        manager.hasPendingPush = true
+                        manager.activeSyncUp = (UUID(), manager.credentialAuthority.capture())
+                        manager.broadcastForFixture(version: expectedVersion)
+                        manager.pollForFixture()
+                        try await Task.sleep(nanoseconds: 80_000_000)
+                        let busyDeferred = manager.lastSyncedVersion == priorVersion
+                        manager.activeSyncUp = nil
+                        try await Task.sleep(nanoseconds: 60_000_000)
+                        let queuedDeferred = manager.lastSyncedVersion == priorVersion
+                        // The actual manager queue drain/export is covered by the companion
+                        // malformed-global harness; this injects its accepted transport state.
+                        manager.hasPendingPush = false
+                        for _ in 0..<100 where manager.lastSyncedVersion < expectedVersion {
+                            try await Task.sleep(nanoseconds: 10_000_000)
+                        }
+                        manager.pollTask?.cancel(); await manager.pollTask?.value
+                        await drainMainQueue()
+                        var result = try await snapshot(manager: manager, session: session, facade: facade, checkpoint: checkpoint,
+                            outcome: .completed, restored: manager.lastSyncedVersion == expectedVersion)
+                        result["broadcastDeferredDuringUpload"] = busyDeferred
+                        result["pollDeferredWhileQueued"] = queuedDeferred
+                        result["pollCaughtUpAfterQueueDrained"] = manager.lastSyncedVersion == expectedVersion
+                        result["malformedStampRetained"] = manager.dirtySettings["stremiox.autoSkip"] == 91
+                            && UserDefaults.standard.string(forKey: "stremiox.autoSkip") == "malformed-bool"
+                        try emit(result)
+                        continue
+                    }
                     if instruction == "dirty-appearance" {
                         CatalogPreferences.shared.posterWidth = .comfort
                         manager.dirtySettings[CatalogPrefsStore.widthKey] = 4000

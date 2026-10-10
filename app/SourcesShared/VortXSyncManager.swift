@@ -792,13 +792,34 @@ final class VortXSyncManager: ObservableObject {
             guard VortxNativeHostPreferences.knownGlobals.contains(key) else {
                 unsupported.append(key); continue // Retain dirty data; never acknowledge an unexported value.
             }
-            let object = UserDefaults.standard.object(forKey: key)
-            let value = try object.map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0, options: .fragmentsAllowed)) } ?? .null
-            guard VortxNativeHostPreferences.validGlobal(key, value: value) else { throw VortxNativeError.invalidSnapshot }
+            guard let value = nativeGlobalValue(key) else {
+                // A malformed local value is not a deletion and must not hold unrelated
+                // durable native edits (or the receives waiting on their push) pending.
+                unsupported.append(key); continue
+            }
             fields[key] = value
         }
         nativeUnsupportedSettings = Array(Set(unsupported)).sorted()
         return fields.isEmpty ? [] : [.init(profileID: nil, fields: fields)]
+    }
+    private func nativeGlobalValue(_ key: String) -> VortxJSON? {
+        guard let object = UserDefaults.standard.object(forKey: key) else { return .null }
+        // Foundation raises an Objective-C exception for values such as Data/Date;
+        // Swift try? cannot catch that. Validate in an array to also admit JSON scalars.
+        guard JSONSerialization.isValidJSONObject([object]),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: .fragmentsAllowed),
+              let value = try? JSONDecoder().decode(VortxJSON.self, from: data),
+              VortxNativeHostPreferences.validGlobal(key, value: value) else { return nil }
+        return value
+    }
+    private func nativeDirtySettingsForExport(_ edits: [VortxNativeHostPreferences.Edit], snapshot: [String: Double]) -> [String: Double] {
+        let exportedGlobals = Set(edits.filter { $0.profileID == nil }.flatMap { $0.fields.keys })
+        return snapshot.filter {
+            if SettingsBackup.isSyncable($0.key), VortxNativeHostPreferences.knownGlobals.contains($0.key) {
+                return exportedGlobals.contains($0.key)
+            }
+            return nativeDirtySettingIsExported($0.key)
+        }
     }
     private func nativeLegacyWatchlists(_ document: [String: Any]) throws -> [UUID: [VortxNativeWatchlist.Entry]] {
         guard let raw = document["settings"] else { return [:] }
@@ -831,7 +852,10 @@ final class VortXSyncManager: ObservableObject {
         return result
     }
     private func nativeDirtySettingIsExported(_ key: String) -> Bool {
-        VortxNativeSyncExportPolicy.acknowledgesSetting(key, syncable: SettingsBackup.isSyncable(key),
+        if SettingsBackup.isSyncable(key), VortxNativeHostPreferences.knownGlobals.contains(key) {
+            return nativeGlobalValue(key) != nil
+        }
+        return VortxNativeSyncExportPolicy.acknowledgesSetting(key, syncable: SettingsBackup.isSyncable(key),
             profileProjection: ProfileStore.nativePlaybackProjectionKeys.contains(key) || ProfileStore.nativeThemeProjectionKeys.contains(key)
                 || ProfileDiscoveryPreferencesStore.activeProjectionKeys.contains(key),
             projectionAcknowledged: nativePreferenceStampIsAttributed(key) && ProfileStore.shared.nativePreferenceIsAcknowledged(key))
@@ -2985,13 +3009,16 @@ final class VortXSyncManager: ObservableObject {
     private struct DerivedSyncDoc {
         let document: [String: Any]
         let baseRevision: Int?
+        // Captured with the host edits actually submitted to the native merge. In
+        // particular, later repair of an omitted key cannot acknowledge its old stamp.
+        var nativeDirtySettings: [String: Double] = [:]
     }
 
     /// Keep each merged document together with the revision it actually read. Two writers from
     /// the same base propose the same revision, so the loser must pull and merge the winner.
     /// The relay's echoed revision cannot substitute for the base of a later rebuilt document.
     private func pushDerivedDoc(_ initial: DerivedSyncDoc, credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil,
-                                onAccepted: ([String: Any]) -> Void = { _ in },
+                                onAccepted: (DerivedSyncDoc) -> Void = { _ in },
                                 rebuild: () async -> DerivedSyncDoc?) async -> Bool {
         let capture = suppliedCapture ?? credentialAuthority.capture()
         guard isCurrent(capture), !hasPendingAccountDocApply(for: capture) else { return false }
@@ -3002,7 +3029,7 @@ final class VortXSyncManager: ObservableObject {
                   let version = SyncDocumentRevisionPolicy.next(after: doc.baseRevision) else { return false }
             switch await pushSyncDocAt(doc.document, version: version, credentialCapture: capture) {
             case .accepted:
-                onAccepted(doc.document)
+                onAccepted(doc)
                 return true
             case .error:
                 return false   // network / server / encode failure: do not advance, next pull reconciles
@@ -3450,10 +3477,9 @@ final class VortXSyncManager: ObservableObject {
                 return false
             }
         }
-        // Snapshot the LOCAL-WINS dirty stamps BEFORE building the push blob. mergeLocalIntoDoc reads the local
-        // domain (local wins), so every currently-dirty key's value rides up in this push. On a CONFIRMED push we
-        // clear exactly these keys (unless re-edited since: clearPushed guards on the stamp), so the dirty mark is
-        // released only once the value is safely on the account and a later pull may apply account values again.
+        // Dirty stamps clear only after a confirmed export, unless re-edited since.
+        // Native merges attach their eligible stamps to each DerivedSyncDoc so omitted
+        // settings stay protected even when their local value is repaired during upload.
         // Serialize this device's derived pushes. Otherwise an older in-flight snapshot can land after
         // an acknowledged reorder. Other accounts are isolated by the credential capture and operation id.
         if activeSyncUp?.capture == capture {
@@ -3478,7 +3504,9 @@ final class VortXSyncManager: ObservableObject {
                                                                 hasLegacyAddonOrderIntent: pendingAddonOrderIntent != nil,
                                                                 overridingLegacySource: afterUserChoseThisDevice) else { return false }
 #endif
+#if !VORTX_NATIVE_DATA_ENGINE
         let dirtyAtPushStart = dirtySettings
+#endif
         let orderIntent = pendingAddonOrderIntent
         // Build the merged doc from the current account base, then push with optimistic-concurrency
         // recovery: if a concurrent write wins the race, re-run this exact merge onto the winner's doc and
@@ -3496,7 +3524,7 @@ final class VortXSyncManager: ObservableObject {
             case .accepted:
                 guard isCurrent(capture) else { return false }
                 acknowledgeNativePreferenceCloud(initial.document, receipts: preferenceReceipts, capture: capture)
-                clearPushedDirtySettings(dirtyAtPushStart); return true
+                clearPushedDirtySettings(initial.nativeDirtySettings); return true
             case .rejected, .error:
                 guard isCurrent(capture) else { return false }
                 _ = await syncDown(force: true, credentialCapture: capture)
@@ -3504,10 +3532,12 @@ final class VortXSyncManager: ObservableObject {
             }
         }
 #endif
-        let pushed = await pushDerivedDoc(initial, credentialCapture: capture, onAccepted: { [weak self] sentDoc in
+        let pushed = await pushDerivedDoc(initial, credentialCapture: capture, onAccepted: { [weak self] sent in
             guard let self, self.isCurrent(capture), let id = self.account?.id else { return }
+            let sentDoc = sent.document
 #if VORTX_NATIVE_DATA_ENGINE
             self.acknowledgeNativePreferenceCloud(sentDoc, receipts: preferenceReceipts, capture: capture)
+            self.clearPushedDirtySettings(sent.nativeDirtySettings)
 #endif
             self.withRemoteApplySuppressed {
                 if AddonOrderSyncPolicy.acknowledges(self.pendingAddonOrderIntent, sent: orderIntent, accountID: id) {
@@ -3523,7 +3553,9 @@ final class VortXSyncManager: ObservableObject {
             return await self.mergeLocalIntoDoc(orderIntent: orderIntent, credentialCapture: capture)
         }
         guard isCurrent(capture) else { return false }
+#if !VORTX_NATIVE_DATA_ENGINE
         if pushed { clearPushedDirtySettings(dirtyAtPushStart) }
+#endif
         return pushed
     }
 
@@ -3565,14 +3597,18 @@ final class VortXSyncManager: ObservableObject {
         // because the independent native carrier was pushed successfully.
         guard VortxNativeSyncExportPolicy.permitsStateOnlyExport(hasDirtySettings: (try? nativeGlobalEdits()) == nil,
                                                                 hasLegacyAddonOrderIntent: orderIntent != nil || pendingAddonOrderIntent != nil) else { return nil }
+        var exportedDirtySettings: [String: Double] = [:]
         do {
             var providers = try mergedNativeProviderState(doc, capture: capture)
             let prepared = try await prepareNativeLegacyMaterial(doc, capture: capture)
             guard isCurrent(capture) else { return nil }
             let remote = try doc["nativeSync"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
             let hostRemote = try doc["nativeHostPreferences"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
+            exportedDirtySettings = dirtySettings
+            var globalEdits = try nativeGlobalEdits()
+            exportedDirtySettings = nativeDirtySettingsForExport(globalEdits, snapshot: exportedDirtySettings)
             var merged = try await CoreBridge.shared.mergeNativeAccountDocument(remote, hostRemote: hostRemote, capture: capture,
-                                                                               legacyMaterial: prepared.material, hostEdits: nativeGlobalEdits(), websiteEvents: Self.nativeWebsiteEvents(doc), websiteAddonEvents: Self.nativeWebsiteAddonEvents(doc), legacyWatchlists: self.nativeLegacyWatchlists(doc),
+                                                                               legacyMaterial: prepared.material, hostEdits: globalEdits, websiteEvents: Self.nativeWebsiteEvents(doc), websiteAddonEvents: Self.nativeWebsiteAddonEvents(doc), legacyWatchlists: self.nativeLegacyWatchlists(doc),
                                                                                sourceAuthority: prepared.authority, authenticatedSourceArchive: prepared.sourceArchive)
             guard isCurrent(capture) else { return nil }
             let replayed = await replayNativePreferenceIntents(capture: capture)
@@ -3581,8 +3617,11 @@ final class VortXSyncManager: ObservableObject {
             guard isCurrent(capture) else { return nil }
             // Export the acknowledged state after replay, never the pre-replay merge snapshot.
             if replayed || !dirtySettings.isEmpty {
+                exportedDirtySettings = dirtySettings
+                globalEdits = try nativeGlobalEdits()
+                exportedDirtySettings = nativeDirtySettingsForExport(globalEdits, snapshot: exportedDirtySettings)
                 merged = try await CoreBridge.shared.mergeNativeAccountDocument(nil, hostRemote: nil, capture: capture,
-                    legacyMaterial: prepared.material, hostEdits: nativeGlobalEdits(), websiteEvents: [], websiteAddonEvents: [],
+                    legacyMaterial: prepared.material, hostEdits: globalEdits, websiteEvents: [], websiteAddonEvents: [],
                     legacyWatchlists: [:], sourceAuthority: prepared.authority, authenticatedSourceArchive: prepared.sourceArchive)
                 guard isCurrent(capture) else { return nil }
             }
@@ -3600,7 +3639,7 @@ final class VortXSyncManager: ObservableObject {
         }
         // Never rewrite the legacy migration baseline from native/profile/overlay mirrors. Until
         // a versioned bidirectional adapter exists, native exports only its own accepted carrier.
-        return DerivedSyncDoc(document: doc, baseRevision: baseRevision)
+        return DerivedSyncDoc(document: doc, baseRevision: baseRevision, nativeDirtySettings: exportedDirtySettings)
 #else
         // Read-merge the pulled doc's tombstone stamps into the local stores BEFORE vortxSummary rebuilds them
         // from local state, so a push that raced a peer's fresh re-add stamp adopts that stamp instead of

@@ -88,13 +88,18 @@ if (process.argv[2] === '--extract') {
   };
   replace('enum Keychain {', 'enum Keychain {\n' + keychainPrefix('    static let fallbackKeyPrefix =') + '\n' + keychainPrefix('    static let invalidationKeyPrefix ='));
   replace('@main @MainActor enum AppleSyncReceivePublicationPeer {', '@MainActor enum AppleSyncReceivePublicationPeer {');
+  // Reuse its DTO/constants, not the standalone receive entrypoint whose synthetic
+  // writable queue/defaults are replaced by production accessors in this harness.
+  replace(member(combined, 'app/Tests/AppleSyncReceivePublicationPeer.swift', '    static func main() async {'), '');
   replace('"pendingPush": manager.hasPendingPush', '"pendingPush": manager.fixtureState()["pending"]!');
+  replace('manager.dirtySettings[CatalogPrefsStore.widthKey] != nil',
+    '(manager.fixtureState()["dirty"] as? [String])?.contains(CatalogPrefsStore.widthKey) == true');
   const markers = [
     '    private func dirtySettingsKey(', '    private var dirtySettings:', '    private var nativeDurablePushPending:', '    private var hasPendingPush:',
     '    private func currentSyncableDomain(', '    private func refreshSettingsShadow(', '    private func noteLocalSettingsChange(',
     '    private func observeDefaultsChange(', '    func nativeMutationDidCommit(', '    private func drainNativeMutationPush(', '    private func drainLocalRosterPush(',
     '    func withRemoteApplySuppressed(', '    nonisolated static func suppressHousekeeping(', '    func requestSyncSoon(',
-    '    private func nativeGlobalEdits(', '    private func nativeDirtySettingIsExported(', '    private func nativePreferenceStampIsAttributed(',
+    '    private func nativeGlobalEdits(', '    private func nativeGlobalValue(', '    private func nativeDirtySettingsForExport(', '    private func nativeDirtySettingIsExported(', '    private func nativePreferenceStampIsAttributed(',
     '    private static var nativePreferenceProjectionKeys:',
     '    private func clearPushedDirtySettings(', '    func syncUp(', '    private func finishSyncUp(', '    private func mergeLocalIntoDoc(',
     '    private func pushDerivedDoc(', '    private struct DerivedSyncDoc {', '    private func ensureNativeCheckpoint(',
