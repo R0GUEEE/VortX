@@ -13,6 +13,7 @@ import {
   applyAddonOrder,
   registerAddonsSyncPusher,
   registerCwSyncPusher,
+  registerWatchlistSyncPusher,
   webProgressEntries,
   webProgressTombstones,
   installedUrls,
@@ -50,6 +51,7 @@ import { CINEMETA_URL, loadAddon } from "./addon";
 import type { MetaItem } from "./types";
 import { effectiveAddonRemovals, applyAddonIntents } from "./addonRemovals";
 import { projectNativeSync, type NativeSyncProjection } from "./nativeSyncProjection";
+import { applyHostIntent, createHostIntent, hostSettingField, watchlistField, watchlistValue, type HostIntent, type HostTarget } from "./nativeHostEdits";
 let appliedNativeProjection: NativeSyncProjection | null = null;
 function nativeSettingsTarget(profile: NativeSyncProjection["profiles"][number]): string { return `${profile.id}|${profile.binding}`; }
 
@@ -249,11 +251,30 @@ function applyNativeProjection(view: NativeSyncProjection, doc: Record<string, u
       const profile = view.profiles.find((profile) => profile.main ? scope === "" : profile.id === scope);
       return !!profile && profile.binding === intent.binding;
     }).map(([key, intent]) => [intent.scope ?? key, intent])),
+    watchlist: Object.values(settingsSyncState.hostIntents).filter((edit) => !edit.intent.global).flatMap(({ intent }) =>
+      Object.values(intent.fields).map((value) => {
+        const field = Object.keys(intent.fields)[0], parts = field.split(".");
+        const token = parts[2].replace(/-/g, "+").replace(/_/g, "/");
+        return { profileId: intent.target.profileId, binding: intent.target.binding, type: parts[1],
+          id: atob(token + "=".repeat((4 - token.length % 4) % 4)), value: value as Record<string, unknown> | null };
+      })),
   }));
   const rosterChanged = setNativeProfiles(view.scope, [...view.profiles].sort((a, b) => Number(b.main) - Number(a.main) || a.id.localeCompare(b.id))
     .map((profile) => ({ ...profile, look: nativeSettingsPatch(profile), restricted: profile.pending || profile.locked || profile.kids })));
   settingsSyncState.profileAtLastChange = activeProfileId();
   const owner = view.profiles.find((profile) => profile.main)!;
+  // Recover the previously durable supported settings slice only under its originally captured
+  // binding. Receiving a different slot is never permission to retarget a queued action.
+  const restored = { ...settingsSyncState.retainedNativeSettings[nativeSettingsTarget(owner)] };
+  for (const key of settingsSyncState.pendingKeys) if (settingsSyncState.pendingSettings &&
+    settingsSyncState.nativeSettingBindings[key] === nativeSettingsTarget(owner)) Object.assign(restored, { [key]: settingsSyncState.pendingSettings[key] });
+  for (const [rawKey, value] of Object.entries(restored)) {
+    const key = rawKey as keyof Settings, field = hostSettingField(key);
+    if (!field) continue;
+    if (settingsSyncState.pendingKeys.has(key) && settingsSyncState.nativeSettingBindings[key] !== nativeSettingsTarget(owner)) continue;
+    const target = hostTarget(view, owner), id = JSON.stringify([target, true, field]);
+    if (!settingsSyncState.hostIntents[id]) { queueHostSetting(settingsSyncState, key, value); persistIntents(settingsSyncState); scheduleIntentPush(settingsSyncState, 350); }
+  }
   const keys = doc.apiKeys && typeof doc.apiKeys === "object" ? doc.apiKeys as Record<string, unknown> : {};
   const ownerPatch: Partial<Settings> = { ...ACCOUNT_SCOPED_SETTING_DEFAULTS, ...NATIVE_HOST_SETTING_DEFAULTS, ...view.globals, ...nativeSettingsPatch(owner),
     ...localProfiles().find((profile) => profile.id === owner.id)?.look, tmdbKey: typeof keys.tmdb === "string" ? keys.tmdb : "",
@@ -561,6 +582,7 @@ function requestAccountPull(state: ReceiveState): Promise<void> {
         const status = await fetchSync(state.session, { version: state.receivedVersion, signal: abort.signal });
         if (!isCurrentReceiver(state) || !syncIsActive() || abort.signal.aborted) return;
         if (status.unchanged || status.decryptFailed) continue;
+        if (status.version !== undefined && state.receivedVersion !== undefined && status.version < state.receivedVersion) continue;
         if (status.contents) {
           const applied = applySyncDoc(status.contents);
           // The legacy browser adapter cannot project native engine state yet. Retain its encrypted
@@ -673,6 +695,8 @@ interface SettingsSyncState {
   ownerSettingsSnapshot: Settings;
   addonIntents: Record<string, AddonIntent>;
   progressIntents: Record<string, ProgressIntent>;
+  hostIntents: Record<string, QueuedHostEdit>;
+  hostCounter: number;
   revision: number;
   retryAttempt: number;
   journalSources: Map<string, string>;
@@ -682,11 +706,60 @@ interface SettingsSyncState {
 interface AddonIntent { url: string; added: boolean; at: number; revision: number; profileId?: string; binding?: string;
   descriptor?: { transportUrl: string; name: string; manifest: unknown } }
 interface ProgressIntent { entries: WebProgressEntry[]; tombstones: CWTombstone[]; revision: number; binding?: string; scope?: string }
+interface QueuedHostEdit { intent: HostIntent; revision: number; settingKey?: keyof Settings }
+function hostIntentKey(intent: HostIntent): string {
+  return JSON.stringify([intent.target, intent.global, Object.keys(intent.fields)[0]]);
+}
+function hostAddress(intent: HostIntent): string {
+  return JSON.stringify([intent.target.scope, intent.global, intent.global ? "globals" : intent.target.profileId, Object.keys(intent.fields)[0]]);
+}
+function hostTarget(view: NativeSyncProjection, profile: NativeSyncProjection["profiles"][number]): HostTarget {
+  return { scope: view.scope, ownerProfileId: view.ownerProfileId, profileId: profile.id, binding: profile.binding };
+}
+function enqueueHostEdit(state: SettingsSyncState, edit: QueuedHostEdit): void {
+  const incoming = edit.intent;
+  // Public host globals/profile Watchlist have one address, not separate native own-slot buckets.
+  // A new explicit action may supersede that address's older intent without retargeting either
+  // capture. Otherwise returning to an old binding could replay an obsolete user choice.
+  for (const [key, old] of Object.entries(state.hostIntents)) {
+    if (hostAddress(old.intent) === hostAddress(incoming)) delete state.hostIntents[key];
+  }
+  if (edit.settingKey) for (const [target, delta] of Object.entries(state.retainedNativeSettings)) {
+    delete delta[edit.settingKey];
+    if (!Object.keys(delta).length) delete state.retainedNativeSettings[target];
+  }
+  state.hostIntents[hostIntentKey(incoming)] = edit;
+}
+function queueHostSetting(state: SettingsSyncState, key: keyof Settings, value: unknown): void {
+  const field = hostSettingField(key), view = appliedNativeProjection;
+  if (!field || !view) return;
+  const owner = view.profiles.find((profile) => profile.main)!;
+  const intent = createHostIntent(hostTarget(view, owner), { [field]: value }, true, journalPageId);
+  enqueueHostEdit(state, { intent, revision: ++state.revision, settingKey: key });
+}
+
+registerWatchlistSyncPusher((item, added) => {
+  const state = settingsSyncState, view = appliedNativeProjection;
+  const profile = view?.profiles.find((profile) => profile.id === activeProfileId());
+  if (!state.session || !view || !profile || profile.pending || profile.locked || profile.kids) return false;
+  discardTransferredIntents(state);
+  try {
+    const field = watchlistField(item.id, item.type ?? ""), value = added ? watchlistValue(item, Date.now() / 1000) : null;
+    const intent = createHostIntent(hostTarget(view, profile), { [field]: value }, false, journalPageId);
+    enqueueHostEdit(state, { intent, revision: ++state.revision });
+    persistIntents(state);
+    scheduleIntentPush(state, 350);
+    window.dispatchEvent(new Event("vortx:watchlist-changed"));
+    return true;
+  } catch { return false; }
+});
 
 let journalClientId: string | undefined;
 function randomSyncId(): string {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const value = crypto.getRandomValues(new Uint8Array(16)); value[6] = (value[6] & 15) | 64; value[8] = (value[8] & 63) | 128;
+  const hex = Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 const journalPageId = randomSyncId();
 
@@ -729,6 +802,7 @@ function discardTransferredIntents(state: SettingsSyncState): void {
   state.pendingKeys.clear(); state.pendingSettings = null;
   state.nativeSettingKeys.clear();
   state.nativeSettingBindings = {};
+  state.hostIntents = {}; state.hostCounter = 0;
   state.retainedNativeSettings = {};
   state.addonIntents = Object.create(null); state.progressIntents = Object.create(null);
   state.journalSources.clear(); state.journalOwners.clear();
@@ -760,7 +834,7 @@ function persistIntents(state: SettingsSyncState): void {
     if (state.pendingSettings) Object.assign(settings, { [key]: state.pendingSettings[key] });
   }
   try {
-    if (!state.pendingKeys.size && !Object.keys(state.retainedNativeSettings).length && !Object.keys(state.addonIntents).length && !Object.keys(state.progressIntents).length) {
+    if (!hasPendingIntents(state)) {
       localStorage.removeItem(journalKey(state.session));
       for (const [key, raw] of state.journalSources) {
         if (localStorage.getItem(key) === raw) localStorage.removeItem(key);
@@ -776,7 +850,15 @@ function persistIntents(state: SettingsSyncState): void {
         settings, nativeSettingKeys: [...state.nativeSettingKeys], nativeSettingBindings: state.nativeSettingBindings,
         retainedNativeSettings: state.retainedNativeSettings,
         addons: state.addonIntents, progress: state.progressIntents, revision: state.revision,
+        host: state.hostIntents, hostCounter: state.hostCounter,
       }));
+      // Transfer only after the complete merged checkpoint is durable. Older source bytes must
+      // not outlive this receipt: otherwise a partial ACK or explicit supersession could replay
+      // their obsolete edits on the next reload. Keep ownership receipts fencing older pages.
+      for (const [source, raw] of state.journalSources) {
+        if (source !== key && localStorage.getItem(source) === raw) localStorage.removeItem(source);
+      }
+      state.journalSources.clear();
     }
   } catch { /* Storage unavailable: retain the live queue and retry while the tab remains open. */ }
 }
@@ -784,6 +866,7 @@ function persistIntents(state: SettingsSyncState): void {
 function restoreIntents(state: SettingsSyncState, onlyOrphans = false): boolean {
   if (!state.session) return false;
   try {
+    const liveHostAddresses = new Set(Object.values(state.hostIntents).map((edit) => hostAddress(edit.intent)));
     const keys = new Set([journalKey(state.session)]);
     const prefix = "vortx.web.sync-intents.v1.";
     for (let i = 0; i < localStorage.length; i++) {
@@ -803,6 +886,7 @@ function restoreIntents(state: SettingsSyncState, onlyOrphans = false): boolean 
     for (const { key: sourceKey, raw, saved } of journals) {
       state.journalSources.set(sourceKey, raw);
       state.revision = Math.max(state.revision, Number(saved.revision) || 0);
+      if (Number.isSafeInteger(saved.hostCounter) && saved.hostCounter >= 0) state.hostCounter = Math.max(state.hostCounter, saved.hostCounter);
       if (saved.settings && typeof saved.settings === "object") {
         for (const key of Object.keys(saved.settings) as (keyof Settings)[]) {
           const value = saved.settings[key];
@@ -844,6 +928,22 @@ function restoreIntents(state: SettingsSyncState, onlyOrphans = false): boolean 
           binding: typeof intent.binding === "string" ? intent.binding : undefined,
           scope: typeof intent.scope === "string" ? intent.scope : undefined,
         };
+      }
+      for (const raw of Object.values(saved.host ?? {})) {
+        try {
+          const edit = raw as QueuedHostEdit, captured = edit.intent;
+          if (captured.target.scope !== `account.${state.session.account.id.toLowerCase()}` || !Number.isSafeInteger(edit.revision)) continue;
+          const intent = createHostIntent(captured.target, captured.fields, captured.global, captured.actor);
+          if (Object.keys(intent.fields).length !== 1) continue;
+          if (captured.registers) intent.registers = captured.registers;
+          if (captured.accepted === true) intent.accepted = true;
+          const settingKey = edit.settingKey && hostSettingField(edit.settingKey) === Object.keys(intent.fields)[0] ? edit.settingKey : undefined;
+          if (intent.global && !settingKey) continue;
+          if (onlyOrphans && liveHostAddresses.has(hostAddress(intent))) continue;
+          // Journals are already ordered by editedAt; per-page revision counters are not a
+          // cross-page clock. Keep the latest restored address, not every old binding capture.
+          enqueueHostEdit(state, { intent, revision: edit.revision, settingKey });
+        } catch { /* Invalid durable DTO cannot become a native host edit. */ }
       }
     }
     return journals.length > 0;
@@ -917,7 +1017,7 @@ function createSettingsSyncState(session: Session | null, ownerSnapshot?: Settin
     writeQueued: false,
     profileAtLastChange: activeProfileId(),
     ownerSettingsSnapshot: copySettings(ownerSnapshot ?? initialOwnerSettings()),
-    addonIntents: Object.create(null), progressIntents: Object.create(null), revision: 0, retryAttempt: 0,
+    addonIntents: Object.create(null), progressIntents: Object.create(null), hostIntents: Object.create(null), hostCounter: 0, revision: 0, retryAttempt: 0,
     journalSources: new Map(),
     journalOwners: new Set(),
   };
@@ -1081,6 +1181,40 @@ async function pushSettings(
       doc.apiKeys = apiKeys;
     }
   }, isCurrent);
+}
+
+async function pushHostEdit(state: SettingsSyncState, edit: QueuedHostEdit, isSessionCurrent: () => boolean): Promise<{ contents: Record<string, unknown>; version?: number }> {
+  const session = state.session!;
+  const isCurrent = () => isSessionCurrent() && state.hostIntents[hostIntentKey(edit.intent)] === edit;
+  await mutateSyncDoc(session, (doc) => {
+    const result = applyHostIntent(doc, edit.intent, state.hostCounter);
+    state.hostCounter = result.counter;
+    persistIntents(state); // Retain actor/clock/value before any uncertain transport completion.
+    return result.alreadyApplied ? false : undefined;
+  }, isCurrent, {
+    rejected: () => { delete edit.intent.registers; delete edit.intent.accepted; persistIntents(state); },
+    accepted: () => { edit.intent.accepted = true; persistIntents(state); },
+  });
+  if (!isCurrent()) throw new Error("Account session changed.");
+  const readback = await fetchSync(session);
+  if (!isCurrent() || readback.decryptFailed || !readback.contents) throw new Error("Waiting for the account edit receipt.");
+  const receipt = applyHostIntent(readback.contents, edit.intent, state.hostCounter);
+  if (!receipt.alreadyApplied) throw new Error("Waiting for the account edit receipt.");
+  state.hostCounter = receipt.counter;
+  return { contents: readback.contents, version: readback.version };
+}
+
+function applyHostReadback(readback: { contents: Record<string, unknown>; version?: number }, session: Session): void {
+  // Apply this authenticated read after retiring its optimistic overlay. Delayed receive reads
+  // below this revision are fenced, including a socket-triggered GET started before the PUT.
+  if (!receiveState || readback.version === undefined || receiveState.receivedVersion === undefined || readback.version >= receiveState.receivedVersion) {
+    const applied = applySyncDoc(readback.contents);
+    if (receiveState && sameSession(receiveState.session, session)) {
+      receiveState.receivedVersion = readback.version;
+      receiveState.projectionPending = !applied;
+      if (applied) receiveState.appliedVersion = readback.version;
+    }
+  }
 }
 
 /** Tombstone-identity normalization: trim + lowercase, byte-for-byte matching the app's
@@ -1375,9 +1509,30 @@ function queueSettingsPush(state: SettingsSyncState): void {
       try { if (isCurrent()) await job(); } catch { failed = true; }
     };
     try {
+      for (const [id, edit] of Object.entries(state.hostIntents)) await attempt(async () => {
+        const readback = await pushHostEdit(state, edit, isCurrent);
+        if (!isCurrent()) throw new Error("Account session changed.");
+        if (state.hostIntents[id]?.revision === edit.revision) delete state.hostIntents[id];
+        if (edit.settingKey) {
+          const key = edit.settingKey, value = Object.values(edit.intent.fields)[0];
+          const target = `${edit.intent.target.profileId}|${edit.intent.target.binding}`;
+          if (state.nativeSettingBindings[key] === target && JSON.stringify(state.pendingSettings?.[key]) === JSON.stringify(value)) {
+            state.pendingKeys.delete(key); state.nativeSettingKeys.delete(key); delete state.nativeSettingBindings[key];
+          }
+          if (JSON.stringify(state.retainedNativeSettings[target]?.[key]) === JSON.stringify(value)) {
+            delete state.retainedNativeSettings[target][key];
+            if (!Object.keys(state.retainedNativeSettings[target]).length) delete state.retainedNativeSettings[target];
+          }
+          if (!state.pendingKeys.size) state.pendingSettings = null;
+        }
+        persistIntents(state);
+        withSuppressedUp(() => applyHostReadback(readback, session));
+        notifyReceiveStatus();
+        window.dispatchEvent(new Event("vortx:watchlist-changed"));
+      });
       // Independent supported API-key deltas must not be starved by a held native settings edit.
       for (const changedKeys of [[...state.pendingKeys].filter((key) => API_KEY_SETTING_KEYS.includes(key)),
-        [...state.pendingKeys].filter((key) => !API_KEY_SETTING_KEYS.includes(key))]) if (state.pendingSettings && changedKeys.length) {
+        [...state.pendingKeys].filter((key) => !API_KEY_SETTING_KEYS.includes(key) && !(state.nativeSettingKeys.has(key) && hostSettingField(key)))]) if (state.pendingSettings && changedKeys.length) {
         await attempt(async () => {
           if (!state.pendingSettings) return;
           const snapshot = copySettings(state.pendingSettings);
@@ -1434,7 +1589,7 @@ function queueSettingsPush(state: SettingsSyncState): void {
 }
 
 function hasPendingIntents(state: SettingsSyncState): boolean {
-  return state.pendingKeys.size > 0 || Object.keys(state.retainedNativeSettings).length > 0 || Object.keys(state.addonIntents).length > 0 || Object.keys(state.progressIntents).length > 0;
+  return state.pendingKeys.size > 0 || Object.keys(state.retainedNativeSettings).length > 0 || Object.keys(state.hostIntents).length > 0 || Object.keys(state.addonIntents).length > 0 || Object.keys(state.progressIntents).length > 0;
 }
 
 function scheduleIntentPush(state: SettingsSyncState, delay: number): void {
@@ -1462,6 +1617,7 @@ function scheduleSettingsPush(
     if (target && !API_KEY_SETTING_KEYS.includes(key)) {
       state.nativeSettingKeys.add(key);
       state.nativeSettingBindings[key] = target;
+      if (hostSettingField(key)) queueHostSetting(state, key, settings[key]);
     }
   }
   state.pendingSettings = next;

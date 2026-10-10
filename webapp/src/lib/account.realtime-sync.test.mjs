@@ -114,6 +114,8 @@ async function serverFor(s, initial = legacyDoc()) {
   let nextGetGate;
   let nextPutGate;
   let failures = 0;
+  let lostResponses = 0;
+  let getFailures = 0;
   let conditional = true;
   let activeGets = 0;
   let maxGets = 0;
@@ -139,6 +141,7 @@ async function serverFor(s, initial = legacyDoc()) {
       if (failures) { failures--; return json({ error: "synthetic offline" }, 503); }
       const accepted = body.version > version;
       if (accepted) { version = body.version; document = body.document; }
+      if (lostResponses) { lostResponses--; throw new Error("synthetic response lost after storage"); }
       return json({ accepted });
     }
     activeGets++; maxGets = Math.max(maxGets, activeGets);
@@ -146,6 +149,7 @@ async function serverFor(s, initial = legacyDoc()) {
     const gate = nextGetGate; nextGetGate = undefined;
     if (gate) await gate;
     activeGets--;
+    if (getFailures) { getFailures--; throw new Error("synthetic readback offline"); }
     if (conditional && init.headers["if-none-match"] === `"${result.version}"`) return new Response(null, { status: 304 });
     return json(result);
   };
@@ -156,6 +160,8 @@ async function serverFor(s, initial = legacyDoc()) {
     get maxGets() { return maxGets; },
     get maxPuts() { return maxPuts; },
     fail(count = 1) { failures = count; },
+    losePutResponse(count = 1) { lostResponses = count; },
+    failGet(count = 1) { getFailures = count; },
     conditional(value) { conditional = value; },
     holdGet() { let release; nextGetGate = new Promise((r) => { release = r; }); return release; },
     holdPut() { let release; nextPutGate = new Promise((r) => { release = r; }); return release; },
@@ -183,7 +189,7 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
   await t.test("socket bursts coalesce delayed pulls, polling is conditional and foreground/online catches up", async () => {
     clean(); const s = makeSession(); const server = await serverFor(s);
     account.adoptSession(s); stop = account.startAccountSync();
-    assert.match(session.get("vortx.web.sync-client.v1"), /^[0-9a-f]{32}$/, "journal IDs work without randomUUID");
+    assert.match(session.get("vortx.web.sync-client.v1"), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, "journal actors work without randomUUID");
     await until(() => account.accountSyncStatus().receivedVersion === 20, "initial account pull");
     const socket = FakeSocket.instances.at(-1);
     assert.equal(new URL(socket.url).searchParams.get("token"), s.token);
@@ -601,5 +607,266 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
     account.signOut(); timers.clear(); account.adoptSession(s); account.applySyncDoc(a); profiles.setActiveProfile(owner);
     assert.deepEqual(settings.getSettings().sourceOrder, orderA, "retained A delta survives journal restore");
     account.applySyncDoc(b); assert.deepEqual(settings.getSettings().sourceOrder, orderB, "newest B delta survives journal restore");
+  });
+
+  const hostDoc = (s) => {
+    const doc = structuredClone(nativeFixture.cases[0].document);
+    doc.nativeSync.scope = doc.nativeHostPreferences.scope = `account.${s.account.id}`;
+    doc.nativeProviderCredentials = { future: "synthetic opaque credentials carrier" };
+    doc.futureCarrier = { unknown: ["retain", 7] };
+    return doc;
+  };
+  const startNative = async (s, doc) => {
+    const server = await serverFor(s, doc);
+    account.adoptSession(s); stop = account.startAccountSync();
+    await until(() => account.accountSyncStatus().appliedVersion === 20, "native host document loaded");
+    profiles.setActiveProfile(doc.nativeSync.ownerProfileId);
+    return server;
+  };
+  const hostJournal = (s) => journalsFor(s).flatMap(([, raw]) => Object.values(JSON.parse(raw).host ?? {}));
+
+  await t.test("supported native global settings use actual host registers and do not starve held native edits", async () => {
+    clean(); const s = makeSession(), doc = hostDoc(s), server = await startNative(s, doc);
+    settings.updateSettings({ autoplayTrailers: false, directLinksOnly: true, performance: "reduced", sourceOrder: ["torrent"], tmdbKey: "synthetic-host-key" });
+    assert.equal(hostJournal(s).length, 3, "supported explicit host edits are durable before upload");
+    await advance(900);
+    const accepted = await server.read(), fields = accepted.nativeHostPreferences.globals.fields;
+    assert.deepEqual([fields["stremiox.autoplayTrailers"].value, fields["stremiox.directLinksOnly"].value, fields["stremiox.performanceMode"].value], [false, true, "reduced"]);
+    for (const field of Object.values(fields)) { assert.match(field.actor, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/); assert.ok(Number.isSafeInteger(field.clock)); }
+    assert.deepEqual(accepted.nativeSync, doc.nativeSync); assert.deepEqual(accepted.nativeProviderCredentials, doc.nativeProviderCredentials);
+    assert.deepEqual(accepted.futureCarrier, doc.futureCarrier); assert.equal(accepted.profileEdits, undefined);
+    assert.equal(accepted.apiKeys.tmdb, "synthetic-host-key");
+    assert.equal(hostJournal(s).length, 0, "only verified host receipts retire their intent");
+    assert.ok(journalsFor(s).some(([, raw]) => JSON.parse(raw).settings.sourceOrder?.[0] === "torrent"), "unsupported core settings stay durable");
+    assert.equal(server.maxPuts, 1);
+  });
+
+  await t.test("account Watchlist add/remove/re-add is distinct from browser Save and preserves a native null tombstone", async () => {
+    clean(); const s = makeSession(), doc = hostDoc(s), server = await startNative(s, doc);
+    const item = { id: "tt-host-roundtrip", type: "movie", name: "Synthetic host title", poster: "https://fixture.invalid/poster.jpg" };
+    store.toggleLibrary(item);
+    assert.equal(store.setAccountWatchlist(item, true), true);
+    assert.ok(store.inAccountWatchlist(item.id, item.type));
+    assert.equal(hostJournal(s).length, 1);
+    const pending = hostJournal(s)[0].intent;
+    assert.equal(Object.values(pending.fields)[0].addedAt, now / 1000, "native host timestamp uses epoch seconds");
+    await advance(400);
+    const owner = doc.nativeSync.ownerProfileId, field = Object.keys(pending.fields)[0];
+    const added = (await server.read()).nativeHostPreferences.profiles[owner].fields[field];
+    assert.ok(added.value); assert.equal(hostJournal(s).length, 0);
+    assert.equal(store.setAccountWatchlist(item, false), true); assert.ok(!store.inAccountWatchlist(item.id, item.type));
+    await advance(400);
+    const removed = (await server.read()).nativeHostPreferences.profiles[owner].fields[field];
+    assert.equal(removed.value, null); assert.ok(removed.clock > added.clock);
+    assert.ok(store.inLibrary(item.id), "Watchlist removal never erases a browser Save");
+    assert.equal(store.setAccountWatchlist(item, true), true); await advance(400);
+    const readded = (await server.read()).nativeHostPreferences.profiles[owner].fields[field];
+    assert.ok(readded.value); assert.ok(readded.clock > removed.clock);
+    assert.ok(store.nativeLibraryItems().every((row) => row.id !== item.id), "Watchlist never authors native Library membership");
+    const host = { innerHTML: "" }; renderLibrary(host);
+    assert.match(host.innerHTML, /data-kind="watchlist"/); assert.match(host.innerHTML, /Saved in this browser/);
+  });
+
+  await t.test("lost PUT response keeps one durable Lamport identity and exact readback ACKs without another upload", async () => {
+    clean(); const s = makeSession(), doc = hostDoc(s), server = await startNative(s, doc);
+    server.losePutResponse(); settings.updateSettings({ directLinksOnly: true });
+    await advance(900);
+    assert.equal(server.puts.length, 1); assert.equal(hostJournal(s).length, 1);
+    const planned = structuredClone(hostJournal(s)[0].intent.registers);
+    assert.ok(planned); assert.equal(hostJournal(s)[0].intent.accepted, undefined);
+    await advance(1000);
+    assert.equal(server.puts.length, 1, "exact authenticated receipt avoids an echo PUT");
+    assert.equal(hostJournal(s).length, 0);
+    assert.deepEqual((await server.read()).nativeHostPreferences.globals.fields["stremiox.directLinksOnly"], planned["stremiox.directLinksOnly"]);
+  });
+
+  await t.test("definite CAS rejection replans above a peer clock while a newer same-field local edit survives in-flight PUT", async () => {
+    clean(); const s = makeSession(), doc = hostDoc(s), server = await startNative(s, doc);
+    const release = server.holdPut(); settings.updateSettings({ directLinksOnly: true }); await advance(900);
+    assert.equal(server.puts.length, 1);
+    const peer = structuredClone(doc);
+    peer.nativeHostPreferences.globals.fields["stremiox.directLinksOnly"] = { clock: 900, actor: "ffffffff-ffff-ffff-ffff-ffffffffffff", value: false };
+    await server.remote(peer); settings.updateSettings({ directLinksOnly: false });
+    release(); await settle(); await advance(800);
+    const field = (await server.read()).nativeHostPreferences.globals.fields["stremiox.directLinksOnly"];
+    assert.equal(field.value, false); assert.ok(field.clock > 900);
+    assert.equal(hostJournal(s).length, 0); assert.equal(settings.getSettings().directLinksOnly, false);
+    assert.equal(server.maxPuts, 1); assert.deepEqual((await server.read()).nativeSync, doc.nativeSync);
+  });
+
+  await t.test("an ambiguous rejected upload never overwrites a newer peer or ACKs without explicit new user intent", async () => {
+    clean(); const s = makeSession(), doc = hostDoc(s), server = await startNative(s, doc);
+    server.fail(); settings.updateSettings({ directLinksOnly: true }); await advance(900);
+    const oldPlan = hostJournal(s)[0].intent.registers;
+    const peer = structuredClone(doc);
+    peer.nativeHostPreferences.globals.fields["stremiox.directLinksOnly"] = { clock: 1000, actor: "ffffffff-ffff-ffff-ffff-ffffffffffff", value: false };
+    await server.remote(peer); FakeSocket.instances.at(-1).update(server.version); await settle(); await advance(1100);
+    assert.equal(server.puts.length, 1, "uncertain retry cannot manufacture a higher causal edit");
+    assert.deepEqual(hostJournal(s)[0].intent.registers, oldPlan); assert.equal(hostJournal(s).length, 1);
+    settings.updateSettings({ directLinksOnly: false }); settings.updateSettings({ directLinksOnly: true }); await advance(900);
+    assert.equal((await server.read()).nativeHostPreferences.globals.fields["stremiox.directLinksOnly"].value, true);
+    assert.ok((await server.read()).nativeHostPreferences.globals.fields["stremiox.directLinksOnly"].clock > 1000);
+    assert.equal(hostJournal(s).length, 0, "a new explicit action may causally supersede the peer");
+  });
+
+  await t.test("host intent survives a reload after failed PUT without borrowing another profile binding", async () => {
+    clean(); const s = makeSession(), doc = hostDoc(s), server = await startNative(s, doc);
+    const item = { id: "tmdb:host-reload", type: "series", name: "Reload fixture" };
+    server.fail(); assert.equal(store.setAccountWatchlist(item, true), true); await advance(400);
+    const captured = structuredClone(hostJournal(s)[0].intent);
+    stop(); stop = undefined; account.signOut(); timers.clear();
+    account = await import(`./account.ts?host-reload=${now}`);
+    account.adoptSession(s); stop = account.startAccountSync(); await advance(400);
+    assert.equal(hostJournal(s).length, 0);
+    const fields = (await server.read()).nativeHostPreferences.profiles[doc.nativeSync.ownerProfileId].fields;
+    assert.deepEqual(fields[Object.keys(captured.fields)[0]], captured.registers[Object.keys(captured.fields)[0]], "reload reuses durable actor and clock");
+    assert.ok(store.inAccountWatchlist(item.id, item.type));
+  });
+
+  await t.test("missing or malformed accepted acknowledgement cannot falsely ACK an unstored host edit against a newer peer", async () => {
+    for (const acknowledgement of [{}, { accepted: "true" }]) {
+      clean(); const s = makeSession(), doc = hostDoc(s), server = await startNative(s, doc);
+      globalThis.fetch = async (url, init = {}) => { const response = await server.fetch(url, init); return init.method === "PUT" ? json(acknowledgement) : response; };
+      const release = server.holdPut(); settings.updateSettings({ directLinksOnly: true }); await advance(900);
+      const peer = structuredClone(doc);
+      peer.nativeHostPreferences.globals.fields["stremiox.directLinksOnly"] = { clock: 1500, actor: "ffffffff-ffff-ffff-ffff-ffffffffffff", value: false };
+      await server.remote(peer); release(); await settle(); await advance(1100);
+      assert.equal(server.puts.length, 1, "unknown worker acknowledgement never enables a causal overwrite");
+      assert.equal(hostJournal(s).length, 1, "an edit not actually stored remains durable");
+      assert.equal(hostJournal(s)[0].intent.accepted, undefined);
+      assert.equal((await server.read()).nativeHostPreferences.globals.fields["stremiox.directLinksOnly"].value, false);
+    }
+  });
+
+  await t.test("accepted old PUT/readback cannot clear a newer same-field local edit", async () => {
+    clean(); const s = makeSession(), doc = hostDoc(s), server = await startNative(s, doc);
+    const release = server.holdPut(); settings.updateSettings({ directLinksOnly: true }); await advance(900);
+    const firstPlan = structuredClone(hostJournal(s)[0].intent.registers);
+    settings.updateSettings({ directLinksOnly: false }); release(); await settle();
+    assert.equal(hostJournal(s).length, 1);
+    assert.equal(Object.values(hostJournal(s)[0].intent.fields)[0], false, "new explicit value survives old exact receipt");
+    assert.equal(settings.getSettings().directLinksOnly, false, "old readback does not flash the superseded value");
+    await advance(900);
+    const result = (await server.read()).nativeHostPreferences.globals.fields["stremiox.directLinksOnly"];
+    assert.equal(result.value, false); assert.ok(result.clock > firstPlan["stremiox.directLinksOnly"].clock);
+    assert.equal(hostJournal(s).length, 0); assert.equal(server.puts.length, 2); assert.equal(server.maxPuts, 1);
+  });
+
+  await t.test("definite accepted host edit may be superseded by a newer peer; receipt shows peer value and never echoes", async () => {
+    clean(); const s = makeSession(), doc = hostDoc(s), server = await startNative(s, doc);
+    let peerNeeded = false;
+    globalThis.fetch = async (url, init = {}) => {
+      if (init.method === "PUT") { const response = await server.fetch(url, init); peerNeeded = true; return response; }
+      if (peerNeeded) {
+        peerNeeded = false; const peer = await server.read();
+        peer.nativeHostPreferences.globals.fields["stremiox.directLinksOnly"] = { clock: 1900, actor: "ffffffff-ffff-ffff-ffff-ffffffffffff", value: false };
+        await server.remote(peer);
+      }
+      return server.fetch(url, init);
+    };
+    settings.updateSettings({ directLinksOnly: true }); await advance(900);
+    assert.equal(hostJournal(s).length, 0, "definite stored edit with a later peer winner is legitimately superseded");
+    assert.equal(settings.getSettings().directLinksOnly, false, "after ACK the native peer winner is visible");
+    await advance(3100); assert.equal(server.puts.length, 1, "received winner never becomes a fresh local action");
+  });
+
+  await t.test("a delayed receive cannot roll back a verified host write, and account switch retires its stale completion", async () => {
+    clean(); const a = makeSession(), docA = hostDoc(a), serverA = await startNative(a, docA);
+    const releaseGet = serverA.holdGet(); FakeSocket.instances.at(-1).update(21); await settle();
+    settings.updateSettings({ directLinksOnly: true }); await advance(900);
+    assert.equal(hostJournal(a).length, 0); assert.equal(account.accountSyncStatus().receivedVersion, 21);
+    releaseGet(); await settle(); assert.equal(settings.getSettings().directLinksOnly, true);
+    assert.equal(account.accountSyncStatus().appliedVersion, 21, "older delayed pull never lowers applied revision");
+    const releasePut = serverA.holdPut(); settings.updateSettings({ directLinksOnly: false }); await advance(900);
+    assert.equal(hostJournal(a).length, 1);
+    const b = makeSession(), docB = hostDoc(b), serverB = await serverFor(b, docB);
+    account.adoptSession(b); await until(() => account.accountSyncStatus().appliedVersion === 20, "new account received");
+    releasePut(); await settle();
+    assert.equal(settings.getSettings().directLinksOnly, false); assert.equal(serverB.puts.length, 0); assert.equal(hostJournal(b).length, 0);
+    assert.equal(hostJournal(a).length, 1, "retired completion never ACKs or copies A's journal into B");
+    globalThis.fetch = serverA.fetch; account.adoptSession(a); await advance(400);
+    assert.equal(hostJournal(a).length, 0, "A later recovers its own exact stored edit receipt");
+    assert.equal(serverA.puts.length, 2, "recovery never creates a third upload");
+  });
+
+  await t.test("Watchlist intents remain captured to own-slot binding, while a new action supersedes only the same public profile address", async () => {
+    clean(); const s = makeSession();
+    const aSample = nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("03-own-A"));
+    const bSample = nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("04-own-B"));
+    const a = structuredClone(aSample.document), b = structuredClone(bSample.document);
+    for (const doc of [a, b]) doc.nativeSync.scope = doc.nativeHostPreferences.scope = `account.${s.account.id}`;
+    const server = await startNative(s, a), viewer = aSample.playback.profileId;
+    profiles.setActiveProfile(viewer);
+    const item = { id: "tt-watch-binding", type: "movie", name: "Captured watchlist" };
+    server.fail(); assert.equal(store.setAccountWatchlist(item, true), true); await advance(400);
+    const capturedA = hostJournal(s)[0].intent.target;
+    await server.remote(b); account.applySyncDoc(b);
+    assert.equal(store.inAccountWatchlist(item.id, item.type), false, "A's pending action is not projected into B");
+    await advance(1000); assert.equal(server.puts.length, 1, "A cannot upload against B's fresh binding");
+    assert.equal(store.setAccountWatchlist(item, false), true);
+    assert.equal(hostJournal(s).length, 1, "new explicit same host address supersedes the old queued add, not another profile");
+    assert.notEqual(hostJournal(s)[0].intent.target.binding, capturedA.binding);
+    await advance(2100);
+    const stored = await server.read(), field = Object.keys(hostJournal(s)[0]?.intent.fields ?? { "watchlist.movie.dHQtd2F0Y2gtYmluZGluZw": null })[0];
+    assert.equal(stored.nativeHostPreferences.profiles[viewer].fields[field].value, null);
+    assert.equal(hostJournal(s).length, 0);
+    a.nativeHostPreferences = stored.nativeHostPreferences; await server.remote(a); account.applySyncDoc(a); await advance(3100);
+    assert.equal(store.inAccountWatchlist(item.id, item.type), false, "returning to A never replays its superseded add");
+    assert.equal(server.puts.length, 2);
+  });
+
+  await t.test("recovered A source is compacted before B reload and cannot resurrect after partial B ACK", async () => {
+    clean(); const s = makeSession();
+    const ownerSlot = (sample) => {
+      const doc = structuredClone(sample.document), owner = doc.nativeSync.ownerProfileId, viewer = sample.playback.profileId;
+      doc.nativeSync.scope = doc.nativeHostPreferences.scope = `account.${s.account.id}`;
+      doc.nativeSync.profiles[owner].profile.account = structuredClone(doc.nativeSync.profiles[viewer].profile.account);
+      doc.nativeSync.accountSlots[owner] = structuredClone(doc.nativeSync.accountSlots[viewer]);
+      return doc;
+    };
+    const a = ownerSlot(nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("03-own-A")));
+    const b = ownerSlot(nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("04-own-B")));
+    const server = await startNative(s, a);
+    settings.updateSettings({ directLinksOnly: true, sourceOrder: ["torrent"] });
+    const sourceKey = journalsFor(s)[0][0], bindingA = hostJournal(s)[0].intent.target.binding;
+    stop(); stop = undefined; account.signOut(); timers.clear(); session.delete("vortx.web.sync-client.v1");
+    await server.remote(b); account = await import(`./account.ts?host-source-recovery=${now}`);
+    account.adoptSession(s); stop = account.startAccountSync(); await until(() => account.accountSyncStatus().appliedVersion === 21, "B loaded while recovered A remains held");
+    settings.updateSettings({ directLinksOnly: true }); settings.updateSettings({ directLinksOnly: false });
+    assert.equal(hostJournal(s).length, 1); assert.notEqual(hostJournal(s)[0].intent.target.binding, bindingA);
+    assert.equal(local.get(sourceKey), undefined, "only after merged checkpoint succeeded is the exact adopted source retired");
+    stop(); stop = undefined; account.signOut(); timers.clear();
+    account = await import(`./account.ts?host-b-before-ack=${now}`);
+    account.adoptSession(s); stop = account.startAccountSync(); await advance(400);
+    assert.equal(hostJournal(s).length, 0, "B ACKs independently while unsupported native sourceOrder stays queued");
+    assert.ok(journalsFor(s).some(([, raw]) => JSON.parse(raw).settings.sourceOrder?.[0] === "torrent"));
+    const stored = await server.read(); a.nativeHostPreferences = stored.nativeHostPreferences; await server.remote(a);
+    stop(); stop = undefined; account.signOut(); timers.clear();
+    account = await import(`./account.ts?host-a-after-partial-ack=${now}`);
+    account.adoptSession(s); stop = account.startAccountSync(); await advance(3100);
+    assert.equal(hostJournal(s).length, 0, "old unplanned A cannot be revived from a source or retained global delta");
+    assert.equal(server.puts.length, 1); assert.equal(settings.getSettings().directLinksOnly, false);
+  });
+
+  await t.test("superseded in-flight A cannot replan after CAS rejection when active slot returns A", async () => {
+    clean(); const s = makeSession();
+    const ownerSlot = (sample) => {
+      const doc = structuredClone(sample.document), owner = doc.nativeSync.ownerProfileId, viewer = sample.playback.profileId;
+      doc.nativeSync.scope = doc.nativeHostPreferences.scope = `account.${s.account.id}`;
+      doc.nativeSync.profiles[owner].profile.account = structuredClone(doc.nativeSync.profiles[viewer].profile.account);
+      doc.nativeSync.accountSlots[owner] = structuredClone(doc.nativeSync.accountSlots[viewer]); return doc;
+    };
+    const a = ownerSlot(nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("03-own-A")));
+    const b = ownerSlot(nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("04-own-B")));
+    const server = await startNative(s, a), release = server.holdPut();
+    settings.updateSettings({ directLinksOnly: true }); await advance(900);
+    await server.remote(b); account.applySyncDoc(b);
+    settings.updateSettings({ directLinksOnly: true }); settings.updateSettings({ directLinksOnly: false });
+    await server.remote(a); account.applySyncDoc(a); release(); await settle(); await advance(1000);
+    assert.equal(server.puts.length, 1, "obsolete A snapshot cannot replan even with a currently matching A binding");
+    assert.equal(hostJournal(s).length, 1); assert.equal(Object.values(hostJournal(s)[0].intent.fields)[0], false);
+    await server.remote(b); account.applySyncDoc(b); await advance(2100);
+    assert.equal(server.puts.length, 2); assert.equal(hostJournal(s).length, 0);
+    assert.equal((await server.read()).nativeHostPreferences.globals.fields["stremiox.directLinksOnly"].value, false);
   });
 });

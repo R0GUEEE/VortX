@@ -262,8 +262,8 @@ export function posterCard(item: MetaItem, progress?: number): string {
 
 /** A poster card wrapped with a remove (×) control, for the Continue Watching + Library rails. The button
  *  is a SIBLING of the card anchor (not nested) so clicking it removes rather than navigating. */
-export function removableCard(item: MetaItem, kind: "cw" | "lib", label: string, progress?: number): string {
-  return `<div class="card-wrap">${posterCard(item, progress)}<button class="card-remove" type="button" data-action="remove-saved" data-id="${escapeHtml(item.id)}" data-kind="${kind}" aria-label="${escapeHtml(label)}">×</button></div>`;
+export function removableCard(item: MetaItem, kind: "cw" | "lib" | "watchlist", label: string, progress?: number): string {
+  return `<div class="card-wrap">${posterCard(item, progress)}<button class="card-remove" type="button" data-action="remove-saved" data-id="${escapeHtml(item.id)}" data-type="${escapeHtml(item.type ?? "")}" data-kind="${kind}" aria-label="${escapeHtml(label)}">×</button></div>`;
 }
 
 const RAIL_TYPE_LABEL: Record<string, string> = { movie: "Movies", series: "Series", channel: "Channels", tv: "TV" };

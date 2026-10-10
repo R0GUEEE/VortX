@@ -4,7 +4,7 @@ import "./styles/tv.css"; // 10-foot presentation; scoped under html.tv, inert u
 import type { Addon } from "./lib/types";
 import { loadInstalledAddons } from "./lib/store";
 import { actionOf, el } from "./lib/dom";
-import { clearProgress, removeFromLibrary, hideRail, clearHiddenRails, hiddenRailCount } from "./lib/store";
+import { clearProgress, removeFromLibrary, hideRail, clearHiddenRails, hiddenRailCount, setAccountWatchlist, nativeWatchlistItems } from "./lib/store";
 import { navigate, onRouteChange, parseRoute, type Route } from "./lib/router";
 import { close as closePlayer, isPlayerOpen } from "./lib/player";
 import { icon } from "./lib/icons";
@@ -251,7 +251,10 @@ function wireGlobalClicks(): void {
       ev.preventDefault();
       const id = hit.node.dataset.id;
       if (id) {
-        if (hit.node.dataset.kind === "cw") clearProgress(id);
+        if (hit.node.dataset.kind === "watchlist") {
+          const item = nativeWatchlistItems().find((row) => row.id === id && row.type === hit.node.dataset.type);
+          if (!item || !setAccountWatchlist(item, false)) return;
+        } else if (hit.node.dataset.kind === "cw") clearProgress(id);
         else removeFromLibrary(id);
         hit.node.closest(".card-wrap")?.remove();
       }
@@ -377,6 +380,7 @@ async function start(): Promise<void> {
 
   // Install receiving listeners before the first async load so a fast account GET cannot be missed.
   window.addEventListener("vortx:addons-changed", () => void reloadAddonsAndRender(true));
+  window.addEventListener("vortx:watchlist-changed", () => { if (parseRoute().name === "library") renderLibrary(mainHost()); });
   window.addEventListener("vortx:profile-changed", (event) => {
     if (event instanceof CustomEvent && event.detail?.fromSync && isPlayerOpen()) return;
     void renderRoute(parseRoute());

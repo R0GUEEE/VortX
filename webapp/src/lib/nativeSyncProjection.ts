@@ -381,14 +381,16 @@ function hostWatchlist(fields: ObjectValue): NativeMediaItem[] {
     const token = match![2].replace(/-/g, "+").replace(/_/g, "/");
     let decoded: string;
     try { decoded = atob(token + "=".repeat((4 - token.length % 4) % 4)); } catch { error(); }
-    if (!/^(tt|tmdb)[A-Za-z0-9:._-]+$/.test(decoded!) || decoded!.length > 512 ||
+    if (!/^(tt|tmdb)[A-Za-z0-9:._-]*$/.test(decoded!) || decoded!.length > 512 ||
       btoa(decoded!).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") !== match![2]) error();
     const value = register(raw).value;
     if (value === null) continue;
     const entry = object(value) ?? error();
-    if (entry.id !== decoded! || entry.type !== match![1] || typeof entry.addedAt !== "number" ||
+    if (Object.keys(entry).some((key) => !["id", "type", "name", "poster", "addedAt"].includes(key)) ||
+      entry.id !== decoded! || entry.type !== match![1] || typeof entry.addedAt !== "number" ||
       !Number.isFinite(entry.addedAt) || entry.addedAt < 0 || entry.addedAt > Number.MAX_SAFE_INTEGER ||
-      (entry.name != null && typeof entry.name !== "string") || (entry.poster != null && typeof entry.poster !== "string")) error();
+      (entry.name != null && (typeof entry.name !== "string" || new TextEncoder().encode(entry.name).length > 4096)) ||
+      (entry.poster != null && (typeof entry.poster !== "string" || new TextEncoder().encode(entry.poster).length > 8192))) error();
     rows.push({ id: entry.id, type: entry.type, name: entry.name || entry.id, poster: entry.poster, addedAt: entry.addedAt, source: "vortx" });
   }
   return rows.sort((a, b) => b.addedAt - a.addedAt || nativeStringCompare(a.type!, b.type!) || nativeStringCompare(a.id, b.id));

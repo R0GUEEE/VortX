@@ -21,7 +21,8 @@ import { defaultSeason, episodesForSeason, isSeries, seasonsOf, sortedVideos } f
 import { actionOf, escapeHtml, httpUrl } from "../lib/dom";
 import { icon } from "../lib/icons";
 import { play, setSkipSegments, currentPlayToken } from "../lib/player";
-import { cwPosition, cwProgress, cwResumeId, inLibrary, toggleLibrary } from "../lib/store";
+import { cwPosition, cwProgress, cwResumeId, inLibrary, toggleLibrary, hasNativeAccountProjection,
+  canEditAccountWatchlist, inAccountWatchlist, setAccountWatchlist } from "../lib/store";
 import { getSettings } from "../lib/settings";
 import { fetchRatings, ratingsText, type Ratings } from "../lib/mdblist";
 import { resolveBackendTrailer, userTrailerLang } from "../lib/trailer";
@@ -258,6 +259,9 @@ export async function handleDetailClick(target: EventTarget | null): Promise<boo
         toggleLibrary(state.meta);
         render();
       }
+      return true;
+    case "toggle-account-watchlist":
+      if (state.meta) { setAccountWatchlist(state.meta, !inAccountWatchlist(state.meta.id, state.meta.type ?? "")); render(); }
       return true;
     case "share":
       return shareTitle();
@@ -728,9 +732,13 @@ function trailerButton(): string {
 /** Add to Library / In Library toggle (the app's wording), adding the title to the local Library. */
 function libraryButton(meta: MetaItem): string {
   const saved = inLibrary(meta.id);
-  return `<button class="chip lib-chip${saved ? " selected" : ""}" data-action="toggle-library" aria-pressed="${saved}">${
-    saved ? `${icon("bookmarkFill")}<span>In Library</span>` : `${icon("bookmark")}<span>Add to Library</span>`
+  const native = hasNativeAccountProjection();
+  const local = `<button class="chip lib-chip${saved ? " selected" : ""}" data-action="toggle-library" aria-pressed="${saved}">${
+    saved ? `${icon("bookmarkFill")}<span>${native ? "Saved in this browser" : "In Library"}</span>` : `${icon("bookmark")}<span>${native ? "Save in this browser" : "Add to Library"}</span>`
   }</button>`;
+  if (!native || !["movie", "series"].includes(meta.type ?? "")) return local;
+  const listed = inAccountWatchlist(meta.id, meta.type!);
+  return local + `<button class="chip${listed ? " selected" : ""}" data-action="toggle-account-watchlist" aria-pressed="${listed}"${canEditAccountWatchlist() ? "" : " disabled"}>${icon("bookmark")}<span>${listed ? "On Account Watchlist" : "Add to Account Watchlist"}</span></button>`;
 }
 
 /** Share the current title. The detail route already lives in the URL, so location.href is the link. */

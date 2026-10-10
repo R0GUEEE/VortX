@@ -11,8 +11,8 @@ export function renderLibrary(host: HTMLElement): void {
     const watchlist = nativeWatchlistItems(), library = nativeLibraryItems(), saved = browserLibraryItems();
     const rail = (id: string, label: string, items: ReturnType<typeof libraryItems>, local = false): string =>
       `<section class="rail-section" aria-labelledby="${id}"><h2 class="rail-title" id="${id}">${label}</h2>` +
-      (items.length ? `<div class="rail" role="list">${items.map((item) => local ? removableCard(item, "lib", "Remove browser save") : posterCard(item)).join("")}</div>` : `<p>No titles in this profile.</p>`) + `</section>`;
-    host.innerHTML = `<div class="board">${rail("rail-watchlist", "Account Watchlist", watchlist)}${rail("rail-library", "Account Library", library)}${rail("rail-browser-saved", "Saved in this browser", saved, true)}<p>Account Watchlist and Library update automatically. Save on a title keeps a separate browser-local bookmark; manage account membership in VortX.</p></div>`;
+      (items.length ? `<div class="rail" role="list">${items.map((item) => local ? removableCard(item, "lib", "Remove browser save") : id === "rail-watchlist" ? removableCard(item, "watchlist", "Remove from Account Watchlist") : posterCard(item)).join("")}</div>` : `<p>No titles in this profile.</p>`) + `</section>`;
+    host.innerHTML = `<div class="board">${rail("rail-watchlist", "Account Watchlist", watchlist)}${rail("rail-library", "Account Library", library)}${rail("rail-browser-saved", "Saved in this browser", saved, true)}<p>Account Watchlist changes sync automatically and stay queued offline. Save keeps a separate browser-local bookmark; native Account Library membership is managed in VortX.</p></div>`;
     return;
   }
   const items = libraryItems();

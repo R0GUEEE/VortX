@@ -609,8 +609,9 @@ export async function putSyncDoc(session: Session, doc: Record<string, unknown>)
  *  sibling keys (doc.profileEdits, doc.apiKeys, doc.addons) and NEVER doc.vortx.* (app-authoritative). */
 export async function mutateSyncDoc(
   session: Session,
-  mutate: (doc: Record<string, unknown>) => void,
+  mutate: (doc: Record<string, unknown>) => void | false,
   isCurrent: () => boolean = () => true,
+  receipt: { rejected?: () => void; accepted?: () => void } = {},
 ): Promise<void> {
   const guard = (): void => { if (!isCurrent()) throw new Error("Account session changed."); };
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -622,7 +623,9 @@ export async function mutateSyncDoc(
     if (status.synced && status.decryptFailed) throw new Error("Could not read your account right now. Please try again.");
     const base = status.synced ? status.version ?? 0 : 0;
     const doc = (status.contents as Record<string, unknown>) ?? {};
-    mutate(doc);
+    // A causal writer may have witnessed its exact durable edit in this authenticated read.
+    // No-op receipt must not create a fresh row revision or echo a received update.
+    if (mutate(doc) === false) return;
     const version = base + 1; // ONE value, bound into the AAD and sent as the row version
     const ciphertext = await sealDocument(session.dataKey, enc(JSON.stringify(doc)), session.account.id, version, WRITE_SYNC_DOC_V2);
     guard();
@@ -631,13 +634,18 @@ export async function mutateSyncDoc(
       token: session.token,
       body: { document: ciphertext, version },
     });
+    guard();
     if (r.status !== 200) throw new Error("Could not save to your account.");
     if (r.data?.accepted !== false) {
       bumpSyncFloor(session.account.id, version);                      // H-2: never accept below this again
       if (WRITE_SYNC_DOC_V2) markSawV2(session.account.id);            // H-1: our stored doc is now v2
+      // Legacy workers omit this field. Preserve their historical return behavior, but a causal
+      // writer may treat only an explicit boolean true as a definite stored-edit receipt.
+      if (r.data?.accepted === true) receipt.accepted?.();
       return; // stored (accepted true, or older worker without the field)
     }
     // accepted === false: a newer version landed between our read and write; loop to re-fetch and merge.
+    receipt.rejected?.();
   }
   throw new Error("Could not save to your account (kept losing to another device).");
 }

@@ -10,7 +10,8 @@ import {
   type ContinueWatchingIdentity,
 } from "./continue-watching-dedupe";
 
-type NativePending = { addons: { url: string; added: boolean }[]; progress: Record<string, { entries: WebProgressEntry[]; tombstones: CWTombstone[] }> };
+type NativePending = { addons: { url: string; added: boolean }[]; progress: Record<string, { entries: WebProgressEntry[]; tombstones: CWTombstone[] }>;
+  watchlist?: { profileId: string; binding: string; id: string; type: string; value: Record<string, unknown> | null }[] };
 let nativeProjection: NativeSyncProjection | null = null;
 let nativeBlockedScope = "";
 let nativePending: () => NativePending = () => ({ addons: [], progress: {} });
@@ -37,9 +38,30 @@ export function nativeLibraryItems(): MetaItem[] {
 export function nativeWatchlistItems(): MetaItem[] {
   if (nativeBlockedScope) return [];
   const profile = nativeProfile();
-  return profile && !profile.pending && !profile.locked && !profile.kids ? nativeProjection!.watchlistByProfile[profile.id] as MetaItem[] : [];
+  if (!profile || profile.pending || profile.locked || profile.kids) return [];
+  const rows = new Map((nativeProjection!.watchlistByProfile[profile.id] ?? []).map((item) => [`${item.type}|${item.id}`, item as MetaItem]));
+  for (const edit of nativePending().watchlist ?? []) {
+    if (edit.profileId !== profile.id || edit.binding !== profile.binding) continue;
+    const key = `${edit.type}|${edit.id}`;
+    if (edit.value === null) rows.delete(key);
+    else rows.set(key, { id: edit.id, type: edit.type, name: typeof edit.value.name === "string" ? edit.value.name : edit.id,
+      poster: typeof edit.value.poster === "string" ? edit.value.poster : undefined, source: "vortx", addedAt: edit.value.addedAt } as MetaItem);
+  }
+  return [...rows.values()].sort((a, b) => Number((b as any).addedAt ?? 0) - Number((a as any).addedAt ?? 0) || a.id.localeCompare(b.id));
 }
 export function hasNativeAccountProjection(): boolean { return nativeProjection !== null || !!nativeBlockedScope; }
+let watchlistPusher: (item: MetaItem, added: boolean) => boolean = () => false;
+export function registerWatchlistSyncPusher(fn: typeof watchlistPusher): void { watchlistPusher = fn; }
+export function canEditAccountWatchlist(): boolean {
+  const profile = nativeProfile();
+  return !nativeBlockedScope && !!profile && !profile.pending && !profile.locked && !profile.kids;
+}
+export function inAccountWatchlist(id: string, type: string): boolean { return nativeWatchlistItems().some((item) => item.id === id && item.type === type); }
+/** Distinct synced want-to-watch action. Browser Save and native library membership are unchanged. */
+export function setAccountWatchlist(item: MetaItem, added: boolean): boolean {
+  if (added && !inAccountWatchlist(item.id, item.type ?? "") && nativeWatchlistItems().length >= 1000) return false;
+  return canEditAccountWatchlist() && watchlistPusher(item, added);
+}
 
 /** Per-profile storage key. The owner profile (scope "") uses the base key, so existing data, account
  *  hydration, and backup all stay on the canonical keys; overlay profiles get a suffixed key so each
