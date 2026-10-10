@@ -4,6 +4,18 @@ import Foundation
 enum NativeForegroundSyncPolicyTests {
     @MainActor
     static func main() async throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        var recovery = NativeForegroundSyncPolicy.RecoveryBackoff()
+        precondition(recovery.permitsAttempt(at: now, userInitiated: false))
+        recovery.recordFailure(at: now)
+        precondition(!recovery.permitsAttempt(at: now.addingTimeInterval(5), userInitiated: false))
+        precondition(recovery.permitsAttempt(at: now.addingTimeInterval(5), userInitiated: true))
+        precondition(recovery.permitsAttempt(at: now.addingTimeInterval(12), userInitiated: false))
+        recovery.recordFailure(at: now.addingTimeInterval(12))
+        precondition(recovery.retryAt == now.addingTimeInterval(36))
+        for _ in 0..<10 { recovery.recordFailure(at: now) }
+        precondition(recovery.retryAt == now.addingTimeInterval(60))
+        print("PASS failed restore backs off, explicit user retry remains available, delay bounded at 60s")
         var current = true
         precondition(NativeForegroundSyncPolicy.shouldPullBroadcast(version: 18, lastAcknowledgedVersion: 17, ownerIsCurrent: true))
         precondition(!NativeForegroundSyncPolicy.shouldPullBroadcast(version: 17, lastAcknowledgedVersion: 17, ownerIsCurrent: true))

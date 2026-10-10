@@ -72,7 +72,9 @@ struct iOSSignInView: View {
             // flips VortXSyncManager.isSignedIn and the .onChange below closes the sheet. SyncSettingsView
             // reads VortXSyncManager from the environment, which this sheet already inherits (same as the
             // account / core objects it already uses).
-            .navigationDestination(isPresented: $showVortXEmail) { SyncSettingsView() }
+            .navigationDestination(isPresented: $showVortXEmail) {
+                SyncSettingsView(onSignedIn: { dismiss() })
+            }
         }
         // Stremio success handler. One place seeds the engine with the freshly written authKey, then
         // dismisses. CoreBridge booted signed-out at launch, so without signedInWithLegacyAuthKey() the

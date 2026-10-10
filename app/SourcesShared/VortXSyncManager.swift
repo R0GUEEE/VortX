@@ -213,6 +213,7 @@ final class VortXSyncManager: ObservableObject {
 
     @Published private(set) var account: Account?
     @Published private(set) var isSignedIn = false
+    @Published private(set) var accountRestoreState: AccountRestoreState = .idle
     /// Wall-clock time of the LAST successful sync round-trip for the signed-in account: stamped on every
     /// ACCEPTED push (pushSyncDocAt) and on every applied / definitively-empty pull (syncDown). Persisted
     /// per account (lastSyncKey(for:)) so a relaunch still shows "last synced 2 hours ago", and published so
@@ -241,6 +242,7 @@ final class VortXSyncManager: ObservableObject {
     private var nativeCheckpointCapture: CredentialScopeRegistry.Capture?
     private var nativeCheckpointProfile: UUID?
     private var nativeCheckpointGeneration = UUID()
+    private var nativeRecoveryFailure: (capture: CredentialScopeRegistry.Capture, profileID: UUID?, backoff: NativeForegroundSyncPolicy.RecoveryBackoff)?
     @Published private(set) var nativeCheckpointStatus = "not_started"
     @Published private(set) var nativeProfileEditConflicts: [VortxNativeProfileEditHost.Conflict] = []
     @Published private(set) var nativeAddonEditConflicts: [VortxNativeWebsiteAddonEdits.Conflict] = []
@@ -1217,6 +1219,19 @@ final class VortXSyncManager: ObservableObject {
         }
     }
 
+    /// Explicit Retry/Sync now may try immediately; automatic catch-up obeys failed-import
+    /// backoff. Neither path clears a poisoned session or treats unreadable data as empty.
+    func retryAccountRestore() async -> Bool {
+#if VORTX_NATIVE_DATA_ENGINE
+        let capture = credentialAuthority.capture()
+        guard isSignedIn, isCurrent(capture) else { return false }
+        if !CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: ProfileStore.shared.activeID) {
+            guard await restoreNativeCheckpoint(credentialCapture: capture, userInitiated: true), isCurrent(capture) else { return false }
+        }
+#endif
+        return await restoreAccountDocIfNeeded()
+    }
+
     /// Routine foreground hydration keeps a certified current session and its resource selections.
     @MainActor
     @discardableResult
@@ -1237,7 +1252,8 @@ final class VortXSyncManager: ObservableObject {
     /// The key never leaves this account owner. Only an absent checkpoint permits a complete
     /// authenticated import/native-carrier adoption; failed reads/decryption never mean absence.
     @discardableResult
-    func restoreNativeCheckpoint(credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil) async -> Bool {
+    func restoreNativeCheckpoint(credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil,
+                                 userInitiated: Bool = false) async -> Bool {
         let capture = suppliedCapture ?? credentialAuthority.capture()
         let selectedProfile = ProfileStore.shared.activeID
         guard isSignedIn, isCurrent(capture), case .account = capture.scope else {
@@ -1247,6 +1263,8 @@ final class VortXSyncManager: ObservableObject {
         if let pending = nativeCheckpointTask, nativeCheckpointCapture == capture, nativeCheckpointProfile == selectedProfile {
             return await pending.value
         }
+        if let failure = nativeRecoveryFailure, failure.capture == capture, failure.profileID == selectedProfile,
+           !failure.backoff.permitsAttempt(at: Date(), userInitiated: userInitiated) { return false }
         let generation = UUID(); nativeCheckpointGeneration = generation; nativeProfileEditConflicts = []; nativeAddonEditConflicts = []; nativeOwnAccountResyncUnavailable = []; nativeOwnAccountOverlayPending = []; nativeOwnAccountOverlayUnattributed = []; nativeWatchedMigrationPending = []
         nativeUnsupportedSettings = []; nativeLegacyWatchlistPending = []
         let previous = nativeCheckpointTask; previous?.cancel(); _ = await previous?.value
@@ -1256,6 +1274,17 @@ final class VortXSyncManager: ObservableObject {
             guard let self else { return false }
             defer {
                 if self.nativeCheckpointGeneration == generation {
+                    if self.isCurrent(capture), ProfileStore.shared.activeID == selectedProfile {
+                        if self.nativeCheckpointStatus == "mounted" {
+                            self.nativeRecoveryFailure = nil
+                        } else {
+                            var backoff = self.nativeRecoveryFailure.flatMap {
+                                $0.capture == capture && $0.profileID == selectedProfile ? $0.backoff : nil
+                            } ?? .init()
+                            backoff.recordFailure(at: Date())
+                            self.nativeRecoveryFailure = (capture, selectedProfile, backoff)
+                        }
+                    }
                     self.nativeCheckpointTask = nil; self.nativeCheckpointCapture = nil; self.nativeCheckpointProfile = nil
                 }
             }
@@ -2252,6 +2281,7 @@ final class VortXSyncManager: ObservableObject {
                 self.restoreTask?.cancel()
                 self.restoreTask = nil
                 self.restoreTaskCapture = nil
+                self.accountRestoreState = .idle
                 self.token = nil
                 self.account = nil
                 self.dataKey = nil
@@ -2570,6 +2600,7 @@ final class VortXSyncManager: ObservableObject {
         self.token = token
         self.dataKey = dataKey
         self.account = candidateAccount
+        self.accountRestoreState = .restoring
         self.isSignedIn = true
         reloadLastSyncStamp()   // a re-sign-in to a known account restores its persisted "last synced"
         // A fresh sign-in is a foreground action, so open the real-time channel immediately (if the app
@@ -2885,32 +2916,49 @@ final class VortXSyncManager: ObservableObject {
         let capturedAccountID = account?.id ?? ""
         guard isCurrent(capture), !hasPendingAccountDocApply(for: capture), let capturedDataKey = dataKey,
               let pt = try? JSONSerialization.data(withJSONObject: obj),
-              let ct = VortXSyncCrypto.sealDocument(dataKey: capturedDataKey, plaintext: pt, accountId: capturedAccountID, version: version, writeV2: Self.writeSyncDocV2) else { return .error }
+              let ct = VortXSyncCrypto.sealDocument(dataKey: capturedDataKey, plaintext: pt, accountId: capturedAccountID, version: version, writeV2: Self.writeSyncDocV2) else {
+            DiagnosticsLog.log("sync", "upload result=blocked stage=local_preflight")
+            return .error
+        }
         let (code, json) = await request("PUT", "/v1/backup", body: ["document": ct, "version": version], auth: true, credentialCapture: capture)
         guard isCurrent(capture), !hasPendingAccountDocApply(for: capture) else { return .error }
-        guard code == 200 else { return .error }
+        guard code == 200 else {
+            DiagnosticsLog.log("sync", "upload result=failed stage=transport status=\(code)")
+            return .error
+        }
         // accepted defaults to true so an older worker without the field (which stored the write) still
         // advances the version, matching the website's `accepted !== false` read.
 #if VORTX_NATIVE_DATA_ENGINE
-        guard let verdict = json?["accepted"] as? NSNumber, CFGetTypeID(verdict) == CFBooleanGetTypeID() else { return .error }
+        guard let verdict = json?["accepted"] as? NSNumber, CFGetTypeID(verdict) == CFBooleanGetTypeID() else {
+            DiagnosticsLog.log("sync", "upload result=failed stage=verdict")
+            return .error
+        }
         let accepted = verdict.boolValue
 #else
         let accepted = (json?["accepted"] as? Bool) ?? true
 #endif
         if accepted {
 #if VORTX_NATIVE_DATA_ENGINE
-            guard rememberNativeBackup(capture: capture) else { return .error }
-            do { try acknowledgeNativeProviders(obj, capture: capture) } catch { return .error }
+            guard rememberNativeBackup(capture: capture) else {
+                DiagnosticsLog.log("sync", "upload result=accepted_remote_unacknowledged stage=local_backup")
+                return .error
+            }
+            do { try acknowledgeNativeProviders(obj, capture: capture) } catch {
+                DiagnosticsLog.log("sync", "upload result=accepted_remote_unacknowledged stage=provider_receipt")
+                return .error
+            }
 #endif
             lastSyncedVersion = max(lastSyncedVersion, version)
             persistLastSyncedVersion()   // survive relaunch so the version guard stays consistent
             if Self.writeSyncDocV2 { Self.markSawDocV2(capturedAccountID) }  // H-1: account's stored doc is now v2
             stampSyncSuccess()           // the account now holds this device's doc: "last synced" = now
+            DiagnosticsLog.log("sync", "upload result=accepted")
             return .accepted(version: version)
         }
         // Rejected (a concurrent write won). The worker echoes the current stored version so we can retry
         // deterministically at stored+1 instead of racing epoch-ms again. Do NOT advance lastSyncedVersion.
         let stored = (json?["version"] as? Int) ?? (json?["version"] as? Double).map(Int.init)
+        DiagnosticsLog.log("sync", "upload result=rejected reason=concurrent_write")
         return .rejected(storedVersion: stored)
     }
 
@@ -3697,26 +3745,55 @@ final class VortXSyncManager: ObservableObject {
     func restoreAccountDocIfNeeded(credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil) async -> Bool {
         let capture = suppliedCapture ?? credentialAuthority.capture()
         guard isSignedIn, isCurrent(capture) else { return false }
-        if hasAppliedAccountDoc, !hasPendingAccountDocApply(for: capture) { return true }
         // Single-flight: adopt(), startRealtime(), and any blocked syncUp can all arrive at once. Assigning
         // restoreTask before the first await means concurrent callers join this task rather than starting their
         // own forced pulls. Safe on the main actor: the Task body cannot begin until this function suspends.
         if let inFlight = restoreTask, restoreTaskCapture == capture { return await inFlight.value }
         restoreTask?.cancel()
+        accountRestoreState = .restoring
         let task = Task { @MainActor [weak self] () -> Bool in
             guard let self else { return false }
             defer {
                 if self.restoreTaskCapture == capture {
                     self.restoreTask = nil
                     self.restoreTaskCapture = nil
+                    if self.isCurrent(capture), self.isSignedIn {
+                        let documentApplied = self.hasAppliedAccountDoc && !self.hasPendingAccountDocApply(for: capture)
+#if VORTX_NATIVE_DATA_ENGINE
+                        let sessionReady = CoreBridge.shared.hasCertifiedNativeSession(
+                            capture: capture, profileID: ProfileStore.shared.activeID)
+#else
+                        let sessionReady = true
+#endif
+                        self.accountRestoreState = documentApplied && sessionReady ? .ready : .failed
+                    }
                 }
+            }
+            if self.hasAppliedAccountDoc, !self.hasPendingAccountDocApply(for: capture) {
+#if VORTX_NATIVE_DATA_ENGINE
+                // A historical sync receipt opens the account-document gate, not the current
+                // engine. A re-sign-in still needs its own certified checkpoint before UI handoff.
+                let sessionReady = await self.ensureNativeCheckpoint(credentialCapture: capture)
+                return sessionReady && self.isCurrent(capture) && self.isSignedIn
+#else
+                return true
+#endif
             }
             var delayNanos: UInt64 = 1_000_000_000
             for attempt in 0..<5 {
                 guard self.isCurrent(capture), self.isSignedIn else { return false }
                 _ = await self.syncDown(force: true, credentialCapture: capture)
                 guard self.isCurrent(capture) else { return false }
-                if self.hasAppliedAccountDoc, !self.hasPendingAccountDocApply(for: capture) { return true }
+                if self.hasAppliedAccountDoc, !self.hasPendingAccountDocApply(for: capture) {
+#if VORTX_NATIVE_DATA_ENGINE
+                    // A definitively empty account also opens this gate. Mount its native
+                    // session before reporting setup/ready, exactly as for a remembered document.
+                    let sessionReady = await self.ensureNativeCheckpoint(credentialCapture: capture)
+                    return sessionReady && self.isCurrent(capture) && self.isSignedIn
+#else
+                    return true
+#endif
+                }
                 guard attempt < 4 else { break }
                 try? await Task.sleep(nanoseconds: delayNanos)
                 guard self.isCurrent(capture) else { return false }
@@ -3726,7 +3803,13 @@ final class VortXSyncManager: ObservableObject {
             if !self.hasAppliedAccountDoc || self.hasPendingAccountDocApply(for: capture) {
                 NSLog("[sync] account doc not restored yet (#145 gate stays shut; pushes refused until it opens)")
             }
+#if VORTX_NATIVE_DATA_ENGINE
+            guard self.hasAppliedAccountDoc, !self.hasPendingAccountDocApply(for: capture), self.isSignedIn else { return false }
+            let sessionReady = await self.ensureNativeCheckpoint(credentialCapture: capture)
+            return sessionReady && self.isCurrent(capture) && self.isSignedIn
+#else
             return self.hasAppliedAccountDoc && !self.hasPendingAccountDocApply(for: capture)
+#endif
         }
         restoreTaskCapture = capture
         restoreTask = task
@@ -5216,13 +5299,15 @@ final class VortXSyncManager: ObservableObject {
                     self.pendingSyncID = nil
                 }
             }
+            var retryDelay: UInt64 = 2_500_000_000
             while self.isSignedIn, self.isCurrent(capture), !Task.isCancelled {
-                do { try await Task.sleep(nanoseconds: 2_500_000_000) } catch { return }
+                do { try await Task.sleep(nanoseconds: retryDelay) } catch { return }
                 guard self.isCurrent(capture), self.pendingSyncID == workerID else { return }
                 let generation = self.nativePushQueue.generation
                 let accepted = await self.syncUp()
                 guard self.isCurrent(capture), self.pendingSyncID == workerID else { return }
                 self.nativePushQueue.acknowledge(generation, accepted: accepted)
+                retryDelay = accepted ? 2_500_000_000 : min(retryDelay * 2, 30_000_000_000)
                 if !self.nativePushQueue.hasPendingPush {
                     self.nativeDurablePushPending = false
                     return

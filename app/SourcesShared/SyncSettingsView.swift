@@ -5,6 +5,9 @@ import SwiftUI
 /// fully signed out, this only adds cross-device sync, backup, and recovery.
 struct SyncSettingsView: View {
     @EnvironmentObject private var sync: VortXSyncManager
+    /// Embedded sign-in sheets close on confirmed authentication, independently of
+    /// network-bound account restore. Ordinary Account settings leave this nil.
+    var onSignedIn: (() -> Void)? = nil
 
     enum Mode: String, CaseIterable { case signIn = "Sign in", create = "Create", recover = "Recover" }
     @State private var mode: Mode = .signIn
@@ -152,7 +155,10 @@ struct SyncSettingsView: View {
                     Button("Cancel") { showQRSignIn = false }
                         .buttonStyle(ChipButtonStyle())
                 }
-                VortXAccountJoinerView(onSignedIn: { showQRSignIn = false })
+                VortXAccountJoinerView(onSignedIn: {
+                    showQRSignIn = false
+                    onSignedIn?()
+                })
                     .frame(maxWidth: .infinity)
             }
             .padding(Theme.Space.lg)
@@ -209,7 +215,7 @@ struct SyncSettingsView: View {
             switch outcome {
             case .completed: syncNote = nil
             case .pending: syncNote = "Your changes are still waiting to sync. Try again shortly."
-            case .failed: syncNote = "Could not finish syncing. Check your connection and try again."
+            case .failed: syncNote = "Couldn't finish syncing. Your changes are still saved on this device. Try again."
             }
             syncing = false
         }
@@ -223,6 +229,11 @@ struct SyncSettingsView: View {
     private func syncNow() {
         Task { @MainActor in
             syncing = true
+            guard await sync.retryAccountRestore() else {
+                syncNote = "Couldn't load your account data yet. Your saved data has not been replaced. Try again."
+                syncing = false
+                return
+            }
             switch await sync.rosterConflictWithAccount() {
             case .conflict:
                 syncing = false
@@ -234,7 +245,7 @@ struct SyncSettingsView: View {
                 let pushed = await sync.pushThisDevice()
                 syncNote = pushed
                     ? nil
-                    : "Could not save your latest changes. Check your connection and try again."
+                    : "Couldn't sync your latest changes. They are still saved on this device. Try again."
                 syncing = false
             }
         }
@@ -264,6 +275,10 @@ struct SyncSettingsView: View {
         switch result {
         case .ok:
             password = ""; totp = ""; needsTotp = false
+            if let onSignedIn {
+                onSignedIn()
+                return // adopt() owns the restore after this sheet disappears.
+            }
             // Decide pull vs seed vs ask: a fresh account is seeded; one with data prompts which to
             // keep; an UNREACHABLE account doc is a distinct retry state (never misread as fresh and
             // seeded over, the old nil-collapse misroute).

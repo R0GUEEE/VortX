@@ -19,7 +19,13 @@ final class VortXSyncManager {
     var lastSyncAt: Date?
     var rosterResult: RosterResult = .noConflict
     var pushResult = true
+    var restoreResult = true
     private(set) var pushCalls = 0
+
+    func retryAccountRestore() async -> Bool {
+        await Task.yield()
+        return restoreResult
+    }
 
     func rosterConflictWithAccount() async -> RosterResult {
         await Task.yield()
@@ -99,7 +105,29 @@ struct MoveSeedingStatusTests {
         check("last-sync line reports a current accepted timestamp", MoveSeeding.lastSyncLine(Date()) == "Last synced just now")
     }
 
+    private static func testRestorePresentation() {
+        check("signed-out devices retain the sign-in reminder",
+              MoveSeeding.presentation(isSignedIn: false, completedFirstSync: false, restoreState: .idle) == .nag)
+        check("successful sign-in immediately shows account loading",
+              MoveSeeding.presentation(isSignedIn: true, completedFirstSync: false, restoreState: .restoring) == .restoring)
+        check("a remembered sync timestamp cannot hide active restoration",
+              MoveSeeding.presentation(isSignedIn: true, completedFirstSync: true, restoreState: .restoring) == .restoring)
+        check("failed restore shows retry without claiming backup",
+              MoveSeeding.presentation(isSignedIn: true, completedFirstSync: false, restoreState: .failed) == .retry)
+        check("confirmed empty account shows setup, not a restored backup",
+              MoveSeeding.presentation(isSignedIn: true, completedFirstSync: false, restoreState: .ready) == .setup)
+        check("accepted restored backup can complete the handoff",
+              MoveSeeding.presentation(isSignedIn: true, completedFirstSync: true, restoreState: .ready) == .confirmation)
+    }
+
     private static func testSyncNowStates() async {
+        let restoreFailure = SyncSettingsViewStatusHarness()
+        restoreFailure.sync.restoreResult = false
+        restoreFailure.syncNow()
+        await settle(restoreFailure)
+        check("failed restore is not labelled an internet problem",
+              restoreFailure.syncNote == "Couldn't load your account data yet. Your saved data has not been replaced. Try again.")
+        check("failed restore never pushes an unvalidated snapshot", restoreFailure.sync.pushCalls == 0)
         let pushFailure = SyncSettingsViewStatusHarness()
         pushFailure.sync.rosterResult = .noConflict
         pushFailure.sync.pushResult = false
@@ -108,7 +136,7 @@ struct MoveSeedingStatusTests {
         await settle(pushFailure)
         check(
             "a false push keeps a visible failure",
-            pushFailure.syncNote == "Could not save your latest changes. Check your connection and try again."
+            pushFailure.syncNote == "Couldn't sync your latest changes. They are still saved on this device. Try again."
         )
         check("a no-conflict push calls the manager once", pushFailure.sync.pushCalls == 1)
 
@@ -134,6 +162,7 @@ struct MoveSeedingStatusTests {
 
     static func main() async {
         testBackedUpLineStates()
+        testRestorePresentation()
         await testSyncNowStates()
         if failures > 0 {
             print("\n\(failures) MoveSeeding status test(s) FAILED.")

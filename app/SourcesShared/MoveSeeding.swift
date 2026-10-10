@@ -1,5 +1,10 @@
 import SwiftUI
 
+/// An account-scoped receipt from the real restore task, not a timer or a percentage.
+enum AccountRestoreState: Equatable, Sendable {
+    case idle, restoring, ready, failed
+}
+
 /// Phase-0 seeding for the upcoming com.vortx home: the NEXT release keeps this bundle id, the one after
 /// moves to com.vortx, which on iOS/tvOS gives the app a FRESH local data container. Everything synced to a
 /// VortX account restores on sign-in; anything only local does not. So before the move, every device should
@@ -15,6 +20,16 @@ import SwiftUI
 ///  - The Settings banner is persistent (not launch-gated) so the state is always inspectable there.
 @MainActor
 enum MoveSeeding {
+    enum Presentation: Equatable { case nag, restoring, retry, setup, confirmation }
+
+    static func presentation(isSignedIn: Bool, completedFirstSync: Bool,
+                             restoreState: AccountRestoreState) -> Presentation {
+        guard isSignedIn else { return .nag }
+        if restoreState == .restoring { return .restoring }
+        if restoreState == .failed { return .retry }
+        if completedFirstSync { return .confirmation }
+        return restoreState == .ready ? .setup : .restoring
+    }
     /// The in-memory latch prevents duplicate presentations inside one process. A separate persisted build
     /// receipt prevents the same reminder from returning on every launch after the user dismisses it.
     static var presentedThisLaunch = false

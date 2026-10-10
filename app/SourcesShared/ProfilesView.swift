@@ -124,6 +124,17 @@ struct ProfilePickerView: View {
                             if profileAction.isRunning {
                                 ProgressView("Opening profile…").tint(.white).foregroundStyle(.white)
                             }
+                            #if VORTX_NATIVE_DATA_ENGINE
+                            if !profileAction.isRunning, nativeSync.isSignedIn {
+                                if nativeSync.accountRestoreState == .restoring {
+                                    ProgressView("Loading your profiles…").tint(.white).foregroundStyle(.white)
+                                } else if nativeSync.accountRestoreState == .failed, profileAction.errorMessage == nil {
+                                    Text("Couldn't finish loading your profiles. Tap a profile to try again.")
+                                        .font(.callout).foregroundStyle(.white)
+                                        .multilineTextAlignment(.center)
+                                }
+                            }
+                            #endif
                             if let error = profileAction.errorMessage {
                                 Text(error).font(.callout).foregroundStyle(.white)
                                     .multilineTextAlignment(.center)
@@ -189,6 +200,11 @@ struct ProfilePickerView: View {
             artwork.stopRotation()
             profileAction.cancel()
         }
+        #if VORTX_NATIVE_DATA_ENGINE
+        .onChange(of: nativeSync.accountRestoreState) { state in
+            if state == .ready, !profileAction.isRunning { profileAction.cancel() }
+        }
+        #endif
     }
 
     private var artworkIsVisible: Bool {
@@ -683,7 +699,7 @@ private struct ProfileAccountRecoveryView: View {
                 Button("Done") { dismiss() }.buttonStyle(.bordered)
             }
             .padding()
-            SyncSettingsView()
+            SyncSettingsView(onSignedIn: { dismiss() })
         }
         .background(Theme.Palette.canvas.ignoresSafeArea())
     }

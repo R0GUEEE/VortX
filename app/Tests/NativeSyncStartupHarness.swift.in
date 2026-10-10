@@ -66,6 +66,9 @@ private final class CredentialScopeRegistry {
     @discardableResult
     func syncDown(force: Bool = false, credentialCapture capture: CredentialScopeRegistry.Capture) async -> Bool {
         pullAttempts += 1
+        enum PullOutcome { case pending }
+        var outcome: PullOutcome?
+        defer { _ = outcome }
         /* PRODUCTION_PULL_GUARD */
         remotePullsApplied += 1
         return true

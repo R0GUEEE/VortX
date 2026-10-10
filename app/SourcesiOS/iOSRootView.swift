@@ -524,14 +524,13 @@ struct iOSRootView: View {
                 iOSHomeView(isActive: true, onBrowse: hideDiscoverTab ? nil : { homeBrowse = true },
                             onNavigationDepthChanged: { homeHasDestination = $0 > 0 })
             }
-            if !hideDiscoverTab, !homeHasDestination {
+            if !compactPhoneHome, !hideDiscoverTab, !homeHasDestination {
                 HStack(spacing: Theme.Space.xs) {
                     homeModeButton("Featured", discover: false)
                     homeModeButton("Discover", discover: true)
                 }
-                // Phone Home keeps the mode switch close to the centered wordmark/customize chrome;
-                // iPad/Mac retain the existing roomier shell spacing.
-                .padding(compactPhoneHome ? 3 : 6)
+                // Compact phones use a navigation-bar Discover action instead of an overlay.
+                .padding(6)
                 .vortxGlass(in: Capsule())
                 .padding(.horizontal, compactPhoneHome ? 16 : Theme.Space.md)
                 .padding(.vertical, compactPhoneHome ? 2 : Theme.Space.xs)
@@ -760,7 +759,12 @@ struct iOSRootView: View {
     }
 
     private func selectTab(_ item: Tab) {
-        if mergeHomeDiscover, item == .discover {
+        if mergeHomeDiscover, item == .home {
+            let alreadyFeatured = tab == .home && !homeBrowse
+            homeBrowse = false
+            tab = .home
+            if alreadyFeatured { TabScrollToTop.shared.bump(TabScrollKeys.home) }
+        } else if mergeHomeDiscover, item == .discover {
             let alreadyBrowsing = tab == .home && homeBrowse && !hideDiscoverTab
             homeBrowse = !hideDiscoverTab
             tab = .home
@@ -1488,40 +1492,11 @@ struct iOSHomeView: View {
                              reach: FeaturedHeroView.heroHeight + 180)
     }
 
-    /// Home's compact card wrapper keeps the shared FeaturedHeroView's model, actions, rotation, trailer,
-    /// reduce-motion behavior, and navigation untouched. Only the phone presentation gets the inset,
-    /// continuous radius, and quiet accent edge; iPad and Mac continue to call the shared hero directly.
+    /// The shared hero owns its contained card geometry on every touch/desktop page.
     @ViewBuilder
     private var homeFeaturedHero: some View {
-        if compactPhoneHome {
-            FeaturedHeroView(model: hero, onOpen: { path.append($0) }, eyebrow: String(localized: "Featured"),
-                             onTintChange: acceptHomeHeroTint)
-                .background {
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .fill(Theme.Palette.accent.opacity(reduceTransparency ? 0.022 : 0.045))
-                        .overlay {
-                            LinearGradient(
-                                colors: [Theme.Palette.accent.opacity(0.075), .clear,
-                                         Theme.Palette.accent.opacity(0.018)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-                        }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .strokeBorder(Theme.Palette.accent.opacity(reduceTransparency ? 0.24 : 0.16),
-                                      lineWidth: 0.8)
-                }
-                .shadow(color: .black.opacity(0.32), radius: 20, y: 12)
-                .padding(.horizontal, 16)
-                .padding(.top, Theme.Space.xs)
-        } else {
-            FeaturedHeroView(model: hero, onOpen: { path.append($0) }, eyebrow: String(localized: "Featured"),
-                             onTintChange: acceptHomeHeroTint)
-        }
+        FeaturedHeroView(model: hero, onOpen: { path.append($0) }, eyebrow: String(localized: "Featured"),
+                         onTintChange: acceptHomeHeroTint)
     }
 
     @ViewBuilder
@@ -1664,6 +1639,20 @@ struct iOSHomeView: View {
             // macOS sign-in lives in Settings -> Account ("VortX account & sync").
             #if os(iOS)
             .toolbar {
+                if compactPhoneHome, let onBrowse, path.isEmpty {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button(action: onBrowse) {
+                            Text("Discover")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(Theme.Palette.textPrimary)
+                                .padding(.horizontal, 12)
+                                .frame(minHeight: 44)
+                                .vortxGlass(in: Capsule(), fillAlpha: VortXGlass.pillFillAlpha, shadow: .pill)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Browse genres and catalogs")
+                    }
+                }
                 // Always-present (never inserted/removed at runtime), so it never trips the NSToolbar churn
                 // the conditional Sign In item is guarded against below. iOS uses a UINavigationBar here, so
                 // it is safe regardless; the entry point on macOS is the inline button in the rail column.
@@ -5868,6 +5857,7 @@ private struct LandscapeArtiOS: View {
     let type: String
     let title: String
     let poster: String?
+    var fallbackIMDb: String? = nil
     @State private var image: PlatformPosterImage?
     @State private var logo: PlatformPosterImage?
     @State private var usedBackdrop = false
@@ -5905,7 +5895,7 @@ private struct LandscapeArtiOS: View {
         let bakedPosterShown = !usedBackdrop && PosterArtwork.bakesRatings(forID: id)
         CardRatingBadge(id: id, type: type,
                         active: PosterArtwork.bakesRatings && !bakedPosterShown,
-                        glyphSize: 8, textSize: 10, maxScores: 2)
+                        glyphSize: 8, textSize: 10, maxScores: 2, fallbackIMDb: fallbackIMDb)
             .padding(6)
     }
 
@@ -6083,7 +6073,8 @@ private struct CinemaPosterCardBody: View {
                         if privateArtwork {
                             privateLandscapeArt
                         } else {
-                            LandscapeArtiOS(id: id, type: type, title: displayName, poster: displayPoster ?? fallbackArt)
+                            LandscapeArtiOS(id: id, type: type, title: displayName, poster: displayPoster ?? fallbackArt,
+                                            fallbackIMDb: imdbRating)
                         }
                     } else if privateArtwork, TraktArtworkPolicy.isFirstPartyArtwork(displayPoster ?? fallbackArt) {
                         // Trakt's documented first-party CDN art may use the normal cache-backed loader.

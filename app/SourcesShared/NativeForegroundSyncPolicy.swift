@@ -3,6 +3,21 @@ import Foundation
 /// Foreground catch-up may merge a newer account document without replacing a certified
 /// resident session. A failed pull is not permission to retire its resource selections.
 enum NativeForegroundSyncPolicy {
+    /// Failed checkpoint preparation is not repaired by repeating the same expensive
+    /// import every few seconds. This controls attempts, never pending edits or authority.
+    struct RecoveryBackoff: Equatable {
+        private(set) var failures = 0
+        private(set) var retryAt = Date.distantPast
+
+        mutating func recordFailure(at now: Date) {
+            failures = min(failures + 1, 4)
+            retryAt = now.addingTimeInterval(min(12 * pow(2, Double(failures - 1)), 60))
+        }
+
+        func permitsAttempt(at now: Date, userInitiated: Bool) -> Bool {
+            userInitiated || now >= retryAt
+        }
+    }
     static func shouldPullBroadcast(version: Int, lastAcknowledgedVersion: Int, ownerIsCurrent: Bool) -> Bool {
         ownerIsCurrent && version > lastAcknowledgedVersion
     }

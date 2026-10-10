@@ -156,6 +156,13 @@ final class CoreBridge: ObservableObject {
         try await facade.setLibraryMembership(id: id, type: type, name: name, poster: poster, present: present,
                                               profileID: profile.uuidString, expectedAccountGeneration: epoch)
         guard nativePlaybackBinding(target)?.0 === facade else { throw VortxNativeError.superseded }
+        // Preserve the detail Library removal's provider mirror, but only after the native
+        // checkpoint acknowledged it and while this exact owner/profile still owns the gesture.
+        if !present {
+            ScrobbleCoordinator.shared.removedFromLibrary(
+                PlaybackMeta(libraryId: id, videoId: id, type: type, name: name,
+                             poster: poster, season: nil, episode: nil))
+        }
     }
     @MainActor
     func markNativeVideoWatched(_ video: CoreVideo, _ isWatched: Bool,
@@ -199,7 +206,7 @@ final class CoreBridge: ObservableObject {
                 // An admitted profile transaction owns the FIFO; do not replace its session.
                 await facade.settleNativeMutations()
             } else {
-                _ = await VortXSyncManager.shared.restoreNativeCheckpoint(credentialCapture: admission.credential)
+                _ = await VortXSyncManager.shared.restoreNativeCheckpoint(credentialCapture: admission.credential, userInitiated: true)
             }
         })
     }
