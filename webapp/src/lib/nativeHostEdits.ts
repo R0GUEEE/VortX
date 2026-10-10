@@ -11,7 +11,7 @@ export interface HostIntent {
 }
 const object = (value: unknown): Record<string, any> | null => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : null;
 const fail = (): never => { throw new Error("This account edit needs a compatible profile and a fresh sync receipt; intent remains queued."); };
-const actorOK = (actor: string): boolean => /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(actor);
+const actorOK = (actor: unknown): actor is string => typeof actor === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(actor);
 const clockOK = (clock: unknown): clock is number => typeof clock === "number" && Number.isSafeInteger(clock) && clock >= 0;
 const bytes = (value: string): number => new TextEncoder().encode(value).length;
 function canonical(value: unknown): string {

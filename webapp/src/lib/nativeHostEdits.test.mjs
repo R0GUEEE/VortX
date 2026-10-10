@@ -205,9 +205,13 @@ test("profile fencing rejects wrong scope, owner, binding, and protected or pend
 });
 test("register validation rejects malformed actors/clocks, overflow, equal-pair conflicts, and ambiguous peers", () => {
   assert.equal(HOST_MAX_CLOCK, Number.MAX_SAFE_INTEGER);
-  assert.throws(() => createHostIntent(target(), { autoplayTrailers: true }, false, "NOT-A-UUID"));
-  assert.throws(() => createHostIntent(target(), { autoplayTrailers: true }, false, LETTER_ACTOR.toUpperCase()));
-  assert.throws(() => createHostIntent(target(), { autoplayTrailers: true }, false, `${ACTOR} `));
+  const actorField = watchlistField("tt-actor", "movie");
+  for (const actor of ["NOT-A-UUID", LETTER_ACTOR.toUpperCase(), `${ACTOR} `, [ACTOR], { toString: () => ACTOR }]) {
+    assert.throws(() => createHostIntent(target(), { [actorField]: null }, false, actor), "actor must be a canonical UUID string, never a coercible value");
+  }
+  const corrupted = createHostIntent(target(), { [actorField]: null }, false, ACTOR);
+  corrupted.actor = [ACTOR];
+  assert.throws(() => applyHostIntent(syntheticDocument(), corrupted, 0), "a corrupted restored actor cannot become a mutation");
 
   const document = syntheticDocument();
   const initial = apply(document, { [hostSettingField("autoplayTrailers")]: true }, { global: true, profileId: OWNER, binding: OWNER_BINDING, counter: HOST_MAX_CLOCK - 1 });
