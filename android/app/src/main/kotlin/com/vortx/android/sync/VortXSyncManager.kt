@@ -1130,7 +1130,9 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
 
     /** Retry an unavailable/corrupt secure-session read without misclassifying it as sign-out. */
     fun retrySessionRestore() {
-        sessionOwnerSnapshot()
+        if (sessionOwnerSnapshot() is SessionOwnerSnapshot.Account) {
+            startRealtime()
+        }
     }
 
     /** Supplies a persisted session read for local recovery-path tests without weakening secure storage. */

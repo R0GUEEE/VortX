@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 import com.vortx.android.integrations.NativeProviderAccess
 import com.vortx.android.integrations.NativeProviderTestStore
 import com.vortx.android.profile.UserProfile
+import com.vortx.android.sync.VortXSyncManager.SessionUiState
 import java.lang.reflect.Proxy
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -122,6 +123,15 @@ class AndroidRealtimeSyncTest {
         fun settingsDirty(stamps: JSONObject) {
             check(context.getSharedPreferences("vortx_sync_dirty", 0).edit()
                 .putString("vortx.sync.dirtySettings.${account.id}", stamps.toString()).commit())
+        }
+        fun unavailableWithoutLiveSession() {
+            // Recreate the cold-launch null-session/unavailable state using persistence seams;
+            // no device secure store is read or changed by this fixture transition.
+            manager.installUnavailableSessionRestoreTestSeam(); manager.sessionOwnerSnapshot()
+            manager.installSessionRestoreTestSeam(null); manager.sessionOwnerSnapshot()
+            manager.installUnavailableSessionRestoreTestSeam()
+            check(manager.sessionOwnerSnapshot() is SessionOwnerSnapshot.UnknownOrUnavailable)
+            check(manager.currentSession() == null)
         }
         suspend fun close() { realtime.stop(); manager.cancelSyncTestWork(); NativeProviderAccess.unbindForTest() }
     }
@@ -413,6 +423,75 @@ class AndroidRealtimeSyncTest {
             f.manager.setRealtimeForeground(false); f.manager.startRealtime() // delayed auth completion
             advanceTimeBy(30_000); runCurrent(); assertEquals(2, f.gets); assertFalse(f.realtime.isActive())
             assertEquals(1, f.sockets.size)
+        } finally { f.close() }
+    }
+
+    @Test fun `foreground restore retry opens channel catches up and continues socket and polling receive`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.unavailableWithoutLiveSession()
+            f.manager.setRealtimeForeground(true); runCurrent()
+            assertFalse(f.realtime.isActive()); assertTrue(f.sockets.isEmpty()); assertEquals(0, f.gets)
+            f.version = 11; f.cloud.getJSONObject("nativeSync").getJSONObject("facts").put("while-unavailable", true)
+            f.manager.installSessionRestoreTestSeam(VortXSyncManager.Session("fixture-a", account, key))
+            f.manager.retrySessionRestore(); runCurrent()
+            assertEquals(SessionUiState.SignedIn(account), f.manager.sessionUiState.value)
+            assertTrue(f.realtime.isActive()); assertEquals(1, f.sockets.size); assertEquals(1, f.gets)
+            assertTrue(f.gateway.carrier.getJSONObject("facts").getBoolean("while-unavailable"))
+            assertEquals(11L, f.manager.lastAppliedVersion())
+            f.manager.retrySessionRestore(); runCurrent()
+            assertEquals(1, f.sockets.size); assertEquals(1, f.gets) // already-active retry is idempotent
+            f.version = 12; f.cloud.getJSONObject("nativeSync").getJSONObject("facts").put("socket-peer", true)
+            f.sockets.single().updated(12); runCurrent()
+            assertEquals(2, f.gets); assertTrue(f.gateway.carrier.getJSONObject("facts").getBoolean("socket-peer"))
+            f.version = 13; f.cloud.getJSONObject("nativeSync").getJSONObject("facts").put("missed-broadcast", true)
+            advanceTimeBy(3_001); runCurrent()
+            assertEquals(3, f.gets); assertEquals(13L, f.manager.lastAppliedVersion())
+            assertTrue(f.gateway.carrier.getJSONObject("facts").getBoolean("missed-broadcast"))
+            assertEquals(0, f.puts)
+        } finally { f.close() }
+    }
+
+    @Test fun `background restore retry stays socketless until foreground returns`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.unavailableWithoutLiveSession()
+            f.manager.setRealtimeForeground(true); f.manager.setRealtimeForeground(false)
+            f.manager.installSessionRestoreTestSeam(VortXSyncManager.Session("fixture-a", account, key))
+            f.manager.retrySessionRestore(); runCurrent(); advanceTimeBy(10_000); runCurrent()
+            assertEquals(SessionUiState.SignedIn(account), f.manager.sessionUiState.value)
+            assertFalse(f.realtime.isActive()); assertTrue(f.sockets.isEmpty()); assertEquals(0, f.gets)
+            f.manager.setRealtimeForeground(true); runCurrent()
+            assertTrue(f.realtime.isActive()); assertEquals(1, f.sockets.size); assertEquals(1, f.gets)
+        } finally { f.close() }
+    }
+
+    @Test fun `unavailable and signed out restore retries cannot open foreground channel`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.unavailableWithoutLiveSession()
+            f.manager.setRealtimeForeground(true); f.manager.retrySessionRestore(); runCurrent()
+            assertEquals(SessionUiState.UnknownOrUnavailable, f.manager.sessionUiState.value)
+            assertFalse(f.realtime.isActive()); assertTrue(f.sockets.isEmpty()); assertEquals(0, f.gets)
+            f.manager.installSessionRestoreTestSeam(null)
+            f.manager.retrySessionRestore(); advanceTimeBy(10_000); runCurrent()
+            assertEquals(SessionUiState.SignedOut, f.manager.sessionUiState.value)
+            assertFalse(f.realtime.isActive()); assertTrue(f.sockets.isEmpty()); assertEquals(0, f.gets)
+        } finally { f.close() }
+    }
+
+    @Test fun `restored foreground channel cannot deliver queued work after account replacement`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.unavailableWithoutLiveSession(); f.manager.setRealtimeForeground(true)
+            f.manager.installSessionRestoreTestSeam(VortXSyncManager.Session("fixture-a", account, key))
+            f.manager.retrySessionRestore()
+            val old = f.sockets.single()
+            val b = account.copy(id = "00000000-0000-0000-0000-000000000999")
+            f.manager.replaceSyncSessionTestSeam(VortXSyncManager.Session("fixture-b", b, key))
+            old.updated(11); runCurrent(); advanceTimeBy(6_001); runCurrent()
+            assertEquals(0, f.gets); assertEquals(0, f.gateway.applied); assertEquals(0L, f.manager.lastAppliedVersion())
+            assertTrue(f.tokens.isEmpty())
         } finally { f.close() }
     }
 
