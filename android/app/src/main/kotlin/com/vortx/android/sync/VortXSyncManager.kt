@@ -2003,15 +2003,18 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         suspend fun derived(): DerivedBackup? {
             var globals = JSONObject()
             if (!publishIfSyncLeaseCurrent(lease) {
-                pushedStamps = readDirtySettings().toMap()
                 val values = currentSyncableDomain()
+                // A retained legacy/profile stamp is not a global register. Keep it in the
+                // durable dirty map, but do not let it block unrelated native edits or receiving.
+                // Only this exact exportable subset may be acknowledged after the PUT succeeds.
+                pushedStamps = readDirtySettings().filterKeys { field ->
+                    field in SettingsBackup.SYNCABLE_SETTING_TYPES && field !in NATIVE_PROFILE_SETTING_KEYS &&
+                        (!settingsPrefs.contains(field) || values.containsKey(field))
+                }
                 globals = JSONObject().also { target -> pushedStamps.keys.forEach { field ->
-                    require(!settingsPrefs.contains(field) || values.containsKey(field)) { "Unsupported native setting value" }
                     target.put(field, values[field]?.let(JSONObject::wrap) ?: JSONObject.NULL)
                 } }
             }) return null
-            // Unknown/platform-only dirty keys cannot be guessed into the shared carrier.
-            if (pushedStamps.keys.any { it !in SettingsBackup.SYNCABLE_SETTING_TYPES || it in NATIVE_PROFILE_SETTING_KEYS }) return null
             val pulled = pullSyncDocResult(lease)
             val seed = pulled == SyncDocPull.Empty
             val baseVersion = (pulled as? SyncDocPull.Doc)?.version

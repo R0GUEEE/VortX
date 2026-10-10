@@ -64,6 +64,12 @@ class AndroidRealtimeSyncTest {
             JSONObject(carrier.toString()), listOf(UserProfile(id = UserProfile.OWNER_ID, name = "Fixture", avatar = "star", isOwner = true)),
             0.0, hostPreferences = host)
         override fun acknowledgeHostPreferences(account: SessionOwnerSnapshot.Account, document: JSONObject): Boolean = !ackFails
+        override fun recordGlobalPreferences(account: SessionOwnerSnapshot.Account, changes: JSONObject): Boolean {
+            val fields = host?.getJSONObject("globals")?.getJSONObject("fields") ?: JSONObject()
+            changes.keys().forEach { fields.put(it, JSONObject().put("value", changes.get(it))) }
+            host = JSONObject().put("globals", JSONObject().put("fields", fields))
+            return true
+        }
         override suspend fun prepareEmptyAccount(account: SessionOwnerSnapshot.Account, isCurrent: () -> Boolean) = document()
     }
 
@@ -111,6 +117,12 @@ class AndroidRealtimeSyncTest {
             manager.onLocalNativeMutation(SessionOwnerSnapshot.Account(account.id, 1))
         }
         fun dirty() = context.getSharedPreferences("vortx_sync_state", 0).getBoolean("pendingPush.${account.id}", false)
+        fun settingsDirty() = JSONObject(context.getSharedPreferences("vortx_sync_dirty", 0)
+            .getString("vortx.sync.dirtySettings.${account.id}", "{}")!!)
+        fun settingsDirty(stamps: JSONObject) {
+            check(context.getSharedPreferences("vortx_sync_dirty", 0).edit()
+                .putString("vortx.sync.dirtySettings.${account.id}", stamps.toString()).commit())
+        }
         suspend fun close() { realtime.stop(); manager.cancelSyncTestWork(); NativeProviderAccess.unbindForTest() }
     }
 
@@ -152,6 +164,85 @@ class AndroidRealtimeSyncTest {
             assertEquals(1, second.puts); assertFalse(second.dirty())
             assertTrue(second.cloud.getJSONObject("nativeSync").getJSONObject("facts").getBoolean("persisted"))
         } finally { second.close() }
+    }
+
+    @Test fun `retained unsupported settings cannot starve native worker after restart or subsequent receiving`() = test {
+        val context = MemoryContext()
+        val retained = JSONObject().put("stremiox.theme.oled", 123.25).put("stremiox.audioLang", 124.5)
+            .put("stremiox.autoSkipDelaySeconds", 125.75)
+        // A known key with an unsupported stored type is not an intentional deletion.
+        context.getSharedPreferences("vortx_settings", 0).edit().putString("stremiox.autoSkipDelaySeconds", "invalid").commit()
+        val first = Fixture(testScheduler, context)
+        try {
+            first.settingsDirty(retained); first.putFails = true; first.edit("library-edit")
+            runCurrent(); advanceTimeBy(2_501); runCurrent()
+            assertEquals(1, first.puts); assertTrue(first.dirty())
+            assertEquals(retained.toString(), first.settingsDirty().toString())
+        } finally { first.close() }
+        val second = Fixture(testScheduler, context)
+        try {
+            second.gateway.carrier = native(JSONObject().put("library-edit", true))
+            second.manager.setRealtimeForeground(true); runCurrent()
+            advanceTimeBy(2_501); runCurrent()
+            assertEquals(1, second.puts); assertFalse(second.dirty())
+            assertTrue(second.cloud.getJSONObject("nativeSync").getJSONObject("facts").getBoolean("library-edit"))
+            assertEquals(retained.toString(), second.settingsDirty().toString())
+            assertFalse(second.cloud.has("nativeHostPreferences"))
+            second.version++
+            second.cloud.getJSONObject("nativeSync").getJSONObject("facts").put("peer-after-upload", true)
+            advanceTimeBy(3_001); runCurrent()
+            assertTrue(second.gateway.carrier.getJSONObject("facts").getBoolean("peer-after-upload"))
+            assertEquals(second.version, second.manager.lastAppliedVersion())
+            assertEquals(1, second.puts); assertFalse(second.dirty())
+            assertEquals(retained.toString(), second.settingsDirty().toString())
+        } finally { second.close() }
+    }
+
+    @Test fun `filtered global acknowledgement preserves newer edit and profile stamp during PUT`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.context.getSharedPreferences("vortx_settings", 0).edit().putBoolean("stremiox.autoSkip", true).commit()
+            f.settingsDirty(JSONObject().put("stremiox.theme.oled", 123.25).put("stremiox.autoSkip", 124.5))
+            f.edit("library-before")
+            f.beforePut = {
+                f.beforePut = null
+                f.context.getSharedPreferences("vortx_settings", 0).edit().putBoolean("stremiox.autoSkip", false).commit()
+                f.settingsDirty(f.settingsDirty().put("stremiox.autoSkip", 126.75))
+                f.edit("library-during")
+            }
+            runCurrent(); advanceTimeBy(2_501); runCurrent()
+            assertEquals(1, f.puts); assertTrue(f.dirty())
+            assertTrue(f.cloud.getJSONObject("nativeHostPreferences").getJSONObject("globals").getJSONObject("fields")
+                .getJSONObject("stremiox.autoSkip").getBoolean("value"))
+            assertEquals(126.75, f.settingsDirty().getDouble("stremiox.autoSkip"), 0.0)
+            advanceTimeBy(2_500); runCurrent()
+            assertEquals(2, f.puts); assertFalse(f.dirty())
+            assertFalse(f.cloud.getJSONObject("nativeHostPreferences").getJSONObject("globals").getJSONObject("fields")
+                .getJSONObject("stremiox.autoSkip").getBoolean("value"))
+            assertTrue(f.cloud.getJSONObject("nativeSync").getJSONObject("facts").getBoolean("library-during"))
+            assertEquals(setOf("stremiox.theme.oled"), f.settingsDirty().keys().asSequence().toSet())
+            assertEquals(123.25, f.settingsDirty().getDouble("stremiox.theme.oled"), 0.0)
+        } finally { f.close() }
+    }
+
+    @Test fun `account replacement while filtered upload waits cannot clear either account intent`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.context.getSharedPreferences("vortx_settings", 0).edit().putBoolean("stremiox.autoSkip", true).commit()
+            val retained = JSONObject().put("stremiox.theme.oled", 123.25).put("stremiox.autoSkip", 124.5)
+            f.settingsDirty(retained); f.edit("library-a")
+            f.getGate = CompletableDeferred()
+            runCurrent(); advanceTimeBy(2_501); runCurrent(); assertEquals(1, f.gets)
+            val b = account.copy(id = "00000000-0000-0000-0000-000000000999")
+            val otherKey = "vortx.sync.dirtySettings.${b.id}"
+            f.context.getSharedPreferences("vortx_sync_dirty", 0).edit().putString(otherKey, "{\"stremiox.autoSkip\":999}").commit()
+            f.manager.replaceSyncSessionTestSeam(VortXSyncManager.Session("fixture-b", b, key))
+            f.getGate!!.complete(Unit); runCurrent()
+            assertEquals(0, f.puts)
+            assertEquals(retained.toString(), f.settingsDirty().toString())
+            assertEquals("{\"stremiox.autoSkip\":999}", f.context.getSharedPreferences("vortx_sync_dirty", 0).getString(otherKey, null))
+            assertTrue(f.dirty())
+        } finally { f.close() }
     }
 
     @Test fun `failed native apply and failed host receipt do not advance revision`() = test {
