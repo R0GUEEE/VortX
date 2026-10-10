@@ -4,12 +4,21 @@ cd "$(dirname "$0")/.."
 source scripts/native-watched-swift-inputs.sh
 mkdir -p app/build
 persistence_test_dir=$(mktemp -d "$PWD/app/build/native-persistence.XXXXXX")
+persistence_sdk_args=()
+persistence_link_args=()
+if [[ -n "${VORTX_NATIVE_PERSISTENCE_SDK:-}" ]]; then
+    persistence_sdk_library="$VORTX_NATIVE_PERSISTENCE_SDK/libvortx_ffi.a"
+    persistence_sdk_hash=$(shasum -a 256 "$persistence_sdk_library" | awk '{print $1}')
+    persistence_sdk_args=(-D VORTX_ENGINE_STATE_BRIDGE -D VORTX_ENGINE_RESOURCE_HOST -D VORTX_NATIVE_DATA_ENGINE -I "$VORTX_NATIVE_PERSISTENCE_SDK/Headers/vortx")
+    persistence_link_args=("$persistence_sdk_library" -framework Security -framework SystemConfiguration)
+fi
 sed -n '1,/^\/\/\/ The profile roster and the active selection\./{ /^\/\/\/ The profile roster and the active selection\./!p; }' app/SourcesShared/Profiles.swift > "$persistence_test_dir/UserProfile.swift"
 {
     printf '%s\n' 'import Foundation'
     sed -n '/^struct ProfileDiscoveryPreferences: /,/^}$/p' app/SourcesShared/ProfileDiscoveryPreferences.swift
 } > "$persistence_test_dir/Discovery.swift"
 xcrun swiftc -swift-version 6 -parse-as-library -strict-concurrency=complete -warnings-as-errors \
+    "${persistence_sdk_args[@]}" \
     app/SourcesShared/VortxNativeRuntime.swift app/SourcesShared/VortxResourceBridge.swift \
     app/SourcesShared/VortxResourceProjection.swift app/SourcesShared/VortxNativeBootstrapArchive.swift \
     app/SourcesShared/VortxNativeHostPreferences.swift "${native_watched_swift_inputs[@]}" \
@@ -17,7 +26,7 @@ xcrun swiftc -swift-version 6 -parse-as-library -strict-concurrency=complete -wa
     app/SourcesShared/VortxProfileOverlayWitness.swift "$persistence_test_dir/UserProfile.swift" \
     "$persistence_test_dir/Discovery.swift" app/SourcesShared/ProfileAddonPreferences.swift \
     app/SourcesShared/VortxNativeProviderCredentials.swift app/SourcesShared/VortxNativeProfileEditHost.swift \
-    app/Tests/VortxNativeSessionTests.swift -o "$persistence_test_dir/native-session"
+    app/Tests/VortxNativeSessionTests.swift "${persistence_link_args[@]}" -o "$persistence_test_dir/native-session"
 "$persistence_test_dir/native-session" "$persistence_test_dir"
 node --input-type=module <<'JS'
 import fs from 'node:fs';
@@ -34,3 +43,7 @@ for (const name of ['settleResidentNativeSession', 'prepareNativeProfileActionTa
 console.log('Board snapshot: one decode per rebuild; profile admission: native FIFO only PASS');
 JS
 printf 'Retained synthetic receipts: %s\n' "$persistence_test_dir"
+if [[ -n "${VORTX_NATIVE_PERSISTENCE_SDK:-}" ]]; then
+    test "$persistence_sdk_hash" = "$(shasum -a 256 "$persistence_sdk_library" | awk '{print $1}')"
+    printf 'Unchanged packaged SDK library SHA256: %s\n' "$persistence_sdk_hash"
+fi

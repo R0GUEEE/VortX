@@ -115,7 +115,15 @@ struct VortxAccountScope: Codable, Hashable, Sendable {
         guard case .object(let libraries) = before["libraries"] else { throw VortxNativeError.invalidSnapshot }
         for (profile, library) in libraries {
             if let context = library["watchContexts"] {
-                guard context == after["libraries"]?[profile]?["watchContexts"] else { throw VortxNativeError.invalidSnapshot }
+                let hydrated = after["libraries"]?[profile]?["watchContexts"]
+                if case .object(let retained) = context, case .object(let projected)? = hydrated {
+                    // The unchanged nativeSync authority can synthesize a missing context during
+                    // hydration. Additions are lossless; every previously sealed entry must still
+                    // survive exactly, including metadata and duration, before mounting/committing.
+                    guard retained.allSatisfy({ projected[$0.key] == $0.value }) else { throw VortxNativeError.invalidSnapshot }
+                } else {
+                    guard context == hydrated else { throw VortxNativeError.invalidSnapshot }
+                }
             }
         }
     }

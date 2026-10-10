@@ -609,7 +609,76 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         }
         print("Checkpoint recovery: Library/Watched ACK gates, FIFO settlement, failure before/after install, readable uncertified state, authoritative reopen and redacted diagnostics passed")
     }
+    static func hydrationPreservationTests() throws {
+        let scope = VortxAccountScope(account: "synthetic-hydration", ownerProfileID: "owner")
+        let context: VortxJSON = .object(["name": .string("Retained"), "durationMs": .integer(123456)])
+        let original: [String: VortxJSON] = [
+            "roster": .object(["profiles": .object(["owner": .object(["id": .string("owner"), "owner": .bool(true)])])]),
+            "activeProfileId": .string("owner"),
+            "libraries": .object(["owner": .object(["watchContexts": .object(["retained": context])])]),
+            "nativeSync": .object(["schemaVersion": .integer(5), "scope": .string(scope.account), "ownerProfileId": .string("owner")])]
+        func raw(_ value: VortxJSON) throws -> String { String(decoding: try JSONEncoder().encode(value), as: UTF8.self) }
+        let before = try raw(.object(original))
+        try scope.validateHydration(from: before, to: before)
+        var addition = original
+        addition["libraries"] = .object(["owner": .object(["watchContexts": .object(["retained": context, "derived": context])])])
+        try scope.validateHydration(from: before, to: raw(.object(addition)))
+        var failures: [VortxJSON] = []
+        for contexts: VortxJSON in [.object([:]), .object(["retained": .object(["name": .string("Changed"), "durationMs": .integer(123456)])]),
+                                    .object(["retained": .object(["name": .string("Retained"), "durationMs": .integer(1)])]), .null] {
+            var changed = original; changed["libraries"] = .object(["owner": .object(["watchContexts": contexts])]); failures.append(.object(changed))
+        }
+        var missing = original; missing["libraries"] = .object(["owner": .object([:])]); failures.append(.object(missing))
+        var changedAuthority = addition
+        changedAuthority["nativeSync"] = .object(["schemaVersion": .integer(4), "scope": .string(scope.account), "ownerProfileId": .string("owner")])
+        failures.append(.object(changedAuthority))
+        for value in failures {
+            do { try scope.validateHydration(from: before, to: raw(value)); check(false) }
+            catch VortxNativeError.invalidSnapshot {}
+        }
+        print("Hydration preservation: derived additions accepted; deletion, name/duration changes, null/missing contexts and changed native authority rejected")
+    }
+#if canImport(VortxEngine) && VORTX_ENGINE_STATE_BRIDGE
+    static func liveHydrationPreservationTests() throws {
+        let scope = VortxAccountScope(account: "synthetic-live-hydration", ownerProfileID: "10000000-0000-0000-0000-000000000123")
+        let runtime = try VortxNativeRuntime(abi: VortxCABI(), ownerID: scope.ownerProfileID, ownerName: "Synthetic")
+        defer { runtime.close() }
+        func raw(_ value: VortxJSON) throws -> String { String(decoding: try JSONEncoder().encode(value), as: UTF8.self) }
+        func dispatch(_ action: VortxJSON) throws {
+            let result = try JSONDecoder().decode(VortxJSON.self, from: Data(runtime.dispatch(raw(action), now: 1000).utf8))
+            check(result["ok"] == .bool(true))
+        }
+        try dispatch(.object(["type": .string("bind_sync_scope"), "scope": .string(scope.account)]))
+        for id in ["retained", "derived"] {
+            try dispatch(.object(["type": .string("report_progress"), "metaId": .string(id), "name": .string("Synthetic"),
+                "positionMs": .integer(2000), "durationMs": .integer(120000), "metadata": .object(["type": .string("movie")])]))
+        }
+        let complete = try scope.validateSnapshot(runtime.stateJSON())
+        var captured = try complete.decode([String: VortxJSON].self)
+        var library = try complete["libraries"]![scope.ownerProfileID]!.decode([String: VortxJSON].self)
+        var contexts = try library["watchContexts"]!.decode([String: VortxJSON].self)
+        check(contexts.count == 2 && contexts.removeValue(forKey: "derived") != nil)
+        library["watchContexts"] = .object(contexts)
+        var libraries = try complete["libraries"]!.decode([String: VortxJSON].self)
+        libraries[scope.ownerProfileID] = .object(library); captured["libraries"] = .object(libraries)
+        let original = try raw(.object(captured))
+        let reopened = try VortxNativeRuntime(abi: VortxCABI(), snapshot: original)
+        defer { reopened.close() }
+        let hydrated = try reopened.stateJSON(), restored = try scope.validateSnapshot(hydrated)
+        check(captured["nativeSync"] == restored["nativeSync"])
+        check(restored["libraries"]?[scope.ownerProfileID]?["watchContexts"] == complete["libraries"]?[scope.ownerProfileID]?["watchContexts"])
+        check(captured["libraries"]?[scope.ownerProfileID]?["watchContexts"] != restored["libraries"]?[scope.ownerProfileID]?["watchContexts"])
+        try scope.validateHydration(from: original, to: hydrated)
+        check(try VortxNativeSession.authenticatedAccountSync(scope: scope, ownerName: "Synthetic", snapshot: original,
+            nativeSync: nil, abi: VortxCABI()) == complete["nativeSync"])
+        print("Actual packaged ABI hydration: unchanged native authority reconstitutes one derived context while preserving the retained context exactly; authenticated preparation passes")
+    }
+#endif
     static func main() async throws {
+        try hydrationPreservationTests()
+#if canImport(VortxEngine) && VORTX_ENGINE_STATE_BRIDGE
+        try liveHydrationPreservationTests()
+#endif
         try await checkpointRecoveryTests()
         try await detailFanoutTests()
         try await catalogFanoutTests()
