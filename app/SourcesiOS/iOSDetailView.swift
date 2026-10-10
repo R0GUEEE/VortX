@@ -852,7 +852,9 @@ struct iOSDetailView: View {
         #endif
     }
 
-    var body: some View {
+    // Opaque view boundaries keep the scene, lifecycle and presentation chains independently
+    // type-checkable without changing their modifier order or view identity.
+    private var detailScene: some View {
         // A GeometryReader gives us the EXACT viewport width to HARD-cap the content column with
         // `.frame(width:)`. `maxWidth: .infinity` only sets an upper bound; it does not stop a child
         // whose intrinsic width exceeds the screen (the hero's single-line metaRow / action button row on
@@ -1033,6 +1035,10 @@ struct iOSDetailView: View {
             PersonView(personID: t.id, name: t.name, profileURL: t.profileURL)
         }
         #endif
+    }
+
+    private var detailLifecycle: some View {
+        detailScene
         // Guard the meta load: the shared CoreBridge already holds this title's meta on an A -> back -> A
         // revisit, so re-loading it churns the engine and momentarily blanks the hero for no reason.
         .onAppear {
@@ -1153,6 +1159,10 @@ struct iOSDetailView: View {
         // than blocking the open on a network call. Internally throttled, opt-in gated, and a no-op when
         // Trakt is unconfigured or disconnected, so this costs nothing for everyone else.
         .onAppear { TraktPlaybackShadow.shared.refreshIfStale() }
+    }
+
+    var body: some View {
+        detailLifecycle
         .alert("NZB playback", isPresented: Binding(
             get: { usenetPlaybackMessage != nil },
             set: { if !$0 { usenetPlaybackMessage = nil } }
