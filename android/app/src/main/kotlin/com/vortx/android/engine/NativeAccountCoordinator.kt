@@ -4,6 +4,7 @@ import com.vortx.android.backup.SettingsBackup
 import com.vortx.android.profile.UserProfile
 import com.vortx.android.sync.NativeAccountGateway
 import com.vortx.android.sync.NativeAccountExport
+import com.vortx.android.sync.NativeAccountMountToken
 import com.vortx.android.sync.SessionOwnerSnapshot
 import com.vortx.android.sync.VortXSyncDoc
 import java.util.UUID
@@ -259,6 +260,13 @@ internal class NativeAccountCoordinator(
         if (old != null) {
             dispose { old.session.close(); retired.remove(old.session) }
         }
+    }
+
+    override fun currentMountToken(account: SessionOwnerSnapshot.Account): NativeAccountMountToken? {
+        val current = mounted.get()?.takeIf { it.account == account && accountCurrent(account) } ?: return null
+        if (current.session.requiresRecovery()) return null
+        val revision = current.session.updates.value
+        return if (mounted.get() === current && accountCurrent(account)) NativeAccountMountToken(current, revision) else null
     }
 
     override suspend fun reopenCheckpoint(account: SessionOwnerSnapshot.Account, isCurrent: () -> Boolean): Boolean = mutex.withLock {

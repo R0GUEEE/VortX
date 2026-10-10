@@ -57,13 +57,14 @@ if (process.argv[2] === '--extract') {
     source('app/SourcesShared/CoreModels.swift'), source('app/SourcesShared/StremioAccount.swift'),
     source('app/SourcesShared/CatalogPreferences.swift'), source('app/SourcesShared/HomeRailPreferences.swift')]);
   const managerMethods = ['    private static func sawDocV2(', '    private static func markSawDocV2(',
+    '    private func conditionalReceiveVersion(', '    private func rememberCompletedNativeReceive(',
     '    private func openSyncDocument(', '    private static func decodeDecryptedSyncDocument(', '    private static func documentVersion(',
     '    private func pullDocVersionedResult(', '    private func pullDocVersionedRetrying(',
     '    private func pushSyncDocAt(', '    private func commitNativePulledDocument(', '    private func applyNativeGlobals(',
     '    static func ownedAddons(', '    func syncDown(', '    private func handle(', '    private func startPoll()'];
   let combined = await readFile('app/Tests/AppleSyncReceivePublicationPeer.swift', 'utf8');
   combined += '\nextension VortXSyncManager {\n'
-    + ['    private enum VersionedPull ', '    private enum PushOutcome ', '    private struct PendingDebridApply:',
+    + ['    private struct NativeReceiveReceipt {', '    private enum VersionedPull ', '    private enum PushOutcome ', '    private struct PendingDebridApply:',
       '    private enum ProviderApplyService:', '    private enum ProviderApplyValue:', '    private struct PendingProviderApply:']
       .map(marker => member(manager, marker)).join('\n')
     + '\n' + managerMethods.map(marker => member(manager, marker)).join('\n')
@@ -126,11 +127,19 @@ const [binary, root] = process.argv.slice(2);
 const run = promisify(execFile);
 let stored = null;
 const wire = [];
+let conditionalReply = 'normal';
 const server = createServer(async (req, res) => {
   assert.equal(req.url, '/v1/backup'); assert.equal(req.headers.authorization, 'Bearer synthetic-fixture-only');
   res.setHeader('content-type', 'application/json');
   if (req.method === 'GET') {
-    wire.push({ method: 'GET', version: stored?.version });
+    const validator = req.headers['if-none-match'] ?? null;
+    const tag = stored ? `"${stored.version}"` : null;
+    const unchanged = stored && (validator === tag || conditionalReply === 'unsolicited');
+    wire.push({ method: 'GET', version: stored?.version, validator, status: unchanged ? 304 : stored ? 200 : 404 });
+    if (unchanged) {
+      if (conditionalReply !== 'missing') res.setHeader('ETag', conditionalReply === 'weak' ? `W/${tag}` : conditionalReply === 'wrong' ? '"999"' : tag);
+      res.statusCode = 304; res.end(); return;
+    }
     res.statusCode = stored ? 200 : 404; res.end(JSON.stringify(stored ?? {})); return;
   }
   assert.equal(req.method, 'PUT');
@@ -151,9 +160,9 @@ async function peer(name, mode, extra = {}, directoryName = name) {
   const { stdout } = await run(binary, [command], { maxBuffer: 8 * 1024 * 1024, timeout: 45_000 });
   const result = JSON.parse(stdout); await writeFile(join(root, `${name}-result.json`), JSON.stringify(result, null, 2)); return result;
 }
-async function warmReceiver() {
-  const directory = join(root, 'sequence-b'); await mkdir(directory);
-  const command = join(root, 'sequence-b.json'); await writeFile(command, JSON.stringify({ mode: 'receive-sequence', directory, baseURL }));
+async function warmReceiver(name = 'sequence-b') {
+  const directory = join(root, name); await mkdir(directory);
+  const command = join(root, `${name}.json`); await writeFile(command, JSON.stringify({ mode: 'receive-sequence', directory, baseURL }));
   const child = spawn(binary, [command], { stdio: ['pipe', 'pipe', 'pipe'] });
   const lines = []; const waiters = []; let failure = null; let stderr = '';
   const reader = createInterface({ input: child.stdout });
@@ -293,9 +302,77 @@ try {
       'revision sequence uses four ordinary encrypted uploads and five actual manager pulls');
     await receiver.close();
   } catch (error) { receiver.abort(); throw error; }
+  const sequenceWire = [...wire];
+  stored = null; wire.length = 0;
+  await peer('conditional-a-v11', 'upload-sequence', { stage: 1, version: 11 }, 'conditional-a');
+  const conditional = await warmReceiver('conditional-b');
+  const conditionalResults = [];
+  async function receiveConditional(instruction = 'conditional') {
+    const value = await conditional.send(instruction); conditionalResults.push({ instruction, ...value });
+    await writeFile(join(root, 'conditional-results.json'), JSON.stringify({ wire, conditionalResults }, null, 2));
+    return value;
+  }
+  try {
+    conditionalReply = 'unsolicited';
+    const refused = await receiveConditional();
+    check(refused.outcome === 'failed' && refused.version === 0 && wire.at(-1).validator === null,
+      'unsolicited 304 cannot bootstrap first restore or acknowledge a document');
+    conditionalReply = 'normal';
+    await conditional.send('persisted-highwater');
+    let full = await receiveConditional();
+    check(full.version === 11 && full.outcome === 'completed' && full.stamped === 1 && full.historyReceipts > 0
+      && full.selection[0].offset === 234000 && wire.at(-1).validator === null,
+      'persisted equal revision without completed mount receipt fully decrypts, commits and publishes');
+    let unchanged = await receiveConditional();
+    check(wire.at(-1).status === 304 && wire.at(-1).validator === '"11"' && unchanged.outcome === 'completed',
+      'routine receive sends exact completed revision and admits matching bodyless 304');
+    check(unchanged.stamped === full.stamped && unchanged.historyReceipts === full.historyReceipts && unchanged.accountGeneration === full.accountGeneration
+      && JSON.stringify(unchanged.selection) === JSON.stringify(full.selection),
+      '304 skips native merge and visible publication without advancing success stamp or changing episode state');
+    for (const bad of ['weak', 'wrong', 'missing']) {
+      conditionalReply = bad;
+      const invalid = await receiveConditional();
+      check(invalid.outcome === 'failed' && invalid.stamped === unchanged.stamped, `${bad} ETag cannot acknowledge unchanged response`);
+      conditionalReply = 'normal';
+      full = await receiveConditional();
+      check(wire.at(-1).validator === null && full.outcome === 'completed', `${bad} ETag invalidates receipt and next receive fully fetches/applies`);
+      unchanged = await receiveConditional();
+    }
+    for (const instruction of ['forced', 'pending-apply', 'replace-mount']) {
+      full = await receiveConditional(instruction);
+      check(wire.at(-1).validator === null && wire.at(-1).status === 200, `${instruction} takes full GET despite remembered revision`);
+      await receiveConditional();
+    }
+    const failedApply = await receiveConditional('fail-prepare');
+    check(failedApply.outcome === 'failed' && wire.at(-1).validator === null, 'failed native prepare cannot create completed receive receipt');
+    full = await receiveConditional();
+    check(full.outcome === 'completed' && wire.at(-1).validator === null, 'retry after failed native prepare performs full fetch');
+    const replacedBeforeAck = await receiveConditional('mount-before-ack');
+    check(replacedBeforeAck.outcome === 'failed' && replacedBeforeAck.stamped === full.stamped,
+      'mount replaced after native commit cannot acknowledge old-mount publication or mint a receive receipt');
+    full = await receiveConditional();
+    check(full.outcome === 'completed' && wire.at(-1).validator === null, 'post-publication replacement requires a complete receive on current mount');
+    for (const instruction of ['mount-during', 'aba-during']) {
+      const invalid = await receiveConditional(instruction);
+      check(invalid.outcome === 'failed' && wire.at(-1).status === 304, `${instruction} rejects delayed 304 against retired receipt`);
+      full = await receiveConditional();
+      check(full.outcome === 'completed' && wire.at(-1).validator === null, `${instruction} replacement takes full receive before reusing a validator`);
+    }
+    const pending = await receiveConditional('pending-during');
+    check(pending.outcome === 'failed' && pending.pendingPush && wire.at(-1).status === 304,
+      'local edit arriving during 304 stays pending and prevents completion');
+    await conditional.send('clear-pending');
+    full = await receiveConditional();
+    check(wire.at(-1).validator === null && full.outcome === 'completed', 'cleared transport pending state still needs a full completed receive');
+    await peer('conditional-a-v12', 'upload-sequence', { stage: 2, version: 12 }, 'conditional-a');
+    const newer = await receiveConditional();
+    check(wire.at(-1).validator === '"11"' && wire.at(-1).status === 200 && newer.version === 12
+      && newer.selection[0].offset === 678000 && newer.outcome === 'completed', 'newer 200 still decrypts, commits and publishes exact peer progress');
+    await conditional.close();
+  } catch (error) { conditional.abort(); throw error; }
   const baselineChecks = baseline.checks;
   await writeFile(join(root, 'receipt.json'), JSON.stringify({ result: 'PASS', checks, baselineChecks, extendedChecks: checks - baselineChecks,
-    baseline, wire, revisions, stale, receiverActor: receiver.ready.actor,
+    baseline, wire: sequenceWire, conditionalWire: wire, conditionalResults, revisions, stale, receiverActor: receiver.ready.actor,
     binarySHA256: sha256(await readFile(binary)), limits: ['macOS static C ABI and extracted Apple source',
       'ProfileStore sink invokes actual discovery apply but excludes full dirty/quarantine admission and rendered catalog board resource content',
       'Exact updated handler and poll bodies run with a shortened injected poll interval; upload-busy and queue-drained flags are fixture inputs, independently proved by manager upload tests',

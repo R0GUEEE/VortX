@@ -21,7 +21,7 @@ if (process.argv[2] === '--extract') {
     const end = source.indexOf('\n    }', start); assert(end > start);
     return [source.slice(start, end + 6)];
   });
-  selected.push('private enum VersionedPull { case doc(doc: [String: Any], version: Int); case empty; case failed(retryable: Bool) }',
+  selected.push(source.match(/^    private enum VersionedPull .*$/m)[0],
     'private enum PushOutcome { case accepted(version: Int); case rejected(storedVersion: Int?); case error }');
   const profiles = await readFile('app/SourcesShared/Profiles.swift', 'utf8');
   const preferenceFixture = await readFile('app/Tests/NativePreferenceAcknowledgementTests.swift', 'utf8');

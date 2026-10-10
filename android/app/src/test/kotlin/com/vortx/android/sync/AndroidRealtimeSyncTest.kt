@@ -37,6 +37,12 @@ class AndroidRealtimeSyncTest {
     private inner class Gateway : NativeAccountGateway {
         var carrier = native()
         var applied = 0
+        var exports = 0
+        var reopens = 0
+        var mount = Any()
+        var mountRevision = 0L
+        var provideMountToken = true
+        var afterExport: (() -> Unit)? = null
         var reopenFails = false
         var applyFails = false
         var ackFails = false
@@ -45,8 +51,10 @@ class AndroidRealtimeSyncTest {
         var applyGate: CompletableDeferred<Unit>? = null
         var applyEntered: CompletableDeferred<Unit>? = null
         override fun retire() {}
+        override fun currentMountToken(account: SessionOwnerSnapshot.Account) =
+            if (reopenFails || !provideMountToken) null else NativeAccountMountToken(mount, mountRevision)
         override suspend fun reopenCheckpoint(account: SessionOwnerSnapshot.Account, isCurrent: () -> Boolean): Boolean {
-            check(isCurrent()); if (reopenFails) error("checkpoint unavailable"); return true
+            reopens++; check(isCurrent()); if (reopenFails) error("checkpoint unavailable"); return true
         }
         override suspend fun applyDocument(account: SessionOwnerSnapshot.Account, document: JSONObject, isCurrent: () -> Boolean): Boolean {
             applied++; applyEntered?.complete(Unit); applyGate?.await()
@@ -61,9 +69,14 @@ class AndroidRealtimeSyncTest {
             }
             return true
         }
-        override fun exportDocument(account: SessionOwnerSnapshot.Account): NativeAccountExport? = if (exportFails) null else NativeAccountExport(
+        override fun exportDocument(account: SessionOwnerSnapshot.Account): NativeAccountExport? {
+            exports++
+            val result = if (exportFails) null else NativeAccountExport(
             JSONObject(carrier.toString()), listOf(UserProfile(id = UserProfile.OWNER_ID, name = "Fixture", avatar = "star", isOwner = true)),
             0.0, hostPreferences = host)
+            afterExport?.invoke()
+            return result
+        }
         override fun acknowledgeHostPreferences(account: SessionOwnerSnapshot.Account, document: JSONObject): Boolean = !ackFails
         override fun recordGlobalPreferences(account: SessionOwnerSnapshot.Account, changes: JSONObject): Boolean {
             val fields = host?.getJSONObject("globals")?.getJSONObject("fields") ?: JSONObject()
@@ -89,6 +102,10 @@ class AndroidRealtimeSyncTest {
         var getGate: CompletableDeferred<Unit>? = null
         val tokens = mutableListOf<String?>()
         val sockets = mutableListOf<Socket>()
+        val validators = mutableListOf<String?>()
+        var replyTag: String? = null
+        var unsolicited304 = false
+        var beforeConditionalReply: (() -> Unit)? = null
         val realtime = VortXSyncRealtime(manager, work, "wss://fixture.invalid/v1/sync/connect") { request, listener ->
             Socket(request, listener).also(sockets::add)
         }
@@ -117,6 +134,28 @@ class AndroidRealtimeSyncTest {
             gateway.carrier.getJSONObject("facts").put(name, true)
             manager.onLocalNativeMutation(SessionOwnerSnapshot.Account(account.id, 1))
         }
+        fun enableConditionalTransport() {
+            manager.installConditionalTransportTestSeam { method, _, body, token, tag ->
+                tokens += token
+                if (method == "GET") {
+                    gets++; validators += tag
+                    beforeConditionalReply?.invoke(); getGate?.await()
+                    val currentTag = "\"$version\""
+                    if (unsolicited304 || tag == currentTag) {
+                        // A poison document proves the accepted bodyless path never attempts decode.
+                        Triple(304, JSONObject().put("document", "not-ciphertext"), replyTag ?: currentTag)
+                    } else Triple(200, JSONObject().put("version", version).put("document",
+                        VortXCrypto.sealDocument(key, cloud.toString().toByteArray(), account.id, version, true)), currentTag)
+                } else {
+                    puts++
+                    val sent = requireNotNull(body)
+                    version = sent.getLong("version")
+                    cloud = JSONObject(String(requireNotNull(VortXCrypto.openDocument(key, sent.getString("document"), account.id, version))))
+                    Triple(200, JSONObject().put("accepted", true), null)
+                }
+            }
+        }
+        suspend fun routinePull() = manager.syncDownForRealtime(requireNotNull(manager.captureRealtimeLease()))
         fun dirty() = context.getSharedPreferences("vortx_sync_state", 0).getBoolean("pendingPush.${account.id}", false)
         fun settingsDirty() = JSONObject(context.getSharedPreferences("vortx_sync_dirty", 0)
             .getString("vortx.sync.dirtySettings.${account.id}", "{}")!!)
@@ -139,6 +178,93 @@ class AndroidRealtimeSyncTest {
     private fun test(block: suspend TestScope.() -> Unit) = runTest {
         Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
         try { block() } finally { NativeProviderAccess.unbindForTest(); Dispatchers.resetMain() }
+    }
+
+    @Test fun `conditional idle poll skips export reopen decode and apply but newer document applies`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.enableConditionalTransport()
+            assertTrue(f.routinePull()) // persisted integer alone must still apply this mount once
+            assertNull(f.validators.single())
+            assertEquals(1, f.gateway.applied)
+            val exports = f.gateway.exports; val reopens = f.gateway.reopens
+            assertTrue(f.routinePull())
+            assertEquals("\"10\"", f.validators.last())
+            assertEquals(1, f.gateway.applied); assertEquals(exports, f.gateway.exports); assertEquals(reopens, f.gateway.reopens)
+            f.version = 11; f.cloud = document(native(JSONObject().put("peer-edit", true)))
+            assertTrue(f.routinePull())
+            assertEquals(2, f.gateway.applied); assertEquals(11L, f.manager.lastAppliedVersion())
+            assertTrue(f.gateway.carrier.getJSONObject("facts").getBoolean("peer-edit"))
+            assertTrue(f.routinePull()); assertEquals("\"11\"", f.validators.last())
+            assertEquals(2, f.gateway.applied)
+        } finally { f.close() }
+    }
+
+    @Test fun `conditional response requires exact strong tag and completed current mount receipt`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.enableConditionalTransport()
+            f.unsolicited304 = true
+            assertFalse(f.routinePull()); assertNull(f.validators.last()); assertEquals(0, f.gateway.applied)
+            f.unsolicited304 = false
+            assertTrue(f.routinePull())
+            for (bad in listOf("W/\"10\"", "\"11\"", "*", "10", "")) {
+                f.replyTag = bad
+                assertFalse(f.routinePull()); assertEquals("\"10\"", f.validators.last())
+                f.replyTag = null
+                assertTrue(f.routinePull()); assertNull(f.validators.last())
+            }
+            assertTrue(f.manager.syncDown(force = true)); assertNull(f.validators.last())
+            f.gateway.mount = Any()
+            assertTrue(f.routinePull()); assertNull(f.validators.last())
+            f.gateway.mountRevision++
+            assertTrue(f.routinePull()); assertNull(f.validators.last())
+        } finally { f.close() }
+    }
+
+    @Test fun `failed apply and pending local edit cannot obtain or consume conditional receipt`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.enableConditionalTransport(); f.gateway.applyFails = true
+            assertFalse(f.routinePull()); assertNull(f.validators.last())
+            f.gateway.applyFails = false
+            assertTrue(f.routinePull()); assertNull(f.validators.last())
+            f.beforeConditionalReply = { f.beforeConditionalReply = null; f.edit("arrived-during-get") }
+            assertFalse(f.routinePull()); assertTrue(f.dirty()); assertEquals(10L, f.manager.lastAppliedVersion())
+            assertEquals(0, f.puts)
+        } finally { f.close() }
+    }
+
+    @Test fun `delayed conditional response cannot survive account ABA or mount replacement`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.enableConditionalTransport(); assertTrue(f.routinePull())
+            f.beforeConditionalReply = { f.beforeConditionalReply = null; f.gateway.mount = Any() }
+            assertFalse(f.routinePull())
+            assertTrue(f.routinePull()); assertNull(f.validators.last())
+            f.beforeConditionalReply = {
+                f.beforeConditionalReply = null
+                f.manager.installSyncTestSeam(VortXSyncManager.Session("fixture-b", account, ByteArray(32) { 18 }), 10, { _, _, _, _ -> 500 to null })
+                f.manager.installSyncTestSeam(VortXSyncManager.Session("fixture-a", account, key), 10, { _, _, _, _ -> 500 to null })
+            }
+            assertFalse(f.routinePull()); assertEquals(10L, f.manager.lastAppliedVersion())
+            assertTrue(f.routinePull()); assertNull(f.validators.last())
+        } finally { f.close() }
+    }
+
+    @Test fun `export publication generation race cannot mint conditional receipt and absent mount token stays full`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.enableConditionalTransport()
+            f.gateway.afterExport = {
+                if (f.gateway.applied > 0) { f.gateway.afterExport = null; f.gateway.mountRevision++ }
+            }
+            assertFalse(f.routinePull()); assertEquals(10L, f.manager.lastAppliedVersion())
+            assertTrue(f.routinePull()); assertNull(f.validators.last())
+            f.gateway.provideMountToken = false
+            assertTrue(f.routinePull()); assertNull(f.validators.last())
+            assertTrue(f.routinePull()); assertNull(f.validators.last())
+        } finally { f.close() }
     }
 
     @Test fun `continuous progress does not postpone upload and PUT edit survives exact ACK`() = test {

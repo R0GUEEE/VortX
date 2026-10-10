@@ -8,10 +8,15 @@ internal data class NativeAccountExport(val nativeSync: JSONObject, val roster: 
     val rawRoster: JSONArray = JSONArray(roster.map { it.encode() }), val hostProfileSyncPending: Boolean = false,
     val hostPreferences: JSONObject? = null, val hostSettingsBaseline: Any? = null)
 
+/** Opaque current mount and mutation generation; contains no account document or credentials. */
+internal data class NativeAccountMountToken(val installation: Any, val revision: Long)
+
 /** Only called with a successfully authenticated/decrypted document under a captured session lease.
  * Credentials and the account data key never cross this boundary. */
 internal interface NativeAccountGateway {
     fun retire()
+    /** Cheap certification only. Missing/recovering mounts must take the full checkpoint path. */
+    fun currentMountToken(account: SessionOwnerSnapshot.Account): NativeAccountMountToken? = null
     /** Requires a captured, durably authenticated account lease; never infers a global owner. */
     suspend fun reopenCheckpoint(account: SessionOwnerSnapshot.Account, isCurrent: () -> Boolean): Boolean = false
     /** Called only after an authenticated 404 with no prior backup evidence. */

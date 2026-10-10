@@ -328,11 +328,13 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
             hostEdits: edits.map { .init(profileID: $0.profileID, fields: $0.fields) })
     }
     func request(_ method: String, _ path: String, body: [String: Any]? = nil, auth: Bool,
-                 credentialCapture capture: CredentialScopeRegistry.Capture) async -> (Int, [String: Any]?) {
+                 credentialCapture capture: CredentialScopeRegistry.Capture, ifNoneMatch: Int? = nil,
+                 receiveETag: ((String?) -> Void)? = nil) async -> (Int, [String: Any]?) {
         guard isCurrent(capture), let base = URL(string: command.baseURL), base.scheme == "http", base.host == "127.0.0.1",
               let url = URL(string: path, relativeTo: base) else { return (0, nil) }
         do {
             var req = URLRequest(url: url); req.httpMethod = method
+            if let ifNoneMatch { req.setValue("\"\(ifNoneMatch)\"", forHTTPHeaderField: "If-None-Match") }
             req.setValue("Bearer synthetic-fixture-only", forHTTPHeaderField: "Authorization")
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try body.map { try JSONSerialization.data(withJSONObject: $0) }
@@ -352,6 +354,7 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
                 }
             }
             let (data, response) = try await URLSession.shared.data(for: req)
+            receiveETag?((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "ETag"))
             if method == "PUT", command.retireDuringPUT == true { retire() }
             if method == "PUT", command.keyABA == true {
                 dataKey = Data(repeating: 3, count: 32); retire(); dataKey = AppleSyncManagerPeer.key; retire()

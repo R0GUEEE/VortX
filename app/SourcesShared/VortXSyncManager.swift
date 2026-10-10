@@ -2009,6 +2009,36 @@ final class VortXSyncManager: ObservableObject {
     private var wsReconnect: Task<Void, Never>?      // pending reconnect attempt
     private var wsKeepAlive: Task<Void, Never>?      // periodic "ping" so the room never idles us out
     private var pollTask: Task<Void, Never>?         // while-active fallback poll
+#if VORTX_NATIVE_DATA_ENGINE
+    /// A process-local receipt for a fully published receive, never a websocket or PUT version.
+    private struct NativeReceiveReceipt {
+        let capture: CredentialScopeRegistry.Capture
+        let target: PlaybackMutationTarget
+        let key: Data
+        let version: Int
+    }
+    private var nativeReceiveReceipt: NativeReceiveReceipt?
+
+    private func conditionalReceiveVersion(_ capture: CredentialScopeRegistry.Capture) -> Int? {
+        guard let receipt = nativeReceiveReceipt, receipt.capture == capture, isCurrent(capture),
+              receipt.key == dataKey, receipt.version == lastSyncedVersion,
+              hasAppliedAccountDoc, !hasPendingPush, !hasPendingAccountDocApply(for: capture),
+              CoreBridge.shared.nativePlaybackTargetIsCurrent(receipt.target),
+              CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: ProfileStore.shared.activeID)
+        else { nativeReceiveReceipt = nil; return nil }
+        return receipt.version
+    }
+
+    private func rememberCompletedNativeReceive(version: Int, capture: CredentialScopeRegistry.Capture,
+                                                target: PlaybackMutationTarget?) {
+        guard isCurrent(capture), !Task.isCancelled, let key = dataKey, !hasPendingPush,
+              let target, CoreBridge.shared.nativePlaybackTargetIsCurrent(target),
+              !hasPendingAccountDocApply(for: capture),
+              CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: ProfileStore.shared.activeID)
+        else { nativeReceiveReceipt = nil; return }
+        nativeReceiveReceipt = .init(capture: capture, target: target, key: key, version: version)
+    }
+#endif
     private var realtimeActive = false               // true between startRealtime() and stopRealtime()
     private let wsMaxBackoff: TimeInterval = 30
 #if VORTX_NATIVE_DATA_ENGINE
@@ -2577,12 +2607,17 @@ final class VortXSyncManager: ObservableObject {
         body: [String: Any]? = nil,
         auth: Bool = false,
         bearer: String? = nil,
-        credentialCapture: CredentialScopeRegistry.Capture? = nil
+        credentialCapture: CredentialScopeRegistry.Capture? = nil,
+        ifNoneMatch: Int? = nil,
+        receiveETag: ((String?) -> Void)? = nil
     ) async -> (Int, [String: Any]?) {
         if let credentialCapture, !isCurrent(credentialCapture) { return (0, nil) }
         guard let url = URL(string: base + path) else { return (0, nil) }
         var req = URLRequest(url: url)
         req.httpMethod = method
+        if let ifNoneMatch, method == "GET", path == "/v1/backup" {
+            req.setValue("\"\(ifNoneMatch)\"", forHTTPHeaderField: "If-None-Match")
+        }
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "content-type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -2602,6 +2637,8 @@ final class VortXSyncManager: ObservableObject {
                 maxResponseBytes: maxResponseBytes
             )
             if let credentialCapture, !isCurrent(credentialCapture) { return (0, nil) }
+            receiveETag?(response.etag)
+            if response.statusCode == 304 { return response.data.isEmpty ? (304, nil) : (0, nil) }
             let json = (try? AuthenticatedHTTPTransport.jsonObject(from: response.data)) as? [String: Any]
             return (response.statusCode, json)
         } catch { return (0, nil) }
@@ -2887,12 +2924,19 @@ final class VortXSyncManager: ObservableObject {
     ///  - .failed: we did NOT read the account. `retryable` separates a transient transport/server fault (worth
     ///             another attempt) from a deterministic decrypt/parse refusal (retrying re-fails identically).
     ///             Either way the caller must NOT treat this as an empty account.
-    private enum VersionedPull { case doc(doc: [String: Any], version: Int); case empty; case failed(retryable: Bool) }
-    private func pullDocVersionedResult(credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil) async -> VersionedPull {
+    private enum VersionedPull { case doc(doc: [String: Any], version: Int); case unchanged(version: Int); case empty; case failed(retryable: Bool) }
+    private func pullDocVersionedResult(credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil,
+                                        ifNoneMatch: Int? = nil) async -> VersionedPull {
         let capture = suppliedCapture ?? credentialAuthority.capture()
         guard isCurrent(capture), dataKey != nil else { return .failed(retryable: false) }
-        let (code, json) = await request("GET", "/v1/backup", auth: true, credentialCapture: capture)
+        var etag: String?
+        let (code, json) = await request("GET", "/v1/backup", auth: true, credentialCapture: capture,
+                                         ifNoneMatch: ifNoneMatch, receiveETag: { etag = $0 })
         guard isCurrent(capture) else { return .failed(retryable: false) }
+        if code == 304 {
+            guard let ifNoneMatch, etag == "\"\(ifNoneMatch)\"" else { return .failed(retryable: false) }
+            return .unchanged(version: ifNoneMatch)
+        }
         if code == 404 { return .empty }                                  // no backup yet
         // request() returns code 0 for a thrown URLSession error (offline / DNS / TLS / timeout) and 5xx is a
         // server fault: both are transient, and both are exactly the "silently returns false" case of #145.
@@ -2926,15 +2970,16 @@ final class VortXSyncManager: ObservableObject {
     /// retried because the retry re-fails identically; they stay .failed so the caller stays blocked rather than
     /// seeding over a doc it never read. Bounded and short (~1.2s worst case) so the 10s while-active poll and
     /// the foreground pull never stack up behind it.
-    private func pullDocVersionedRetrying(attempts: Int = 3, credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil) async -> VersionedPull {
+    private func pullDocVersionedRetrying(attempts: Int = 3, credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil,
+                                          ifNoneMatch: Int? = nil) async -> VersionedPull {
         let capture = suppliedCapture ?? credentialAuthority.capture()
         guard isCurrent(capture) else { return .failed(retryable: false) }
         var delayNanos: UInt64 = 400_000_000
         for attempt in 0..<max(1, attempts) {
-            let result = await pullDocVersionedResult(credentialCapture: capture)
+            let result = await pullDocVersionedResult(credentialCapture: capture, ifNoneMatch: ifNoneMatch)
             guard isCurrent(capture) else { return .failed(retryable: false) }
             switch result {
-            case .doc, .empty: return result
+            case .doc, .empty, .unchanged: return result
             case .failed(let retryable):
                 guard retryable, attempt < attempts - 1 else { return result }
                 try? await Task.sleep(nanoseconds: delayNanos)
@@ -3575,7 +3620,7 @@ final class VortXSyncManager: ObservableObject {
         var doc: [String: Any]
         let baseRevision: Int?
         switch await pullDocVersionedResult(credentialCapture: capture) {
-        case .failed: return nil
+        case .failed, .unchanged: return nil
         case .empty:
             baseRevision = nil
 #if VORTX_NATIVE_DATA_ENGINE
@@ -3878,9 +3923,11 @@ final class VortXSyncManager: ObservableObject {
 #if VORTX_NATIVE_DATA_ENGINE
     /// A mount alone cannot acknowledge a pulled document. Merge both carriers against its exact
     /// current profile/credential receipt, durably commit, and publish the accepted host projections.
-    private func commitNativePulledDocument(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) async throws {
+    @discardableResult
+    private func commitNativePulledDocument(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) async throws -> PlaybackMutationTarget {
         let profileID = ProfileStore.shared.activeID
-        guard isCurrent(capture), CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: profileID) else {
+        guard isCurrent(capture), CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: profileID),
+              case .native(let initialBinding?) = CoreBridge.shared.captureNativePlaybackTarget() else {
             throw VortxNativeError.superseded
         }
         let prepared = try await prepareNativeLegacyMaterial(doc, capture: capture)
@@ -3903,6 +3950,12 @@ final class VortXSyncManager: ObservableObject {
             // checkpoint retains the join; repair via fresh pull/base+1, preserving legacy siblings.
             nativeMutationDidCommit(credentialCapture: capture)
         }
+        let committedTarget = CoreBridge.shared.captureNativePlaybackTarget()
+        guard case .native(let committedBinding?) = committedTarget,
+              committedBinding.sessionGeneration == initialBinding.sessionGeneration,
+              committedBinding.credential == capture, committedBinding.profileID == profileID,
+              CoreBridge.shared.nativePlaybackTargetIsCurrent(committedTarget) else { throw VortxNativeError.superseded }
+        return committedTarget
     }
 #endif
 
@@ -3914,7 +3967,7 @@ final class VortXSyncManager: ObservableObject {
     /// and by sign-in reconciliation). True if anything was restored.
     @discardableResult
     func syncDown(force: Bool = false, credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil,
-                  reportOutcome: ((ConflictResolutionOutcome) -> Void)? = nil) async -> Bool {
+                  reportOutcome: ((ConflictResolutionOutcome) -> Void)? = nil, routineReceive: Bool = false) async -> Bool {
         let capture = suppliedCapture ?? credentialAuthority.capture()
         let capturedDataKey = dataKey
         var outcome: ConflictResolutionOutcome = .failed
@@ -3949,8 +4002,20 @@ final class VortXSyncManager: ObservableObject {
         let mustRestore = !hasAppliedAccountDoc || hasPendingAccountDocApply(for: capture)
         let effectiveForce = force || mustRestore
         if !effectiveForce, hasPendingPush { outcome = .pending; return false }
+        var conditionalVersion: Int? = nil
+#if VORTX_NATIVE_DATA_ENGINE
+        if effectiveForce { nativeReceiveReceipt = nil }
+        conditionalVersion = routineReceive && !effectiveForce ? conditionalReceiveVersion(capture) : nil
+#endif
         let pulled: (doc: [String: Any], version: Int)
-        switch await pullDocVersionedRetrying(credentialCapture: capture) {
+        switch await pullDocVersionedRetrying(credentialCapture: capture, ifNoneMatch: conditionalVersion) {
+        case .unchanged(let version):
+#if VORTX_NATIVE_DATA_ENGINE
+            guard routineReceive, !effectiveForce, conditionalVersion == version,
+                  conditionalReceiveVersion(capture) == version, !Task.isCancelled else { return false }
+            outcome = .completed
+#endif
+            return false
         case .doc(let doc, let version):
             pulled = (doc, version)
         case .empty:
@@ -3959,15 +4024,29 @@ final class VortXSyncManager: ObservableObject {
             // .seededFromDevice path pushes through syncUp). Stamped inside the suppression window because it is
             // a UserDefaults write, and an unsuppressed write here would arm the very push we are ordering.
             guard isCurrent(capture), !hasPendingAccountDocApply(for: capture) else { return false }
+#if VORTX_NATIVE_DATA_ENGINE
+            nativeReceiveReceipt = nil
+#endif
             withRemoteApplySuppressed { hasAppliedAccountDoc = true }
             outcome = .completed
             return false
         case .failed:
+#if VORTX_NATIVE_DATA_ENGINE
+            nativeReceiveReceipt = nil
+#endif
             // We did NOT read the account (transient fault already retried, or an undecryptable doc). Leave the
             // gate shut: syncUp stays blocked, so a failed read can never become a destructive push.
             return false
         }
         guard isCurrent(capture) else { return false }
+#if VORTX_NATIVE_DATA_ENGINE
+        // A first routine full response must establish this mount's completed receive receipt.
+        // A persisted push/applied integer alone cannot admit the next bodyless response.
+        let requireNativeReceipt = routineReceive && conditionalReceiveVersion(capture) == nil
+        nativeReceiveReceipt = nil
+#else
+        let requireNativeReceipt = false
+#endif
         // VERSION-WINS: once no local edit is pending, apply only a STRICTLY NEWER remote; a stale or equal pull
         // is a no-op. lastSyncedVersion is persisted per account (versionKey(for:)) so this holds across relaunches.
         //
@@ -3980,7 +4059,7 @@ final class VortXSyncManager: ObservableObject {
         switch AddonSyncPullPolicy.decision(
             pulledVersion: pulled.version,
             lastSyncedVersion: lastSyncedVersion,
-            effectiveForce: effectiveForce,
+            effectiveForce: effectiveForce || requireNativeReceipt,
             hasAppliedAccountDoc: hasAppliedAccountDoc,
             hasPendingAccountDocApply: hasPendingAccountDocApply(for: capture),
             credentialIsCurrent: isCurrent(capture)
@@ -3999,12 +4078,13 @@ final class VortXSyncManager: ObservableObject {
         var doc = pulled.doc
 #if VORTX_NATIVE_DATA_ENGINE
         var nativeAccountDocumentCommitted = false
+        var nativeCommittedTarget: PlaybackMutationTarget?
         let nativeProviderApplySnapshot: VortxNativeProviderCredentials.Document
         guard await settleNativeProviderJournal(capture: capture), isCurrent(capture) else { return false }
         do {
             var providers = try mergedNativeProviderState(doc, capture: capture)
             if CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: ProfileStore.shared.activeID) {
-                try await commitNativePulledDocument(doc, capture: capture)
+                nativeCommittedTarget = try await commitNativePulledDocument(doc, capture: capture)
                 nativeAccountDocumentCommitted = true
             }
             providers = try persistMergedNativeProviders(providers, capture: capture)
@@ -4534,10 +4614,12 @@ final class VortXSyncManager: ObservableObject {
 #if VORTX_NATIVE_DATA_ENGINE
         guard await NativeForegroundSyncPolicy.mayAcknowledgeDocument(
             nativeDocumentCommitted: nativeAccountDocumentCommitted,
-            isCurrent: { self.isCurrent(capture) },
+            isCurrent: {
+                self.isCurrent(capture) && (nativeCommittedTarget.map { CoreBridge.shared.nativePlaybackTargetIsCurrent($0) } ?? true)
+            },
             ensureSession: { await self.ensureNativeCheckpoint(credentialCapture: capture) },
             commitDocument: {
-                do { try await self.commitNativePulledDocument(pulled.doc, capture: capture); return true }
+                do { nativeCommittedTarget = try await self.commitNativePulledDocument(pulled.doc, capture: capture); return true }
                 catch {
                     DiagnosticsLog.log("sync", "operation=native_pull_commit result=failed reason=\(VortxNativeError.diagnosticCode(error))")
                     return false
@@ -4567,6 +4649,9 @@ final class VortXSyncManager: ObservableObject {
         // unconditional because refreshOwnerResumeCache does not contribute to `restored`.
         guard isCurrent(capture) else { return false }
         CoreBridge.shared.rebuildContinueWatching()
+#if VORTX_NATIVE_DATA_ENGINE
+        rememberCompletedNativeReceive(version: pulled.version, capture: capture, target: nativeCommittedTarget)
+#endif
         outcome = .completed
         return restored
     }
@@ -5551,7 +5636,7 @@ final class VortXSyncManager: ObservableObject {
         guard let version = Self.documentVersion(obj["version"]),
               NativeForegroundSyncPolicy.shouldPullBroadcast(version: version, lastAcknowledgedVersion: lastSyncedVersion,
                                                             ownerIsCurrent: isCurrent(capture)) else { return }
-        Task { await syncDown(credentialCapture: capture) }
+        Task { await syncDown(credentialCapture: capture, routineReceive: true) }
     }
 
     private func scheduleReconnect() {
@@ -5602,7 +5687,7 @@ final class VortXSyncManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: self?.pollIntervalNanos ?? 3_000_000_000)
                 if Task.isCancelled { return }
                 guard let self, self.isCurrent(capture) else { return }
-                await self.syncDown(credentialCapture: capture)
+                await self.syncDown(credentialCapture: capture, routineReceive: true)
             }
         }
     }

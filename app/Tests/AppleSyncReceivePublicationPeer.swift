@@ -197,27 +197,40 @@ struct SIMKLContinueWatchingShadow {
     var isSignedIn = true; var hasAppliedAccountDoc = false; var hasPendingPush = false
     var activeSyncDown: (id: UUID, capture: CredentialScopeRegistry.Capture)?
     var activeSyncUp: (id: UUID, capture: CredentialScopeRegistry.Capture)?
+    private var nativeReceiveReceipt: NativeReceiveReceipt?
     var lastSyncedVersion = 0; var stamped = 0
     var pollTask: Task<Void, Never>?
     let pollIntervalNanos: UInt64 = 20_000_000
     var backupUploadFailure: SyncBackupUploadFailure?
+    var failPreparation = false
+    var pendingApplyFixture = false
+    var afterResponse: (() throws -> Void)?
+    var replaceMountBeforeAcknowledgement = false
+    var providerSnapshotReads = 0
     var dirtySettings: [String: Double] = [:]; var appliedSettingsBaseline: Set<String> = []
     private var pendingDebridApply: PendingDebridApply?
     private var pendingProviderApply: PendingProviderApply?
     enum ConflictResolutionOutcome: String { case completed, pending, failed }
     init(directory: URL, baseURL: URL) { self.directory = directory; self.baseURL = baseURL; Self.shared = self }
     func isCurrent(_ capture: CredentialScopeRegistry.Capture) -> Bool { credentialAuthority.isCurrent(capture) }
-    func hasPendingAccountDocApply(for capture: CredentialScopeRegistry.Capture) -> Bool { false }
+    func hasPendingAccountDocApply(for capture: CredentialScopeRegistry.Capture) -> Bool { pendingApplyFixture }
     func withRemoteApplySuppressed(_ body: () -> Void) { body() }
     func settleNativeProviderJournal(capture: CredentialScopeRegistry.Capture) async -> Bool { isCurrent(capture) }
     func nativeProviderState(capture: CredentialScopeRegistry.Capture) throws -> VortxNativeProviderCredentials {
-        try VortxNativeProviderCredentials(scope: capture.namespace, actor: AppleSyncReceivePublicationPeer.actor)
+        providerSnapshotReads += 1
+        if replaceMountBeforeAcknowledgement && providerSnapshotReads == 2 {
+            CoreBridge.shared.nativeInstallGeneration = UUID()
+            try CoreBridge.shared.refreshProfilesForFixture()
+        }
+        return try VortxNativeProviderCredentials(scope: capture.namespace, actor: AppleSyncReceivePublicationPeer.actor)
     }
     func mergedNativeProviderState(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) throws -> VortxNativeProviderCredentials { try nativeProviderState(capture: capture) }
     func persistMergedNativeProviders(_ providers: VortxNativeProviderCredentials, capture: CredentialScopeRegistry.Capture) throws -> VortxNativeProviderCredentials { providers }
     func mirrorNativeProviderKeys(_ providers: VortxNativeProviderCredentials, original: Any?) throws -> [String: Any] { [:] }
     struct Preparation { let material: Data? = nil; let authority: (any VortxMutationAuthority)? = nil; let sourceArchive: Data? = nil }
-    func prepareNativeLegacyMaterial(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) async throws -> Preparation { Preparation() }
+    func prepareNativeLegacyMaterial(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) async throws -> Preparation {
+        if failPreparation { throw VortxNativeError.invalidSnapshot }; return Preparation()
+    }
     static func nativeWebsiteEvents(_ doc: [String: Any]) throws -> [VortxJSON] { [] }
     static func nativeWebsiteAddonEvents(_ doc: [String: Any]) throws -> [VortxJSON] { [] }
     func nativeLegacyWatchlists(_ doc: [String: Any]) throws -> [UUID: [VortxNativeWatchlist.Entry]] { [:] }
@@ -240,12 +253,22 @@ struct SIMKLContinueWatchingShadow {
     func publishNativeWatchedPending(_ archive: Data?, capture: CredentialScopeRegistry.Capture) throws {}
     func publishNativeOwnOverlayPending(_ pending: VortxJSON, capture: CredentialScopeRegistry.Capture) throws {}
     func updateNativeOwnAccountAvailability(missing: [UUID], profiles: [UserProfile], capture: CredentialScopeRegistry.Capture) {}
-    func request(_ method: String, _ path: String, body: [String: Any]? = nil, auth: Bool, credentialCapture: CredentialScopeRegistry.Capture) async -> (Int, [String: Any]?) {
+    func request(_ method: String, _ path: String, body: [String: Any]? = nil, auth: Bool, credentialCapture: CredentialScopeRegistry.Capture,
+                 ifNoneMatch: Int? = nil, receiveETag: ((String?) -> Void)? = nil) async -> (Int, [String: Any]?) {
         do {
             var request = URLRequest(url: baseURL.appendingPathComponent(path)); request.httpMethod = method
+            if let ifNoneMatch { request.setValue("\"\(ifNoneMatch)\"", forHTTPHeaderField: "If-None-Match") }
             request.setValue("Bearer synthetic-fixture-only", forHTTPHeaderField: "Authorization")
             if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.urlCache = nil
+            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            let session = URLSession(configuration: configuration)
+            defer { session.finishTasksAndInvalidate() }
+            let (data, response) = try await session.data(for: request)
+            let callback = afterResponse; afterResponse = nil; try callback?()
+            receiveETag?((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "ETag"))
+            if (response as? HTTPURLResponse)?.statusCode == 304 { return (304, nil) }
             return ((response as? HTTPURLResponse)?.statusCode ?? 0, try JSONSerialization.jsonObject(with: data) as? [String: Any])
         } catch { return (0, nil) }
     }
@@ -350,8 +373,8 @@ struct SIMKLContinueWatchingShadow {
         let catalogKeys = [addonA, addonB, addonC, addonD].map { $0 + "|movie|popular" }
         let host = try await session.hostPreferencesDocument()
         let hostDocument = try host.decode(VortxNativeHostPreferences.Document.self)
-        let sealed = try checkpoint.readHostPreferences(scope: .init(account: account, ownerProfileID: owner))!
-        let localHost = try JSONDecoder().decode(VortxNativeHostPreferences.Local.self, from: sealed)
+        let sealed = try checkpoint.readHostPreferences(scope: .init(account: account, ownerProfileID: owner))
+        let localHost = try sealed.map { try JSONDecoder().decode(VortxNativeHostPreferences.Local.self, from: $0) }
         return ["version": manager.lastSyncedVersion, "stamped": manager.stamped, "hasApplied": manager.hasAppliedAccountDoc,
             "pendingPush": manager.hasPendingPush, "outcome": outcome.rawValue, "restored": restored,
             "profileID": ProfileStore.shared.activeID!.uuidString, "viewerName": viewerProfile?.name ?? "",
@@ -376,7 +399,7 @@ struct SIMKLContinueWatchingShadow {
             "pendingWidthEdit": manager.dirtySettings[CatalogPrefsStore.widthKey] != nil,
             "homeRails": HomeRailPreferences.shared.arrange(HomeRail.iOSDefaultOrder).map(\.rawValue),
             "homeHidden": Array(HomeRailPreferences.shared.hidden).sorted(), "hostActor": hostDocument.globals.fields.values.first?.actor ?? "",
-            "installationActor": localHost.actor]
+            "installationActor": localHost?.actor ?? ""]
     }
     static func main() async {
         do {
@@ -451,6 +474,14 @@ struct SIMKLContinueWatchingShadow {
                         try emit(["dirty": true, "width": CatalogPreferences.shared.posterWidth.rawValue])
                         continue
                     }
+                    if instruction == "clear-pending" {
+                        manager.hasPendingPush = false; try emit(["cleared": true]); continue
+                    }
+                    if instruction == "persisted-highwater" {
+                        // A persisted push/previous-process version is not this mount's receive receipt.
+                        manager.lastSyncedVersion = 11; manager.hasAppliedAccountDoc = true
+                        try emit(["seededHighwater": true]); continue
+                    }
                     if instruction == "stale" {
                         let selected = HomeContinueWatchingSelection.current(core: core, profiles: .shared)
                         let receipts = core.acceptedHistoryReceiptRevision
@@ -464,9 +495,29 @@ struct SIMKLContinueWatchingShadow {
                             "staleSelectionRejected": !selected.intent.isCurrent(core: core, profiles: .shared)])
                         continue
                     }
-                    guard instruction == "pull" else { throw VortxNativeError.invalidResponse }
+                    let conditionalInstructions = ["conditional", "forced", "fail-prepare", "pending-apply", "replace-mount", "mount-during", "aba-during", "pending-during", "mount-before-ack"]
+                    guard instruction == "pull" || conditionalInstructions.contains(instruction) else { throw VortxNativeError.invalidResponse }
+                    manager.failPreparation = instruction == "fail-prepare"
+                    manager.pendingApplyFixture = instruction == "pending-apply"
+                    manager.providerSnapshotReads = 0
+                    manager.replaceMountBeforeAcknowledgement = instruction == "mount-before-ack"
+                    if instruction == "replace-mount" { core.nativeInstallGeneration = UUID(); try core.refreshProfilesForFixture() }
+                    if instruction == "mount-during" {
+                        manager.afterResponse = { core.nativeInstallGeneration = UUID(); try core.refreshProfilesForFixture() }
+                    }
+                    if instruction == "aba-during" {
+                        manager.afterResponse = {
+                            manager.dataKey = Data(repeating: 99, count: 32); CredentialScopeRegistry.shared.retire()
+                            manager.dataKey = key; CredentialScopeRegistry.shared.retire()
+                            core.nativeCredentialCapture = CredentialScopeRegistry.shared.capture()
+                            try core.refreshProfilesForFixture()
+                        }
+                    }
+                    if instruction == "pending-during" { manager.afterResponse = { manager.hasPendingPush = true } }
                     var outcome = VortXSyncManager.ConflictResolutionOutcome.failed
-                    let restored = await manager.syncDown(reportOutcome: { outcome = $0 })
+                    let restored = await manager.syncDown(force: instruction == "forced" || instruction == "fail-prepare" || instruction == "mount-before-ack",
+                        reportOutcome: { outcome = $0 }, routineReceive: instruction != "pull")
+                    manager.failPreparation = false; manager.pendingApplyFixture = false; manager.replaceMountBeforeAcknowledgement = false
                     await drainMainQueue()
                     try emit(try await snapshot(manager: manager, session: session, facade: facade, checkpoint: checkpoint, outcome: outcome, restored: restored))
                 }

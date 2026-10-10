@@ -120,6 +120,11 @@ internal typealias SyncRequestTestSeam = suspend (
     bearerToken: String?,
 ) -> Pair<Int, JSONObject?>
 
+/** Header-aware local transport seam; the normal production transport remains below. */
+internal typealias ConditionalSyncRequestTestSeam = suspend (
+    method: String, path: String, body: JSONObject?, bearerToken: String?, ifNoneMatch: String?,
+) -> Triple<Int, JSONObject?, String?>
+
 /** Opaque native-owner fence. A gateway may only use a lease it captured for the current engine account. */
 interface AccountAddonGatewayLease
 
@@ -997,6 +1002,22 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     private var realtimeForeground = false
 
     @Volatile private var requestTestSeam: SyncRequestTestSeam? = null
+    @Volatile private var conditionalRequestTestSeam: ConditionalSyncRequestTestSeam? = null
+    private data class NativeReceiveReceipt(val lease: SyncSessionLease, val mount: NativeAccountMountToken, val version: Long)
+    private var nativeReceiveReceipt: NativeReceiveReceipt? = null // guarded by nativeSyncMutex
+
+    private fun conditionalReceiveVersion(lease: SyncSessionLease, gateway: NativeAccountGateway): Long? {
+        val receipt = nativeReceiveReceipt ?: return null
+        val account = SessionOwnerSnapshot.Account(lease.accountId, lease.ownerEpoch)
+        if (!isSyncLeaseCurrent(lease) || !isSyncLeaseCurrent(receipt.lease) ||
+            receipt.lease.operationGeneration != lease.operationGeneration || receipt.lease.ownerEpoch != lease.ownerEpoch ||
+            receipt.lease.accountId != lease.accountId || receipt.version != lastSyncedVersion(lease) ||
+            gateway.currentMountToken(account) != receipt.mount) {
+            nativeReceiveReceipt = null
+            return null
+        }
+        return receipt.version
+    }
     @Volatile private var versionedPayloadTestObserver: (() -> Unit)? = null
     @Volatile private var sessionRestoreTestSeam: SessionLoad? = null
 
@@ -1578,6 +1599,10 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         }
     }
 
+    internal fun installConditionalTransportTestSeam(transport: ConditionalSyncRequestTestSeam) {
+        conditionalRequestTestSeam = transport
+    }
+
     /** Narrow regression seam for final native-dispatch admission; production replacements use the same coordinator. */
     internal fun captureSyncLeaseAdmissionTestSeam(): ((() -> Boolean) -> Boolean)? =
         captureSyncLease()?.let(::syncLeaseAdmission)
@@ -1736,6 +1761,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
 
     private sealed interface SyncDocPull {
         data class Doc(val doc: JSONObject, val version: Long) : SyncDocPull
+        data class Unchanged(val version: Long) : SyncDocPull
         data object Empty : SyncDocPull
         data object Failed : SyncDocPull
     }
@@ -1757,17 +1783,23 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     private suspend fun pullSyncDocResult(
         lease: SyncSessionLease,
         allowOlderAddonTombstones: Boolean,
+        ifNoneMatch: Long? = null,
     ): SyncDocPull {
         if (!isSyncLeaseCurrent(lease)) return SyncDocPull.Failed
         val callPermit = acquireSyncCallPermit(lease) ?: return SyncDocPull.Failed
+        var etag: String? = null
         val (code, json) = request(
             "GET",
             "/v1/backup",
             null,
             bearerToken = lease.token,
             callPermit = callPermit,
+            ifNoneMatch = ifNoneMatch?.let { "\"$it\"" },
+            receiveETag = { etag = it },
         )
         if (!isSyncLeaseCurrent(lease)) return SyncDocPull.Failed
+        if (code == 304) return if (ifNoneMatch != null && etag == "\"$ifNoneMatch\"")
+            SyncDocPull.Unchanged(ifNoneMatch) else SyncDocPull.Failed
         if (code == 404) return if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED &&
             (lastSyncedVersion(lease) > 0 || syncState.nativeBackupSeen(lease.accountId))) SyncDocPull.Failed else SyncDocPull.Empty
         if (code != 200) return SyncDocPull.Failed                // network/server error: do not clobber
@@ -1926,21 +1958,29 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         return synced && isSyncLeaseCurrent(lease)
     }
 
-    private suspend fun nativeSyncDown(lease: SyncSessionLease, force: Boolean = false): Boolean {
+    private suspend fun nativeSyncDown(lease: SyncSessionLease, force: Boolean = false, routineReceive: Boolean = false): Boolean {
         val gateway = nativeGateway ?: return false
         val account = SessionOwnerSnapshot.Account(lease.accountId, lease.ownerEpoch)
+        if (force) nativeReceiveReceipt = null
+        val conditionalVersion = if (routineReceive && !force) conditionalReceiveVersion(lease, gateway) else null
         // Local availability is independent of network availability. The lease came from verified
         // secure session persistence; the encrypted locator supplies the historical owner, never
         // the unscoped device roster. Failed/corrupt recovery is not permission to create an account.
-        val reopened = try { gateway.reopenCheckpoint(account) { isSyncLeaseCurrent(lease) } }
+        val reopened = try { conditionalVersion != null || gateway.reopenCheckpoint(account) { isSyncLeaseCurrent(lease) } }
         catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
         catch (_: Exception) { return false }
-        if (reopened && !applyNativeHostSettings(lease, gateway.exportDocument(account))) return false
+        if (conditionalVersion == null && reopened && !applyNativeHostSettings(lease, gateway.exportDocument(account))) return false
         // The secure journal is authoritative even if the process died before the ordinary
         // debounce marker was written. Re-arm its exact account before permitting a pull.
         if (com.vortx.android.integrations.NativeProviderAccess.hasPending(account) == true) armPendingSync(lease, recordEdit = true)
         if (retryPendingPushBeforePull(lease)) return false
-        val pulled = pullSyncDocResult(lease)
+        val pulled = pullSyncDocResult(lease, allowOlderAddonTombstones = false, ifNoneMatch = conditionalVersion)
+        if (pulled is SyncDocPull.Unchanged) {
+            if (com.vortx.android.integrations.NativeProviderAccess.hasPending(account) == true) armPendingSync(lease, recordEdit = true)
+            return conditionalVersion == pulled.version && conditionalReceiveVersion(lease, gateway) == pulled.version &&
+                !retryPendingPushBeforePull(lease) && isSyncLeaseCurrent(lease)
+        }
+        nativeReceiveReceipt = null
         if (pulled == SyncDocPull.Empty) {
             return nativeSyncUp(lease)
         }
@@ -1949,17 +1989,21 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         if (retryPendingPushBeforePull(lease)) return false
         // A confirmed mounted checkpoint already contains this acknowledged revision. Replaying
         // it on every active poll remounts/projections and can arm needless peer echo work.
-        if (reopened && !force && syncState.hasLastVersion(lease.accountId) && pull.version == lastSyncedVersion(lease)) {
+        if (reopened && !force && !routineReceive && syncState.hasLastVersion(lease.accountId) && pull.version == lastSyncedVersion(lease)) {
             val exported = gateway.exportDocument(account) ?: return false
             if (NativeSyncPublicationPolicy.needsRepublish(pull.doc, exported)) armPendingSync(lease, recordEdit = true)
             return isSyncLeaseCurrent(lease)
         }
+        val initialMount = gateway.currentMountToken(account)
         val applied = try { gateway.applyDocument(account, pull.doc) { isSyncLeaseCurrent(lease) } }
             catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
             catch (_: Exception) { false }
         if (!applied) return false
+        val appliedMount = gateway.currentMountToken(account)
+        if (initialMount != null && appliedMount?.installation !== initialMount.installation) return false
         val exported = gateway.exportDocument(account) ?: return false
         if (!applyNativeHostSettings(lease, exported)) return false
+        if (appliedMount != null && gateway.currentMountToken(account) != appliedMount) return false
         // The same atomic secure record backs provider reads and register intent. No deferred
         // credential application can replay an older pull over a newer local edit after suspension.
         var credentialsStored = false
@@ -1971,6 +2015,11 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         // authenticated native join retains our facts; publish only if that joined wire carrier
         // actually contributes facts missing from the server (never a projection or wall clock).
         if (NativeSyncPublicationPolicy.needsRepublish(pull.doc, exported)) armPendingSync(lease, recordEdit = true)
+        if (isSyncLeaseCurrent(lease) && !retryPendingPushBeforePull(lease)) {
+            if (initialMount != null && appliedMount != null && gateway.currentMountToken(account) == appliedMount) {
+                nativeReceiveReceipt = NativeReceiveReceipt(lease, appliedMount, pull.version)
+            }
+        }
         return isSyncLeaseCurrent(lease)
     }
 
@@ -2023,7 +2072,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
             val document = when (pulled) {
                 is SyncDocPull.Doc -> pulled.doc
                 SyncDocPull.Empty -> gateway.prepareEmptyAccount(account) { isSyncLeaseCurrent(lease) } ?: return null
-                SyncDocPull.Failed -> return null
+                SyncDocPull.Failed, is SyncDocPull.Unchanged -> return null
             }
             if (seed) {
                 // Fresh seed has no mounted writer or local actor. Preserve any queued local
@@ -2126,7 +2175,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         val store = resolveStore() ?: return null
         val pull = pullSyncDocResult(lease)
         val doc: JSONObject = when (pull) {
-            is SyncDocPull.Failed -> return null
+            is SyncDocPull.Failed, is SyncDocPull.Unchanged -> return null
             is SyncDocPull.Empty -> JSONObject()
             is SyncDocPull.Doc -> pull.doc
         }
@@ -2396,9 +2445,10 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     private suspend fun syncDown(
         lease: SyncSessionLease,
         force: Boolean = false,
+        routineReceive: Boolean = false,
     ): Boolean {
         if (!isSyncLeaseCurrent(lease)) return false
-        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { nativeSyncMutex.withLock { nativeSyncDown(lease, force) } }
+        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { nativeSyncMutex.withLock { nativeSyncDown(lease, force, routineReceive) } }
             catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
             catch (_: Exception) { false }
         // PENDING-EDIT GUARD: restore a durable process-death marker and retry its push before any
@@ -2823,7 +2873,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         syncLeaseAdmission(lease).invoke(action)
     internal fun lastAppliedVersion(lease: SyncSessionLease): Long =
         if (isSyncLeaseCurrent(lease)) lastSyncedVersion(lease) else Long.MAX_VALUE
-    internal suspend fun syncDownForRealtime(lease: SyncSessionLease): Boolean = syncDown(lease)
+    internal suspend fun syncDownForRealtime(lease: SyncSessionLease): Boolean = syncDown(lease, routineReceive = true)
 
     // ---- Sign-in reconciliation (no blind last-writer-wins) ----
 
@@ -2845,7 +2895,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
                 if (pull.doc.has("vortx") || pull.doc.has("settings") || pull.doc.has("apiKeys"))
                     AccountDataProbe.HAS_DATA else AccountDataProbe.EMPTY
             is SyncDocPull.Empty -> AccountDataProbe.EMPTY       // genuinely no backup yet: safe to seed
-            is SyncDocPull.Failed -> AccountDataProbe.UNREACHABLE // blip / refused doc: retry, NEVER seed
+            is SyncDocPull.Failed, is SyncDocPull.Unchanged -> AccountDataProbe.UNREACHABLE // blip / refused doc: retry, NEVER seed
         }
     }
 
@@ -2986,7 +3036,17 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         body: JSONObject?,
         bearerToken: String? = null,
         callPermit: SessionOperationCoordinator.OutboundCallPermit,
+        ifNoneMatch: String? = null,
+        receiveETag: ((String?) -> Unit)? = null,
     ): Pair<Int, JSONObject?> {
+        conditionalRequestTestSeam?.let { testTransport ->
+            if (!callPermit.isCurrent()) return 0 to null
+            return try {
+                val (status, json, etag) = testTransport(method, path, body, bearerToken, ifNoneMatch)
+                receiveETag?.invoke(etag)
+                status to json
+            } finally { callPermit.close() }
+        }
         requestTestSeam?.let { testTransport ->
             if (!callPermit.isCurrent()) return 0 to null
             return try {
@@ -3015,6 +3075,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
                         // The session bearer for the backup/sync endpoints. `api.vortx.tv` is the account-authed
                         // host and is deliberately NOT edge-signed (excluded from VortXEdgeAuth's gate).
                         bearerToken?.let { setRequestProperty("authorization", "Bearer $it") }
+                        if (method == "GET" && path == "/v1/backup") ifNoneMatch?.let { setRequestProperty("If-None-Match", it) }
                         if (bodyBytes != null) {
                             doOutput = true
                             setRequestProperty("content-type", "application/json")
@@ -3028,6 +3089,8 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
                     }
                     if (!callPermit.isCurrent()) return@withContext 0 to null
                     val status = opened.responseCode
+                    receiveETag?.invoke(opened.getHeaderField("ETag"))
+                    if (status == 304) return@withContext 304 to null
                     val stream = if (status in 200..399) opened.inputStream else opened.errorStream
                     val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
                     val json = if (path == "/v1/backup") BackupRevisionPolicy.decodeResponse(text)
