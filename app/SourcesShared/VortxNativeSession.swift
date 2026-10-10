@@ -3,6 +3,36 @@ import CryptoKit
 import Darwin
 import Security
 
+/// File errors carry private URLs and account paths in userInfo/localizedDescription. Keep only
+/// allowlisted domains, numeric codes, and a static stage while rethrowing the original error.
+enum VortxCheckpointDiagnostics {
+    enum Stage: String {
+        case validate, retainExisting = "retain_existing", seal, createDirectory = "create_directory"
+        case stageWrite = "stage_write", stageSync = "stage_sync", stageReadback = "stage_readback"
+        case install, directorySync = "directory_sync", installedReadback = "installed_readback"
+        case transactionCommit = "transaction_commit"
+    }
+    static func summary(stage: Stage, error: Error) -> String {
+        func code(_ error: Error) -> String {
+            if error is VortxNativeError { return "domain=native code=" + VortxNativeError.diagnosticCode(error) }
+            let value = error as NSError
+            let domain: String
+            switch value.domain {
+            case NSCocoaErrorDomain: domain = "cocoa"
+            case NSPOSIXErrorDomain: domain = "posix"
+            case NSOSStatusErrorDomain: domain = "osstatus"
+            default: domain = error is CryptoKitError ? "cryptokit" : "other"
+            }
+            return "domain=\(domain) code=\(value.code)"
+        }
+        let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? Error
+        return "stage=\(stage.rawValue) \(code(error))" + (underlying.map { " underlying_" + code($0) } ?? "")
+    }
+    static func report(stage: Stage, error: Error) {
+        VXProbe.log("native-checkpoint", summary(stage: stage, error: error))
+    }
+}
+
 /// This key authenticates only the local checkpoint inventory. Account ciphertext remains readable
 /// with its independent account key after device-key loss; no installation identity is exported.
 enum VortxNativeInstallationKey {
@@ -397,34 +427,49 @@ final class VortxEncryptedCheckpointStore: VortxCheckpointStore, @unchecked Send
     }
     private func commitSnapshot(_ snapshot: String, scope: VortxAccountScope, hostPreferences: Data?) throws {
         lock.lock(); defer { lock.unlock() }
-        try scope.validate(); _ = try scope.validateSnapshot(snapshot)
-        var retainedHost = hostPreferences
+        var stage = VortxCheckpointDiagnostics.Stage.validate
         do {
-            // The first migration source is immutable, even for a fresh store instance making a
-            // later commit. A decode/read failure must not replace it with a newer/empty carrier.
-            let retained = try open(Data(contentsOf: url(scope)), scope: scope)
-            if let bootstrap = retained.bootstrap { bootstraps[scope] = bootstrap }
-            if retainedHost == nil { retainedHost = retained.hostPreferences }
-        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {}
-        let bootstrap = bootstraps[scope]
-        let envelope = Envelope(format: "vortx-native-checkpoint-v1", state: snapshot, bootstrap: bootstrap, hostPreferences: retainedHost)
-        let sealed = try AES.GCM.seal(JSONEncoder().encode(envelope), using: key, authenticating: scope.authenticatedData)
-        guard let combined = sealed.combined else { throw VortxNativeError.invalidSnapshot }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let staged = directory.appendingPathComponent(".native-checkpoint-\(UUID().uuidString).sealed")
-        defer { try? FileManager.default.removeItem(at: staged) }
-        try indexedCiphertext(combined, scope: scope).write(to: staged, options: [.withoutOverwriting, .completeFileProtection])
-        let file = try FileHandle(forWritingTo: staged); defer { try? file.close() }
-        try file.synchronize()
-        let stagedRead = try open(Data(contentsOf: staged), scope: scope)
-        guard stagedRead.state == snapshot, stagedRead.bootstrap == bootstrap, stagedRead.hostPreferences == retainedHost else { throw VortxNativeError.invalidSnapshot }
-        guard Darwin.rename(staged.path, url(scope).path) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-        let directoryFD = Darwin.open(directory.path, O_RDONLY)
-        guard directoryFD >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-        defer { Darwin.close(directoryFD) }
-        guard Darwin.fsync(directoryFD) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-        let installed = try open(Data(contentsOf: url(scope)), scope: scope)
-        guard installed.state == snapshot, installed.bootstrap == bootstrap, installed.hostPreferences == retainedHost else { throw VortxNativeError.invalidSnapshot }
+            try scope.validate(); _ = try scope.validateSnapshot(snapshot)
+            var retainedHost = hostPreferences
+            stage = .retainExisting
+            do {
+                // The first migration source is immutable, even for a fresh store instance making a
+                // later commit. A decode/read failure must not replace it with a newer/empty carrier.
+                let retained = try open(Data(contentsOf: url(scope)), scope: scope)
+                if let bootstrap = retained.bootstrap { bootstraps[scope] = bootstrap }
+                if retainedHost == nil { retainedHost = retained.hostPreferences }
+            } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {}
+            let bootstrap = bootstraps[scope]
+            let envelope = Envelope(format: "vortx-native-checkpoint-v1", state: snapshot, bootstrap: bootstrap, hostPreferences: retainedHost)
+            stage = .seal
+            let sealed = try AES.GCM.seal(JSONEncoder().encode(envelope), using: key, authenticating: scope.authenticatedData)
+            guard let combined = sealed.combined else { throw VortxNativeError.invalidSnapshot }
+            stage = .createDirectory
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let staged = directory.appendingPathComponent(".native-checkpoint-\(UUID().uuidString).sealed")
+            defer { try? FileManager.default.removeItem(at: staged) }
+            stage = .stageWrite
+            try indexedCiphertext(combined, scope: scope).write(to: staged, options: [.withoutOverwriting, .completeFileProtection])
+            stage = .stageSync
+            let file = try FileHandle(forWritingTo: staged); defer { try? file.close() }
+            try file.synchronize()
+            stage = .stageReadback
+            let stagedRead = try open(Data(contentsOf: staged), scope: scope)
+            guard stagedRead.state == snapshot, stagedRead.bootstrap == bootstrap, stagedRead.hostPreferences == retainedHost else { throw VortxNativeError.invalidSnapshot }
+            stage = .install
+            guard Darwin.rename(staged.path, url(scope).path) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            stage = .directorySync
+            let directoryFD = Darwin.open(directory.path, O_RDONLY)
+            guard directoryFD >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            defer { Darwin.close(directoryFD) }
+            guard Darwin.fsync(directoryFD) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            stage = .installedReadback
+            let installed = try open(Data(contentsOf: url(scope)), scope: scope)
+            guard installed.state == snapshot, installed.bootstrap == bootstrap, installed.hostPreferences == retainedHost else { throw VortxNativeError.invalidSnapshot }
+        } catch {
+            VortxCheckpointDiagnostics.report(stage: stage, error: error)
+            throw error
+        }
     }
 }
 
@@ -992,6 +1037,7 @@ actor VortxNativeSession {
         catch {
             // A rename may have succeeded before a readback/fsync failure. Do not overwrite that
             // uncertain checkpoint with another transaction; reopen and validate it first.
+            VortxCheckpointDiagnostics.report(stage: .transactionCommit, error: error)
             persistenceFailed = true; throw VortxNativeError.checkpointUncertain
         }
         let previous = runtime; runtime = candidate; hostPreferences = candidateHost; installed = true; previous.close()

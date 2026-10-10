@@ -69,6 +69,7 @@ final class CoreBridge: ObservableObject {
     private var nativeFacade: VortxNativeCoreFacade? { nativeFacadeLock.withLock { nativeFacadeStorage } }
     var nativeRegistryBinding: VortxNativeCoreFacade.RegistryBinding? { nativeFacade?.registryBinding }
     var hasNativeSession: Bool { nativeFacade?.isAvailable == true }
+    var nativeCheckpointRequiresReopen: Bool { nativeFacade?.requiresCheckpointReopen == true }
     @MainActor
     func hasCertifiedNativeSession(capture: CredentialScopeRegistry.Capture, profileID: UUID?) -> Bool {
         nativeFacadeLock.withLock {
@@ -81,7 +82,7 @@ final class CoreBridge: ObservableObject {
         guard CredentialScopeRegistry.shared.isCurrent(capture),
               let facade = nativeFacadeLock.withLock({ nativeCredentialCapture == capture ? nativeFacadeStorage : nil }),
               facade.isAvailable else { return }
-        await facade.settled()
+        await facade.settleNativeMutations()
         guard CredentialScopeRegistry.shared.isCurrent(capture),
               nativeFacadeLock.withLock({ nativeFacadeStorage === facade && nativeCredentialCapture == capture }) else { return }
         // The facade FIFO can settle before the user operation's MainActor continuation publishes
@@ -146,6 +147,29 @@ final class CoreBridge: ObservableObject {
         nativeFacadeLock.withLock { .native(currentNativePlaybackBinding()) }
     }
     func nativePlaybackTargetIsCurrent(_ target: PlaybackMutationTarget) -> Bool { nativePlaybackBinding(target) != nil }
+    /// Manual UI gestures acknowledge persistence, not merely admission to the native FIFO.
+    @MainActor
+    func setNativeLibraryMembership(id: String, type: String, name: String, poster: String?, present: Bool,
+                                    target: PlaybackMutationTarget) async throws {
+        guard let (facade, profile) = nativePlaybackBinding(target),
+              case .native(let binding?) = target, let epoch = binding.accountGeneration else { throw VortxNativeError.superseded }
+        try await facade.setLibraryMembership(id: id, type: type, name: name, poster: poster, present: present,
+                                              profileID: profile.uuidString, expectedAccountGeneration: epoch)
+        guard nativePlaybackBinding(target)?.0 === facade else { throw VortxNativeError.superseded }
+    }
+    @MainActor
+    func markNativeVideoWatched(_ video: CoreVideo, _ isWatched: Bool,
+                                expected: LibraryWatchedMutationPolicy.DetailTarget, target: PlaybackMutationTarget) async throws {
+        guard let resident = metaDetails?.meta,
+              LibraryWatchedMutationPolicy.residentMatches(expected, residentID: resident.id, residentType: resident.type),
+              resident.videos?.contains(where: { $0.id == video.id }) == true,
+              let (facade, profile) = nativePlaybackBinding(target),
+              case .native(let binding?) = target, let epoch = binding.accountGeneration else { throw VortxNativeError.superseded }
+        try await facade.setWatchedVideosAcknowledged(metaID: resident.id, videoIDs: [video.id], name: resident.name,
+            type: resident.type, poster: resident.poster, watched: isWatched, profileID: profile.uuidString,
+            expectedAccountGeneration: epoch)
+        guard nativePlaybackBinding(target)?.0 === facade else { throw VortxNativeError.superseded }
+    }
     struct NativeProfileActionAdmission {
         let credential: CredentialScopeRegistry.Capture
         let profileID: UUID?
@@ -173,7 +197,7 @@ final class CoreBridge: ObservableObject {
             guard case .native(nil) = admission.target else { return }
             if let facade = self.nativeFacade, facade.isAvailable {
                 // An admitted profile transaction owns the FIFO; do not replace its session.
-                await facade.settled()
+                await facade.settleNativeMutations()
             } else {
                 _ = await VortXSyncManager.shared.restoreNativeCheckpoint(credentialCapture: admission.credential)
             }
@@ -5952,8 +5976,8 @@ final class CoreBridge: ObservableObject {
                 // Decode + assemble off the main thread (same as the old inline path, which also ran off-main).
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     guard let self else { return }
-                    let rows = self.buildBoardRows()
                     let boardState = self.decode(CoreBoardState.self, field: "board")
+                    let rows = boardState.map { self.buildBoardRows($0) } ?? []
                     // [engine] one board line per coalesced rebuild (catalogs the engine holds -> visible rows).
                     VXProbe.log("engine", "board changed catalogs=\(boardState?.catalogs.count ?? 0) rows=\(rows.count)")
                     DispatchQueue.main.async { [weak self] in
@@ -5980,6 +6004,9 @@ final class CoreBridge: ObservableObject {
     /// appear as their content arrives (no empty placeholders).
     private func buildBoardRows() -> [CoreBoardRow] {
         guard let board = decode(CoreBoardState.self, field: "board") else { return [] }
+        return buildBoardRows(board)
+    }
+    private func buildBoardRows(_ board: CoreBoardState) -> [CoreBoardRow] {
         let titles = catalogTitleMap()
         let disabledAddons = ProfileStore.activeDisabledAddons()   // per-profile add-on set, hoisted once
         // Removed-but-engine-retained add-ons (see `tombstonedBases`): their rows must not render on

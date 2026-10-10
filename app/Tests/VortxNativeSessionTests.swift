@@ -32,7 +32,7 @@ private final class SessionABI: VortxRuntimeABI, @unchecked Sendable {
                   incoming["scope"] as? String == (state["nativeSync"] as? [String: Any])?["scope"] as? String else { return "{\"ok\":false}" }
             state["nativeSync"] = incoming
         }
-        state["fixtureMutation"] = action["value"] ?? now
+        state["fixtureMutation"] = action["value"] ?? action["type"] ?? now
         if let data = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]) { states[handle] = String(decoding: data, as: UTF8.self) }
         return "{\"ok\":true}"
     }
@@ -206,7 +206,8 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         if request.resource == .stream && addonID == "source6" { throw VortxNativeError.unavailable }
         let content: VortxJSON
         if request.resource == .meta {
-            content = .object(["meta": .object(["id": .string(request.id), "type": .string(request.type), "name": .string("Fixture \(attempt)")])])
+            content = .object(["meta": .object(["id": .string(request.id), "type": .string(request.type), "name": .string("Fixture \(attempt)"),
+                "videos": .array([.object(["id": .string(request.id + ":1:1"), "season": .integer(1), "episode": .integer(1)])])])])
         } else if addonID == "source7" {
             content = .object(["streams": .array([.string("malformed")])])
         } else { content = .object(["streams": .array([.object(["url": .string("https://fixture.invalid/video.mp4?attempt=\(attempt)")])])]) }
@@ -251,6 +252,12 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         check(transport.maximumActive == 6 && transport.started.count == 6)
         check(!transport.started.contains("title:1:1/stream/source4"))
         check(state(facade)?["streams"]?.array?.count == 22)
+        // Profile/sync admission needs only native FIFO settlement, never these held resources.
+        let nativeSettled = MutationCounter()
+        let settlement = Task { await facade.settleNativeMutations(); nativeSettled.increment() }
+        try await eventually { nativeSettled.value == 1 }
+        await settlement.value
+        check(state(facade)?["streams"]?.array?.first?["content"]?["type"] == .string("Loading"))
         transport.release(blocked[2])
         try await eventually { state(facade)?["streams"]?.array?[2]["content"]?["type"] == .string("Ready") }
         check(state(facade)?["streams"]?.array?[0]["content"]?["type"] == .string("Loading"))
@@ -534,7 +541,76 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         await cold.close()
         print("Native watchlist: busy host FIFO add/remove, acknowledged membership, stable busy target, profile ABA/account rebind/logout rejection and cold readback passed")
     }
+    static func checkpointRecoveryTests() async throws {
+        let nested = NSError(domain: NSPOSIXErrorDomain, code: Int(EIO), userInfo: [NSLocalizedDescriptionKey: "private-data"])
+        let failure = NSError(domain: NSCocoaErrorDomain, code: 512,
+            userInfo: [NSFilePathErrorKey: "/private/account-checkpoint", NSUnderlyingErrorKey: nested])
+        check(VortxCheckpointDiagnostics.summary(stage: .installedReadback, error: failure)
+            == "stage=installed_readback domain=cocoa code=512 underlying_domain=posix code=5")
+        check(VortxCheckpointDiagnostics.summary(stage: .stageWrite,
+            error: NSError(domain: "private-account-domain", code: 17)) == "stage=stage_write domain=other code=17")
+        for operation in ["library", "watched"] {
+            for afterInstall in [false, true] {
+                let scope = VortxAccountScope(account: "checkpoint-\(operation)-\(afterInstall)", ownerProfileID: "owner")
+                let store = SessionStore(), accepted = MutationCounter()
+                let session = try VortxNativeSession(scope: scope, ownerName: "Owner", abi: SessionABI(), store: store,
+                    transport: DetailFanoutTransport(held: []), allowNewAccount: true)
+                let registry = [VortxResourceAddon(id: "source0", transportUrl: "https://fixture.invalid/manifest.json",
+                    manifest: .object(["resources": .array([.string("meta")])]))]
+                let facade = try await VortxNativeCoreFacade.create(session: session, registry: registry,
+                    mutationAccepted: { accepted.increment() }, changed: { _ in })
+                let metaPath = try VortxResourceProjection.path(.init(resource: .meta, type: "series", id: "title"))
+                let load: VortxJSON = .object(["action": .string("Load"), "args": .object(["model": .string("MetaDetails"),
+                    "args": .object(["metaPath": metaPath])])])
+                check(facade.dispatch(data: try JSONEncoder().encode(load), field: "meta_details"))
+                await facade.settled()
+                let epoch = facade.accountGeneration
+                @Sendable func mutate(_ present: Bool) async throws {
+                    if operation == "library" {
+                        try await facade.setLibraryMembership(id: "title", type: "series", name: "Fixture", poster: nil,
+                            present: present, profileID: "owner", expectedAccountGeneration: epoch)
+                    } else {
+                        try await facade.setWatchedVideosAcknowledged(metaID: "title", videoIDs: ["title:1:1"], name: "Fixture",
+                            type: "series", poster: nil, watched: present, profileID: "owner", expectedAccountGeneration: epoch)
+                    }
+                }
+                let original = facade.stateData("native_state")!
+                store.blockNextWrite()
+                let completion = MutationCounter()
+                let mutation = Task { try await mutate(true); completion.increment() }
+                await withCheckedContinuation { done in DispatchQueue.global().async {
+                    precondition(store.entered.wait(timeout: .now() + 5) == .success); done.resume()
+                } }
+                check(completion.value == 0 && accepted.value == 0 && facade.stateData("native_state") == original)
+                let settled = MutationCounter()
+                let settlement = Task { await facade.settleNativeMutations(); settled.increment() }
+                await Task.yield()
+                check(settled.value == 0)
+                store.release.signal(); try await mutation.value; await settlement.value
+                check(completion.value == 1 && accepted.value == 1 && settled.value == 1)
+                let acknowledged = facade.stateData("native_state")!
+                let checkpointBefore = try store.read(scope: scope)!
+                store.failWrites(afterInstall: afterInstall)
+                do { try await mutate(false); check(false) } catch VortxNativeError.checkpointUncertain {}
+                check(!facade.isAvailable && facade.requiresCheckpointReopen)
+                check(facade.stateData("native_state") == acknowledged && facade.profileSnapshot() != nil)
+                check(accepted.value == 1)
+                let authoritative = try store.read(scope: scope)!
+                check((authoritative != checkpointBefore) == afterInstall)
+                store.recover()
+                do { try await mutate(true); check(false) } catch VortxNativeError.checkpointUncertain {}
+                check(try store.read(scope: scope) == authoritative && !facade.isAvailable)
+                await facade.shutdown()
+                let reopened = try VortxNativeSession(scope: scope, ownerName: "Owner", abi: SessionABI(), store: store,
+                    transport: SessionTransport())
+                check(try await reopened.stateJSON() == authoritative)
+                await reopened.close()
+            }
+        }
+        print("Checkpoint recovery: Library/Watched ACK gates, FIFO settlement, failure before/after install, readable uncertified state, authoritative reopen and redacted diagnostics passed")
+    }
     static func main() async throws {
+        try await checkpointRecoveryTests()
         try await detailFanoutTests()
         try await catalogFanoutTests()
         try await watchlistAdmissionTests()

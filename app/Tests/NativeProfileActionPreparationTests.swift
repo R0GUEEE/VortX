@@ -63,7 +63,7 @@ enum NativeProfileActionPreparationTests {
         precondition(admission.contains("CredentialScopeRegistry.shared.isCurrent(admission.credential)"))
         precondition(admission.contains("ProfileStore.shared.activeID == admission.profileID"))
         precondition(admission.contains("guard case .native(nil) = admission.target else { return }"))
-        precondition(admission.contains("await facade.settled()"))
+        precondition(admission.contains("await facade.settleNativeMutations()"))
         precondition(admission.contains("restoreNativeCheckpoint(credentialCapture: admission.credential)"))
         let sync = try String(contentsOfFile: "app/SourcesShared/VortXSyncManager.swift", encoding: .utf8)
         let beforeRestore = sync.components(separatedBy: "func restoreNativeCheckpoint(")[1]
