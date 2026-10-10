@@ -88,7 +88,8 @@ struct ProfilePickerView: View {
             GeometryReader { geometry in
                 let layout = ProfilePickerLayout(width: geometry.size.width,
                                                  largeText: dynamicTypeSize.isAccessibilitySize || theme.textScale > 1.20,
-                                                 isPhone: profilePickerIsPhone)
+                                                 isPhone: profilePickerIsPhone,
+                                                 isTV: profilePickerIsTV)
                 ZStack {
                     backgroundArtwork
                     ScrollView(.vertical, showsIndicators: false) {
@@ -100,14 +101,14 @@ struct ProfilePickerView: View {
                             }
                             if let movie = artwork.movie {
                                 Text(movie.name)
-                                    .modifier(ProfilePickerText(size: 26, style: .title, design: .serif))
+                                    .modifier(ProfilePickerText(size: layout.movieTextSize, style: .title, design: .serif))
                                     .multilineTextAlignment(.center)
                                     .foregroundStyle(.white.opacity(0.9))
                                     .padding(.bottom, 12)
                                     .accessibilityHidden(true)
                             }
                             Text(isEditing ? "Edit profiles" : "Who's watching?")
-                                .modifier(ProfilePickerText(size: layout.isWide ? 40 : 25, style: .title2, design: .rounded))
+                                .modifier(ProfilePickerText(size: layout.headingTextSize, style: .title2, design: .rounded))
                                 .foregroundStyle(.white)
                                 .multilineTextAlignment(.center)
                                 .accessibilityAddTraits(.isHeader)
@@ -154,7 +155,7 @@ struct ProfilePickerView: View {
                         }
                         .padding(.horizontal, layout.horizontalInset)
                         .padding(.bottom, layout.isPhone ? 32 : 0)
-                        .frame(maxWidth: 1100)
+                        .frame(maxWidth: layout.contentMaxWidth)
                         .frame(maxWidth: .infinity)
                         .frame(minHeight: geometry.size.height,
                                alignment: layout.isPhone ? .bottom : .center)
@@ -224,6 +225,14 @@ struct ProfilePickerView: View {
         #endif
     }
 
+    private var profilePickerIsTV: Bool {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
+    }
+
     private var backgroundArtwork: some View {
         ZStack {
             Color.black
@@ -246,7 +255,7 @@ struct ProfilePickerView: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: layout.spacing), count: layout.columns),
                           alignment: .center, spacing: 24) {
                     ForEach(0..<(store.profiles.count + 2), id: \.self) { index in
-                        profileTile(at: index, side: layout.avatarSide)
+                        profileTile(at: index, side: layout.avatarSide, nameTextSize: layout.nameTextSize)
                     }
                 }
             } else {
@@ -254,7 +263,7 @@ struct ProfilePickerView: View {
                     ForEach(layout.rows(itemCount: store.profiles.count + 2), id: \.lowerBound) { row in
                         HStack(alignment: .top, spacing: layout.spacing) {
                             ForEach(Array(row), id: \.self) { index in
-                                profileTile(at: index, side: layout.avatarSide)
+                                profileTile(at: index, side: layout.avatarSide, nameTextSize: layout.nameTextSize)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -266,18 +275,18 @@ struct ProfilePickerView: View {
         .profileFocusSection()
     }
 
-    @ViewBuilder private func profileTile(at index: Int, side: CGFloat) -> some View {
+    @ViewBuilder private func profileTile(at index: Int, side: CGFloat, nameTextSize: CGFloat) -> some View {
         if index < store.profiles.count {
             let profile = store.profiles[index]
             ProfileAvatarTile(profile: profile, isCurrent: profile.id == store.activeID,
-                              isEditing: isEditing, side: side) { pick(profile) }
+                              isEditing: isEditing, side: side, nameTextSize: nameTextSize) { pick(profile) }
         } else if index == store.profiles.count {
-            ProfilePickerActionTile(title: "Add", symbol: "plus", side: side) {
+            ProfilePickerActionTile(title: "Add", symbol: "plus", side: side, nameTextSize: nameTextSize) {
                 editorProfile = UserProfile(name: "", avatar: "🎬", accentID: theme.accentID)
             }
         } else {
             ProfilePickerActionTile(title: isEditing ? "Done" : "Edit",
-                                    symbol: isEditing ? "checkmark" : "pencil", side: side) {
+                                    symbol: isEditing ? "checkmark" : "pencil", side: side, nameTextSize: nameTextSize) {
                 isEditing.toggle()
             }
         }
@@ -405,7 +414,14 @@ private final class ProfilePickerArtwork: ObservableObject {
 
     private static let candidateLimit = 12
     private static let rotationIntervalNanoseconds: UInt64 = 5_000_000_000
-    fileprivate static let artworkMaxPixel: CGFloat = CGFloat(HeroArtworkQualityPolicy.mobileLongEdge)
+    // Keep the rotating picker bounded to full HD on TV, without a 4K prefetch queue.
+    fileprivate static let artworkMaxPixel: CGFloat = {
+        #if os(tvOS)
+        return CGFloat(HeroArtworkQualityPolicy.fullHDLongEdge)
+        #else
+        return CGFloat(HeroArtworkQualityPolicy.mobileLongEdge)
+        #endif
+    }()
 
     @Published private(set) var movie: ProfilePickerMovie?
     private var candidates: [ProfilePickerMovie] = []
@@ -579,6 +595,7 @@ private struct ProfileAvatarTile: View {
     let isCurrent: Bool
     let isEditing: Bool
     let side: CGFloat
+    let nameTextSize: CGFloat
     let action: () -> Void
 
     private var accent: Color {
@@ -589,11 +606,11 @@ private struct ProfileAvatarTile: View {
         Button(action: action) {
             VStack(spacing: 10) {
                 ProfileAvatarFace(profile: profile, isCurrent: isCurrent, isEditing: isEditing, side: side, accent: accent)
-                Text(profile.name).modifier(ProfilePickerText(size: 18, style: .headline))
+                Text(profile.name).modifier(ProfilePickerText(size: nameTextSize, style: .headline))
                     .multilineTextAlignment(.center).lineLimit(2)
             }
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, alignment: .top)
+            .frame(width: side, alignment: .top)
             .contentShape(Rectangle())
         }
         .buttonStyle(ProfilePickerButtonStyle(outline: false))
@@ -646,6 +663,7 @@ private struct ProfilePickerActionTile: View {
     let title: String
     let symbol: String
     let side: CGFloat
+    let nameTextSize: CGFloat
     let action: () -> Void
 
     var body: some View {
@@ -654,10 +672,10 @@ private struct ProfilePickerActionTile: View {
                 Image(systemName: symbol).font(.system(size: side * 0.40, weight: .light))
                     .frame(width: side, height: side)
                     .background(.white.opacity(0.14), in: RoundedRectangle(cornerRadius: side * 0.23, style: .continuous))
-                Text(title).modifier(ProfilePickerText(size: 18, style: .headline))
+                Text(title).modifier(ProfilePickerText(size: nameTextSize, style: .headline))
             }
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, alignment: .top)
+            .frame(width: side, alignment: .top)
             .contentShape(Rectangle())
         }
         .buttonStyle(ProfilePickerButtonStyle())
