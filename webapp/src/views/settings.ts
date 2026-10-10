@@ -10,6 +10,7 @@ import {
   addProfile,
   updateProfileMeta,
   deleteProfile,
+  hasNativeProfiles,
   PROFILE_AVATARS,
 } from "../lib/profiles";
 import {
@@ -135,13 +136,13 @@ function profilesSection(): string {
   const chips = list
     .map(
       (p) =>
-        `<button class="profile-chip${p.id === activeId ? " selected" : ""}" data-action="switch-profile" data-id="${escapeHtml(p.id)}">
+        `<button class="profile-chip${p.id === activeId ? " selected" : ""}" data-action="switch-profile" data-id="${escapeHtml(p.id)}"${p.restricted ? ' disabled aria-disabled="true"' : ""}>
           <span class="profile-avatar" aria-hidden="true">${escapeHtml(p.avatar)}</span>
           <span class="profile-name">${escapeHtml(p.name)}</span>
         </button>`,
     )
     .join("");
-  const add = `<button class="profile-chip profile-add" data-action="add-profile" aria-label="Add a profile"><span class="profile-avatar" aria-hidden="true">+</span><span class="profile-name">Add</span></button>`;
+  const add = hasNativeProfiles() ? "" : `<button class="profile-chip profile-add" data-action="add-profile" aria-label="Add a profile"><span class="profile-avatar" aria-hidden="true">+</span><span class="profile-name">Add</span></button>`;
 
   const active = activeProfile();
   const avatars = PROFILE_AVATARS.map(
@@ -160,8 +161,9 @@ function profilesSection(): string {
 
   return group(
     "Profiles",
-    `<div class="profile-row">${chips}${add}</div>${editor}`,
-    "Each profile keeps its own look, languages, library, and Continue Watching; switching applies them instantly. A PIN lock is coming next.",
+    `<div class="profile-row">${chips}${add}</div>${hasNativeProfiles() ? "" : editor}`,
+    hasNativeProfiles() ? "Account profiles update automatically from VortX. Manage their names, avatars and membership in VortX. PIN, kids and pending-account profiles cannot be opened here."
+      : "Each profile keeps its own look, languages, library, and Continue Watching; switching applies them instantly. A PIN lock is coming next.",
   );
 }
 
@@ -184,7 +186,8 @@ function accountSection(): string {
 
 function accountSyncMessage(): string {
   const status = accountSyncStatus();
-  if (status.projectionPending) return "Account update received. Native app data is awaiting compatible browser support.";
+  if (status.projectionPending) return "Account update received. Supported browser data updates automatically; some native data or profile protections still require VortX.";
+  if (hasNativeProfiles()) return "Account updates apply automatically. Browser Save is local; native profile-setting edits stay queued pending compatible sync support. Metadata API keys sync independently.";
   return status.appliedVersion === undefined ? "Checking for account updates…" : "Account updates apply automatically while this page is active.";
 }
 
@@ -539,6 +542,7 @@ export function handleSettingsClick(target: EventTarget | null): boolean {
       rerender();
       return true;
     case "add-profile":
+      if (hasNativeProfiles()) return true;
       addProfile("New profile", PROFILE_AVATARS[profiles().length % PROFILE_AVATARS.length]);
       rerender();
       return true;

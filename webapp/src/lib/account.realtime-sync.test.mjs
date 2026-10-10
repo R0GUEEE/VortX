@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { registerHooks } from "node:module";
 
@@ -83,6 +83,9 @@ let account = await import("./account.ts");
 const store = await import("./store.ts");
 const settings = await import("./settings.ts");
 const profiles = await import("./profiles.ts");
+const player = await import("./player.ts");
+const { renderLibrary } = await import("../views/library.ts");
+const nativeFixture = JSON.parse(readFileSync(new URL("./fixtures/native-sync-carrier.json", import.meta.url), "utf8"));
 const { sealDocument, openDocument } = vault.__syncCryptoTestHooks;
 const json = (value, status = 200) => new Response(JSON.stringify(value), {
   status, headers: { "content-type": "application/json" },
@@ -231,7 +234,7 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
 
   await t.test("add-on failure retries exact descriptor/removal intent and retains edits arriving during PUT", async () => {
     clean(); const s = makeSession(); const preserved = { transportUrl: "https://old.test/manifest.json", manifest: { id: "old" }, foreign: 7 };
-    const server = await serverFor(s, { ...legacyDoc(), addons: [preserved], nativeSync: { future: "opaque" }, nativeHostPreferences: { keep: true } });
+    const server = await serverFor(s, { ...legacyDoc(), addons: [preserved], nativeExtension: { future: "opaque" }, providerExtension: { keep: true } });
     account.adoptSession(s); account.applySyncDoc(legacyDoc());
     const url = "https://addons.test:443/A/../B/manifest.json?Token=AbC";
     await store.addAddon(url); store.removeAddon(preserved.transportUrl);
@@ -243,7 +246,7 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
     const doc = await server.read();
     assert.ok(doc.addons.some((a) => a.transportUrl === url)); assert.ok(doc.addons.some((a) => a.transportUrl === second));
     assert.ok(!doc.addons.some((a) => a.transportUrl === preserved.transportUrl));
-    assert.deepEqual(doc.nativeSync, { future: "opaque" }); assert.deepEqual(doc.nativeHostPreferences, { keep: true });
+    assert.deepEqual(doc.nativeExtension, { future: "opaque" }); assert.deepEqual(doc.providerExtension, { keep: true });
     assert.equal(server.maxPuts, 1);
   });
 
@@ -375,5 +378,228 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
     window.removeEventListener("vortx:addons-changed", changed);
     assert.ok(store.libraryItems().some((item) => item.id === "remote-library-only"));
     assert.equal(server.puts.length, 0);
+  });
+
+  await t.test("actual native export reaches live Library, Watchlist, CW, profiles and add-ons through a socket update", async () => {
+    clean(); const s = makeSession(); s.account.id = "sync-fixture";
+    const initial = structuredClone(nativeFixture.cases[0].document);
+    const server = await serverFor(s, initial);
+    local.set("vortx.web.library.v1", JSON.stringify([{ id: "foreign-local-save", type: "movie", name: "Other account" }]));
+    account.adoptSession(s); stop = account.startAccountSync();
+    await until(() => account.accountSyncStatus().appliedVersion === 20, "compatible native projection applied");
+    assert.equal(account.accountSyncStatus().projectionPending, false);
+    assert.deepEqual(store.nativeWatchlistItems().map((item) => item.id), ["tt-watchlist"]);
+    assert.deepEqual(store.nativeLibraryItems().map((item) => item.id), ["tt-saved"]);
+    assert.deepEqual(store.continueWatching().map((item) => [item.id, item.resumeId, item.position, item.duration, item.updatedAt]),
+      [["tt-saved", "tt-saved:1:2", 120, 1200, 1791497839000]], "milliseconds/playhead and seconds/activity are converted exactly once");
+    assert.equal(store.cwPosition("tt-saved:1:2"), 120);
+    assert.deepEqual(store.browserLibraryItems(), [], "inherited local saves are not another account's native Library");
+    const host = { innerHTML: "" }; renderLibrary(host);
+    assert.match(host.innerHTML, /Account Watchlist/); assert.match(host.innerHTML, /Account Library/);
+    assert.match(host.innerHTML, /Saved in this browser/); assert.ok(!host.innerHTML.includes("foreign-local-save"));
+    const owner = initial.nativeSync.ownerProfileId;
+    const updated = structuredClone(nativeFixture.cases[1].document);
+    updated.nativeSync.libraries[owner] = { records: {}, order: { ids: [], updatedAt: 2000000000 } };
+    updated.nativeSync.watches[owner].log["tt-saved:1:2"].removed_at = 2000000000;
+    updated.nativeHostPreferences.profiles[owner].fields["watchlist.movie.dHQtd2F0Y2hsaXN0"].value = null;
+    updated.nativeHostPreferences.profiles[owner].fields["watchlist.movie.dHQtd2F0Y2hsaXN0"].clock++;
+    updated.vortx = { profiles: [{ id: "stale-profile", name: "Stale profile" }], library: [{ id: "stale-legacy-title", type: "movie", name: "Stale" }] };
+    await server.remote(updated); FakeSocket.instances.at(-1).update(server.version);
+    await until(() => account.accountSyncStatus().appliedVersion === 21, "native update applies immediately");
+    assert.deepEqual(store.nativeLibraryItems(), []); assert.deepEqual(store.nativeWatchlistItems(), []); assert.deepEqual(store.continueWatching(), []);
+    assert.ok(profiles.profiles().some((profile) => profile.name === "Renamed on Android"));
+    assert.ok(!profiles.profiles().some((profile) => profile.id === "stale-profile"));
+    assert.ok(!store.installedUrls().includes("https://fixture.invalid/one/manifest.json"));
+    assert.equal(server.puts.length, 0, "native read-down never edits native/legacy channels or echoes upload");
+  });
+
+  await t.test("native own-account rebinding fences queued progress, delayed manifests, local saves and account switch", async () => {
+    clean(); const s = makeSession(); s.account.id = "website-own-slot-fixture";
+    const ownA = nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("03-own-A"));
+    const ownB = nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("04-own-B"));
+    const server = await serverFor(s, structuredClone(ownA.document));
+    account.adoptSession(s); account.applySyncDoc(ownA.document);
+    const viewer = ownA.playback.profileId.toUpperCase(); profiles.setActiveProfile(viewer);
+    assert.deepEqual(store.nativeLibraryItems().map((row) => row.id), ["tt-own-a-only"]);
+    store.toggleLibrary({ id: "own-a-browser-save", type: "movie", name: "A browser save" });
+    store.recordProgress({ id: "own-a-edited", type: "movie", name: "A dirty edit" }, 20, 100);
+    assert.ok(store.continueWatching().some((row) => row.id === "own-a-edited"));
+    const fetch = globalThis.fetch; let release; const manifest = new Promise((resolve) => { release = resolve; });
+    globalThis.fetch = (url, init) => String(url).startsWith("https://slow-native.test/") ? manifest : fetch(url, init);
+    const install = store.addAddon("https://slow-native.test/manifest.json");
+    await server.remote(structuredClone(ownB.document)); account.applySyncDoc(ownB.document);
+    assert.deepEqual(store.nativeLibraryItems().map((row) => row.id), ["tt-own-b-only"]);
+    assert.deepEqual(store.browserLibraryItems(), []); assert.ok(!store.continueWatching().some((row) => row.id === "own-a-edited"));
+    release(json({ id: "slow-native", name: "Slow", version: "1", resources: [], types: [], catalogs: [] }));
+    await assert.rejects(install, /Account changed/);
+    await advance(1_000); assert.equal(server.puts.length, 0, "A's dirty progress is not written into B's active account slot");
+    assert.ok(journalsFor(s).some(([, raw]) => raw.includes("own-a-edited")), "unacknowledged original-slot intent stays durable");
+    const other = makeSession(); account.adoptSession(other);
+    assert.equal(store.hasNativeAccountProjection(), false); assert.ok(!store.libraryItems().some((row) => row.id === "tt-own-b-only"));
+  });
+
+  await t.test("native-valid zero resume remains visible, and protected native profiles cannot activate browser resources", async () => {
+    clean(); const sample = nativeFixture.edgeCases.find((sample) => sample.source.startsWith("01-zero"));
+    const s = makeSession(); s.account.id = sample.document.nativeSync.scope.replace(/^account\./, "");
+    account.adoptSession(s); account.applySyncDoc(sample.document);
+    assert.equal(store.continueWatching().length, 1); assert.equal(store.continueWatching()[0].position, 0);
+    const document = structuredClone(sample.document), owner = document.nativeSync.ownerProfileId;
+    document.nativeSync.profiles[owner].profile.pin = "synthetic-pin";
+    account.applySyncDoc(document);
+    assert.deepEqual(store.continueWatching(), []); assert.deepEqual(store.nativeLibraryItems(), []); assert.deepEqual(store.installedUrls(), []);
+  });
+
+  await t.test("native settings/add-on/progress intent survives missing carrier while independent metadata keys ACK", async () => {
+    clean(); const s = makeSession();
+    const doc = structuredClone(nativeFixture.cases[0].document);
+    doc.nativeSync.scope = doc.nativeHostPreferences.scope = `account.${s.account.id}`;
+    doc.vortx = legacyDoc().vortx; // A retained historical main is not native settings authority.
+    doc.nativeProviderCredentials = { opaque: "synthetic-retained-carrier" };
+    const server = await serverFor(s, doc);
+    account.adoptSession(s); account.applySyncDoc(doc);
+    settings.updateSettings({ accentID: "royal", tmdbKey: "synthetic-metadata-key" });
+    await store.addAddon("https://native-held.test/manifest.json");
+    store.recordProgress({ id: "native-held-progress", type: "movie", name: "Native browser progress" }, 20, 100);
+    await advance(1_000); await until(() => server.puts.length === 1, "supported metadata subset ACK: " + JSON.stringify({ requests: server.requests.map((r) => r.method), pending: journalsFor(s).map(([, raw]) => Object.keys(JSON.parse(raw).settings)) }));
+    assert.equal(server.puts.length, 1, "only supported metadata subset is ACKed");
+    const accepted = await server.read();
+    assert.equal(accepted.apiKeys.tmdb, "synthetic-metadata-key");
+    assert.deepEqual(accepted.nativeSync, doc.nativeSync); assert.deepEqual(accepted.nativeHostPreferences, doc.nativeHostPreferences);
+    assert.deepEqual(accepted.nativeProviderCredentials, doc.nativeProviderCredentials); assert.equal(accepted.profileEdits, undefined);
+    assert.equal(accepted.webProgress, undefined);
+    assert.ok(journalsFor(s).some(([, raw]) => raw.includes("native-held-progress") && raw.includes("native-held.test") && raw.includes("royal")));
+    const missing = { ...legacyDoc(), foreign: { preserve: true } };
+    await server.remote(missing); await advance(3_000);
+    assert.equal(server.puts.length, 1, "binding-captured edits cannot fall through to a missing native carrier");
+    assert.ok(journalsFor(s).length);
+    account.signOut(); timers.clear(); account.adoptSession(s); account.applySyncDoc(doc);
+    assert.equal(settings.getSettings().accentID, "royal", "native dirty settings survive account re-adoption");
+    await advance(1_000); assert.equal(server.puts.length, 1); assert.ok(journalsFor(s).length);
+  });
+
+  await t.test("pre-hydration unbound browser progress cannot be attributed or ACKed by a native carrier", async () => {
+    clean(); const s = makeSession();
+    const doc = structuredClone(nativeFixture.cases[0].document);
+    doc.nativeSync.scope = doc.nativeHostPreferences.scope = `account.${s.account.id}`;
+    const server = await serverFor(s, doc);
+    account.adoptSession(s);
+    store.recordProgress({ id: "unbound-before-first-pull", type: "movie", name: "Unbound" }, 20, 100);
+    account.applySyncDoc(doc); await advance(1_000);
+    assert.equal(server.puts.length, 0);
+    assert.ok(journalsFor(s).some(([, raw]) => raw.includes("unbound-before-first-pull")));
+    assert.ok(!store.continueWatching().some((row) => row.id === "unbound-before-first-pull"));
+  });
+
+  await t.test("native equal removal/resume clock retains the CABI-accepted CW row in the real browser store", async () => {
+    clean(); const doc = structuredClone(nativeFixture.edgeCases.find((sample) => sample.source.startsWith("01-zero")).document);
+    const s = makeSession(); s.account.id = doc.nativeSync.scope.replace(/^account\./, "");
+    const owner = doc.nativeSync.ownerProfileId, state = Object.values(doc.nativeSync.watches[owner].log)[0];
+    Object.assign(state, { resume_at: 100, removed_at: 100, resume_ms: 1, watched_at: 0, reset_at: 0 });
+    account.adoptSession(s); account.applySyncDoc(doc);
+    assert.equal(store.continueWatching().length, 1); assert.equal(store.continueWatching()[0].position, .001);
+    store.clearProgress(store.continueWatching()[0].id); assert.deepEqual(store.continueWatching(), [], "explicit browser removal is a separate pending overlay");
+  });
+
+  await t.test("real player progress listeners retain start-time admission across own-slot and account changes", async () => {
+    clean(); const ownA = nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("03-own-A"));
+    const ownB = nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("04-own-B"));
+    const s = makeSession(); s.account.id = "website-own-slot-fixture";
+    const server = await serverFor(s, ownA.document); account.adoptSession(s); account.applySyncDoc(ownA.document);
+    profiles.setActiveProfile(ownA.playback.profileId.toUpperCase());
+    const video = Object.assign(new EventTarget(), { currentTime: 20, duration: 100 });
+    player.__playerTestHooks.wireProgress(video, { id: "playing-under-A", type: "movie", name: "A movie" }, store.captureProgressAdmission());
+    video.dispatchEvent(new Event("timeupdate"));
+    assert.ok(store.continueWatching().some((row) => row.id === "playing-under-A"));
+    await server.remote(ownB.document); account.applySyncDoc(ownB.document); await advance(5_001);
+    video.currentTime = 35; video.dispatchEvent(new Event("timeupdate")); video.dispatchEvent(new Event("ended"));
+    assert.ok(!store.continueWatching().some((row) => row.id === "playing-under-A"));
+    const [journal] = journalsFor(s).map(([, raw]) => JSON.parse(raw));
+    assert.equal(Object.values(journal.progress).flatMap((intent) => intent.entries).find((row) => row.id === "playing-under-A").t, 20);
+    assert.equal(server.puts.length, 0);
+    const other = makeSession(); account.adoptSession(other); await advance(5_001);
+    video.dispatchEvent(new Event("timeupdate")); video.dispatchEvent(new Event("ended"));
+    assert.equal(journalsFor(other).length, 0); assert.ok(!store.continueWatching().some((row) => row.id === "playing-under-A"));
+  });
+
+  await t.test("native look intent stays durable in its exact profile and binding, never in inherited local roster", async () => {
+    clean(); const ownA = nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("03-own-A"));
+    const ownB = nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("04-own-B"));
+    const s = makeSession(); s.account.id = "website-own-slot-fixture"; await serverFor(s, ownA.document);
+    account.adoptSession(s); account.applySyncDoc(ownA.document);
+    const viewer = ownA.playback.profileId.toUpperCase(); profiles.setActiveProfile(viewer);
+    const originalRoster = local.get("vortx.web.profiles.v1");
+    settings.updateSettings({ accentID: "crimson", audioLang: "fr" });
+    account.applySyncDoc(ownA.document); assert.equal(settings.getSettings().accentID, "crimson");
+    assert.equal(settings.getSettings().audioLang, "fr");
+    account.applySyncDoc(ownB.document); assert.notEqual(settings.getSettings().accentID, "crimson");
+    assert.notEqual(settings.getSettings().audioLang, "fr");
+    account.signOut(); timers.clear(); account.adoptSession(s); account.applySyncDoc(ownA.document); profiles.setActiveProfile(viewer);
+    assert.equal(settings.getSettings().accentID, "crimson"); assert.equal(settings.getSettings().audioLang, "fr");
+    assert.equal(local.get("vortx.web.profiles.v1"), originalRoster);
+    const roster = JSON.stringify(profiles.profiles());
+    assert.throws(() => profiles.addProfile("Unsafe local-only native profile", "🦊"));
+    profiles.updateProfileMeta(viewer, { name: "Unsafe rename" }); profiles.deleteProfile(viewer);
+    assert.equal(JSON.stringify(profiles.profiles()), roster);
+  });
+
+  await t.test("public host settings project supported values without echo and malformed carriers quarantine native resources", async () => {
+    clean(); const s = makeSession(), doc = structuredClone(nativeFixture.cases[0].document);
+    doc.nativeSync.scope = doc.nativeHostPreferences.scope = `account.${s.account.id}`;
+    const owner = doc.nativeSync.ownerProfileId, fields = doc.nativeHostPreferences.profiles[owner].fields;
+    const actor = fields.avatar.actor;
+    fields.playback = { clock: 3, actor, value: { audioLang: "fr", subtitleLang: "en", forcedPolicy: "off", useAddonOrder: true, sourceTypeOrder: ["direct", "debrid"] } };
+    doc.nativeHostPreferences.globals.fields = {
+      "stremiox.autoplayTrailers": { clock: 4, actor, value: false },
+      "stremiox.directLinksOnly": { clock: 5, actor, value: true },
+      "stremiox.performanceMode": { clock: 6, actor, value: "reduced" },
+    };
+    const server = await serverFor(s, doc); account.adoptSession(s); assert.equal(account.applySyncDoc(doc), true, "known supported host projection applies");
+    profiles.setActiveProfile(owner); // A prior synthetic session's remembered child is not this assertion target.
+    const applied = settings.getSettings();
+    assert.deepEqual([applied.accentID, applied.background, applied.textScale], ["ember", "warm", 1]);
+    assert.deepEqual([applied.audioLang, applied.subtitleLang, applied.subtitlesMode, applied.useAddonOrder, applied.sourceOrder], ["fr", "en", "off", true, ["direct", "debrid"]]);
+    assert.deepEqual([applied.autoplayTrailers, applied.directLinksOnly, applied.performance], [false, true, "reduced"]);
+    await advance(1_000); assert.equal(server.puts.length, 0); assert.equal(journalsFor(s).length, 0);
+    assert.ok(store.continueWatching().length);
+    const malformed = structuredClone(doc); malformed.nativeSync.profiles[owner].profile.parental.kids = "invalid";
+    assert.equal(account.applySyncDoc(malformed), false);
+    assert.deepEqual(store.continueWatching(), []); assert.deepEqual(store.nativeLibraryItems(), []);
+    assert.deepEqual(store.browserLibraryItems(), []); assert.deepEqual(store.installedUrls(), []);
+    assert.throws(() => profiles.addProfile("Not a native profile", "🦊"));
+    account.applySyncDoc(doc); assert.ok(store.continueWatching().length, "compatible native receive exits quarantine");
+    doc.nativeSync.profiles[owner].profile.settings.disabledAddons = ["https://fixture.invalid/one/manifest.json"];
+    account.applySyncDoc(doc); assert.ok(!store.installedUrls().includes("https://fixture.invalid/one/manifest.json"));
+  });
+
+  await t.test("non-look native settings preserve A and B deltas through metadata edits and reload", async () => {
+    clean(); const s = makeSession();
+    // Derived from actual schema-4 active-slot exports. Only target placement is changed; no
+    // native clocks are invented or written by the browser under test.
+    const ownerSlot = (sample) => {
+      const doc = structuredClone(sample.document), owner = doc.nativeSync.ownerProfileId, viewer = sample.playback.profileId;
+      doc.nativeSync.scope = doc.nativeHostPreferences.scope = `account.${s.account.id}`;
+      doc.nativeSync.profiles[owner].profile.account = structuredClone(doc.nativeSync.profiles[viewer].profile.account);
+      doc.nativeSync.accountSlots[owner] = structuredClone(doc.nativeSync.accountSlots[viewer]);
+      return doc;
+    };
+    const a = ownerSlot(nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("03-own-A")));
+    const b = ownerSlot(nativeFixture.ownSlotCases.find((sample) => sample.source.startsWith("04-own-B")));
+    const server = await serverFor(s, a); account.adoptSession(s); assert.equal(account.applySyncDoc(a), true);
+    const owner = a.nativeSync.ownerProfileId; profiles.setActiveProfile(owner);
+    const orderA = ["torrent", "direct"], orderB = ["usenet", "debrid"];
+    settings.updateSettings({ sourceOrder: orderA });
+    await server.remote(b); account.applySyncDoc(b);
+    settings.updateSettings({ tmdbKey: "synthetic-independent-metadata" });
+    const pendingA = JSON.parse(journalsFor(s).at(-1)[1]);
+    assert.deepEqual(pendingA.settings.sourceOrder, orderA, "unrelated B edit never copies B's live default over A's pending value");
+    settings.updateSettings({ sourceOrder: orderB });
+    const queued = JSON.parse(journalsFor(s).at(-1)[1]);
+    assert.deepEqual(queued.settings.sourceOrder, orderB);
+    assert.ok(Object.values(queued.retainedNativeSettings).some((delta) => JSON.stringify(delta.sourceOrder) === JSON.stringify(orderA)));
+    account.applySyncDoc(a); assert.deepEqual(settings.getSettings().sourceOrder, orderA);
+    account.applySyncDoc(b); assert.deepEqual(settings.getSettings().sourceOrder, orderB);
+    account.signOut(); timers.clear(); account.adoptSession(s); account.applySyncDoc(a); profiles.setActiveProfile(owner);
+    assert.deepEqual(settings.getSettings().sourceOrder, orderA, "retained A delta survives journal restore");
+    account.applySyncDoc(b); assert.deepEqual(settings.getSettings().sourceOrder, orderB, "newest B delta survives journal restore");
   });
 });

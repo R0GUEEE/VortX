@@ -1,6 +1,7 @@
 import type { Addon, MetaItem } from "./types";
 import { CINEMETA_URL, loadAddon } from "./addon";
-import { activeScope } from "./profiles";
+import { activeScope, activeProfileId } from "./profiles";
+import { nativeAddonIdentity, type NativeSyncProjection } from "./nativeSyncProjection";
 import {
   canonicalPlaybackIdentity,
   continueWatchingIdentityKeys,
@@ -9,10 +10,43 @@ import {
   type ContinueWatchingIdentity,
 } from "./continue-watching-dedupe";
 
+type NativePending = { addons: { url: string; added: boolean }[]; progress: Record<string, { entries: WebProgressEntry[]; tombstones: CWTombstone[] }> };
+let nativeProjection: NativeSyncProjection | null = null;
+let nativeBlockedScope = "";
+let nativePending: () => NativePending = () => ({ addons: [], progress: {} });
+export function setNativeAccountProjection(view: NativeSyncProjection | null, pending?: () => NativePending): void {
+  nativeProjection = view;
+  nativeBlockedScope = "";
+  if (pending) nativePending = pending;
+}
+export function blockNativeAccountProjection(scope: string): void { nativeBlockedScope = scope; }
+function nativeProfile() {
+  return nativeProjection?.profiles.find((profile) => profile.id === activeProfileId()) ?? null;
+}
+function nativeKey(base: string): string {
+  const profile = nativeProfile();
+  if (!nativeProjection) return base;
+  return `${base}.${encodeURIComponent(nativeProjection.scope)}.${profile?.id ?? "blocked"}.${encodeURIComponent(profile?.binding ?? "blocked")}`;
+}
+export function nativeLibraryItems(): MetaItem[] {
+  if (nativeBlockedScope) return [];
+  const profile = nativeProfile();
+  return profile && !profile.pending && !profile.locked && !profile.kids
+    ? (nativeProjection!.libraryByProfile[profile.id] ?? []).filter((row) => row.type !== "native_magnet" && row.type !== "torrent_playlist") as MetaItem[] : [];
+}
+export function nativeWatchlistItems(): MetaItem[] {
+  if (nativeBlockedScope) return [];
+  const profile = nativeProfile();
+  return profile && !profile.pending && !profile.locked && !profile.kids ? nativeProjection!.watchlistByProfile[profile.id] as MetaItem[] : [];
+}
+export function hasNativeAccountProjection(): boolean { return nativeProjection !== null || !!nativeBlockedScope; }
+
 /** Per-profile storage key. The owner profile (scope "") uses the base key, so existing data, account
  *  hydration, and backup all stay on the canonical keys; overlay profiles get a suffixed key so each
  *  keeps its own local library and Continue Watching (the web twin of the apps' per-profile history). */
 function scopedKey(base: string): string {
+  if (nativeBlockedScope) return `${base}.blocked.${encodeURIComponent(nativeBlockedScope)}`;
+  if (nativeProjection) return nativeKey(base);
   const scope = activeScope();
   return scope ? `${base}.${scope}` : base;
 }
@@ -26,6 +60,32 @@ const STORAGE_KEY = "vortx.web.addons.v1";
 
 /** The persisted transport URLs (manifest.json links), Cinemeta first, then user-added. */
 export function installedUrls(): string[] {
+  if (nativeBlockedScope) return [];
+  const profile = nativeProfile();
+  if (nativeProjection && !profile) return [];
+  if (profile) {
+    if (profile.pending || profile.locked || profile.kids) return [];
+    const entries = nativeProjection!.addonsByProfile[profile.id] ?? [];
+    const byIdentity = new Map(entries.map((entry) => [entry.identity, entry]));
+    const urls = (nativeProjection!.addonOrderByProfile[profile.id] ?? []).map((key) => byIdentity.get(key)?.addon?.transportUrl as string)
+      .filter((url) => typeof url === "string" && /^https:\/\//i.test(url));
+    let edits: Record<string, { added: boolean; basis: string }> = {};
+    try { edits = JSON.parse(localStorage.getItem(nativeKey(STORAGE_KEY + ".edits")) ?? "{}"); } catch { /* optional */ }
+    const apply = (url: string, added: boolean): void => {
+      const index = urls.findIndex((value) => addonIdentity(value) === addonIdentity(url));
+      if (added && index < 0) urls.push(url);
+      if (!added && index >= 0) urls.splice(index, 1);
+    };
+    for (const [url, edit] of Object.entries(edits)) {
+      if (edit.basis === JSON.stringify(byIdentity.get(addonIdentity(url)) ?? null)) apply(url, edit.added);
+    }
+    // The owner/global add-on journal must never be projected into an own-account viewer.
+    if (profile.main || nativeProjection!.addonsByProfile[profile.id] === nativeProjection!.ownerAddons) {
+      for (const edit of nativePending().addons) apply(edit.url, edit.added);
+    }
+    const disabled = new Set((profile.settings.disabledAddons as string[]).map(nativeAddonIdentity));
+    return [CINEMETA_URL, ...urls.filter((url) => url !== CINEMETA_URL && !disabled.has(nativeAddonIdentity(url)))];
+  }
   let saved: string[] = [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -37,11 +97,24 @@ export function installedUrls(): string[] {
   return urls.includes(CINEMETA_URL) ? urls : [CINEMETA_URL, ...urls];
 }
 
+const addonIdentity = nativeAddonIdentity;
+function rememberNativeAddonEdit(url: string, added: boolean): void {
+  const profile = nativeProfile();
+  if (!profile) return;
+  const key = nativeKey(STORAGE_KEY + ".edits");
+  try {
+    const edits = JSON.parse(localStorage.getItem(key) ?? "{}");
+    const entry = (nativeProjection!.addonsByProfile[profile.id] ?? []).find((entry) => entry.identity === addonIdentity(url));
+    edits[url] = { added, basis: JSON.stringify(entry ?? null) };
+    localStorage.setItem(key, JSON.stringify(edits));
+  } catch { /* durable network intent is separately retained by account.ts */ }
+}
+
 /** Persist the transport URL list (keeping Cinemeta pinned first). */
 function persist(urls: string[]): void {
   const deduped = Array.from(new Set(urls));
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(deduped));
+    localStorage.setItem(nativeProjection ? nativeKey(STORAGE_KEY) : STORAGE_KEY, JSON.stringify(deduped));
   } catch {
     // Private-mode / quota: the in-memory list still works for this session.
   }
@@ -79,7 +152,9 @@ export function registerAddonsSyncPusher(fn: ((hint?: AddonSyncHint) => void) | 
 export async function addAddon(transportUrl: string): Promise<Addon> {
   const admitted = addonAdmission?.();
   const addon = await loadAddon(transportUrl.trim()); // validates scheme (https-only) + normalizes
+  if (nativeBlockedScope) throw new Error("Account native data is unavailable; retry after a compatible account update.");
   if (admitted && !admitted()) throw new Error("Account changed while loading this add-on. Please try again.");
+  rememberNativeAddonEdit(addon.transportUrl, true);
   persist([...installedUrls(), addon.transportUrl]); // store exactly the normalized URL that loaded
   addonsSyncPusher?.({ added: addon.transportUrl, descriptor: addon });
   return addon;
@@ -87,7 +162,9 @@ export async function addAddon(transportUrl: string): Promise<Addon> {
 
 /** Remove an add-on by transport URL (Cinemeta cannot be removed - it backs Home + meta). */
 export function removeAddon(transportUrl: string): void {
+  if (nativeBlockedScope) return;
   if (transportUrl === CINEMETA_URL) return;
+  rememberNativeAddonEdit(transportUrl, false);
   persist(installedUrls().filter((u) => u !== transportUrl));
   addonsSyncPusher?.({ removed: transportUrl }); // push + write the removal tombstone so apps uninstall it
 }
@@ -99,6 +176,15 @@ const LIBRARY_KEY = "vortx.web.library.v1";
 
 /** Saved titles, most-recently-added first. */
 export function libraryItems(): MetaItem[] {
+  const native = nativeLibraryItems();
+  const local = browserLibraryItems();
+  return [...native, ...local.filter((item) => !native.some((row) => row.id === item.id))];
+}
+
+/** Save remains browser-local; native Watchlist/Library are distinct received channels. */
+export function browserLibraryItems(): MetaItem[] {
+  if (nativeBlockedScope) return [];
+  if (nativeProjection && (!nativeProfile() || nativeProfile()!.pending || nativeProfile()!.locked || nativeProfile()!.kids)) return [];
   try {
     const raw = localStorage.getItem(scopedKey(LIBRARY_KEY));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
@@ -110,12 +196,12 @@ export function libraryItems(): MetaItem[] {
 
 /** Whether a title id is currently saved. */
 export function inLibrary(id: string): boolean {
-  return libraryItems().some((e) => e.id === id);
+  return browserLibraryItems().some((e) => e.id === id);
 }
 
 /** Add or remove a title; returns true if it is now saved. */
 export function toggleLibrary(item: MetaItem): boolean {
-  const current = libraryItems();
+  const current = browserLibraryItems();
   const exists = current.some((e) => e.id === item.id);
   const slim: MetaItem = { id: item.id, type: item.type, name: item.name, poster: item.poster };
   const next = exists ? current.filter((e) => e.id !== item.id) : [slim, ...current];
@@ -269,6 +355,7 @@ export interface CWEntry extends MetaItem {
   position: number;
   duration: number;
   updatedAt: number;
+  nativeAccepted?: boolean;
 }
 
 export interface CWTombstone {
@@ -282,7 +369,7 @@ function cwIdentity(entry: CWEntry): ContinueWatchingIdentity {
     type: entry.type,
     aliases: [entry.resumeId],
     freshness: entry.updatedAt,
-    hasValidProgress:
+    hasValidProgress: entry.nativeAccepted === true ||
       Number.isFinite(entry.position) && Number.isFinite(entry.duration) && entry.position > 0 && entry.duration > 0,
   };
 }
@@ -339,6 +426,40 @@ function readCWKey(key: string, tombstoneKey: string): CWEntry[] {
 
 /** Every stored progress entry (one per played id), most-recently-watched first. */
 function rawCW(): CWEntry[] {
+  if (nativeBlockedScope) return [];
+  const profile = nativeProfile();
+  if (nativeProjection && !profile) return [];
+  if (profile) {
+    if (profile.pending || profile.locked || profile.kids) return [];
+    const view = nativeProjection!;
+    const localTombstones = readCWTombstones(scopedKey(CW_TOMBSTONE_KEY));
+    const tombstones: CWTombstone[] = [...localTombstones,
+      ...(view.watchRemovalsByProfile[profile.id] ?? []).map((row) => ({
+        keys: [...continueWatchingIdentityKeys({ id: row.id, type: row.type, aliases: [row.resumeId, ...row.aliases] })], removedAt: row.removedAt,
+      }))];
+    const scope = profile.main ? "" : profile.id;
+    const pending = nativePending().progress[scope];
+    if (pending) tombstones.push(...pending.tombstones);
+    const remote: CWEntry[] = (view.continueByProfile[profile.id] ?? []).filter((row) => typeof row.type === "string").map((row) => ({
+      id: row.id, type: row.type!, name: row.name, poster: row.poster, resumeId: row.resumeId || row.id,
+      position: (row.t ?? 0) / 1000, duration: (row.d ?? 0) / 1000, updatedAt: (row.updatedAt ?? 0) * 1000, nativeAccepted: true,
+    }));
+    const queued: CWEntry[] = (pending?.entries ?? []).map((row) => ({ id: row.id, type: row.type, name: row.name || row.id,
+      poster: row.poster, resumeId: row.v, position: row.t, duration: row.d, updatedAt: row.lastWatched }));
+    const byKey = new Map<string, CWEntry>();
+    for (const row of [...remote, ...readCWKey(scopedKey(CW_KEY), scopedKey(CW_TOMBSTONE_KEY)), ...queued]) {
+      const key = canonicalPlaybackIdentity(row.resumeId, row.type) ?? row.resumeId;
+      const dirty = queued.includes(row);
+      const pendingRemoval = (pending?.tombstones ?? []).some((removal) =>
+        identityKeysIntersect(continueWatchingIdentityKeys(cwIdentity(row)), new Set(removal.keys)) && (!dirty || removal.removedAt >= row.updatedAt));
+      // Native visibility has already applied the exact causal tie rules in the adapter. Only
+      // explicit browser removals may overlay it; synthesized native removals filter local rows.
+      if (pendingRemoval || (!dirty && isTombstoned(row, row.nativeAccepted ? localTombstones : tombstones))) continue;
+      const previous = byKey.get(key);
+      if (!previous || row.updatedAt > previous.updatedAt || queued.includes(row)) byKey.set(key, row);
+    }
+    return [...byKey.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  }
   return readCWKey(scopedKey(CW_KEY), scopedKey(CW_TOMBSTONE_KEY));
 }
 
@@ -382,8 +503,14 @@ export function cwResumeId(titleId: string): string | null {
 // watch on the web reach your apps and other browsers. No-op signed out.
 export interface ProgressSyncHint { entry?: CWEntry; removal?: CWTombstone }
 let cwSyncPusher: ((hint?: ProgressSyncHint) => void) | null = null;
-export function registerCwSyncPusher(fn: ((hint?: ProgressSyncHint) => void) | null): void {
+let progressAdmission: (() => (() => boolean)) | null = null;
+export function captureProgressAdmission(): () => boolean {
+  return progressAdmission?.() ?? (() => true);
+}
+export function registerCwSyncPusher(fn: ((hint?: ProgressSyncHint) => void) | null,
+  admission: (() => (() => boolean)) | null = null): void {
   cwSyncPusher = fn;
+  progressAdmission = admission;
 }
 
 /** One bilateral web-progress entry, the shape both the app and other web clients read out of
@@ -454,7 +581,11 @@ export function recordProgress(
   item: { id: string; type: string; name: string; poster?: string; resumeId?: string },
   position: number,
   duration: number,
+  admitted: () => boolean = () => true,
 ): void {
+  if (nativeBlockedScope) return;
+  if (!admitted()) return; // A playing title belongs to its start-time account/profile/own slot.
+  if (nativeProjection && (!nativeProfile() || nativeProfile()!.pending || nativeProfile()!.locked || nativeProfile()!.kids)) return;
   if (!isFinite(position) || !isFinite(duration) || duration <= 0) return;
   const resumeId = item.resumeId ?? item.id;
   const resumeKey = canonicalPlaybackIdentity(resumeId, item.type);
@@ -703,7 +834,7 @@ export function addRecentSearch(query: string): void {
 /** Remove a title from the Library by id (the rail × control). */
 export function removeFromLibrary(id: string): void {
   try {
-    localStorage.setItem(scopedKey(LIBRARY_KEY), JSON.stringify(libraryItems().filter((e) => e.id !== id)));
+    localStorage.setItem(scopedKey(LIBRARY_KEY), JSON.stringify(browserLibraryItems().filter((e) => e.id !== id)));
   } catch {
     /* storage disabled or full: best-effort */
   }

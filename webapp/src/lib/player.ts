@@ -1,7 +1,7 @@
 import type Hls from "hls.js";
 import type { ErrorData } from "hls.js";
 import { el } from "./dom";
-import { cwPosition, recordProgress } from "./store";
+import { cwPosition, recordProgress, captureProgressAdmission } from "./store";
 import { getSettings, type SubtitlesMode } from "./settings";
 import type { SubtitleTrack } from "./addon";
 import { mountControls, type PlayerController, type SkipSegment } from "./playerControls";
@@ -121,6 +121,7 @@ let sessionFallbacks: string[] = [];
 let sessionIndex = 0;
 let sessionTitle = "";
 let sessionOptions: PlayOptions = {};
+let sessionProgressAdmission: () => boolean = () => true;
 // Per-source generation, bumped every time we mount a new source (play + each advanceSource). Error/silent
 // handlers capture the generation of the source they were wired to and refuse to advance once it is stale,
 // so a late fatal error queued against an already-superseded source can't chain-advance past the good source
@@ -149,6 +150,7 @@ export async function play(url: string, title: string, opts: PlayOptions = {}): 
   // is just this single url.
   sessionTitle = title;
   sessionOptions = opts;
+  sessionProgressAdmission = captureProgressAdmission();
   sessionFallbacks = opts.fallbacks && opts.fallbacks.length ? opts.fallbacks.slice() : [url];
   const startAt = sessionFallbacks.indexOf(url);
   sessionIndex = startAt >= 0 ? startAt : 0;
@@ -408,10 +410,11 @@ function advanceSource(host: HTMLElement, reason: "decode" | "silent" | "manual"
 
 /** Record Continue Watching progress for `item` while it plays, and resume from the saved position.
  *  Throttled to once every 5s; passing 95% drops it from Continue Watching (treated as finished). */
-function wireProgress(video: HTMLVideoElement, item: CWItem): void {
+function wireProgress(video: HTMLVideoElement, item: CWItem, admitted = sessionProgressAdmission): void {
   video.addEventListener(
     "loadedmetadata",
     () => {
+      if (!admitted()) return;
       const pos = cwPosition(item.resumeId ?? item.id);
       if (pos > 5 && (!isFinite(video.duration) || pos < video.duration - 10)) video.currentTime = pos;
     },
@@ -422,13 +425,14 @@ function wireProgress(video: HTMLVideoElement, item: CWItem): void {
     const now = Date.now();
     if (now - last < 5000) return;
     last = now;
-    recordProgress(item, video.currentTime, video.duration);
+    recordProgress(item, video.currentTime, video.duration, admitted);
   });
   // Playback ran to the end: force a final record at full duration so the title crosses the 95%
   // "finished" threshold and drops out of Continue Watching. The 5s-throttled timeupdate above can
   // miss the last seconds, which would otherwise leave a fully-watched title stuck in the rail.
   video.addEventListener("ended", () => {
-    recordProgress(item, video.duration, video.duration);
+    if (!admitted()) return;
+    recordProgress(item, video.duration, video.duration, admitted);
     // Auto-play the next episode of a series (the app's binge behavior), if the Detail surface supplied one.
     sessionOptions.onNextEpisode?.();
   });
@@ -533,7 +537,7 @@ async function addSubtitleTracks(video: HTMLVideoElement, subs: SubtitleTrack[])
   applySubtitlePreference(appended, settings.subtitlesMode, settings.subtitleLang);
 }
 
-export const __playerTestHooks = { addSubtitleTracks, applySubtitlePreference };
+export const __playerTestHooks = { addSubtitleTracks, applySubtitlePreference, wireProgress };
 
 /** Fetch a subtitle file, convert SRT to WebVTT if needed, and return a blob: URL for a <track>. */
 async function toVttUrl(sub: SubtitleTrack): Promise<string | null> {

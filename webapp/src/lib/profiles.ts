@@ -15,6 +15,10 @@ export interface Profile {
   name: string;
   avatar: string; // a single emoji glyph
   look: ProfileLook;
+  /** Native PIN/parental enforcement is unavailable here; never open that profile's resources. */
+  restricted?: boolean;
+  /** Credential-free native account-binding revision; local look intent never crosses a rebind. */
+  nativeBinding?: string;
 }
 
 export const PROFILE_AVATARS = [
@@ -23,9 +27,32 @@ export const PROFILE_AVATARS = [
 
 const KEY = "vortx.web.profiles.v1";
 const ACTIVE_KEY = "vortx.web.activeProfile.v1";
+const NATIVE_LOOK_DEFAULTS: ProfileLook = { accentID: "ember", background: "warm", textScale: 1, audioLang: "", subtitleLang: "", subtitlesMode: "always" };
 
 const listeners = new Set<() => void>();
 let cache: Profile[] | null = null;
+let nativeRoster: Profile[] | null = null;
+let nativeScope = "";
+const activeKey = (): string => nativeRoster ? `${ACTIVE_KEY}.${nativeScope}` : ACTIVE_KEY;
+export function hasNativeProfiles(): boolean { return nativeScope !== ""; }
+export function blockNativeProfiles(scope: string): void {
+  nativeScope = scope;
+  if (nativeRoster) nativeRoster = nativeRoster.map((profile) => ({ ...profile, restricted: true }));
+}
+
+/** Accepted native roster is authoritative, including deletions; legacy local profiles stay intact. */
+export function setNativeProfiles(scope: string, roster: (SyncedProfile & { look: Partial<ProfileLook>; restricted: boolean; binding: string })[] | null): boolean {
+  const previous = JSON.stringify(nativeRoster);
+  nativeScope = scope;
+  nativeRoster = roster ? roster.map((profile) => ({ id: profile.id, name: profile.name,
+    avatar: profile.avatar || "🍿", look: { ...NATIVE_LOOK_DEFAULTS, ...Object.fromEntries(Object.keys(NATIVE_LOOK_DEFAULTS)
+      .filter((key) => key in profile.look).map((key) => [key, profile.look[key as keyof ProfileLook]])),
+      ...nativeLookIntent(profile.id, profile.binding) }, restricted: profile.restricted, nativeBinding: profile.binding })) : null;
+  if (nativeRoster && (!nativeRoster.some((profile) => profile.id === activeProfileId() && !profile.restricted))) {
+    try { localStorage.setItem(activeKey(), nativeRoster.find((profile) => !profile.restricted)?.id ?? nativeRoster[0].id); } catch { /* optional */ }
+  }
+  return previous !== JSON.stringify(nativeRoster);
+}
 
 /** Snapshot the look fields out of the live Settings (used to seed a new profile / the default). */
 function lookFromSettings(s: Settings = getSettings()): ProfileLook {
@@ -47,6 +74,21 @@ function randomId(): string {
 }
 
 function persist(profiles: Profile[]): void {
+  if (nativeRoster) {
+    for (const profile of profiles) {
+      const previous = nativeRoster.find((row) => row.id === profile.id);
+      if (!previous || !profile.nativeBinding || previous.restricted) continue;
+      const patch = nativeLookIntent(profile.id, profile.nativeBinding);
+      for (const key of Object.keys(profile.look) as (keyof ProfileLook)[]) {
+        if (previous.look[key] !== profile.look[key]) Object.assign(patch, { [key]: profile.look[key] });
+      }
+      try { if (Object.keys(patch).length) localStorage.setItem(nativeLookKey(profile.id, profile.nativeBinding), JSON.stringify(patch)); }
+      catch { /* Network journal and current live look remain available when storage is blocked. */ }
+    }
+    nativeRoster = profiles;
+    listeners.forEach((fn) => fn());
+    return; // Native display edits must never overwrite the signed-out/local roster.
+  }
   cache = profiles;
   try {
     localStorage.setItem(KEY, JSON.stringify(profiles));
@@ -56,9 +98,22 @@ function persist(profiles: Profile[]): void {
   listeners.forEach((fn) => fn());
 }
 
+function nativeLookKey(profileId: string, binding: string): string {
+  return `${KEY}.look-intent.${encodeURIComponent(nativeScope)}.${profileId}.${encodeURIComponent(binding)}`;
+}
+function nativeLookIntent(profileId: string, binding: string): Partial<ProfileLook> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(nativeLookKey(profileId, binding)) ?? "{}");
+    const defaults = NATIVE_LOOK_DEFAULTS;
+    return Object.fromEntries(Object.keys(defaults).filter((key) => typeof raw[key] === typeof defaults[key as keyof ProfileLook])
+      .map((key) => [key, raw[key]]));
+  } catch { return {}; }
+}
+
 /** The profile roster. Seeds a single default profile (snapshotting the current settings) on first read,
  *  so there is always at least one profile and the owner's existing look is preserved. */
 export function profiles(): Profile[] {
+  if (nativeRoster) return nativeRoster;
   if (cache) return cache;
   let parsed: Profile[] = [];
   try {
@@ -88,7 +143,7 @@ export function activeProfileId(): string {
   const list = profiles();
   let id = "";
   try {
-    id = localStorage.getItem(ACTIVE_KEY) ?? "";
+    id = localStorage.getItem(activeKey()) ?? "";
   } catch {
     id = "";
   }
@@ -110,9 +165,9 @@ export function activeScope(): string {
 /** Switch the active profile and apply its look + languages to the live Settings. */
 export function setActiveProfile(id: string): void {
   const p = profiles().find((x) => x.id === id);
-  if (!p) return;
+  if (!p || p.restricted) return;
   try {
-    localStorage.setItem(ACTIVE_KEY, id);
+    localStorage.setItem(activeKey(), id);
   } catch {
     /* best-effort */
   }
@@ -125,6 +180,7 @@ export function setActiveProfile(id: string): void {
 
 /** Create a new profile seeded from the current look, switch to it, and return it. */
 export function addProfile(name: string, avatar: string): Profile {
+  if (hasNativeProfiles()) throw new Error("Manage account profiles in VortX; native profile edit events are not supported here yet.");
   const p: Profile = { id: randomId(), name: name.trim() || "New profile", avatar, look: lookFromSettings() };
   persist([...profiles(), p]);
   setActiveProfile(p.id);
@@ -133,6 +189,7 @@ export function addProfile(name: string, avatar: string): Profile {
 
 /** Rename / re-avatar a profile (not its look - that follows the live Settings while active). */
 export function updateProfileMeta(id: string, patch: { name?: string; avatar?: string }): void {
+  if (hasNativeProfiles()) return;
   persist(
     profiles().map((p) =>
       p.id === id ? { ...p, name: (patch.name ?? p.name).trim() || p.name, avatar: patch.avatar ?? p.avatar } : p,
@@ -142,6 +199,7 @@ export function updateProfileMeta(id: string, patch: { name?: string; avatar?: s
 
 /** Delete a profile. The owner (index 0) cannot be deleted; deleting the active one falls back to the owner. */
 export function deleteProfile(id: string): void {
+  if (hasNativeProfiles()) return;
   if (isOwnerProfile(id) || profiles().length <= 1) return;
   const next = profiles().filter((p) => p.id !== id);
   persist(next);

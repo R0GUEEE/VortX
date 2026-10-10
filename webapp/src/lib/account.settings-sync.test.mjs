@@ -372,14 +372,14 @@ test("settings sync writes only owner edits and never echoes hydration or overla
     "the global metadata edit is written to the encrypted account document",
   );
   assert.equal(
-    overlayWritten.profileEdits.roster[0].settings.accentID,
+    overlayWritten.vortx.profiles[0].settings.accentID,
     "forest",
     "an overlay shared-setting write preserves a newer remote owner appearance",
   );
   assert.equal(
-    overlayWritten.profileEdits.roster[0].settings.playback.safetyMode,
-    "strict",
-    "the overlay shared-setting delta reaches the owner without replacing unrelated owner fields",
+    overlayWritten.profileEdits,
+    undefined,
+    "a metadata-only delta does not manufacture an unrelated legacy profile edit",
   );
   setActiveProfile(ownerId);
   assert.equal(
@@ -398,13 +398,13 @@ test("settings sync writes only owner edits and never echoes hydration or overla
   );
   assert.equal(
     requests.filter((request) => (request.init.method ?? "GET") === "GET").length,
-    2,
-    "the global overlay edit and owner edit each read the latest account doc once",
+    3,
+    "independent metadata and profile-setting subsets each read the latest account document",
   );
   assert.equal(
     requests.filter((request) => request.init.method === "PUT").length,
-    2,
-    "the global overlay edit and coalesced owner edit are each written once",
+    3,
+    "independent metadata and profile-setting subsets remain serialized",
   );
   const put = requests.filter((request) => request.init.method === "PUT").at(-1);
   const putBody = JSON.parse(String(put.init.body));
