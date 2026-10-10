@@ -53,6 +53,11 @@ final class ProfileStore: @unchecked Sendable {
     func mergeInRoster(_ incoming: [UserProfile], incomingModified: Date?) { fatalError("legacy roster was entered") }
     func applyLocalTombstones() { fatalError("legacy roster was entered") }
     func reloadFromDefaults() { fatalError("legacy defaults were entered") }
+    func captureDiscovery() { fatalError("remote reload must not recapture discovery as a local edit") }
+}
+@MainActor final class CollectionsHubModel {
+    static let shared = CollectionsHubModel()
+    func load() {}
 }
 enum LibraryAutoAdd { static let watchlistChangedNote = Notification.Name("synthetic.watchlistChanged") }
 enum Keychain {
@@ -115,6 +120,8 @@ final class CoreBridge: @unchecked Sendable {
     func nativeCredentialSlot(profileID: UUID) -> String? { nil }
     func dispatchCtx(_ value: [String: Any]) -> Bool { fatalError("legacy add-on hydration was entered") }
     func dispatch(action: [String: Any], field: String) { fatalError("board resources were entered") }
+    func catalogOrderDidChange() {}
+    func rebuildBoardRows() {}
 }
 
 // Unrelated provider/legacy collaborators are inert and reject any unexpected use.
@@ -191,6 +198,7 @@ struct SIMKLContinueWatchingShadow {
     var activeSyncDown: (id: UUID, capture: CredentialScopeRegistry.Capture)?
     var activeSyncUp: (id: UUID, capture: CredentialScopeRegistry.Capture)?
     var lastSyncedVersion = 0; var stamped = 0
+    var backupUploadFailure: SyncBackupUploadFailure?
     var dirtySettings: [String: Double] = [:]; var appliedSettingsBaseline: Set<String> = []
     private var pendingDebridApply: PendingDebridApply?
     private var pendingProviderApply: PendingProviderApply?
@@ -321,6 +329,10 @@ struct SIMKLContinueWatchingShadow {
         _ = try await session.dispatch(actions.map(raw), now: now, hostEdits: [.init(profileID: owner, fields: membership),
             .init(profileID: viewer, fields: ["avatar": .string(stage == 1 ? "🐱" : "🐯")]),
             .init(profileID: nil, fields: ["vortx.home.layout": .string(stage == 2 ? "wall" : "rails"),
+                "stremiox.catalog.landscapeCards": .bool(stage != 2),
+                "stremiox.catalog.posterWidthPreset": .string(stage == 2 ? "large" : "compact"),
+                "stremiox.catalog.posterRadiusPreset": .string(stage == 2 ? "pill" : "sharp"),
+                "stremiox.catalog.hidePosterLabels": .bool(stage == 2),
                 "vortx.home.railOrder": .array([.string("addonCatalogs"), .string("topPicks")]),
                 "vortx.home.railHidden": .array([.string(stage == 3 ? "topPicks" : "collectionsHub")])])])
     }
@@ -354,6 +366,12 @@ struct SIMKLContinueWatchingShadow {
             "removedClockDistinct": removed?["removedAt"] != removed?["addedAt"],
             "catalogOrder": CatalogPrefsStore.order(), "catalogHidden": Array(CatalogPrefsStore.hidden()).sorted(),
             "catalogRanks": catalogKeys.map { CatalogPrefsStore.rank($0) }, "homeLayout": CatalogPrefsStore.homeLayout().rawValue,
+            "visibleHomeLayout": CatalogPreferences.shared.homeLayout.rawValue,
+            "visibleLandscape": CatalogPreferences.shared.landscapeCards,
+            "visiblePosterWidth": CatalogPreferences.shared.posterWidth.rawValue,
+            "visiblePosterRadius": CatalogPreferences.shared.posterRadius.rawValue,
+            "visibleHideLabels": CatalogPreferences.shared.hidePosterLabels,
+            "pendingWidthEdit": manager.dirtySettings[CatalogPrefsStore.widthKey] != nil,
             "homeRails": HomeRailPreferences.shared.arrange(HomeRail.iOSDefaultOrder).map(\.rawValue),
             "homeHidden": Array(HomeRailPreferences.shared.hidden).sorted(), "hostActor": hostDocument.globals.fields.values.first?.actor ?? "",
             "installationActor": localHost.actor]
@@ -387,9 +405,18 @@ struct SIMKLContinueWatchingShadow {
                 core.nativeFacadeStorage = facade; core.nativeCredentialCapture = CredentialScopeRegistry.shared.capture()
                 core.nativePublishedAccountGeneration = facade.accountGeneration
                 try core.refreshProfilesForFixture()
+                // Seed the real observable cache before any receive. Reading defaults alone
+                // would pass the old implementation while the open screen stayed stale.
+                _ = CatalogPreferences.shared
                 try emit(["ready": true, "actor": hostActor])
                 while let instruction = readLine() {
                     if instruction == "close" { break }
+                    if instruction == "dirty-appearance" {
+                        CatalogPreferences.shared.posterWidth = .comfort
+                        manager.dirtySettings[CatalogPrefsStore.widthKey] = 4000
+                        try emit(["dirty": true, "width": CatalogPreferences.shared.posterWidth.rawValue])
+                        continue
+                    }
                     if instruction == "stale" {
                         let selected = HomeContinueWatchingSelection.current(core: core, profiles: .shared)
                         let receipts = core.acceptedHistoryReceiptRevision

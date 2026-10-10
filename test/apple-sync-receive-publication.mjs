@@ -102,12 +102,12 @@ if (process.argv[2] === '--extract') {
   await writeFile(join(output, 'UserProfile.swift'), slice(profiles, 'import Foundation', '/// The profile roster and the active selection.'));
   receipts.push({ path: discovery.path, marker: 'entire Foundation-only discovery persistence bridge', sourceSHA256: sha256(discovery.text), sliceSHA256: sha256(discovery.text) });
   await writeFile(join(output, 'Discovery.swift'), discovery.text);
-  const catalogMethods = ['    static func hidden() ', '    static func order() ', '    static func isHidden(', '    static func rank(', '    static func homeLayout()'];
-  await writeFile(join(output, 'CatalogConsumers.swift'), 'import Foundation\n'
-    + slice(catalog, 'enum HomeLayoutPreset:', '\n/// A Discover HUB category')
-    + '\nenum CatalogPrefsStore {\n'
-    + slice(catalog, '    static let homeLayoutKey =', '\n') + '\n'
-    + catalogMethods.map(marker => member(catalog, marker)).join('\n') + '\n}\n');
+  // Include the actual observable cache, not just static reads from the backing store:
+  // globals can arrive after profile discovery, leaving an already-open view stale.
+  await writeFile(join(output, 'CatalogConsumers.swift'), 'import Foundation\nimport Combine\n'
+    + slice(catalog, 'enum PosterWidthPreset:', '\n/// A Discover HUB category')
+    + slice(catalog, 'enum CatalogPrefsStore {', '\n/// Editor: every catalog')
+    + slice(catalog, 'struct DiscoverFilters:', '\n/// Static option catalogs'));
   receipts.push({ path: home.path, marker: 'entire Home rail preference consumer', sourceSHA256: sha256(home.text), sliceSHA256: sha256(home.text) });
   await writeFile(join(output, 'HomeRails.swift'), home.text);
   await writeFile(join(output, 'Combined.swift'), combined);
@@ -209,6 +209,10 @@ try {
   let stale;
   try {
     for (const stage of [1, 2, 3, 4]) {
+      if (stage === 3) {
+        const edited = await receiver.send('dirty-appearance');
+        check(edited.dirty && edited.width === 'comfort', 'visible local poster-width edit is seeded before later remote globals');
+      }
       const sent = await peer(`sequence-a-v${stage}`, 'upload-sequence', { stage, version: stage }, 'sequence-a');
       check(sent.accepted && sent.version === stage && sent.stamped === 1, `revision ${stage} acknowledged by actual encrypted uploader`);
       const pulled = await receiver.send('pull'); revisions.push(pulled);
@@ -216,6 +220,13 @@ try {
       check(pulled.version === stage && pulled.certified && pulled.hasApplied && pulled.outcome === 'completed', `revision ${stage} actual syncDown ACK follows certified native receive`);
       check(pulled.profileID === '10000000-0000-0000-0000-000000000041' && pulled.selectionCurrent,
         `revision ${stage} retains active owner and current Home selection`);
+      check(pulled.visibleHomeLayout === (stage === 2 ? 'wall' : 'rails')
+        && pulled.visibleLandscape === (stage !== 2)
+        && pulled.visiblePosterWidth === (stage >= 3 ? 'comfort' : stage === 2 ? 'large' : 'compact')
+        && pulled.visiblePosterRadius === (stage === 2 ? 'pill' : 'sharp')
+        && pulled.visibleHideLabels === (stage === 2),
+        `revision ${stage} refreshes the actual observable catalog appearance without reopening the app`);
+      if (stage >= 3) check(pulled.pendingWidthEdit, `revision ${stage} preserves the unsaved local width stamp while receiving other globals`);
       if (stage === 1) {
         check(pulled.viewerName === 'Sequence Viewer' && pulled.viewerAvatar === '🐱', 'remote profile creation and host avatar publish on peer B');
         check(JSON.stringify(pulled.inventory) === JSON.stringify([urls.c, urls.a, urls.b]), 'remote native installed inventory uses intentional reorder rather than install order');

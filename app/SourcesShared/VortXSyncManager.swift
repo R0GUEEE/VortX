@@ -840,13 +840,26 @@ final class VortXSyncManager: ObservableObject {
         guard case .object(let fields) = host["globals"]?["fields"] else { return }
         withRemoteApplySuppressed {
             var appliedHomeRailLayout = false
+            var appliedCatalogAppearance = false
+            let catalogAppearanceKeys: Set<String> = [CatalogPrefsStore.landscapeKey,
+                CatalogPrefsStore.widthKey, CatalogPrefsStore.radiusKey,
+                CatalogPrefsStore.hideLabelsKey, CatalogPrefsStore.homeLayoutKey]
             for (key, register) in fields where dirtySettings[key] == nil {
                 guard let value = register["value"], VortxNativeHostPreferences.validGlobal(key, value: value) else { continue }
                 if value == .null { UserDefaults.standard.removeObject(forKey: key) }
-                else if let data = try? JSONEncoder().encode(value), let object = try? JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed) { UserDefaults.standard.set(object, forKey: key) }
+                else {
+                    guard let data = try? JSONEncoder().encode(value),
+                          let object = try? JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed) else { continue }
+                    UserDefaults.standard.set(object, forKey: key)
+                }
                 if key == HomeRailStore.orderKey || key == HomeRailStore.hiddenKey { appliedHomeRailLayout = true }
+                if catalogAppearanceKeys.contains(key) { appliedCatalogAppearance = true }
             }
             if appliedHomeRailLayout { HomeRailPreferences.shared.reloadFromDefaults() }
+            // These observable properties are cached at init. Profile/discovery application can run
+            // before global registers (or be deferred for a local edit), so refresh after the actual
+            // global writes, inside remote-apply suppression, rather than waiting for an app restart.
+            if appliedCatalogAppearance { CatalogPreferences.shared.reloadFromDefaults() }
         }
     }
     private func nativeBackupSeen(capture: CredentialScopeRegistry.Capture) -> Bool {
