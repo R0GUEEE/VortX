@@ -2275,15 +2275,17 @@ jobs:
           [ "$READY" = 1 ] || { echo "::error::published direct-test release is not readable by immutable ID"; exit 1; }
           manifest_id="$(jq -er '[.assets[] | select(.name == "VortX-Apple-Local-Test-Provenance.json" and .state == "uploaded")] | if length == 1 then .[0].id else error("expected exactly one provenance asset") end' "$RELEASE_JSON")"
           gh api -H 'Accept: application/octet-stream' -- "repos/$GH_REPO/releases/assets/$manifest_id" > "$WORK_DIR/provenance.json"
-          IOS_NAME="$(jq -er '.artifacts.ios.name | select(test("^VortX-iOS-[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+-test\\.ipa$"))' "$WORK_DIR/provenance.json")"
-          MAC_NAME="$(jq -er '.artifacts.macos.name | select(test("^VortX-macOS-[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+-test\\.dmg$"))' "$WORK_DIR/provenance.json")"
+          python3 scripts/verify-apple-direct-test-release.py asset-names \
+            --release-json "$RELEASE_JSON" --provenance "$WORK_DIR/provenance.json" \
+            --release-commit "$GITHUB_SHA" > "$WORK_DIR/asset-names.txt"
           asset_id() {
             jq -er --arg name "$1" '[.assets[] | select(.name == $name and .state == "uploaded")] | if length == 1 then .[0].id else error("expected exactly one uploaded asset") end' "$RELEASE_JSON"
           }
-          IOS_ID="$(asset_id "$IOS_NAME")"
-          MAC_ID="$(asset_id "$MAC_NAME")"
-          gh api -H 'Accept: application/octet-stream' -- "repos/$GH_REPO/releases/assets/$IOS_ID" > "$WORK_DIR/$IOS_NAME"
-          gh api -H 'Accept: application/octet-stream' -- "repos/$GH_REPO/releases/assets/$MAC_ID" > "$WORK_DIR/$MAC_NAME"
+          while IFS= read -r ASSET_NAME; do
+            ASSET_ID="$(asset_id "$ASSET_NAME")"
+            [[ "$ASSET_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+            gh api -H 'Accept: application/octet-stream' -- "repos/$GH_REPO/releases/assets/$ASSET_ID" > "$WORK_DIR/$ASSET_NAME"
+          done < "$WORK_DIR/asset-names.txt"
           unset GH_TOKEN
           python3 scripts/verify-apple-direct-test-release.py verify-published \
             --release-json "$RELEASE_JSON" --provenance "$WORK_DIR/provenance.json" \

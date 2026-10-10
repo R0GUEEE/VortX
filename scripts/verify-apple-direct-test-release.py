@@ -37,9 +37,39 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 IOS_BUNDLE = "com.stremiox.app.native"
 MAC_BUNDLE = "com.stremiox.mac"
+TV_BUNDLE = "com.stremiox.tv"
+TV_LITE_BUNDLE = "com.stremiox.tv.lite"
+TV_TOP_SHELF_BUNDLE = "com.stremiox.tv.topshelf"
 EXPECTED_NATIVE_FEATURES = "state,resource-host;server=iOS,tvOS,separate-mac"
 REQUIRED_NATIVE_ARCHIVES = frozenset({"libvortx_ffi.a", "Libmpv", "Libavcodec", "Libavformat", "Libplacebo"})
-NATIVE_RECEIPT_SUFFIX = {"ios": "ios", "macos": "mac"}
+DEFAULT_TARGETS = ("ios", "macos")
+TV_TARGETS = (*DEFAULT_TARGETS, "tvos", "tvos-lite")
+# Artifact keys distinguish TV variants; both use the real native platform tvos.
+ARTIFACTS = {
+    "ios": ("ios", "ios", "iOS", IOS_BUNDLE, "ipa", "unsigned-resign-required", "not-applicable"),
+    "macos": ("macos", "mac", "macOS", MAC_BUNDLE, "dmg", "adhoc", "not-notarized"),
+    "tvos": ("tvos", "tvos", "tvOS", TV_BUNDLE, "ipa", "unsigned-resign-required", "not-applicable"),
+    "tvos-lite": ("tvos", "tvos-lite", "tvOS-lite", TV_LITE_BUNDLE, "ipa", "unsigned-resign-required", "not-applicable"),
+}
+NATIVE_RECEIPT_SUFFIX = {key: spec[1] for key, spec in ARTIFACTS.items()}
+APP_LAYOUTS = {
+    "ios": ("DerivedData-iOS/Build/Products/Release-iphoneos/VortXiOSNative.app",
+            "DerivedData-iOS/Build/Intermediates.noindex/VortX.build/Release-iphoneos/"
+            "VortXiOSNative.build/VortXiOSNative-arm64.map"),
+    "macos": ("DerivedData-mac/Build/Products/Release/VortX.app",
+              "DerivedData-mac/Build/Intermediates.noindex/VortX.build/Release/"
+              "VortXMac.build/VortX-arm64.map"),
+    "tvos": ("DerivedData-tvOS/Build/Products/Release-appletvos/VortXTV.app",
+             "DerivedData-tvOS/Build/Intermediates.noindex/VortX.build/Release-appletvos/"
+             "VortXTV.build/VortXTV-arm64.map"),
+    "tvos-lite": ("DerivedData-tvOS/Build/Products/Release-appletvos/VortXTVLite.app",
+                  "DerivedData-tvOS/Build/Intermediates.noindex/VortX.build/Release-appletvos/"
+                  "VortXTVLite.build/VortXTVLite-arm64.map"),
+}
+
+
+def artifact_name(target: str, version: str, build: str) -> str:
+    return f"VortX-{ARTIFACTS[target][2]}-{version}-{build}-test.{ARTIFACTS[target][4]}"
 
 
 class DirectTestError(ValueError):
@@ -443,14 +473,15 @@ def _check_engine_input_binding(input_manifest: dict[str, Any], receipts: dict[s
         if item.get("unsignedSha256") is not None:
             sanitized_item["unsignedSha256"] = checked_sha(item["unsignedSha256"], "unsigned server hash")
         sanitized.append(sanitized_item)
-    for platform in ("ios", "macos"):
-        engine_slice = NATIVE.ENGINE_SLICES[platform]
-        player_slice = NATIVE.MPV_SLICES[platform]
+    for platform, receipt in receipts.items():
+        native_platform = ARTIFACTS[platform][0]
+        engine_slice = NATIVE.ENGINE_SLICES[native_platform]
+        player_slice = NATIVE.MPV_SLICES[native_platform]
         engine = by_key.get(("engine", engine_slice, ""))
         require(engine is not None, f"accepted {platform} engine SDK slice is missing")
-        require(receipts[platform]["engineSourceRevision"] == revision,
+        require(receipt["engineSourceRevision"] == revision,
                 f"accepted {platform} app receipt engine revision differs from the input manifest")
-        for archive, digest in receipts[platform]["loadedArchives"].items():
+        for archive, digest in receipt["loadedArchives"].items():
             if archive == "libvortx_ffi.a":
                 expected = engine
             else:
@@ -462,18 +493,12 @@ def _check_engine_input_binding(input_manifest: dict[str, Any], receipts: dict[s
     return sorted(sanitized, key=lambda row: (row["kind"], row["slice"] or "", row.get("target", "")))
 
 
-def _recheck_native_app_receipts(run_dir: Path, input_manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _recheck_native_app_receipts(run_dir: Path, input_manifest: dict[str, Any],
+                                targets: tuple[str, ...] = DEFAULT_TARGETS) -> dict[str, dict[str, Any]]:
     """Re-run the existing native acceptance checks against retained originals and link maps."""
-    layouts = {
-        "ios": ("DerivedData-iOS/Build/Products/Release-iphoneos/VortXiOSNative.app",
-                "DerivedData-iOS/Build/Intermediates.noindex/VortX.build/Release-iphoneos/"
-                "VortXiOSNative.build/VortXiOSNative-arm64.map"),
-        "macos": ("DerivedData-mac/Build/Products/Release/VortX.app",
-                  "DerivedData-mac/Build/Intermediates.noindex/VortX.build/Release/"
-                  "VortXMac.build/VortX-arm64.map"),
-    }
     receipts: dict[str, dict[str, Any]] = {}
-    for platform, (app_relative, map_relative) in layouts.items():
+    for platform in targets:
+        app_relative, map_relative = APP_LAYOUTS[platform]
         suffix = NATIVE_RECEIPT_SUFFIX[platform]
         app = run_dir / app_relative
         link_map = run_dir / map_relative
@@ -481,7 +506,9 @@ def _recheck_native_app_receipts(run_dir: Path, input_manifest: dict[str, Any]) 
         require(link_map.is_file(), f"retained original {platform} link map is missing; refusing receipt-only attestation")
         recorded = read_json(run_dir / f"native-{suffix}.json")
         try:
-            rechecked = NATIVE.verify_app(input_manifest, app, platform, link_map)
+            rechecked = NATIVE.verify_app(input_manifest, app, ARTIFACTS[platform][0], link_map)
+            if platform in ("tvos", "tvos-lite"):
+                _verify_tvos_bundle(app, platform, recorded)
         except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
             raise DirectTestError(f"fresh native {platform} app/link-map verification failed: {error}") from error
         require(rechecked == recorded,
@@ -498,25 +525,24 @@ def _validate_artifact_receipt(run_dir: Path, platform: str, version: str, build
     app_receipt_path = run_dir / f"native-{suffix}.json"
     package_receipt = read_json(package_receipt_path)
     raw_app_receipt = read_json(app_receipt_path)
-    portable = _portable_receipt(raw_app_receipt, platform)
-    bundle = IOS_BUNDLE if platform == "ios" else MAC_BUNDLE
-    expected_name = f"VortX-{('iOS' if platform == 'ios' else 'macOS')}-{version}-{build}-test.{('ipa' if platform == 'ios' else 'dmg')}"
+    native_platform, _, _, bundle, _, signature, notarization = ARTIFACTS[platform]
+    portable = _portable_receipt(raw_app_receipt, native_platform)
+    expected_name = artifact_name(platform, version, build)
     artifact_path = run_dir / "out" / expected_name
     require(artifact_path.is_file(), f"retained {platform} test artifact is missing")
     actual_sha = sha256_file(artifact_path)
     require(package_receipt.get("schema") == 1 and package_receipt.get("artifact") == expected_name and
             package_receipt.get("artifactSha256") == actual_sha, f"retained {platform} package receipt differs from artifact bytes")
     require(package_receipt.get("build") == build and package_receipt.get("version") == version and
-            package_receipt.get("platform") == platform and package_receipt.get("bundleIdentifier") == bundle and
+            package_receipt.get("platform") == native_platform and package_receipt.get("bundleIdentifier") == bundle and
             package_receipt.get("engineSourceRevision") == engine_revision,
             f"retained {platform} package receipt identity is incoherent")
     require(portable["engineSourceRevision"] == engine_revision and portable["version"] == version and
             portable["build"] == build and portable["bundleIdentifier"] == bundle,
             f"accepted {platform} app receipt differs from the package receipt")
     return {"name": expected_name, "size": artifact_path.stat().st_size, "sha256": actual_sha,
-            "platform": platform, "bundleIdentifier": bundle, "version": version, "build": build,
-            "architecture": "arm64", "signatureMode": "unsigned-resign-required" if platform == "ios" else "adhoc",
-            "notarization": "not-notarized" if platform == "macos" else "not-applicable",
+            "platform": native_platform, "bundleIdentifier": bundle, "version": version, "build": build,
+            "architecture": "arm64", "signatureMode": signature, "notarization": notarization,
             "packageReceiptSha256": sha256_file(package_receipt_path),
             "acceptedAppReceiptSha256": sha256_file(app_receipt_path),
             "acceptedAppReceipt": portable}
@@ -542,7 +568,7 @@ def _check_local_tag(repo_root: Path, tag: str, release_commit: str) -> None:
 
 
 def create_manifest(release: dict[str, Any], release_commit: str, run_dir: Path,
-                    repo_root: Path) -> dict[str, Any]:
+                    repo_root: Path, *, include_tvos: bool = False) -> dict[str, Any]:
     tag, version, release_id = validate_release_identity(release, published=False)
     release_commit = checked_commit(release_commit, "release-tag commit")
     source_commit = checked_commit((run_dir / "source-revision.txt").read_text().strip(), "build source commit")
@@ -552,34 +578,39 @@ def create_manifest(release: dict[str, Any], release_commit: str, run_dir: Path,
     _assert_ancestor(repo_root, source_commit, release_commit)
     inputs_path = run_dir / "native-build-inputs.json"
     inputs = read_json(inputs_path)
-    fresh_receipts = _recheck_native_app_receipts(run_dir, inputs)
-    portable_receipts = {platform: _portable_receipt(receipt, platform)
+    targets = TV_TARGETS if include_tvos else DEFAULT_TARGETS
+    fresh_receipts = (_recheck_native_app_receipts(run_dir, inputs, targets) if include_tvos else
+                      _recheck_native_app_receipts(run_dir, inputs))
+    portable_receipts = {platform: _portable_receipt(receipt, ARTIFACTS[platform][0])
                          for platform, receipt in fresh_receipts.items()}
     input_hashes = _check_engine_input_binding(inputs, portable_receipts)
     engine_revision = inputs["engineSourceRevision"]
-    ios_build = str(read_json(run_dir / "native-package-ios.json").get("build"))
-    mac_build = str(read_json(run_dir / "native-package-mac.json").get("build"))
-    ios = _validate_artifact_receipt(run_dir, "ios", version, ios_build, engine_revision)
-    mac = _validate_artifact_receipt(run_dir, "macos", version, mac_build, engine_revision)
-    require(ios["build"] == mac["build"], "iOS and Mac packages must use the same numeric build")
-    inspect_artifact(run_dir / "out" / ios["name"], ios, "ios")
-    inspect_artifact(run_dir / "out" / mac["name"], mac, "macos")
+    artifacts = {}
+    for target in targets:
+        build = str(read_json(run_dir / f"native-package-{NATIVE_RECEIPT_SUFFIX[target]}.json").get("build"))
+        require(build.isdigit(), f"{target} package must use a numeric build")
+        artifacts[target] = _validate_artifact_receipt(run_dir, target, version, build, engine_revision)
+    require(len({item["build"] for item in artifacts.values()}) == 1,
+            "all Apple packages must use the same numeric build" if include_tvos else
+            "iOS and Mac packages must use the same numeric build")
+    for target, item in artifacts.items():
+        inspect_artifact(run_dir / "out" / item["name"], item, target)
     route_snapshot = validate_route_snapshot(capture_public_routes(tag), tag)
     return {
-        "schemaVersion": SCHEMA_VERSION,
+        "schemaVersion": 2 if include_tvos else SCHEMA_VERSION,
         "distribution": "direct-test-only",
         "provenanceKind": "local-retained-native-build-receipts",
         "repository": REPOSITORY,
         "release": {"id": release_id, "tag": tag, "commit": release_commit, "version": version,
                     "prerelease": True},
-        "build": {"sourceCommit": source_commit, "version": version, "number": ios["build"],
+        "build": {"sourceCommit": source_commit, "version": version, "number": artifacts["ios"]["build"],
                   "execution": "local", "engineSourceRevision": engine_revision},
         "engineInputs": {"manifestSha256": sha256_file(inputs_path), "features": inputs.get("features"),
                          "engineSourceRevision": engine_revision, "hashes": input_hashes},
-        "targets": ["ios", "macos"],
-        "excludedTargets": ["tvos", "android"],
+        "targets": list(targets),
+        "excludedTargets": ["android"] if include_tvos else ["tvos", "android"],
         "feedPolicy": {"promotion": False, "sourceMutation": False, "routesMustRemain": route_snapshot},
-        "artifacts": {"ios": ios, "macos": mac},
+        "artifacts": artifacts,
     }
 
 
@@ -593,7 +624,8 @@ def _validate_manifest_shape(manifest: dict[str, Any], release: dict[str, Any], 
     tag, version, release_id = validate_release_identity(release, expected_tag=manifest_release.get("tag"),
                                                         expected_release_id=manifest_release.get("id"),
                                                         published=True)
-    require(manifest.get("schemaVersion") == SCHEMA_VERSION and manifest.get("distribution") == "direct-test-only" and
+    schema = manifest.get("schemaVersion")
+    require(type(schema) is int and schema in (1, 2) and manifest.get("distribution") == "direct-test-only" and
             manifest.get("provenanceKind") == "local-retained-native-build-receipts" and
             manifest.get("repository") == REPOSITORY, "manifest is not a supported local direct-test attestation")
     rel = manifest.get("release")
@@ -618,7 +650,10 @@ def _validate_manifest_shape(manifest: dict[str, Any], release: dict[str, Any], 
             engine == engine_inputs.get("engineSourceRevision") and
             engine_inputs.get("features") == EXPECTED_NATIVE_FEATURES,
             "engine source revision differs from the recorded input manifest")
-    require(manifest.get("targets") == ["ios", "macos"] and manifest.get("excludedTargets") == ["tvos", "android"],
+    targets = TV_TARGETS if schema == 2 else DEFAULT_TARGETS
+    require(manifest.get("targets") == list(targets) and
+            manifest.get("excludedTargets") == (["android"] if schema == 2 else ["tvos", "android"]),
+            "schema 2 must claim exactly iOS, macOS, tvOS and tvOS Lite and exclude Android" if schema == 2 else
             "direct-test manifest must claim only iOS and macOS and explicitly exclude tvOS/Android")
     feed_policy = manifest.get("feedPolicy")
     require(isinstance(feed_policy, dict) and set(feed_policy) == {"promotion", "sourceMutation", "routesMustRemain"} and
@@ -627,11 +662,11 @@ def _validate_manifest_shape(manifest: dict[str, Any], release: dict[str, Any], 
             "direct-test manifest may not promote or mutate public feeds")
     snapshot = validate_route_snapshot(feed_policy.get("routesMustRemain"), tag)
     artifacts = manifest.get("artifacts")
-    require(isinstance(artifacts, dict) and set(artifacts) == {"ios", "macos"},
+    require(isinstance(artifacts, dict) and set(artifacts) == set(targets),
+            "schema 2 must contain exactly four Apple artifacts" if schema == 2 else
             "manifest must contain exactly iOS and macOS artifacts")
-    expected = {"ios": (IOS_BUNDLE, "ipa", "unsigned-resign-required", "not-applicable"),
-                "macos": (MAC_BUNDLE, "dmg", "adhoc", "not-notarized")}
-    for platform, (bundle, extension, signature, notarization) in expected.items():
+    for platform in targets:
+        native_platform, _, _, bundle, _, signature, notarization = ARTIFACTS[platform]
         item = artifacts[platform]
         require(isinstance(item, dict) and set(item) == {"name", "size", "sha256", "platform", "bundleIdentifier",
                 "version", "build", "architecture", "signatureMode", "notarization", "packageReceiptSha256",
@@ -639,14 +674,14 @@ def _validate_manifest_shape(manifest: dict[str, Any], release: dict[str, Any], 
                 f"manifest {platform} artifact is malformed")
         basename = item.get("name")
         require(isinstance(basename, str) and Path(basename).name == basename and
-                basename == f"VortX-{('iOS' if platform == 'ios' else 'macOS')}-{version}-{build['number']}-test.{extension}",
+                basename == artifact_name(platform, version, build["number"]),
                 f"manifest {platform} asset name is not the expected build artifact")
-        require(item.get("platform") == platform and item.get("bundleIdentifier") == bundle and
+        require(item.get("platform") == native_platform and item.get("bundleIdentifier") == bundle and
                 item.get("version") == version and item.get("build") == build["number"] and
                 item.get("architecture") == "arm64" and item.get("signatureMode") == signature and
                 item.get("notarization") == notarization,
                 f"manifest {platform} platform/content/signature metadata is invalid")
-        require(isinstance(item.get("size"), int) and item["size"] > 0,
+        require(type(item.get("size")) is int and item["size"] > 0,
                 f"manifest {platform} artifact size is invalid")
         checked_sha(item.get("sha256"), f"manifest {platform} artifact SHA-256")
         checked_sha(item.get("packageReceiptSha256"), f"manifest {platform} package receipt SHA-256")
@@ -655,7 +690,7 @@ def _validate_manifest_shape(manifest: dict[str, Any], release: dict[str, Any], 
         require(isinstance(portable, dict) and set(portable) == {"schema", "platform", "engineSourceRevision",
                 "bundleIdentifier", "version", "build", "executableSha256", "unsignedExecutableSha256",
                 "bundlePayload", "linkMapSha256", "loadedArchives"} and portable.get("schema") == 1 and
-                portable.get("platform") == platform and
+                portable.get("platform") == native_platform and
                 portable.get("bundleIdentifier") == bundle and portable.get("version") == version and
                 portable.get("build") == build["number"] and portable.get("engineSourceRevision") == engine,
                 f"manifest {platform} accepted-content receipt identity is incoherent")
@@ -682,9 +717,9 @@ def _validate_manifest_shape(manifest: dict[str, Any], release: dict[str, Any], 
         key = (str(item.get("kind")), str(item.get("slice")), str(item.get("target") or ""))
         require(key not in input_index, f"manifest duplicates engine input {key}")
         input_index[key] = digest
-    for platform, engine_slice, player_slice in (
-            ("ios", NATIVE.ENGINE_SLICES["ios"], NATIVE.MPV_SLICES["ios"]),
-            ("macos", NATIVE.ENGINE_SLICES["macos"], NATIVE.MPV_SLICES["macos"])):
+    for platform in targets:
+        native_platform = ARTIFACTS[platform][0]
+        engine_slice, player_slice = NATIVE.ENGINE_SLICES[native_platform], NATIVE.MPV_SLICES[native_platform]
         receipt_archives = artifacts[platform]["acceptedAppReceipt"]["loadedArchives"]
         engine_hash = input_index.get(("engine", engine_slice, ""))
         require(engine_hash is not None and receipt_archives.get("libvortx_ffi.a") == engine_hash,
@@ -703,10 +738,19 @@ def open_app(artifact: Path, platform: str) -> Iterator[Path]:
     with tempfile.TemporaryDirectory(prefix="vortx-direct-apple-verify-") as temporary:
         root = Path(temporary).resolve()
         mounted = False
-        if platform == "ios":
-            require(artifact.suffix == ".ipa", "iOS direct-test artifact must be an IPA")
+        if platform in ("ios", "tvos"):
+            require(artifact.suffix == ".ipa", f"{platform} direct-test artifact must be an IPA")
             with zipfile.ZipFile(artifact) as archive:
+                seen: set[str] = set()
                 for item in archive.infolist():
+                    if platform == "tvos":
+                        relative = PurePosixPath(item.filename)
+                        require(relative.parts and relative.parts[0] == "Payload" and
+                                not relative.is_absolute() and ".." not in relative.parts and
+                                "\\" not in item.filename and relative.as_posix() == item.filename.rstrip("/") and
+                                relative.as_posix() not in seen,
+                                "tvOS IPA has duplicate or unexpected archive entries")
+                        seen.add(relative.as_posix())
                     destination = (root / item.filename).resolve()
                     require(destination.is_relative_to(root), "IPA entry escapes its extraction root")
                     mode = item.external_attr >> 16
@@ -719,6 +763,10 @@ def open_app(artifact: Path, platform: str) -> Iterator[Path]:
                     else:
                         archive.extract(item, root)
             apps = list((root / "Payload").glob("*.app"))
+            if platform == "tvos":
+                require(len(apps) == 1 and apps[0].is_dir() and not apps[0].is_symlink() and
+                        list((root / "Payload").iterdir()) == apps,
+                        "tvOS IPA Payload must contain exactly its one app and no extras")
         else:
             require(platform == "macos" and artifact.suffix == ".dmg", "macOS direct-test artifact must be a DMG")
             mount = root / "mount"
@@ -736,12 +784,99 @@ def open_app(artifact: Path, platform: str) -> Iterator[Path]:
                                text=True, capture_output=True)
 
 
+def _verify_unsigned(app: Path, label: str) -> None:
+    require(not any(app.rglob("_CodeSignature")) and not any(app.rglob("embedded.mobileprovision")),
+            f"{label} test IPA is expected to be unsigned for normal re-signing/sideload")
+    diag = subprocess.run(["codesign", "-dv", "--verbose=4", str(app)], text=True,
+                          capture_output=True, check=False)
+    require(diag.returncode != 0, f"{label} test IPA unexpectedly carries a code signature")
+
+
+def _verify_tvos_executable(bundle: Path, info: dict[str, Any]) -> None:
+    executable = info.get("CFBundleExecutable")
+    require(isinstance(executable, str) and executable and Path(executable).name == executable,
+            "tvOS bundle executable name is invalid")
+    binary = bundle / executable
+    require(binary.is_file(), "tvOS bundle executable is missing")
+    archs = subprocess.run(["lipo", "-archs", str(binary)], check=True, text=True,
+                           capture_output=True).stdout.strip().split()
+    require(archs == ["arm64"], "tvOS executable architecture is not exactly arm64")
+    commands = subprocess.run(["otool", "-l", str(binary)], check=True, text=True,
+                              capture_output=True).stdout
+    versions = re.findall(r"cmd LC_BUILD_VERSION\n(.*?)(?=\nLoad command|\Z)", commands, re.DOTALL)
+    require(len(versions) == 1, "tvOS executable must have exactly one LC_BUILD_VERSION")
+    fields = {key: re.findall(rf"(?m)^\s*{key}\s+(\S+)\s*$", versions[0])
+              for key in ("platform", "minos", "sdk")}
+    require(all(len(values) == 1 for values in fields.values()), "tvOS executable LC_BUILD_VERSION fields are malformed")
+    require(fields["platform"][0] in ("3", "TVOS"),
+            "tvOS executable is not an Apple TV device build")
+    require(_version_tuple(fields["minos"][0]) == _version_tuple(NATIVE.FLOORS["tvos"]),
+            "tvOS executable deployment floor differs from the accepted minimum")
+    require(_version_tuple(fields["sdk"][0]) >= (26, 5),
+            "tvOS executable SDK is below the reviewed 26.5 floor")
+
+
+def _verify_tvos_bundle(app: Path, target: str, accepted: dict[str, Any]) -> None:
+    """Check variant policy on both retained originals and extracted public IPA bytes."""
+    with (app / "Info.plist").open("rb") as stream:
+        info = plistlib.load(stream)
+    bundle = ARTIFACTS[target][3]
+    scheme = "vortx-lite" if target == "tvos-lite" else "vortx"
+    require(info.get("CFBundleIdentifier") == bundle and
+            info.get("CFBundleExecutable") == ("VortXTVLite" if target == "tvos-lite" else "VortXTV") and
+            info.get("CFBundleShortVersionString") == accepted["version"] and
+            info.get("CFBundleVersion") == accepted["build"], "tvOS variant bundle/version/build is invalid")
+    require(info.get("UIDeviceFamily") == [3] and info.get("CFBundleSupportedPlatforms") == ["AppleTVOS"],
+            "tvOS IPA is not an Apple TV device build")
+    require(_version_tuple(info.get("MinimumOSVersion")) == _version_tuple(NATIVE.FLOORS["tvos"]),
+            "tvOS deployment floor differs from the accepted minimum")
+    require(all(info.get(key) is True or info.get(key) == "YES"
+                for key in ("VortXNativeDataEngine", "VortXNativeResourceHost")) and
+            info.get("VortXEngineSourceRevision") == accepted["engineSourceRevision"] and
+            info.get("VortXNativeTransport") == ("none" if target == "tvos-lite" else "in-process"),
+            "tvOS native engine pin/feature/transport policy is invalid")
+    url_types = info.get("CFBundleURLTypes")
+    require(info.get("VortXURLScheme") == scheme and isinstance(url_types, list) and len(url_types) == 1 and
+            isinstance(url_types[0], dict) and url_types[0].get("CFBundleURLName") == bundle and
+            url_types[0].get("CFBundleURLSchemes") == [scheme], "tvOS variant URL scheme is invalid")
+    require(not any(app.rglob("vortx-streaming-server")), "tvOS IPA must not contain the Mac streaming daemon")
+    extensions = sorted(app.rglob("*.appex"))
+    expected_extension = app / "PlugIns/VortXTopShelf.appex"
+    require(extensions == ([expected_extension] if target == "tvos" else []),
+            "Full tvOS requires exactly its Top Shelf extension; Lite must contain no extensions")
+    _verify_unsigned(app, target)
+    _verify_tvos_executable(app, info)
+    if target == "tvos":
+        with (expected_extension / "Info.plist").open("rb") as stream:
+            extension = plistlib.load(stream)
+        require(extension.get("CFBundleIdentifier") == TV_TOP_SHELF_BUNDLE and
+                extension.get("CFBundleExecutable") == "VortXTopShelf" and
+                extension.get("CFBundleShortVersionString") == accepted["version"] and
+                extension.get("CFBundleVersion") == accepted["build"] and
+                extension.get("UIDeviceFamily") == [3] and
+                extension.get("CFBundleSupportedPlatforms") == ["AppleTVOS"] and
+                _version_tuple(extension.get("MinimumOSVersion")) == _version_tuple(NATIVE.FLOORS["tvos"]) and
+                extension.get("VortXURLScheme") == "vortx" and
+                extension.get("NSExtension") == {"NSExtensionPointIdentifier": "com.apple.tv-top-shelf",
+                                               "NSExtensionPrincipalClass": "VortXTopShelf.ContentProvider"},
+                "tvOS Top Shelf extension identity/metadata is invalid")
+        _verify_unsigned(expected_extension, "tvOS Top Shelf")
+        _verify_tvos_executable(expected_extension, extension)
+
+
 def inspect_artifact(path: Path, item: dict[str, Any], platform: str) -> None:
     require(path.is_file() and path.stat().st_size == item["size"] and sha256_file(path) == item["sha256"],
             f"published {platform} artifact size/SHA differs from local build receipt")
     accepted = item["acceptedAppReceipt"]
-    with open_app(path, platform) as app:
-        NATIVE.verify_packaged_copy(accepted, app, platform)
+    native_platform = ARTIFACTS[platform][0]
+    with open_app(path, native_platform) as app:
+        if native_platform == "tvos":
+            require(app.name == ("VortXTVLite.app" if platform == "tvos-lite" else "VortXTV.app"),
+                    "tvOS variant app filename is invalid")
+        try:
+            NATIVE.verify_packaged_copy(accepted, app, native_platform)
+        except ValueError as error:
+            raise DirectTestError(f"{platform} accepted payload verification failed: {error}") from error
         contents = app / "Contents" if platform == "macos" else app
         info_path = contents / "Info.plist"
         with info_path.open("rb") as stream:
@@ -750,17 +885,14 @@ def inspect_artifact(path: Path, item: dict[str, Any], platform: str) -> None:
                 info.get("CFBundleShortVersionString") == item["version"] and
                 str(info.get("CFBundleVersion")) == item["build"],
                 f"published {platform} bundle identity/version/build differs from its manifest")
-        if platform == "ios":
+        if native_platform == "tvos":
+            _verify_tvos_bundle(app, platform, accepted)
+        elif platform == "ios":
             require(info.get("UIDeviceFamily") == [1, 2], "iOS IPA must support both iPhone and iPad")
             require(info.get("CFBundleSupportedPlatforms") == ["iPhoneOS"], "iOS IPA is not a device build")
             require(_version_tuple(info.get("MinimumOSVersion")) == _version_tuple(NATIVE.FLOORS["ios"]),
                     "iOS deployment floor differs from the accepted minimum")
-            require(not any(part.name == "_CodeSignature" for part in app.rglob("_CodeSignature")) and
-                    not any(part.name == "embedded.mobileprovision" for part in app.rglob("embedded.mobileprovision")),
-                    "iOS test IPA is expected to be unsigned for normal re-signing/sideload")
-            diag = subprocess.run(["codesign", "-dv", "--verbose=4", str(app)], text=True,
-                                  capture_output=True, check=False)
-            require(diag.returncode != 0, "iOS test IPA unexpectedly carries a code signature")
+            _verify_unsigned(app, "iOS")
         else:
             subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True,
                            text=True, capture_output=True)
@@ -813,12 +945,12 @@ def verify_published(release: dict[str, Any], manifest: dict[str, Any], release_
     expected_provenance_url = f"https://github.com/{REPOSITORY}/releases/download/{tag}/{PROVENANCE_NAME}"
     require(provenance_asset.get("browser_download_url") == expected_provenance_url,
             "published provenance asset URL is not tag-bound")
-    expected_names = {PROVENANCE_NAME, manifest["artifacts"]["ios"]["name"], manifest["artifacts"]["macos"]["name"]}
+    expected_names = {PROVENANCE_NAME, *(item["name"] for item in manifest["artifacts"].values())}
     observed_names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
     require(len(observed_names) == len(assets) and len(observed_names) == len(set(observed_names)) and
             set(observed_names) == expected_names,
-            "direct-test release must contain exactly its provenance, iOS IPA and Mac DMG (no tvOS/APK assets)")
-    for platform in ("ios", "macos"):
+            "direct-test release must contain exactly its provenance and declared Apple artifacts (no extras)")
+    for platform in manifest["targets"]:
         item = manifest["artifacts"][platform]
         asset_name = item["name"]
         asset_record = next(asset for asset in assets if asset["name"] == asset_name)
@@ -859,6 +991,12 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--build-dir", type=Path, required=True, help="retained local Apple build/package receipt directory")
     prepare.add_argument("--repo-root", type=Path, default=Path.cwd())
     prepare.add_argument("--output", type=Path, required=True)
+    prepare.add_argument("--include-tvos", action="store_true",
+                         help="explicit schema 2: require both Full and Lite tvOS IPAs as well as iOS/Mac")
+    names = commands.add_parser("asset-names", help="read-only validated artifact roster before downloading package bytes")
+    names.add_argument("--release-json", type=Path, required=True)
+    names.add_argument("--provenance", type=Path, required=True)
+    names.add_argument("--release-commit", required=True)
     verify = commands.add_parser("verify-published", help="read-only post-publication content/provenance/route verification")
     verify.add_argument("--release-json", type=Path, required=True)
     verify.add_argument("--provenance", type=Path, required=True)
@@ -870,10 +1008,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare":
             release = read_json(args.release_json)
             validate_release_identity(release, published=False)
-            manifest = create_manifest(release, args.release_commit, args.build_dir, args.repo_root)
+            manifest = create_manifest(release, args.release_commit, args.build_dir, args.repo_root,
+                                       include_tvos=args.include_tvos)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_bytes(canonical_json(manifest))
             print(f"PASS: generated local direct-test provenance for {manifest['release']['tag']} build {manifest['build']['number']}")
+        elif args.command == "asset-names":
+            manifest = read_json(args.provenance)
+            _validate_manifest_shape(manifest, read_json(args.release_json), args.release_commit)
+            for target in manifest["targets"]:
+                print(manifest["artifacts"][target]["name"])
         else:
             release = read_json(args.release_json)
             manifest = read_json(args.provenance)
