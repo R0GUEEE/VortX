@@ -65,18 +65,23 @@ export async function loadInstalledAddons(): Promise<Addon[]> {
 // The pusher carries an explicit add/remove signal so the account write can maintain the removal
 // tombstone (doc.removedAddons) precisely - never inferred by diffing the merged set (which would
 // false-tombstone app-installed add-ons the webapp simply doesn't hold locally).
-export interface AddonSyncHint { added?: string; removed?: string }
+export interface AddonSyncHint { added?: string; removed?: string; descriptor?: Addon }
 let addonsSyncPusher: ((hint?: AddonSyncHint) => void) | null = null;
-export function registerAddonsSyncPusher(fn: ((hint?: AddonSyncHint) => void) | null): void {
+let addonAdmission: (() => (() => boolean)) | null = null;
+export function registerAddonsSyncPusher(fn: ((hint?: AddonSyncHint) => void) | null,
+  admission: (() => (() => boolean)) | null = null): void {
   addonsSyncPusher = fn;
+  addonAdmission = admission;
 }
 
 /** Add a stream/catalog add-on by transport URL. Validates the manifest before persisting; returns
  *  the resolved Addon so the caller can refresh the UI. Throws if the URL is not a valid add-on. */
 export async function addAddon(transportUrl: string): Promise<Addon> {
+  const admitted = addonAdmission?.();
   const addon = await loadAddon(transportUrl.trim()); // validates scheme (https-only) + normalizes
+  if (admitted && !admitted()) throw new Error("Account changed while loading this add-on. Please try again.");
   persist([...installedUrls(), addon.transportUrl]); // store exactly the normalized URL that loaded
-  addonsSyncPusher?.({ added: addon.transportUrl }); // push + clear any prior removal tombstone for it
+  addonsSyncPusher?.({ added: addon.transportUrl, descriptor: addon });
   return addon;
 }
 
@@ -178,11 +183,11 @@ export function applyAddonOrder(orderedUrls: string[]): boolean {
 
 /** Merge synced library items into the local library (union by id; existing entries win). Slimmed to the
  *  same id/type/name/poster shape the local library stores. */
-export function mergeLibrary(items: MetaItem[]): void {
+export function mergeLibrary(items: MetaItem[]): boolean {
   const valid = items.filter(
     (m) => m && typeof m.id === "string" && typeof m.type === "string" && typeof m.name === "string",
   );
-  if (!valid.length) return;
+  if (!valid.length) return false;
   // Account hydration ALWAYS targets the owner library (base key), never an active overlay profile -
   // overlay profiles stay local and must never receive or mutate the account library.
   let existing: MetaItem[] = [];
@@ -197,11 +202,12 @@ export function mergeLibrary(items: MetaItem[]): void {
   const additions = valid
     .filter((m) => !seen.has(m.id))
     .map((m) => ({ id: m.id, type: m.type, name: m.name, poster: m.poster }));
-  if (!additions.length) return;
+  if (!additions.length) return false;
   try {
     localStorage.setItem(LIBRARY_KEY, JSON.stringify([...existing, ...additions]));
+    return true;
   } catch {
-    /* best-effort */
+    return false;
   }
 }
 
@@ -374,8 +380,9 @@ export function cwResumeId(titleId: string): string | null {
 // Write-up trigger: fires after any local CW change so the account can push the active profile's web
 // watch-progress up to the bilateral doc.webProgress field (debounced in account.ts), making what you
 // watch on the web reach your apps and other browsers. No-op signed out.
-let cwSyncPusher: (() => void) | null = null;
-export function registerCwSyncPusher(fn: (() => void) | null): void {
+export interface ProgressSyncHint { entry?: CWEntry; removal?: CWTombstone }
+let cwSyncPusher: ((hint?: ProgressSyncHint) => void) | null = null;
+export function registerCwSyncPusher(fn: ((hint?: ProgressSyncHint) => void) | null): void {
   cwSyncPusher = fn;
 }
 
@@ -478,8 +485,9 @@ export function recordProgress(
         }
       }
     }
-    writeCWTombstone(scopedKey(CW_TOMBSTONE_KEY), removalKeys, Date.now());
-    cwSyncPusher?.(); // finishing a title is a CW change too - push the dropped state up
+    const removedAt = Date.now();
+    writeCWTombstone(scopedKey(CW_TOMBSTONE_KEY), removalKeys, removedAt);
+    cwSyncPusher?.({ removal: { keys: [...removalKeys], removedAt } });
     return;
   }
   const entry: CWEntry = {
@@ -493,7 +501,7 @@ export function recordProgress(
     updatedAt: Date.now(),
   };
   persistCW([entry, ...others].slice(0, 40));
-  cwSyncPusher?.(); // debounced account write-up of the active profile's web progress
+  cwSyncPusher?.({ entry }); // capture this edit and its scope before a later profile switch
 }
 
 /** Remove a title from Continue Watching (every played-id entry that shares this display id). */
@@ -522,7 +530,7 @@ export function clearProgress(id: string): void {
   const tombstoneKey = scopedKey(CW_TOMBSTONE_KEY);
   const removedAt = Date.now();
   writeCWTombstone(tombstoneKey, removalKeys, removedAt);
-  cwSyncPusher?.(); // publish the active live set; this scope's tombstone still blocks stale hydration
+  cwSyncPusher?.({ removal: { keys: [...removalKeys], removedAt } });
 }
 
 function persistCW(entries: CWEntry[]): void {

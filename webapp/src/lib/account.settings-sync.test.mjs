@@ -41,7 +41,8 @@ globalThis.matchMedia = () => ({ matches: false });
 const nativeSetTimeout = globalThis.setTimeout;
 let settingsTimerSchedules = 0;
 globalThis.setTimeout = (fn, delay, ...args) => {
-  settingsTimerSchedules += 1;
+  // Count the settings debounce itself; account requests also carry independent timeout deadlines.
+  if (delay === 800) settingsTimerSchedules += 1;
   return nativeSetTimeout(fn, delay, ...args);
 };
 const waitForSettingsPush = () => new Promise((resolve) => nativeSetTimeout(resolve, 1_000));

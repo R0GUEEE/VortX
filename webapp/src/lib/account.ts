@@ -1,13 +1,12 @@
-// Session-state module for the webapp. A thin, DOM-free layer over vault.ts that the nav, the Login
-// screen, and a future Settings > Account section all read from. It owns:
+// Account/session sync for the webapp, read by the nav, Login and Settings. It owns:
 //   - the single in-memory session cache (so callers don't re-read localStorage on every render),
 //   - the boot-time validation (loadSession then GET /v1/auth/me, clearing on a definite 401),
-//   - sign-out, and
-//   - a tiny subscribe/notify bus so UI reacts to sign-in / sign-out without polling.
-// vault.ts is the source of truth for crypto + persistence; this module never touches localStorage
-// directly, it goes through vault's saveSession/loadSession/clearSession.
+//   - sign-out and a subscribe/notify bus,
+//   - bounded socket/conditional-poll receive and foreground catch-up, and
+//   - an account-scoped journal of explicit edits, ACKed only after serialized successful writes.
+// vault.ts owns session persistence and encrypted transport. Journals carry no session/key/socket URL.
 
-import { loadSession, clearSession, validateSession, saveSession, getSyncDoc, mutateSyncDoc, type Session } from "./vault";
+import { loadSession, clearSession, validateSession, saveSession, getSyncDoc, fetchSync, connectSyncSocket, mutateSyncDoc, type Session } from "./vault";
 import {
   mergeInstalledAddons,
   pruneInstalledAddons,
@@ -25,6 +24,7 @@ import {
   mergeCWTombstones,
   type CWEntry,
   type CWTombstone,
+  type WebProgressEntry,
 } from "./store";
 import {
   mergeSyncedProfiles,
@@ -56,6 +56,7 @@ const listeners = new Set<Listener>();
 function setSession(next: Session | null): void {
   bindSettingsSyncState(next);
   cached = next;
+  bindReceiveSession(next);
   notify();
 }
 
@@ -66,6 +67,7 @@ export function currentSession(): Session | null {
   if (cached === undefined) {
     cached = loadSession();
     bindSettingsSyncState(cached);
+    bindReceiveSession(cached);
   }
   return cached;
 }
@@ -88,11 +90,13 @@ export function accountDisplay(): string | null {
  *  null. Safe to call once at startup, before painting the nav. */
 export async function ensureValidSession(): Promise<Session | null> {
   const session = loadSession();
+  const prior = currentSession();
   if (!session) {
     setSession(null);
     return null;
   }
   const ok = await validateSession(session);
+  if (!sameSession(currentSession(), prior)) return currentSession();
   if (!ok) {
     clearSession();
     setSession(null);
@@ -200,6 +204,11 @@ function rosterFromDoc(vortx: Record<string, unknown>, doc: Record<string, unkno
  *  of any missing/odd key - a partial or foreign doc never throws. */
 export function applySyncDoc(doc: Record<string, unknown> | null | undefined): void {
   if (!doc || typeof doc !== "object") return;
+  discardTransferredIntents(settingsSyncState);
+  withSuppressedUp(() => applySyncDocLocally(doc));
+}
+
+function applySyncDocLocally(doc: Record<string, unknown>): void {
   const vortx = (doc.vortx && typeof doc.vortx === "object" ? doc.vortx : {}) as Record<string, unknown>;
 
   // Settings read-down: metadata API keys (doc.apiKeys) + the app/dashboard per-profile appearance,
@@ -212,12 +221,12 @@ export function applySyncDoc(doc: Record<string, unknown> | null | undefined): v
     tmdbKey: typeof keys.tmdb === "string" ? keys.tmdb : "",
     mdblistKey: typeof keys.mdblist === "string" ? keys.mdblist : "",
   };
-  settingsSyncState.apiKeysArmed = true;
   const settingsPatch = settingsPatchFromDoc(doc);
-  if (Object.keys(settingsPatch).length) {
-    settingsSyncState.profileSettingsArmed = true;
+  const ownerPatch: Partial<Settings> = { ...metadataPatch, ...settingsPatch };
+  // A pull can race a local edit or failed PUT. Keep that edit live until its durable intent is ACKed.
+  for (const key of settingsSyncState.pendingKeys) {
+    if (settingsSyncState.pendingSettings) Object.assign(ownerPatch, { [key]: settingsSyncState.pendingSettings[key] });
   }
-  const ownerPatch = { ...metadataPatch, ...settingsPatch };
   if (Object.keys(ownerPatch).length) {
     const ownerSettings = mergeOwnerSettings(ownerPatch);
     if (isOwnerProfile(activeProfileId())) {
@@ -250,6 +259,11 @@ export function applySyncDoc(doc: Record<string, unknown> | null | undefined): v
   // the Apple app). Normalize (trim+lowercase) BOTH sides so casing differences can't cause a miss - the app
   // keys its tombstones the same way. Re-adding a URL clears the web tombstone (add wins LWW).
   const removedNorm = effectiveAddonRemovals(doc);
+  for (const intent of Object.values(settingsSyncState.addonIntents)) {
+    const normalized = normalizeAddonUrl(intent.url);
+    if (intent.added) { removedNorm.delete(normalized); urls.push(intent.url); }
+    else removedNorm.add(normalized);
+  }
   const liveUrls = removedNorm.size ? urls.filter((u) => !removedNorm.has(normalizeAddonUrl(u))) : urls;
   const addedChanged = mergeInstalledAddons(liveUrls);
   const toPrune = removedNorm.size ? installedUrls().filter((u) => removedNorm.has(normalizeAddonUrl(u))) : [];
@@ -260,7 +274,7 @@ export function applySyncDoc(doc: Record<string, unknown> | null | undefined): v
   // Owner library (vortx.library: [{id,name,type,poster,t,d,lastWatched,v,...}]). The app emits t/d in
   // seconds (the dashboard + now the web app derive Continue Watching from each item's progress).
   const libItems = (Array.isArray(vortx.library) ? vortx.library : []) as Array<Record<string, unknown>>;
-  mergeLibrary(libItems as unknown as MetaItem[]);
+  const libraryChanged = mergeLibrary(libItems as unknown as MetaItem[]);
 
   // Apply bilateral timestamped removals BEFORE any live union so stale account/app rows cannot resurrect
   // a clear or >=95%-finished title. Older documents simply omit webProgress.removed.
@@ -321,10 +335,10 @@ export function applySyncDoc(doc: Record<string, unknown> | null | undefined): v
   // Re-render: any add-on/library/CW change reloads the nav; a roster change repaints the profile switcher
   // and the scoped Home/Library/Continue-Watching for the active profile.
   if (typeof window !== "undefined") {
-    if (addonsChanged || orderChanged || cwChanged || rosterChanged || byProfileChanged) {
+    if (addonsChanged || orderChanged || libraryChanged || cwChanged || rosterChanged || byProfileChanged) {
       window.dispatchEvent(new Event("vortx:addons-changed"));
     }
-    if (rosterChanged) window.dispatchEvent(new Event("vortx:profile-changed"));
+    if (rosterChanged) window.dispatchEvent(new CustomEvent("vortx:profile-changed", { detail: { fromSync: true } }));
   }
 }
 
@@ -342,6 +356,10 @@ function tombstonesFrom(value: unknown): CWTombstone[] {
  *  library, and metadata keys come over from their other VortX devices. Fail-soft: a missing or
  *  undecryptable doc never blocks sign-in. */
 export async function hydrateFromAccount(session: Session): Promise<void> {
+  if (receiveState && sameSession(receiveState.session, session)) {
+    await requestAccountPull(receiveState);
+    return;
+  }
   try {
     const doc = await getSyncDoc(session);
     if (sameSession(settingsSyncState.session, session)) applySyncDoc(doc);
@@ -350,9 +368,198 @@ export async function hydrateFromAccount(session: Session): Promise<void> {
   }
 }
 
+interface ReceiveState {
+  session: Session;
+  receivedVersion?: number;
+  appliedVersion?: number;
+  projectionPending?: boolean;
+  pull: Promise<void> | null;
+  pullAgain: boolean;
+  abort: AbortController | null;
+  socket: WebSocket | null;
+  pollTimer?: ReturnType<typeof setTimeout>;
+  reconnectTimer?: ReturnType<typeof setTimeout>;
+  reconnectAttempt: number;
+}
+
+let receiveStarted = false;
+let receiveState: ReceiveState | null = null;
+
+function syncIsActive(): boolean {
+  return (typeof document === "undefined" || document.visibilityState !== "hidden") &&
+    (typeof navigator === "undefined" || navigator.onLine !== false);
+}
+
+function isCurrentReceiver(state: ReceiveState): boolean {
+  return receiveStarted && receiveState === state && sameSession(settingsSyncState.session, state.session);
+}
+
+function disposeReceiver(state: ReceiveState): void {
+  if (state.pollTimer) clearTimeout(state.pollTimer);
+  if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+  state.pollTimer = state.reconnectTimer = undefined;
+  state.abort?.abort();
+  if (state.socket) {
+    state.socket.onopen = state.socket.onmessage = state.socket.onerror = state.socket.onclose = null;
+    state.socket.close();
+    state.socket = null;
+  }
+}
+
+function bindReceiveSession(session: Session | null): void {
+  if (!receiveStarted) return;
+  if (session && receiveState && sameSession(receiveState.session, session)) return;
+  if (receiveState) disposeReceiver(receiveState);
+  receiveState = session ? {
+    session, pull: null, pullAgain: false, abort: null, socket: null, reconnectAttempt: 0,
+  } : null;
+  if (receiveState) resumeReceiver(receiveState, true);
+  notifyReceiveStatus();
+}
+
+function resumeReceiver(state: ReceiveState, flushWrites = false): void {
+  if (!isCurrentReceiver(state) || !syncIsActive()) return;
+  discardTransferredIntents(settingsSyncState);
+  if (!settingsSyncState.writeQueued && restoreIntents(settingsSyncState, true)) {
+    withSuppressedUp(() => updateSettings(isOwnerProfile(activeProfileId())
+      ? settingsSyncState.ownerSettingsSnapshot : sharedSettingsPatch(settingsSyncState.ownerSettingsSnapshot)));
+    persistIntents(settingsSyncState);
+    scheduleIntentPush(settingsSyncState, 350);
+  }
+  for (const key of settingsSyncState.journalOwners) claimJournal(settingsSyncState, key);
+  void requestAccountPull(state);
+  connectReceiver(state);
+  if (!state.pollTimer) state.pollTimer = setTimeout(() => {
+    state.pollTimer = undefined;
+    resumeReceiver(state);
+  }, 3_000);
+  if (flushWrites && hasPendingIntents(settingsSyncState)) {
+    if (settingsSyncState.pushTimer) clearTimeout(settingsSyncState.pushTimer);
+    queueSettingsPush(settingsSyncState);
+  }
+}
+
+function connectReceiver(state: ReceiveState): void {
+  if (state.socket || state.reconnectTimer || typeof WebSocket === "undefined") return;
+  const retry = (): void => {
+    if (!isCurrentReceiver(state) || !syncIsActive() || state.reconnectTimer) return;
+    state.reconnectTimer = setTimeout(() => {
+      state.reconnectTimer = undefined;
+      if (isCurrentReceiver(state) && syncIsActive()) connectReceiver(state);
+    }, Math.min(30_000, 1_000 * 2 ** Math.min(state.reconnectAttempt++, 5)));
+  };
+  try {
+    const socket = connectSyncSocket(state.session);
+    state.socket = socket;
+    socket.onopen = () => {
+      if (!isCurrentReceiver(state) || state.socket !== socket) return;
+      state.reconnectAttempt = 0;
+      void requestAccountPull(state); // closes the write-between-initial-GET-and-socket-open gap
+    };
+    socket.onmessage = (event) => {
+      if (!isCurrentReceiver(state) || state.socket !== socket || !syncIsActive()) return;
+      try {
+        const message = JSON.parse(String(event.data));
+        if (message.type === "updated" && Number.isSafeInteger(message.version) &&
+          (state.receivedVersion === undefined || message.version > state.receivedVersion)) {
+          void requestAccountPull(state);
+        }
+      } catch { /* Invalid notifications carry no account content and cannot trigger application. */ }
+    };
+    socket.onclose = () => {
+      if (state.socket !== socket) return;
+      state.socket = null;
+      retry();
+    };
+    socket.onerror = () => {
+      if (state.socket !== socket) return;
+      state.socket = null;
+      socket.onclose = null;
+      socket.close();
+      retry();
+    };
+  } catch { retry(); }
+}
+
+function requestAccountPull(state: ReceiveState): Promise<void> {
+  if (!isCurrentReceiver(state) || !syncIsActive()) return Promise.resolve();
+  if (state.pull) {
+    state.pullAgain = true;
+    return state.pull;
+  }
+  const run = async (): Promise<void> => {
+    do {
+      state.pullAgain = false;
+      const abort = new AbortController();
+      state.abort = abort;
+      const deadline = setTimeout(() => abort.abort(), 15_000);
+      try {
+        const status = await fetchSync(state.session, { version: state.receivedVersion, signal: abort.signal });
+        if (!isCurrentReceiver(state) || !syncIsActive() || abort.signal.aborted) return;
+        if (status.unchanged || status.decryptFailed) continue;
+        if (status.contents) {
+          applySyncDoc(status.contents);
+          // The legacy browser adapter cannot project native engine state yet. Retain its encrypted
+          // fields on every write, and expose received separately from fully applied in the UI.
+          state.projectionPending = ["nativeSync", "nativeHostPreferences", "nativeProviderCredentials"]
+            .some((key) => status.contents![key] !== undefined);
+          if (!state.projectionPending) state.appliedVersion = status.version;
+        }
+        state.receivedVersion = status.version;
+        notifyReceiveStatus();
+      } catch { /* Socket hints, fallback polling, and foreground/online catch-up retry automatically. */ }
+      finally {
+        clearTimeout(deadline);
+        if (state.abort === abort) state.abort = null;
+      }
+    } while (state.pullAgain && isCurrentReceiver(state) && syncIsActive());
+  };
+  state.pull = run().finally(() => { state.pull = null; });
+  return state.pull;
+}
+
+/** One automatic receiving lifecycle for this page. Account/token changes retire old callbacks. */
+export function startAccountSync(): () => void {
+  receiveStarted = true;
+  bindReceiveSession(currentSession());
+  const catchUp = (): void => {
+    if (!receiveState) return;
+    if (syncIsActive()) resumeReceiver(receiveState, true);
+    else disposeReceiver(receiveState);
+  };
+  const pause = (): void => {
+    if (receiveState) disposeReceiver(receiveState);
+    releaseJournals(settingsSyncState);
+  };
+  window.addEventListener("online", catchUp);
+  window.addEventListener("offline", catchUp);
+  window.addEventListener("pageshow", catchUp);
+  window.addEventListener("pagehide", pause);
+  document.addEventListener("visibilitychange", catchUp);
+  return () => {
+    receiveStarted = false;
+    if (receiveState) disposeReceiver(receiveState);
+    receiveState = null;
+    window.removeEventListener("online", catchUp);
+    window.removeEventListener("offline", catchUp);
+    window.removeEventListener("pageshow", catchUp);
+    window.removeEventListener("pagehide", pause);
+    document.removeEventListener("visibilitychange", catchUp);
+  };
+}
+
+export function accountSyncStatus(): { receivedVersion?: number; appliedVersion?: number; projectionPending: boolean } {
+  return { receivedVersion: receiveState?.receivedVersion, appliedVersion: receiveState?.appliedVersion,
+    projectionPending: receiveState?.projectionPending ?? false };
+}
+
+function notifyReceiveStatus(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("vortx:account-sync-changed"));
+}
+
 // --- Two-way sync: push web-authored changes back to the account --------------------------------
-// The webapp writes ONLY web-owned sibling keys: doc.profileEdits (the main profile's settings) and
-// doc.addons (the installed add-on list). It NEVER writes doc.vortx.* (app-authoritative). Every write
+// The webapp writes ONLY web-owned sibling keys: doc.profileEdits (the main profile's settings),
+// doc.addons (installed add-ons) and doc.webProgress. It NEVER writes doc.vortx.* (app-authoritative). Every write
 // goes through mutateSyncDoc (optimistic concurrency: read version, merge, PUT version+1, retry on a
 // stale-version rejection) so a concurrent app/device write is never clobbered.
 
@@ -390,8 +597,6 @@ const ACCOUNT_SCOPED_SETTING_DEFAULTS: Partial<Settings> = {
 
 interface SettingsSyncState {
   session: Session | null;
-  profileSettingsArmed: boolean;
-  apiKeysArmed: boolean;
   suppressUpDepth: number;
   pushTimer: ReturnType<typeof setTimeout> | undefined;
   pendingKeys: Set<keyof Settings>;
@@ -399,6 +604,165 @@ interface SettingsSyncState {
   writeQueued: boolean;
   profileAtLastChange: string;
   ownerSettingsSnapshot: Settings;
+  addonIntents: Record<string, AddonIntent>;
+  progressIntents: Record<string, ProgressIntent>;
+  revision: number;
+  retryAttempt: number;
+  journalSources: Map<string, string>;
+  journalOwners: Set<string>;
+}
+
+interface AddonIntent { url: string; added: boolean; at: number; revision: number;
+  descriptor?: { transportUrl: string; name: string; manifest: unknown } }
+interface ProgressIntent { entries: WebProgressEntry[]; tombstones: CWTombstone[]; revision: number }
+
+let journalClientId: string | undefined;
+function randomSyncId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+const journalPageId = randomSyncId();
+
+function journalOwner(key: string): { id?: string; until?: number } {
+  try { return JSON.parse(localStorage.getItem(key + ".owner") ?? "{}"); } catch { return {}; }
+}
+
+function claimJournal(state: SettingsSyncState, key: string): boolean {
+  const owner = journalOwner(key);
+  if (owner.id !== journalPageId && Number(owner.until) > Date.now()) return false;
+  try {
+    localStorage.setItem(key + ".owner", JSON.stringify({ id: journalPageId, until: Date.now() + 30_000 }));
+    state.journalOwners.add(key);
+  } catch { /* Storage unavailable: the current tab still retains its in-memory intent. */ }
+  return true;
+}
+
+function ownsJournals(state: SettingsSyncState): boolean {
+  return [...state.journalOwners].every((key) => {
+    const owner = journalOwner(key);
+    try { return owner.id === journalPageId || (owner.id === undefined && localStorage.getItem(key) !== null); }
+    catch { return true; /* Storage unavailable: keep this page's in-memory queue. */ }
+  });
+}
+
+function releaseJournals(state: SettingsSyncState): void {
+  for (const key of state.journalOwners) {
+    if (journalOwner(key).id !== journalPageId) continue;
+    // Keep the ownership receipt after ACK. A suspended older page must see that its journal
+    // transferred, even after the recovering page removes the completed journal itself.
+    try { localStorage.setItem(key + ".owner", JSON.stringify({ id: journalPageId, until: 0 })); }
+    catch { /* lease will expire */ }
+  }
+}
+
+function discardTransferredIntents(state: SettingsSyncState): void {
+  if (ownsJournals(state)) return;
+  // Another page recovered this inactive page's exact durable journal. Its writer now owns those
+  // intents; this page must not replay an older copy when it resumes or accepts a fresh edit.
+  state.pendingKeys.clear(); state.pendingSettings = null;
+  state.addonIntents = Object.create(null); state.progressIntents = Object.create(null);
+  state.journalSources.clear(); state.journalOwners.clear();
+}
+
+function journalKey(session: Session): string {
+  if (!journalClientId) {
+    try { journalClientId = sessionStorage.getItem("vortx.web.sync-client.v1") ?? undefined; } catch { /* optional */ }
+    journalClientId ??= randomSyncId();
+    try { sessionStorage.setItem("vortx.web.sync-client.v1", journalClientId); } catch { /* in-memory queue remains */ }
+  }
+  const prefix = "vortx.web.sync-intents.v1." + encodeURIComponent(session.account.id) + ".";
+  let key = prefix + journalClientId;
+  const owner = journalOwner(key);
+  if (owner.id !== journalPageId && Number(owner.until) > Date.now()) {
+    journalClientId = randomSyncId();
+    try { sessionStorage.setItem("vortx.web.sync-client.v1", journalClientId); } catch { /* optional */ }
+    key = prefix + journalClientId;
+  }
+  return key;
+}
+
+// Only explicit account edits go in this journal. It carries no token, data key, or socket URL.
+// A synchronous write happens before scheduling network work, including before pagehide/reload.
+function persistIntents(state: SettingsSyncState): void {
+  if (!state.session) return;
+  const settings: Partial<Settings> = {};
+  for (const key of state.pendingKeys) {
+    if (state.pendingSettings) Object.assign(settings, { [key]: state.pendingSettings[key] });
+  }
+  try {
+    if (!state.pendingKeys.size && !Object.keys(state.addonIntents).length && !Object.keys(state.progressIntents).length) {
+      localStorage.removeItem(journalKey(state.session));
+      for (const [key, raw] of state.journalSources) {
+        if (localStorage.getItem(key) === raw) localStorage.removeItem(key);
+      }
+      state.journalSources.clear();
+      releaseJournals(state);
+      state.journalOwners.clear();
+    } else {
+      const key = journalKey(state.session);
+      claimJournal(state, key);
+      localStorage.setItem(key, JSON.stringify({
+        accountId: state.session.account.id, editedAt: Date.now(),
+        settings, addons: state.addonIntents, progress: state.progressIntents, revision: state.revision,
+      }));
+    }
+  } catch { /* Storage unavailable: retain the live queue and retry while the tab remains open. */ }
+}
+
+function restoreIntents(state: SettingsSyncState, onlyOrphans = false): boolean {
+  if (!state.session) return false;
+  try {
+    const keys = new Set([journalKey(state.session)]);
+    const prefix = "vortx.web.sync-intents.v1.";
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(prefix)) keys.add(key);
+    }
+    const journals = [...keys].flatMap((key) => {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return [];
+        const saved = JSON.parse(raw);
+        if (onlyOrphans && journalOwner(key).id === journalPageId) return [];
+        return saved.accountId === state.session!.account.id && claimJournal(state, key) ? [{ key, raw, saved }] : [];
+      } catch { return []; }
+    }).sort((a, b) => (Number(a.saved.editedAt) || 0) - (Number(b.saved.editedAt) || 0));
+    const snapshot = copySettings(state.ownerSettingsSnapshot);
+    for (const { key: sourceKey, raw, saved } of journals) {
+      state.journalSources.set(sourceKey, raw);
+      state.revision = Math.max(state.revision, Number(saved.revision) || 0);
+      if (saved.settings && typeof saved.settings === "object") {
+        for (const key of Object.keys(saved.settings) as (keyof Settings)[]) {
+          const value = saved.settings[key];
+          if ((onlyOrphans && state.pendingKeys.has(key)) || !(key in snapshot) || (key === "sourceOrder"
+            ? !Array.isArray(value) || !value.every((v: unknown) => typeof v === "string")
+            : typeof value !== typeof snapshot[key])) continue;
+          Object.assign(snapshot, { [key]: value });
+          state.pendingKeys.add(key);
+        }
+      }
+      if (state.pendingKeys.size) {
+        state.pendingSettings = snapshot;
+        state.ownerSettingsSnapshot = snapshot;
+      }
+      for (const value of Object.values(saved.addons ?? {})) {
+        const intent = value as AddonIntent;
+        if (typeof intent?.url !== "string" || typeof intent.added !== "boolean" || !Number.isFinite(intent.at)) continue;
+        const key = addonMembershipKey(intent.url);
+        if (!state.addonIntents[key] || state.addonIntents[key].at <= intent.at) state.addonIntents[key] = intent;
+      }
+      for (const [scope, value] of Object.entries(saved.progress ?? {})) {
+        const intent = value as ProgressIntent;
+        if (!intent || !Array.isArray(intent.entries) || !Array.isArray(intent.tombstones)) continue;
+        state.progressIntents[scope] = {
+          entries: mergeWebProgress(state.progressIntents[scope]?.entries, intent.entries),
+          tombstones: mergeWebProgressTombstones(state.progressIntents[scope]?.tombstones, tombstonesFrom(intent.tombstones)),
+          revision: ++state.revision,
+        };
+      }
+    }
+    return journals.length > 0;
+  } catch { return false; /* Invalid journals cannot become an account write. */ }
 }
 
 let settingsSyncState: SettingsSyncState;
@@ -456,10 +820,8 @@ function initialOwnerSettings(): Settings {
 }
 
 function createSettingsSyncState(session: Session | null, ownerSnapshot?: Settings): SettingsSyncState {
-  return {
+  const state: SettingsSyncState = {
     session,
-    profileSettingsArmed: false,
-    apiKeysArmed: false,
     suppressUpDepth: 0,
     pushTimer: undefined,
     pendingKeys: new Set(),
@@ -467,7 +829,12 @@ function createSettingsSyncState(session: Session | null, ownerSnapshot?: Settin
     writeQueued: false,
     profileAtLastChange: activeProfileId(),
     ownerSettingsSnapshot: copySettings(ownerSnapshot ?? initialOwnerSettings()),
+    addonIntents: Object.create(null), progressIntents: Object.create(null), revision: 0, retryAttempt: 0,
+    journalSources: new Map(),
+    journalOwners: new Set(),
   };
+  restoreIntents(state);
+  return state;
 }
 
 settingsSyncState = createSettingsSyncState(null);
@@ -478,6 +845,7 @@ function bindSettingsSyncState(session: Session | null): void {
     return;
   }
   if (settingsSyncState.pushTimer) clearTimeout(settingsSyncState.pushTimer);
+  releaseJournals(settingsSyncState);
   let resetSnapshot: Settings | undefined;
   withSuppressedUp(() => {
     resetSnapshot = updateSettings({
@@ -486,6 +854,10 @@ function bindSettingsSyncState(session: Session | null): void {
     });
   });
   settingsSyncState = createSettingsSyncState(session, resetSnapshot);
+  if (session) {
+    withSuppressedUp(() => updateSettings(settingsSyncState.ownerSettingsSnapshot));
+    scheduleIntentPush(settingsSyncState, 350);
+  }
 }
 
 // Guard so settings applied by read-down hydration do not immediately echo back up as a web edit.
@@ -571,10 +943,14 @@ async function pushSettings(
   session: Session,
   s: Settings,
   changedKeys: readonly (keyof Settings)[],
+  isCurrent: () => boolean = () => true,
 ): Promise<void> {
   await mutateSyncDoc(session, (doc) => {
     const changed = new Set(changedKeys);
     const mainId = mainProfileId(doc);
+    if (!mainId && changedKeys.some((key) => key in ACCOUNT_SCOPED_SETTING_DEFAULTS && !API_KEY_SETTING_KEYS.includes(key))) {
+      throw new Error("Account profile projection is not available; settings intent remains queued.");
+    }
     if (mainId) {
       const edits = (doc.profileEdits && typeof doc.profileEdits === "object" ? doc.profileEdits : {}) as Record<string, unknown>;
       const base = effectiveMainSettings(doc); // freshest known main settings (app mirror + newer overlay)
@@ -604,7 +980,7 @@ async function pushSettings(
       }
       doc.apiKeys = apiKeys;
     }
-  });
+  }, isCurrent);
 }
 
 /** Tombstone-identity normalization: trim + lowercase, byte-for-byte matching the app's
@@ -614,22 +990,35 @@ function normalizeAddonUrl(u: string): string {
   return u.trim().toLowerCase();
 }
 
+// Descriptor membership preserves case-sensitive path/query/credential bytes. Legacy tombstones
+// continue to use their established normalization until every client supports exact membership.
+function addonMembershipKey(u: string): string {
+  const value = u.trim();
+  const match = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]+)([\s\S]*)$/i.exec(value);
+  if (!match) return value;
+  const authority = match[2];
+  const split = authority.lastIndexOf("@");
+  const credentials = split >= 0 ? authority.slice(0, split + 1) : "";
+  const host = authority.slice(split + 1).toLowerCase();
+  return `${match[1].toLowerCase()}://${credentials}${host}${match[3]}`;
+}
+
 /** Push the webapp's installed add-ons up to the account (the doc.addons web sibling), so add-ons added
  *  on the web reach the user's other devices AND the native apps. Cinemeta is excluded (a universal
  *  built-in). Serialized + coalesced by the caller. Fail-soft. */
 async function pushAddons(
   session: Session,
-  urls: string[],
-  hint?: { added?: string[]; removed?: string[] },
+  intents: AddonIntent[],
+  isCurrent: () => boolean,
 ): Promise<void> {
-  try {
     // Pre-resolve each URL's FULL manifest (async, outside the mutate): the app installs from doc.addons
     // network-free and DROPS any entry without a manifest, so a URL-only entry would never reach the apps.
     const resolved = new Map<string, { transportUrl: string; name: string; manifest: unknown }>();
+    for (const intent of intents) if (intent.descriptor) resolved.set(intent.url, intent.descriptor);
     await Promise.all(
-      urls
-        .filter((u) => u !== CINEMETA_URL)
-        .map(async (u) => {
+      intents
+        .filter((intent) => intent.added && !intent.descriptor && intent.url !== CINEMETA_URL)
+        .map(async ({ url: u }) => {
           try {
             const a = await loadAddon(u);
             resolved.set(u, { transportUrl: a.transportUrl, name: a.manifest.name, manifest: a.manifest });
@@ -651,13 +1040,21 @@ async function pushAddons(
         const u = addonUrl(a);
         if (u) priorByUrl.set(u, a as { transportUrl: string; name?: string; manifest?: unknown });
       }
-      const descriptors: Array<{ transportUrl: string; name?: string; manifest?: unknown }> = [];
-      for (const u of urls) {
-        if (u === CINEMETA_URL || appUrls.has(u)) continue; // Cinemeta built-in; app add-ons stay in their channel
-        const r = resolved.get(u);
-        if (r) descriptors.push(r); // freshly-resolved manifest
-        else if (priorByUrl.get(u)?.manifest) descriptors.push(priorByUrl.get(u)!); // preserve the last good descriptor
-        // else: no manifest available this round - SKIP rather than write a URL-only entry the app drops.
+      // Change only explicit membership intent. A device's inherited store must not overwrite remote
+      // additions or copy account A's add-ons into a newly signed-in account B.
+      const descriptors: unknown[] = [...(Array.isArray(doc.addons) ? doc.addons : [])];
+      for (const intent of intents) {
+        const u = intent.url;
+        if (u === CINEMETA_URL) continue;
+        for (let i = descriptors.length - 1; i >= 0; i--) {
+          const priorUrl = addonUrl(descriptors[i]);
+          if (priorUrl && addonMembershipKey(priorUrl) === addonMembershipKey(u)) descriptors.splice(i, 1);
+        }
+        if (!intent.added || appUrls.has(u)) continue;
+        const prior = priorByUrl.get(u);
+        const descriptor = resolved.get(u) ?? (prior?.manifest ? prior : undefined);
+        if (!descriptor) throw new Error("Add-on manifest unavailable; retry pending install.");
+        descriptors.push({ ...(prior && typeof prior === "object" ? prior : {}), ...descriptor });
       }
       doc.addons = descriptors;
 
@@ -665,57 +1062,44 @@ async function pushAddons(
       // false-tombstone app add-ons). doc.removedAddons {url: epochMs} is the web-internal record (carries
       // timestamps so a re-add can clear it). doc.webAddonRemovals is the flat string[] the APP reads and
       // folds into its uninstall set (VortXSyncManager: "web agent owns this write; we only READ it").
-      applyAddonIntents(doc, hint, Date.now());
-    });
-  } catch {
-    // fail-soft: the add-on is already installed locally; a later change re-pushes.
-  }
+      for (const intent of intents) {
+        applyAddonIntents(doc, intent.added ? { added: [intent.url] } : { removed: [intent.url] }, intent.at);
+      }
+    }, isCurrent);
 }
 
-// Wire the add-on write-up once at module load. recordProgress-style hazards apply: add/remove fire in
-// bursts, and each pushAddons does a FULL doc.addons overwrite, so an unserialized fire-and-forget push
-// could write a stale snapshot and drop an entry. Coalesce: accumulate add/remove hints, debounce briefly,
-// run ONE push that reads installedUrls() fresh at fire time, and never overlap two pushes.
-const pendingAdded = new Set<string>();
-const pendingRemoved = new Set<string>();
-let addonPushTimer: ReturnType<typeof setTimeout> | null = null;
-let addonPushInFlight = false;
-function scheduleAddonPush(): void {
-  if (addonPushTimer) return;
-  addonPushTimer = setTimeout(runAddonPush, 350);
-}
-async function runAddonPush(): Promise<void> {
-  addonPushTimer = null;
-  if (addonPushInFlight) { scheduleAddonPush(); return; } // one already running; try again after it
-  const s = currentSession();
-  if (!s) { pendingAdded.clear(); pendingRemoved.clear(); return; }
-  const hint = { added: [...pendingAdded], removed: [...pendingRemoved] };
-  pendingAdded.clear();
-  pendingRemoved.clear();
-  addonPushInFlight = true;
-  try {
-    await pushAddons(s, installedUrls(), hint);
-  } finally {
-    addonPushInFlight = false;
-    if (pendingAdded.size || pendingRemoved.size) scheduleAddonPush(); // hints arrived mid-flight
-  }
-}
+// Capture exact add/remove intent and the already validated manifest before scheduling any upload.
 registerAddonsSyncPusher((hint) => {
-  if (hint?.added) { pendingAdded.add(hint.added); pendingRemoved.delete(hint.added); }
-  if (hint?.removed) { pendingRemoved.add(hint.removed); pendingAdded.delete(hint.removed); }
-  scheduleAddonPush();
+  if (!currentSession() || settingsSyncState.suppressUpDepth > 0) return;
+  const state = settingsSyncState;
+  discardTransferredIntents(state);
+  const url = hint?.added ?? hint?.removed;
+  if (!url) return;
+  const key = addonMembershipKey(url);
+  state.addonIntents[key] = { url, added: !!hint?.added,
+    at: Math.max(Date.now(), (state.addonIntents[key]?.at ?? 0) + 1), revision: ++state.revision,
+    descriptor: hint?.descriptor ? { transportUrl: hint.descriptor.transportUrl,
+      name: hint.descriptor.manifest.name, manifest: hint.descriptor.manifest } : undefined };
+  persistIntents(state);
+  scheduleIntentPush(state, 350);
+}, () => {
+  const session = currentSession();
+  const state = settingsSyncState;
+  return () => state === settingsSyncState && sameAccountScope(state.session, session);
 });
 
 // Push the ACTIVE profile's web watch-progress up to the bilateral doc.webProgress field. Owner progress
 // goes top-level (doc.webProgress.owner) to match the app's convention; overlay progress under
 // .byProfile[profileId]. The app merges this into watch history (LWW by lastWatched), NEVER into
 // libraryItem. Fail-soft. (Read-down lives in applySyncDoc.)
-async function pushWebProgress(session: Session): Promise<void> {
-  try {
-    const entries = webProgressEntries(); // the active scope's CW, already in the bilateral shape
-    const tombstones = webProgressTombstones();
-    const owner = isOwnerProfile(activeProfileId());
-    const pid = activeProfileId();
+async function pushWebProgress(session: Session,
+  scope = isOwnerProfile(activeProfileId()) ? "" : activeProfileId(),
+  intent: ProgressIntent = { entries: webProgressEntries(), tombstones: webProgressTombstones(), revision: 0 },
+  isCurrent: () => boolean = () => true,
+): Promise<void> {
+    const { entries, tombstones } = intent;
+    const owner = scope === "";
+    const pid = scope;
     await mutateSyncDoc(session, (doc) => {
       const wp: Record<string, unknown> =
         doc.webProgress && typeof doc.webProgress === "object" ? (doc.webProgress as Record<string, unknown>) : {};
@@ -748,10 +1132,7 @@ async function pushWebProgress(session: Session): Promise<void> {
       wp.removed = removed;
       wp.editedAt = Date.now();
       doc.webProgress = wp;
-    });
-  } catch {
-    // fail-soft: progress is already saved locally; the next CW change re-pushes.
-  }
+    }, isCurrent);
 }
 
 function mergeWebProgressTombstones(prior: unknown, mine: CWTombstone[]): CWTombstone[] {
@@ -774,6 +1155,8 @@ function mergeWebProgress(prior: unknown, mine: ReturnType<typeof webProgressEnt
     const existing = byKey.get(key);
     if (!existing || lastWatched >= existing.lastWatched) {
       byKey.set(key, {
+        ...existing,
+        ...r,
         id: r.id,
         type: typeof r.type === "string" ? r.type : "",
         v: r.v,
@@ -792,77 +1175,117 @@ function mergeWebProgress(prior: unknown, mine: ReturnType<typeof webProgressEnt
     .slice(0, 100); // cap the synced array; locally we still keep the 40 most-recent per the CW store
 }
 
-// recordProgress fires ~every 5s during playback, so coalesce: the first change opens a window and the
-// push fires once at its end (at most ~1 account write per WEBPROGRESS_PUSH_DELAY of continuous play),
-// then flushes on pagehide so a closed tab still syncs the last position.
-let webProgressTimer: ReturnType<typeof setTimeout> | null = null;
-const WEBPROGRESS_PUSH_DELAY = 25_000;
-registerCwSyncPusher(() => {
+// recordProgress fires ~every 5s during playback. Journal the edited row immediately and send within
+// one second; a profile switch, failed PUT or closed page cannot lose or retarget that snapshot.
+const WEBPROGRESS_PUSH_DELAY = 1_000;
+registerCwSyncPusher((hint) => {
   if (settingsSyncState.suppressUpDepth > 0) return; // hydration merges CW too; don't echo synced progress back up
   if (!currentSession()) return; // signed out: progress stays local
-  if (webProgressTimer) return; // a push is already scheduled within this window
-  webProgressTimer = setTimeout(() => {
-    webProgressTimer = null;
-    const s = currentSession();
-    if (s) void pushWebProgress(s);
-  }, WEBPROGRESS_PUSH_DELAY);
+  if (!hint) return; // automatic writes only carry the explicit edit, never an inherited account store
+  const state = settingsSyncState;
+  const scope = isOwnerProfile(activeProfileId()) ? "" : activeProfileId();
+  discardTransferredIntents(state);
+  const prior = state.progressIntents[scope];
+  const entries = hint.entry ? [{ id: hint.entry.id, type: hint.entry.type, v: hint.entry.resumeId,
+    t: hint.entry.position, d: hint.entry.duration, lastWatched: hint.entry.updatedAt,
+    name: hint.entry.name, poster: hint.entry.poster }] : [];
+  state.progressIntents[scope] = {
+    entries: mergeWebProgress(prior?.entries, entries),
+    tombstones: mergeWebProgressTombstones(prior?.tombstones, hint.removal ? [hint.removal] : []),
+    revision: ++state.revision,
+  };
+  persistIntents(state);
+  scheduleIntentPush(state, WEBPROGRESS_PUSH_DELAY);
 });
 if (typeof window !== "undefined") {
   window.addEventListener("pagehide", () => {
-    if (webProgressTimer) {
-      clearTimeout(webProgressTimer);
-      webProgressTimer = null;
-    }
-    const s = currentSession();
-    if (s) void pushWebProgress(s); // best-effort final flush (browsers allow a last fetch on pagehide)
+    if (settingsSyncState.pushTimer) clearTimeout(settingsSyncState.pushTimer);
+    queueSettingsPush(settingsSyncState); // durable intent survives even when pagehide fetch is canceled
   });
 }
 
 function syncableSettingsKeys(
-  state: SettingsSyncState,
   changedKeys: readonly (keyof Settings)[],
 ): (keyof Settings)[] {
-  if (state.profileSettingsArmed) return [...changedKeys];
-  if (!state.apiKeysArmed) return [];
-  return changedKeys.filter((key) => API_KEY_SETTING_KEYS.includes(key));
+  // Explicit edits are durable even while the first account GET is pending. The writer separately
+  // waits for a usable main-profile projection; hydration never manufactures a dirty key.
+  return changedKeys.filter((key) => key in ACCOUNT_SCOPED_SETTING_DEFAULTS);
 }
 
 function queueSettingsPush(state: SettingsSyncState): void {
   state.pushTimer = undefined;
-  if (state !== settingsSyncState || !state.session) {
-    state.pendingKeys.clear();
-    state.pendingSettings = null;
-    return;
-  }
-  if (!state.pendingSettings || !state.pendingKeys.size || state.writeQueued) return;
+  discardTransferredIntents(state);
+  if (state !== settingsSyncState || !state.session || !hasPendingIntents(state) || state.writeQueued) return;
   state.writeQueued = true;
 
   const write = async (): Promise<void> => {
-    state.writeQueued = false;
-    if (state !== settingsSyncState || !state.session || !state.pendingSettings || !state.pendingKeys.size) {
+    if (state !== settingsSyncState || !state.session) {
+      state.writeQueued = false;
       return;
     }
     const session = state.session;
-    const snapshot = copySettings(state.pendingSettings);
-    const changedKeys = [...state.pendingKeys];
-    state.pendingKeys.clear();
-    state.pendingSettings = null;
+    const isCurrent = () => state === settingsSyncState && sameSession(state.session, session) && ownsJournals(state);
+    let failed = false;
+    const attempt = async (job: () => Promise<void>): Promise<void> => {
+      try { if (isCurrent()) await job(); } catch { failed = true; }
+    };
     try {
-      await pushSettings(session, snapshot, changedKeys);
+      if (state.pendingSettings && state.pendingKeys.size) {
+        await attempt(async () => {
+          if (!state.pendingSettings) return;
+          const snapshot = copySettings(state.pendingSettings);
+          const changedKeys = [...state.pendingKeys];
+          await pushSettings(session, snapshot, changedKeys, isCurrent);
+          if (!isCurrent()) throw new Error("Account session changed.");
+          for (const key of changedKeys) {
+            if (JSON.stringify(state.pendingSettings?.[key]) === JSON.stringify(snapshot[key])) state.pendingKeys.delete(key);
+          }
+          if (!state.pendingKeys.size) state.pendingSettings = null;
+          persistIntents(state);
+        });
+      }
+      const addons = Object.values(state.addonIntents);
+      if (addons.length) {
+        await attempt(async () => {
+          await pushAddons(session, addons, isCurrent);
+          if (!isCurrent()) throw new Error("Account session changed.");
+          for (const intent of addons) {
+            const key = addonMembershipKey(intent.url);
+            if (state.addonIntents[key]?.revision === intent.revision) delete state.addonIntents[key];
+          }
+          persistIntents(state);
+        });
+      }
+      for (const [scope, intent] of Object.entries(state.progressIntents)) {
+        await attempt(async () => {
+          await pushWebProgress(session, scope, intent, isCurrent);
+          if (!isCurrent()) throw new Error("Account session changed.");
+          if (state.progressIntents[scope]?.revision === intent.revision) delete state.progressIntents[scope];
+          persistIntents(state);
+        });
+      }
+      if (!failed) state.retryAttempt = 0;
     } catch {
-      // Merge a failed batch back into the live pending accumulator. A later queued job captures this
-      // combined key set at execution time; with no later edit, the retry timer makes progress itself.
-      // Values always come from the newest owner snapshot, so an older same-key value cannot win.
-      if (state === settingsSyncState && sameSession(state.session, session)) {
-        for (const key of changedKeys) state.pendingKeys.add(key);
-        state.pendingSettings = copySettings(state.ownerSettingsSnapshot);
-        if (!state.writeQueued && !state.pushTimer) {
-          state.pushTimer = setTimeout(() => queueSettingsPush(state), SETTINGS_RETRY_DELAY);
-        }
+      failed = true; // Unacknowledged intent never leaves the journal, including across reload/sign-out.
+    } finally {
+      state.writeQueued = false;
+      if (state === settingsSyncState && state.session && hasPendingIntents(state)) {
+        scheduleIntentPush(state, failed
+          ? Math.min(30_000, SETTINGS_RETRY_DELAY * 2 ** Math.min(state.retryAttempt++, 5))
+          : 350);
       }
     }
   };
   settingsWriteTail = settingsWriteTail.then(write, write);
+}
+
+function hasPendingIntents(state: SettingsSyncState): boolean {
+  return state.pendingKeys.size > 0 || Object.keys(state.addonIntents).length > 0 || Object.keys(state.progressIntents).length > 0;
+}
+
+function scheduleIntentPush(state: SettingsSyncState, delay: number): void {
+  if (state !== settingsSyncState || !state.session || !hasPendingIntents(state) || state.pushTimer) return;
+  state.pushTimer = setTimeout(() => queueSettingsPush(state), delay);
 }
 
 function scheduleSettingsPush(
@@ -872,12 +1295,14 @@ function scheduleSettingsPush(
 ): void {
   for (const key of changedKeys) state.pendingKeys.add(key);
   state.pendingSettings = copySettings(settings);
+  persistIntents(state);
   if (state.pushTimer) clearTimeout(state.pushTimer);
   state.pushTimer = setTimeout(() => queueSettingsPush(state), SETTINGS_PUSH_DELAY);
 }
 
 onSettingsChange((next) => {
   const state = settingsSyncState;
+  discardTransferredIntents(state);
   const profileId = activeProfileId();
   const switchedProfile = profileId !== state.profileAtLastChange;
   state.profileAtLastChange = profileId;
@@ -898,7 +1323,7 @@ onSettingsChange((next) => {
     return; // the overlay changed only one of its six profile-scoped fields
   }
   rememberOwnerSettings(ownerNext);
-  const syncableKeys = syncableSettingsKeys(state, changedKeys);
+  const syncableKeys = syncableSettingsKeys(changedKeys);
   if (!syncableKeys.length) return;
   const session = currentSession();
   if (!session || state !== settingsSyncState || !sameSession(state.session, session)) return;

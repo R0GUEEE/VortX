@@ -1,5 +1,5 @@
 import { actionOf, escapeHtml } from "../lib/dom";
-import { currentSession, signOut } from "../lib/account";
+import { currentSession, signOut, accountSyncStatus } from "../lib/account";
 import { exportBackup, importBackup } from "../lib/store";
 import {
   profiles,
@@ -170,8 +170,9 @@ function accountSection(): string {
   if (acct) {
     const who = escapeHtml(acct.username || acct.email || "Signed in");
     const sub = acct.email && acct.username ? escapeHtml(acct.email) : undefined;
-    const body = row(who, `<button class="chip" data-action="account-signout">Sign out</button>`, sub);
-    return group("Account", body, "Your library, add-ons, and settings sync across every VortX device, end to end encrypted.");
+    const body = row(who, `<button class="chip" data-action="account-signout">Sign out</button>`, sub) +
+      `<p class="settings-footer" data-account-sync-status aria-live="polite">${accountSyncMessage()}</p>`;
+    return group("Account", body, "Your account data is end to end encrypted.");
   }
   const body = `<a class="btn-primary settings-signin" href="#/login">Sign in to VortX</a>`;
   return group(
@@ -180,6 +181,17 @@ function accountSection(): string {
     "Sign in to sync your library, add-ons, and settings across every VortX device (end to end encrypted). You can keep using the web app signed out, stored only on this device.",
   );
 }
+
+function accountSyncMessage(): string {
+  const status = accountSyncStatus();
+  if (status.projectionPending) return "Account update received. Native app data is awaiting compatible browser support.";
+  return status.appliedVersion === undefined ? "Checking for account updates…" : "Account updates apply automatically while this page is active.";
+}
+
+if (typeof window !== "undefined") window.addEventListener("vortx:account-sync-changed", () => {
+  const label = host?.querySelector<HTMLElement>("[data-account-sync-status]");
+  if (label) label.textContent = accountSyncMessage();
+});
 
 function metadataSection(mdblistKey: string, tmdbKey: string): string {
   const body =

@@ -26,7 +26,7 @@ import { handleSettingsClick, renderSettings } from "./views/settings";
 import { handleLoginClick, renderLogin } from "./views/login";
 import { renderApprove, handleApproveClick } from "./views/approve";
 import { applySettings } from "./lib/settings";
-import { ensureValidSession, hydrateFromAccount } from "./lib/account";
+import { ensureValidSession, startAccountSync } from "./lib/account";
 import { initTvPlatform } from "./lib/tvnav";
 
 // VortX web client entry point. Flow: load installed add-ons (Cinemeta + user stream add-ons) ->
@@ -36,6 +36,7 @@ import { initTvPlatform } from "./lib/tvnav";
 // engine, no streaming server, so it is direct/debrid/HLS-first by design (see README).
 
 let addons: Addon[] = [];
+let addonReloadGeneration = 0;
 
 const APP_SHELL = `
   <a class="skip-link" href="#main">Skip to content</a>
@@ -187,8 +188,12 @@ async function renderRoute(route: Route): Promise<void> {
 }
 
 /** Reload the installed add-ons (after an install/remove) and re-render the current route. */
-async function reloadAddonsAndRender(): Promise<void> {
-  addons = await loadInstalledAddons();
+async function reloadAddonsAndRender(preservePlayback = false): Promise<void> {
+  const generation = ++addonReloadGeneration;
+  const loaded = await loadInstalledAddons();
+  if (generation !== addonReloadGeneration) return;
+  addons = loaded;
+  if (preservePlayback && isPlayerOpen()) return;
   await renderRoute(parseRoute());
 }
 
@@ -370,18 +375,27 @@ async function start(): Promise<void> {
   initCardMenu(); // right-click / long-press context menu on poster cards
   initTvPlatform(); // D-pad + OK + BACK remote input on webOS/Tizen; no-op in the browser
 
+  // Install receiving listeners before the first async load so a fast account GET cannot be missed.
+  window.addEventListener("vortx:addons-changed", () => void reloadAddonsAndRender(true));
+  window.addEventListener("vortx:profile-changed", (event) => {
+    if (event instanceof CustomEvent && event.detail?.fromSync && isPlayerOpen()) return;
+    void renderRoute(parseRoute());
+  });
   // Validate the token in the background, then pull the account sync doc so a returning (already signed-in)
   // user's add-ons, library, and Continue Watching refresh on load - not only on a fresh sign-in. Never
   // blocks first paint; applySyncDoc fires vortx:addons-changed to re-render when something merges.
-  void ensureValidSession().then((session) => {
-    if (session) void hydrateFromAccount(session);
+  void ensureValidSession().then(() => startAccountSync());
+  const generation = ++addonReloadGeneration;
+  const initialAddons = await loadInstalledAddons();
+  if (generation === addonReloadGeneration) addons = initialAddons;
+  // Registering routing immediately emits the current route. A newer sync reload may already
+  // have rendered it and started playback while the original boot load was pending.
+  let initialRouteNotification = true;
+  onRouteChange((route) => {
+    const preservePlayback = initialRouteNotification && isPlayerOpen();
+    initialRouteNotification = false;
+    if (!preservePlayback) void renderRoute(route);
   });
-  addons = await loadInstalledAddons();
-  onRouteChange((route) => void renderRoute(route));
-  // Account hydration (on sign-in) merges synced add-ons into storage; reload + re-render so they appear.
-  window.addEventListener("vortx:addons-changed", () => void reloadAddonsAndRender());
-  // Switching profile changes which (scoped) library / Continue Watching the views read; re-render the route.
-  window.addEventListener("vortx:profile-changed", () => void renderRoute(parseRoute()));
 }
 
 void start();

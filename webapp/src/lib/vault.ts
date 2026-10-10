@@ -153,21 +153,26 @@ interface ApiResult {
  *  decodes the JSON body (skipping it on 204 / non-JSON responses). */
 async function api(
   path: string,
-  opts: { method?: string; body?: unknown; token?: string } = {},
+  opts: { method?: string; body?: unknown; token?: string; headers?: Record<string, string>; signal?: AbortSignal } = {},
 ): Promise<ApiResult> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...opts.headers };
   if (opts.body !== undefined) headers["content-type"] = "application/json";
   if (opts.token) headers.authorization = "Bearer " + opts.token;
-  const res = await fetch(API + path, {
-    method: opts.method ?? "GET",
-    headers,
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
-  let data: Record<string, unknown> | null = null;
-  if (res.status !== 204 && res.headers.get("content-type")?.includes("json")) {
-    data = (await res.json()) as Record<string, unknown>;
-  }
-  return { status: res.status, data };
+  const controller = opts.signal ? null : new AbortController();
+  const deadline = controller ? setTimeout(() => controller.abort(), 15_000) : undefined;
+  try {
+    const res = await fetch(API + path, {
+      method: opts.method ?? "GET",
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: opts.signal ?? controller!.signal,
+    });
+    let data: Record<string, unknown> | null = null;
+    if (res.status !== 204 && res.headers.get("content-type")?.includes("json")) {
+      data = (await res.json()) as Record<string, unknown>;
+    }
+    return { status: res.status, data };
+  } finally { if (deadline) clearTimeout(deadline); }
 }
 
 /** A human-friendly but strong (128-bit) recovery code: VX-XXXX-XXXX-XXXX-XXXX-XXXX in Crockford
@@ -525,10 +530,16 @@ export interface SyncStatus {
   // A stored doc that EXISTS (200) but did not decrypt/parse. A writer that treats this as an empty {} would
   // PUT a near-empty doc as a full replacement and WIPE the account (every channel), so callers must abort.
   decryptFailed?: boolean;
+  unchanged?: boolean;
 }
 
-export async function fetchSync(session: Session): Promise<SyncStatus> {
-  const r = await api("/v1/backup", { token: session.token });
+export async function fetchSync(session: Session, options: { version?: number; signal?: AbortSignal } = {}): Promise<SyncStatus> {
+  const r = await api("/v1/backup", {
+    token: session.token,
+    signal: options.signal,
+    headers: options.version === undefined ? undefined : { "if-none-match": `"${options.version}"` },
+  });
+  if (r.status === 304) return { synced: true, unchanged: true, version: options.version };
   if (r.status === 404) return { synced: false };
   if (r.status !== 200) throw new Error("offline");
   const data = r.data as { document: string; version: number };
@@ -546,6 +557,10 @@ export async function fetchSync(session: Session): Promise<SyncStatus> {
     if (pt) {
       try {
         contents = JSON.parse(td.decode(pt)) as Record<string, unknown>;
+        if (!contents || typeof contents !== "object" || Array.isArray(contents) ||
+          data.version < syncFloor(acct) || options.signal?.aborted) {
+          return { synced: true, version: data.version, decryptFailed: true };
+        }
         if (isV2) markSawV2(acct);
         bumpSyncFloor(acct, data.version);
       } catch {
@@ -595,9 +610,13 @@ export async function putSyncDoc(session: Session, doc: Record<string, unknown>)
 export async function mutateSyncDoc(
   session: Session,
   mutate: (doc: Record<string, unknown>) => void,
+  isCurrent: () => boolean = () => true,
 ): Promise<void> {
+  const guard = (): void => { if (!isCurrent()) throw new Error("Account session changed."); };
   for (let attempt = 0; attempt < 5; attempt++) {
+    guard();
     const status = await fetchSync(session);
+    guard();
     // Refuse to write onto a doc we could not read: mutating an assumed-empty {} and PUTing it would wipe
     // the whole account at a winning version. Fail loudly instead (mirrors the app + vortx-site).
     if (status.synced && status.decryptFailed) throw new Error("Could not read your account right now. Please try again.");
@@ -606,6 +625,7 @@ export async function mutateSyncDoc(
     mutate(doc);
     const version = base + 1; // ONE value, bound into the AAD and sent as the row version
     const ciphertext = await sealDocument(session.dataKey, enc(JSON.stringify(doc)), session.account.id, version, WRITE_SYNC_DOC_V2);
+    guard();
     const r = await api("/v1/backup", {
       method: "PUT",
       token: session.token,
@@ -620,6 +640,14 @@ export async function mutateSyncDoc(
     // accepted === false: a newer version landed between our read and write; loop to re-fetch and merge.
   }
   throw new Error("Could not save to your account (kept losing to another device).");
+}
+
+/** Browser WebSocket authentication uses a transient URL. Never store or log this URL. */
+export function connectSyncSocket(session: Session): WebSocket {
+  const url = new URL("/v1/sync/connect", API);
+  url.protocol = "wss:";
+  url.searchParams.set("token", session.token);
+  return new WebSocket(url.href);
 }
 
 // --- QR / device sign-in (pairing) --------------------------------------------------------------
