@@ -2634,7 +2634,7 @@ struct iOSDetailView: View {
             groups: suspended ? [] : rankedMovie().groups,
             progress: core.streamLoadProgress(),
             playbackMeta: moviePlaybackMeta,
-            states: core.streamAddonStates(),
+            states: !suspended && sourceList.isSettled ? core.streamAddonStates() : [],
             sourcesSettled: sourceList.isSettled,
             continuity: rememberedQuality,
             pinContext: pinContext,
@@ -3740,7 +3740,7 @@ struct iOSDetailView: View {
             groups: suspended ? [] : rankedLive(),
             progress: core.streamLoadProgress(),
             playbackMeta: livePlaybackMeta,
-            states: core.streamAddonStates(),
+            states: !suspended && sourceList.isSettled ? core.streamAddonStates() : [],
             sourcesSettled: sourceList.isSettled,
             pinContext: pinContext,
             cachedHashes: debridCache.cachedHashes,
@@ -5318,15 +5318,16 @@ struct iOSEpisodeStreams: View {
     /// EXACT same list). While the episode's player / trailer cover is up, skip the rankedGroups pass (pass []
     /// + isSuspended) so this hidden episode list stops re-rendering behind the video; it restores on close.
     private func sourceListView(width: CGFloat, heroOwnsPrimaryPlay: Bool = false) -> some View {
-        iOSSourceList(
-            groups: presentation != nil ? [] : rankedEpisode(),
+        let suspended = presentation != nil
+        return iOSSourceList(
+            groups: suspended ? [] : rankedEpisode(),
             progress: core.streamLoadProgress(forStreamId: shownVideo.id),
             playbackMeta: PlaybackMeta(
                 libraryId: meta.id, videoId: shownVideo.id, type: "series", name: meta.name,
                 poster: shownVideo.thumbnail ?? meta.poster, season: shownVideo.season,
                 episode: shownVideo.episode
             ),
-            states: core.streamAddonStates(forStreamId: shownVideo.id),
+            states: !suspended && sourceList.isSettled ? core.streamAddonStates(forStreamId: shownVideo.id) : [],
             sourcesSettled: sourceList.isSettled,
             continuity: rememberedQuality,
             pinContext: pinContext,
@@ -6632,9 +6633,21 @@ struct iOSSourceList: View {
     private func sortedStreams(_ group: CoreStreamSourceGroup) -> [CoreStream] {
         switch sortMode {
         case .best:    return group.streams
-        case .size:    return group.streams.sorted { StreamRanking.sizeForSort($0) > StreamRanking.sizeForSort($1) }
-        case .seeders: return group.streams.sorted { StreamRanking.seedersForSort($0) > StreamRanking.seedersForSort($1) }
+        case .size:    return stableDescendingStreams(group.streams, key: StreamRanking.sizeForSort)
+        case .seeders: return stableDescendingStreams(group.streams, key: StreamRanking.seedersForSort)
         }
+    }
+
+    /// Parse each comparison key once, keeping the ranked input order for equal keys. The group can
+    /// contain thousands of streams even though only its first window of rows is rendered.
+    private func stableDescendingStreams<Key: Comparable>(
+        _ streams: [CoreStream], key: (CoreStream) -> Key
+    ) -> [CoreStream] {
+        let keyed: [(index: Int, stream: CoreStream, key: Key)] = streams.enumerated().map {
+            (index: $0.offset, stream: $0.element, key: key($0.element))
+        }
+        let sorted = keyed.sorted { $0.key == $1.key ? $0.index < $1.index : $0.key > $1.key }
+        return sorted.map { $0.stream }
     }
 
     private var streamCount: Int { groups.reduce(0) { $0 + $1.streams.count } }
@@ -6660,9 +6673,10 @@ struct iOSSourceList: View {
                 out.append(WindowedGroup(id: group.addon, group: group, rows: []))
                 continue
             }
-            let streams = sortedStreams(group)
-            expandable += streams.count
-            let take = min(budget, streams.count)   // budget is never negative: take <= budget each step
+            expandable += group.streams.count
+            let take = min(budget, group.streams.count)   // budget is never negative: take <= budget each step
+            // Keep every header, but do no per-stream parsing/sorting once this group's row budget is zero.
+            let streams = take > 0 ? sortedStreams(group) : []
             var seen: [String: Int] = [:]
             let rows = streams.prefix(take).map { s -> SourceRow in
                 let base = s.id
