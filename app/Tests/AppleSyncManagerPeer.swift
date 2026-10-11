@@ -75,6 +75,9 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
     func captureNativePlaybackTarget() -> ManagerPlaybackMutationTarget {
         .native(.init(credential: .init(generation: generation), profileID: UUID(uuidString: AppleSyncManagerPeer.owner)!))
     }
+    func nativePlaybackTargetIsCurrent(_ target: ManagerPlaybackMutationTarget) -> Bool {
+        session != nil && target == captureNativePlaybackTarget()
+    }
     func capture(_ data: Data, for name: String) { snapshots[name] = data }
     func saveNativeProfile(_ profile: UserProfile, creating: Bool, target: ManagerPlaybackMutationTarget,
                            preferenceAdmission: (@Sendable (VortxJSON, VortxJSON) -> Bool)? = nil) async throws {

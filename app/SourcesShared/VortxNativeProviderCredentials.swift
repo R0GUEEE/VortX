@@ -108,6 +108,12 @@ struct VortxNativeProviderCredentials {
     mutating func acknowledge(_ sent: [String: Register]) {
         for (key, register) in sent where local.pending[key] == register { local.pending.removeValue(forKey: key) }
     }
+    /// Compare the joined durable carrier, including acknowledged registers and clears.
+    /// A missing empty carrier is equivalent; it must not cause an echo on every old document.
+    func requiresCausalRepublish(pulled: VortxJSON?) throws -> Bool {
+        guard let pulled else { return !local.document.fields.isEmpty }
+        return try document != pulled
+    }
     func mirror(into original: [String: String]) -> [String: String] {
         var result = original
         for (key, event) in local.document.fields {

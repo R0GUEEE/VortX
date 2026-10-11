@@ -33,14 +33,22 @@ private enum VortXSyncCrypto {
     var persistenceCount = 0
     var receiptFails = false
     var backupFails = false
+    var sourceCurrent = true
+    var sentBodies: [[String: Any]] = []
     var reply: (Int, [String: Any]?) = (400, ["error": "bad_request"])
+    var readReply: (Int, [String: Any]?) = (404, nil)
+    var whileReading: (() -> Void)?
     var whileSending: (() -> Void)?
     func isCurrent(_ capture: CredentialScopeRegistry.Capture) -> Bool { capture == credentialAuthority.capture() }
     func hasPendingAccountDocApply(for capture: CredentialScopeRegistry.Capture) -> Bool { pendingApply }
-    func request(_ method: String, _ path: String, body: [String: Any], auth: Bool,
-                 credentialCapture: CredentialScopeRegistry.Capture) async -> (Int, [String: Any]?) {
+    func request(_ method: String, _ path: String, body: [String: Any]? = nil, auth: Bool,
+                 credentialCapture: CredentialScopeRegistry.Capture, ifNoneMatch: Int? = nil,
+                 receiveETag: ((String?) -> Void)? = nil) async -> (Int, [String: Any]?) {
+        if method == "GET" { whileReading?(); return readReply }
         precondition(method == "PUT" && path == "/v1/backup" && auth)
-        precondition(body["document"] is String && body["version"] as? Int == 10)
+        let body = body!
+        precondition(body["document"] is String)
+        sentBodies.append(body)
         whileSending?()
         return reply
     }
@@ -52,11 +60,27 @@ private enum VortXSyncCrypto {
     func persistLastSyncedVersion() { persistenceCount += 1 }
     func stampSyncSuccess() { successCount += 1 }
     static func markSawDocV2(_ accountID: String) { preconditionFailure("v2 writes remain disabled") }
-    func send() async -> String {
-        switch await pushSyncDocAt(["synthetic": String(repeating: "x", count: 1_267_400)], version: 10) {
+    func openSyncDocument(_ document: String, version: Int) -> Data? { Data(base64Encoded: document) }
+    static func decodeDecryptedSyncDocument(_ data: Data) throws -> [String: Any] {
+        try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    }
+    func seedAfterRead() async -> String {
+        guard case .empty = await pullDocVersionedResult() else { return "no-seed" }
+        return await send(base: nil, version: 0)
+    }
+    static func documentVersion(_ raw: Any?) -> Int? {
+        guard let n = raw as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+              n.doubleValue >= 0, n.doubleValue <= Double(SyncDocumentRevisionPolicy.maximumSafeRevision),
+              n.doubleValue.rounded(.towardZero) == n.doubleValue else { return nil }
+        return n.intValue
+    }
+    func send(base: Int? = 9, version: Int = 10) async -> String {
+        switch await pushSyncDocAt(["synthetic": String(repeating: "x", count: 1_267_400)], version: version,
+                                  baseRevision: base, sourceIsCurrent: { self.sourceCurrent }) {
         case .accepted: return "accepted"
         case .rejected: return "rejected"
         case .error: return "error"
+        case .upgradeRequired: return "upgrade"
         }
     }
     /* PRODUCTION_UPLOAD */
@@ -68,6 +92,20 @@ private enum VortXSyncCrypto {
         precondition(condition(), label); checks += 1
     }
     static func main() async {
+        for (status, body) in [(200, ["document": NSNull(), "version": 0] as [String: Any]),
+                               (401, [:]), (403, [:]), (503, [:]), (200, ["document": "bad", "version": 0]),
+                               (200, ["document": Data("{}".utf8).base64EncodedString(), "version": 0])] {
+            let h = UploadHarness(); h.readReply = (status, body); h.reply = (200, ["accepted": true])
+            let outcome = await h.seedAfterRead()
+            expect(outcome == "no-seed" && h.sentBodies.isEmpty, "only authenticated404 may produce create witness;200null/failure/existing-zero cannot seed")
+        }
+        let absent = UploadHarness(); absent.reply = (200, ["accepted": true])
+        let absentOutcome = await absent.seedAfterRead()
+        expect(absentOutcome == "accepted" && absent.sentBodies[0]["baseRevision"] is NSNull && absent.sentBodies[0]["version"] as? Int == 0,
+               "actual authenticated404 creates explicit null base and versionzero")
+        let retiredRead = UploadHarness(); retiredRead.whileReading = { retiredRead.credentialAuthority.generation += 1 }
+        let retiredReadOutcome = await retiredRead.seedAfterRead()
+        expect(retiredReadOutcome == "no-seed" && retiredRead.sentBodies.isEmpty, "retired authenticated read cannot seed another credential scope")
         for (status, code, expected) in [(413, nil, SyncBackupUploadFailure.tooLarge),
                                        (400, "document_too_large", .tooLarge),
                                        (400, "request_too_large", .tooLarge),
@@ -93,7 +131,25 @@ private enum VortXSyncCrypto {
         expect(acceptedOutcome == "accepted" && accepted.backupUploadFailure == nil, "durably accepted retry clears error")
         expect(accepted.lastSyncedVersion == 10 && accepted.successCount == 1 && accepted.persistenceCount == 1,
                "only durable acceptance records sync success")
+#if VORTX_NATIVE_DATA_ENGINE
         expect(accepted.backupCount == 1 && accepted.providerReceiptCount == 1, "accepted payload persists both receipts")
+#endif
+        expect(accepted.sentBodies[0]["baseRevision"] as? Int == 9, "wire witness is exact candidate base")
+        let create = UploadHarness(); create.reply = (200, ["accepted": true])
+        _ = await create.send(base: nil, version: 0)
+        expect(create.sentBodies[0]["baseRevision"] is NSNull, "absence is explicit null, never omitted")
+        for (base, version) in [(nil, 1), (9, 100), (-1, 0)] as [(Int?, Int)] {
+            let invalid = UploadHarness()
+            let outcome = await invalid.send(base: base, version: version)
+            expect(outcome == "error" && invalid.sentBodies.isEmpty, "invalid proposal refused before transport")
+        }
+        let upgrade = UploadHarness(); upgrade.reply = (426, ["error": "upgrade_required", "accepted": false])
+        let upgradeOutcome = await upgrade.send()
+        expect(upgradeOutcome == "upgrade" && upgrade.backupUploadFailure == .upgradeRequired,
+               "protected account returns update-needed, not retryable conflict")
+        expect(upgrade.lastSyncedVersion == 9 && upgrade.successCount == 0 && upgrade.providerReceiptCount == 0,
+               "upgrade-needed cannot stamp success or acknowledge intent")
+        expect(upgrade.backupUploadFailure!.message.contains("Update VortX"), "simple actionable update message")
 
         let conflict = UploadHarness(); conflict.backupUploadFailure = .tooLarge
         conflict.reply = (200, ["accepted": false, "version": 11])
@@ -102,12 +158,19 @@ private enum VortXSyncCrypto {
                "CAS rejection is not an acknowledgement")
         expect(conflict.backupUploadFailure == .tooLarge, "rejection cannot claim failed backup saved")
 
-        for stage in ["verdict", "backup", "receipt", "retired-owner", "pending-restore"] {
+        var stages = ["verdict", "missing-verdict", "retired-owner", "pending-restore", "replaced-key", "retired-mount"]
+#if VORTX_NATIVE_DATA_ENGINE
+        stages += ["backup", "receipt"]
+#endif
+        for stage in stages {
             let h = UploadHarness(); h.backupUploadFailure = .tooLarge
             h.reply = (200, stage == "verdict" ? ["accepted": 1] : ["accepted": true])
+            if stage == "missing-verdict" { h.reply = (200, [:]) }
             h.backupFails = stage == "backup"; h.receiptFails = stage == "receipt"
             if stage == "retired-owner" { h.whileSending = { h.credentialAuthority.generation += 1 } }
             if stage == "pending-restore" { h.whileSending = { h.pendingApply = true } }
+            if stage == "replaced-key" { h.whileSending = { h.dataKey = Data([2]) } }
+            if stage == "retired-mount" { h.whileSending = { h.sourceCurrent = false } }
             let outcome = await h.send()
             expect(outcome == "error" && h.lastSyncedVersion == 9 && h.successCount == 0,
                    "unproven local or remote completion retains revision")

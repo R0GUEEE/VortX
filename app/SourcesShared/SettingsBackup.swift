@@ -331,7 +331,12 @@ enum SettingsBackup {
         // here (it is empty today, so this is a no-op now). Once `keyPrefixMigrations` is non-empty, a base
         // written by an older client will keep its old key names alongside this device's new ones and the two
         // will diverge rather than merge. Revisit this loop when that seam opens.
-        for (key, value) in local { merged[key] = value }
+        for (key, value) in local {
+            if key == "stremiox.profiles", let roster = value as? Data {
+                guard let retained = LegacySyncRetention.rosterData(existing: merged[key], replacement: roster) else { return nil }
+                merged[key] = retained
+            } else { merged[key] = value }
+        }
         // DELIBERATE-REMOVAL PASS (the baseline). A key the account holds but this device does NOT is kept by the
         // overlay above (absence is not deletion). The one exception: a key in `appliedBaseline` is one this device
         // once applied from the account, so its absence now is the user having CLEARED it (removeObject / a
@@ -346,7 +351,8 @@ enum SettingsBackup {
             merged.removeValue(forKey: key)
         }
         let app = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String) ?? "VortX"
-        return try? encode(domain: merged, bundleID: bundleID, app: app)
+        guard let encoded = try? encode(domain: merged, bundleID: bundleID, app: app) else { return nil }
+        return LegacySyncRetention.settingsEnvelope(existing: pulledBlob, replacement: encoded)
     }
 
     /// Apply a backup file. Merges keys (overwriting matching ones, leaving the rest), so a

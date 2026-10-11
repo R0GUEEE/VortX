@@ -22,7 +22,7 @@ if (process.argv[2] === '--extract') {
     return [source.slice(start, end + 6)];
   });
   selected.push(source.match(/^    private enum VersionedPull .*$/m)[0],
-    'private enum PushOutcome { case accepted(version: Int); case rejected(storedVersion: Int?); case error }');
+    source.match(/^    private enum PushOutcome .*$/m)[0]);
   const profiles = await readFile('app/SourcesShared/Profiles.swift', 'utf8');
   const preferenceFixture = await readFile('app/Tests/NativePreferenceAcknowledgementTests.swift', 'utf8');
   const block = (text, marker) => {

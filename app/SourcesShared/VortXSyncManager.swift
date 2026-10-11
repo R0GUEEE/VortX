@@ -1201,7 +1201,10 @@ final class VortXSyncManager: ObservableObject {
         let host = try VortxNativeHostPreferences(scope: scope, actor: nativeHostActor(capture: capture))
         candidate["nativeHostPreferences"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(host.document))
         guard isCurrent(capture), !Task.isCancelled else { throw VortxNativeError.superseded }
-        _ = await pushSyncDocAt(candidate, version: 0, credentialCapture: capture)
+        let seedGeneration = nativeCheckpointGeneration
+        let outcome = await pushSyncDocAt(candidate, version: 0, baseRevision: nil, credentialCapture: capture,
+            sourceIsCurrent: { self.nativeCheckpointGeneration == seedGeneration })
+        if case .upgradeRequired = outcome { return nil }
         guard isCurrent(capture), !Task.isCancelled else { throw VortxNativeError.superseded }
         switch await pullDocVersionedResult(credentialCapture: capture) {
         case .doc(let document, let version) where version >= lastSyncedVersion: return document
@@ -2896,7 +2899,6 @@ final class VortXSyncManager: ObservableObject {
         if code == 404 { return .empty }                 // no backup yet
         guard code == 200 else { return .failed }        // network/server error: do not clobber
         guard let json else { return .failed }
-        if json["document"] is NSNull, Self.documentVersion(json["version"]) == 0 { return .empty }
         guard let docStr = json["document"] as? String, !docStr.isEmpty else { return .failed }
         guard let pulledVersion = Self.documentVersion(json["version"]) else { return .failed }
         // H-2: refuse an honest-label replay of a doc OLDER than what this account has already applied. syncUp
@@ -2919,7 +2921,7 @@ final class VortXSyncManager: ObservableObject {
     /// tell "nothing to restore" from "I failed to read the account" and silently returned false either way.
     /// That silent false is what let ONE unretried pull lose the reinstall race against the debounced push.
     ///  - .doc:    decrypted, ready to apply.
-    ///  - .empty:  the server definitively says this account has no document (404, or 200 with no document).
+    ///  - .empty:  the authenticated canonical endpoint returns 404 for an absent backup.
     ///             There is nothing to restore and nothing to push over.
     ///  - .failed: we did NOT read the account. `retryable` separates a transient transport/server fault (worth
     ///             another attempt) from a deterministic decrypt/parse refusal (retrying re-fails identically).
@@ -2945,7 +2947,6 @@ final class VortXSyncManager: ObservableObject {
             return .failed(retryable: code == 0 || code >= 500)
         }
         guard let json else { return .failed(retryable: false) }
-        if json["document"] is NSNull, Self.documentVersion(json["version"]) == 0 { return .empty }
         guard let docStr = json["document"] as? String, !docStr.isEmpty else { return .failed(retryable: false) }
         // `version` stays `as? Int` (Swift's Int is 64-bit on every platform this app targets), so an epoch-ms
         // version is carried whole. Never narrow this to a 32-bit type: a truncated version corrupts the AAD and
@@ -2992,39 +2993,41 @@ final class VortXSyncManager: ObservableObject {
 
     /// Push a doc at an explicit version. Returns the worker's optimistic-concurrency verdict so the
     /// caller can react to a lost race, NOT a bare Bool that conflates "stored" with "rejected". The
-    /// worker replies `{ accepted:true }` when it stored a strictly-newer version, or `{ accepted:false,
+    /// worker replies `{ accepted:true }` when the exact base comparison stored the candidate, or `{ accepted:false,
     /// version:<current stored> }` when a concurrent write already won. lastSyncedVersion advances ONLY on
     /// accepted==true: advancing it on a rejected write (the old bug) suppressed the recovery pull, so a
     /// write that LOST the race was silently dropped and the device stayed diverged.
-    private enum PushOutcome { case accepted(version: Int); case rejected(storedVersion: Int?); case error }
-    private func pushSyncDocAt(_ obj: [String: Any], version: Int, credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil) async -> PushOutcome {
+    private enum PushOutcome { case accepted(version: Int); case rejected(storedVersion: Int?); case upgradeRequired; case error }
+    private func pushSyncDocAt(_ obj: [String: Any], version: Int, baseRevision: Int?,
+                               credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil,
+                               sourceIsCurrent: () -> Bool = { true }) async -> PushOutcome {
         let capture = suppliedCapture ?? credentialAuthority.capture()
         let capturedAccountID = account?.id ?? ""
-        guard isCurrent(capture), !hasPendingAccountDocApply(for: capture), let capturedDataKey = dataKey,
+        guard isCurrent(capture), sourceIsCurrent(), !Task.isCancelled,
+              SyncDocumentRevisionPolicy.next(after: baseRevision) == version,
+              !hasPendingAccountDocApply(for: capture), let capturedDataKey = dataKey,
               let pt = try? JSONSerialization.data(withJSONObject: obj),
               let ct = VortXSyncCrypto.sealDocument(dataKey: capturedDataKey, plaintext: pt, accountId: capturedAccountID, version: version, writeV2: Self.writeSyncDocV2) else {
             DiagnosticsLog.log("sync", "upload result=blocked stage=local_preflight")
             return .error
         }
-        let (code, json) = await request("PUT", "/v1/backup", body: ["document": ct, "version": version], auth: true, credentialCapture: capture)
-        guard isCurrent(capture), !hasPendingAccountDocApply(for: capture) else { return .error }
+        let (code, json) = await request("PUT", "/v1/backup", body: ["document": ct, "version": version,
+            "baseRevision": baseRevision.map { $0 as Any } ?? NSNull()], auth: true, credentialCapture: capture)
+        guard isCurrent(capture), sourceIsCurrent(), !Task.isCancelled, dataKey == capturedDataKey,
+              !hasPendingAccountDocApply(for: capture) else { return .error }
         guard code == 200 else {
             let failure = SyncBackupUploadFailure.classify(status: code, serverCode: json?["error"] as? String)
             backupUploadFailure = failure
             DiagnosticsLog.log("sync", "upload result=failed stage=transport status=\(code) reason=\(failure.diagnosticCode) plaintextBytes=\(pt.count) ciphertextBytes=\(ct.utf8.count)")
-            return .error
+            return failure == .upgradeRequired ? .upgradeRequired : .error
         }
-        // accepted defaults to true so an older worker without the field (which stored the write) still
-        // advances the version, matching the website's `accepted !== false` read.
-#if VORTX_NATIVE_DATA_ENGINE
+        // Every target needs an explicit Boolean verdict. A missing/malformed response is
+        // ambiguous delivery, never permission to retire durable intent or stamp success.
         guard let verdict = json?["accepted"] as? NSNumber, CFGetTypeID(verdict) == CFBooleanGetTypeID() else {
             DiagnosticsLog.log("sync", "upload result=failed stage=verdict")
             return .error
         }
         let accepted = verdict.boolValue
-#else
-        let accepted = (json?["accepted"] as? Bool) ?? true
-#endif
         if accepted {
 #if VORTX_NATIVE_DATA_ENGINE
             guard rememberNativeBackup(capture: capture) else {
@@ -3044,9 +3047,8 @@ final class VortXSyncManager: ObservableObject {
             DiagnosticsLog.log("sync", "upload result=accepted plaintextBytes=\(pt.count) ciphertextBytes=\(ct.utf8.count)")
             return .accepted(version: version)
         }
-        // Rejected (a concurrent write won). The worker echoes the current stored version so we can retry
-        // deterministically at stored+1 instead of racing epoch-ms again. Do NOT advance lastSyncedVersion.
-        let stored = (json?["version"] as? Int) ?? (json?["version"] as? Double).map(Int.init)
+        // This echo is diagnostic only; only a new authenticated read can supply another base.
+        let stored = Self.documentVersion(json?["version"])
         DiagnosticsLog.log("sync", "upload result=rejected reason=concurrent_write")
         return .rejected(storedVersion: stored)
     }
@@ -3054,6 +3056,8 @@ final class VortXSyncManager: ObservableObject {
     private struct DerivedSyncDoc {
         let document: [String: Any]
         let baseRevision: Int?
+        let credentialCapture: CredentialScopeRegistry.Capture
+        let sourceIsCurrent: () -> Bool
         // Captured with the host edits actually submitted to the native merge. In
         // particular, later repair of an omitted key cannot acknowledge its old stamp.
         var nativeDirtySettings: [String: Double] = [:]
@@ -3070,13 +3074,15 @@ final class VortXSyncManager: ObservableObject {
         let maxRetries = 3
         var doc = initial
         for attempt in 0..<maxRetries {
-            guard isCurrent(capture), !hasPendingAccountDocApply(for: capture),
+            guard isCurrent(capture), doc.credentialCapture == capture, doc.sourceIsCurrent(),
+                  !hasPendingAccountDocApply(for: capture),
                   let version = SyncDocumentRevisionPolicy.next(after: doc.baseRevision) else { return false }
-            switch await pushSyncDocAt(doc.document, version: version, credentialCapture: capture) {
+            switch await pushSyncDocAt(doc.document, version: version, baseRevision: doc.baseRevision,
+                                      credentialCapture: capture, sourceIsCurrent: doc.sourceIsCurrent) {
             case .accepted:
                 onAccepted(doc)
                 return true
-            case .error:
+            case .error, .upgradeRequired:
                 return false   // network / server / encode failure: do not advance, next pull reconciles
             case .rejected:
                 // A concurrent write won. Re-pull, re-merge the local pending changes onto it (same merge as
@@ -3127,6 +3133,9 @@ final class VortXSyncManager: ObservableObject {
                 if let v = pb.minResolution { playback["minResolution"] = v }
                 if let v = pb.hideUnknownResolution { playback["hideUnknownResolution"] = v }
                 if let v = pb.preferredAudioOnly { playback["preferredAudioOnly"] = v }
+                if let v = pb.preferKeywords { playback["preferKeywords"] = v }
+                if let v = pb.avoidBehavior { playback["avoidBehavior"] = v }
+                if let v = pb.autoPickBest { playback["autoPickBest"] = v }
                 settings["playback"] = playback
             }
             return ["id": p.id.uuidString, "name": p.name, "locked": p.pin != nil, "main": p.isOwner,
@@ -3447,7 +3456,7 @@ final class VortXSyncManager: ObservableObject {
         // Additive: the dashboard and clients that do not know the field keep reading deletedLibrary as before.
         let removedLibraryTs = LibraryTombstones.timestampsForSync()
         if !removedLibraryTs.isEmpty { v["deletedLibraryTs"] = removedLibraryTs }
-        return v
+        return LegacySyncRetention.summary(existing: existingVortx, replacement: v)
     }
 
     /// Decode just the profile roster out of a doc's `settings` blob (the base64 SettingsBackup
@@ -3497,7 +3506,7 @@ final class VortXSyncManager: ObservableObject {
     @discardableResult
     func syncUp(afterUserChoseThisDevice: Bool = false) async -> Bool {
         let capture = credentialAuthority.capture()
-        guard isSignedIn, isCurrent(capture) else { return false }
+        guard isSignedIn, isCurrent(capture), backupUploadFailure != .upgradeRequired else { return false }
 #if VORTX_NATIVE_DATA_ENGINE
         guard await settleNativeProviderJournal(capture: capture), isCurrent(capture) else { return false }
 #endif
@@ -3565,11 +3574,14 @@ final class VortXSyncManager: ObservableObject {
         if nativePreparedSeedCapture == capture {
             // Deployed worker: version zero INSERT succeeds only while no row exists. Never
             // escalate a rejected/unknown first insert to an epoch version over a peer's seed.
-            switch await pushSyncDocAt(initial.document, version: 0, credentialCapture: capture) {
+            guard initial.baseRevision == nil, initial.credentialCapture == capture else { return false }
+            switch await pushSyncDocAt(initial.document, version: 0, baseRevision: initial.baseRevision,
+                                      credentialCapture: capture, sourceIsCurrent: initial.sourceIsCurrent) {
             case .accepted:
                 guard isCurrent(capture) else { return false }
                 acknowledgeNativePreferenceCloud(initial.document, receipts: preferenceReceipts, capture: capture)
                 clearPushedDirtySettings(initial.nativeDirtySettings); return true
+            case .upgradeRequired: return false
             case .rejected, .error:
                 guard isCurrent(capture) else { return false }
                 _ = await syncDown(force: true, credentialCapture: capture)
@@ -3614,12 +3626,19 @@ final class VortXSyncManager: ObservableObject {
     private func mergeLocalIntoDoc(orderIntent: AddonOrderIntent?, credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil) async -> DerivedSyncDoc? {
         let capture = suppliedCapture ?? credentialAuthority.capture()
         guard isCurrent(capture), isSignedIn else { return nil }
+        let capturedKey = dataKey
 #if VORTX_NATIVE_DATA_ENGINE
+        let capturedTarget = CoreBridge.shared.captureNativePlaybackTarget()
+        let sourceIsCurrent = { self.dataKey == capturedKey && CoreBridge.shared.nativePlaybackTargetIsCurrent(capturedTarget) }
         nativePreparedSeedCapture = nil
+#else
+        let sourceIsCurrent = { self.dataKey == capturedKey }
 #endif
         var doc: [String: Any]
         let baseRevision: Int?
-        switch await pullDocVersionedResult(credentialCapture: capture) {
+        let candidateRead = await pullDocVersionedResult(credentialCapture: capture)
+        guard isCurrent(capture), sourceIsCurrent() else { return nil }
+        switch candidateRead {
         case .failed, .unchanged: return nil
         case .empty:
             baseRevision = nil
@@ -3633,7 +3652,7 @@ final class VortXSyncManager: ObservableObject {
             guard version >= lastSyncedVersion else { return nil }
             doc = existing; baseRevision = version
         }
-        guard isCurrent(capture) else { return nil }
+        guard isCurrent(capture), sourceIsCurrent() else { return nil }
 #if VORTX_NATIVE_DATA_ENGINE
         // The native CRDT is a TOP-LEVEL sibling of the full legacy/host preference carriers.
         // Merge the freshly pulled peer state through the kernel before exporting; never assign
@@ -3646,7 +3665,7 @@ final class VortXSyncManager: ObservableObject {
         do {
             var providers = try mergedNativeProviderState(doc, capture: capture)
             let prepared = try await prepareNativeLegacyMaterial(doc, capture: capture)
-            guard isCurrent(capture) else { return nil }
+            guard isCurrent(capture), sourceIsCurrent() else { return nil }
             let remote = try doc["nativeSync"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
             let hostRemote = try doc["nativeHostPreferences"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
             exportedDirtySettings = dirtySettings
@@ -3655,11 +3674,12 @@ final class VortXSyncManager: ObservableObject {
             var merged = try await CoreBridge.shared.mergeNativeAccountDocument(remote, hostRemote: hostRemote, capture: capture,
                                                                                legacyMaterial: prepared.material, hostEdits: globalEdits, websiteEvents: Self.nativeWebsiteEvents(doc), websiteAddonEvents: Self.nativeWebsiteAddonEvents(doc), legacyWatchlists: self.nativeLegacyWatchlists(doc),
                                                                                sourceAuthority: prepared.authority, authenticatedSourceArchive: prepared.sourceArchive)
-            guard isCurrent(capture) else { return nil }
+            guard isCurrent(capture), sourceIsCurrent() else { return nil }
             let replayed = await replayNativePreferenceIntents(capture: capture)
+            guard isCurrent(capture), sourceIsCurrent() else { return nil }
             // Only still-owned warm projections are eligible; unknown cold stamps stay quarantined.
             _ = await ProfileStore.shared.retryNativePreferenceProjection(keys: Set(dirtySettings.keys.filter { nativePreferenceStampIsAttributed($0) }))
-            guard isCurrent(capture) else { return nil }
+            guard isCurrent(capture), sourceIsCurrent() else { return nil }
             // Export the acknowledged state after replay, never the pre-replay merge snapshot.
             if replayed || !dirtySettings.isEmpty {
                 exportedDirtySettings = dirtySettings
@@ -3668,7 +3688,7 @@ final class VortXSyncManager: ObservableObject {
                 merged = try await CoreBridge.shared.mergeNativeAccountDocument(nil, hostRemote: nil, capture: capture,
                     legacyMaterial: prepared.material, hostEdits: globalEdits, websiteEvents: [], websiteAddonEvents: [],
                     legacyWatchlists: [:], sourceAuthority: prepared.authority, authenticatedSourceArchive: prepared.sourceArchive)
-                guard isCurrent(capture) else { return nil }
+                guard isCurrent(capture), sourceIsCurrent() else { return nil }
             }
             doc["nativeSync"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(merged["nativeSync"]!))
             doc["nativeHostPreferences"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(merged["nativeHostPreferences"]!))
@@ -3684,7 +3704,9 @@ final class VortXSyncManager: ObservableObject {
         }
         // Never rewrite the legacy migration baseline from native/profile/overlay mirrors. Until
         // a versioned bidirectional adapter exists, native exports only its own accepted carrier.
-        return DerivedSyncDoc(document: doc, baseRevision: baseRevision, nativeDirtySettings: exportedDirtySettings)
+        guard sourceIsCurrent() else { return nil }
+        return DerivedSyncDoc(document: doc, baseRevision: baseRevision, credentialCapture: capture,
+                              sourceIsCurrent: sourceIsCurrent, nativeDirtySettings: exportedDirtySettings)
 #else
         // Read-merge the pulled doc's tombstone stamps into the local stores BEFORE vortxSummary rebuilds them
         // from local state, so a push that raced a peer's fresh re-add stamp adopts that stamp instead of
@@ -3739,7 +3761,7 @@ final class VortXSyncManager: ObservableObject {
         // with epoch-ms wall-clock they win last-writer-wins over the dashboard's save, wiping the
         // dashboard's TMDB key. Mirrors the asymmetric read-side debrid guard in syncDown.
         guard isCurrent(capture) else { return nil }
-        var keys = (doc["apiKeys"] as? [String: String]) ?? [:]
+        var keys = (doc["apiKeys"] as? [String: Any]) ?? [:]
         if let t = ApiKeys.tmdbKey() { keys["tmdb"] = t }
         if let m = ApiKeys.mdblistKey() { keys["mdblist"] = m }
         if let f = ApiKeys.fanartKey() { keys["fanart"] = f }
@@ -3795,15 +3817,18 @@ final class VortXSyncManager: ObservableObject {
         // Recent searches, per profile (SearchHistoryStore is UserDefaults-only so it does not ride the
         // SettingsBackup blob). Key by the same profile id the search UI uses (activeID), plus the
         // "default" bucket for searches made with no profile selected. Best-effort: skip empty lists.
-        var searches: [String: [String]] = [:]
+        var searches = doc["searches"] as? [String: Any] ?? [:]
         for p in ProfileStore.shared.profiles {
             let terms = SearchHistoryStore.allTerms(for: p.id)
-            if !terms.isEmpty { searches[p.id.uuidString] = terms }
+            searches[p.id.uuidString] = terms.isEmpty ? nil : terms
         }
+        for id in ProfileStore.shared.deletedProfileIDs { searches.removeValue(forKey: id) }
         let defaultTerms = SearchHistoryStore.allTerms(for: nil)
-        if !defaultTerms.isEmpty { searches["default"] = defaultTerms }
+        searches["default"] = defaultTerms.isEmpty ? nil : defaultTerms
         if searches.isEmpty { doc.removeValue(forKey: "searches") } else { doc["searches"] = searches }
-        return DerivedSyncDoc(document: doc, baseRevision: baseRevision)
+        guard isCurrent(capture), sourceIsCurrent() else { return nil }
+        return DerivedSyncDoc(document: doc, baseRevision: baseRevision, credentialCapture: capture,
+                              sourceIsCurrent: sourceIsCurrent)
 #endif
     }
 
@@ -3972,7 +3997,7 @@ final class VortXSyncManager: ObservableObject {
         let capturedDataKey = dataKey
         var outcome: ConflictResolutionOutcome = .failed
         defer { reportOutcome?(isCurrent(capture) && dataKey == capturedDataKey && !Task.isCancelled ? outcome : .failed) }
-        guard isSignedIn, isCurrent(capture) else { return false }
+        guard isSignedIn, isCurrent(capture), backupUploadFailure != .upgradeRequired else { return false }
 #if VORTX_NATIVE_DATA_ENGINE
         // One pulled document may commit at a time, and a pull may not project an older host
         // document over an in-flight export. A refused operation leaves its ACK/version untouched.
@@ -4008,7 +4033,10 @@ final class VortXSyncManager: ObservableObject {
         conditionalVersion = routineReceive && !effectiveForce ? conditionalReceiveVersion(capture) : nil
 #endif
         let pulled: (doc: [String: Any], version: Int)
-        switch await pullDocVersionedRetrying(credentialCapture: capture, ifNoneMatch: conditionalVersion) {
+        let received = await pullDocVersionedRetrying(credentialCapture: capture, ifNoneMatch: conditionalVersion)
+        guard isCurrent(capture), dataKey == capturedDataKey, !Task.isCancelled,
+              backupUploadFailure != .upgradeRequired else { return false }
+        switch received {
         case .unchanged(let version):
 #if VORTX_NATIVE_DATA_ENGINE
             guard routineReceive, !effectiveForce, conditionalVersion == version,
@@ -4088,6 +4116,14 @@ final class VortXSyncManager: ObservableObject {
                 nativeAccountDocumentCommitted = true
             }
             providers = try persistMergedNativeProviders(providers, capture: capture)
+            let pulledProviders = try doc["nativeProviderCredentials"].map {
+                try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0))
+            }
+            if try providers.requiresCausalRepublish(pulled: pulledProviders) {
+                // Even an already-ACKed local register needs durable repair after a legacy
+                // rollback. This admission survives failed sends/restarts without a new edit.
+                nativeMutationDidCommit(credentialCapture: capture)
+            }
             let mirrored = try mirrorNativeProviderKeys(providers, original: doc["apiKeys"])
             var keys = mirrored.compactMapValues { $0 as? String }
             if providers.local.document.fields["traktAccess"]?.value == .null {
@@ -4592,7 +4628,8 @@ final class VortXSyncManager: ObservableObject {
                 secondCompleted: true,
                 superseded: false)
         }
-        guard isCurrent(capture), !providerSettlement.superseded else { return false }
+        guard isCurrent(capture), dataKey == capturedDataKey, !providerSettlement.superseded,
+              backupUploadFailure != .upgradeRequired else { return false }
         if !providerSettlement.completed {
             guard let pending = providerPlan else { return false }
             let failedProviderValues = pending.values.filter {
@@ -4627,6 +4664,7 @@ final class VortXSyncManager: ObservableObject {
             }
         ) else { return false }
 #endif
+        guard isCurrent(capture), dataKey == capturedDataKey, backupUploadFailure != .upgradeRequired else { return false }
         withRemoteApplySuppressed {
             guard isCurrent(capture) else { return }
             pendingProviderApply = nil
@@ -5429,6 +5467,7 @@ final class VortXSyncManager: ObservableObject {
         }
         nativePushQueue.request()
         nativeDurablePushPending = true
+        guard backupUploadFailure != .upgradeRequired else { return }
         // Do not cancel an executing upload for a later local edit. Its captured generation
         // will ACK only itself; the same worker exports the newer checkpoint next.
         guard pendingSync == nil else { return }
@@ -5450,6 +5489,7 @@ final class VortXSyncManager: ObservableObject {
                 let generation = self.nativePushQueue.generation
                 let accepted = await self.syncUp()
                 guard self.isCurrent(capture), self.pendingSyncID == workerID else { return }
+                guard self.backupUploadFailure != .upgradeRequired else { return }
                 self.nativePushQueue.acknowledge(generation, accepted: accepted)
                 retryDelay = accepted ? 2_500_000_000 : min(retryDelay * 2, 30_000_000_000)
                 if !self.nativePushQueue.hasPendingPush {
@@ -5463,6 +5503,7 @@ final class VortXSyncManager: ObservableObject {
         }
 #else
         hasPendingPush = true
+        guard backupUploadFailure != .upgradeRequired else { return }
         pendingSync?.cancel()
         pendingSync = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_500_000_000)
@@ -5473,7 +5514,7 @@ final class VortXSyncManager: ObservableObject {
             // an interleaved pull re-apply the account's pre-edit value and revert the just-made edit.
             // Cancellation reliably means superseded, so bail without clearing: the final, non-cancelled task
             // always reaches this line and clears the flag, so it can never stick true.
-            if Task.isCancelled { return }
+            if Task.isCancelled || self?.backupUploadFailure == .upgradeRequired { return }
             self?.hasPendingPush = false
         }
 #endif

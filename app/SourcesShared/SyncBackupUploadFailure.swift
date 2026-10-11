@@ -6,8 +6,10 @@ enum SyncBackupUploadFailure: Equatable {
     case authorization
     case serverRejected
     case unavailable
+    case upgradeRequired
 
     static func classify(status: Int, serverCode: String?) -> Self {
+        if status == 426 { return .upgradeRequired }
         if status == 413 { return .tooLarge }
         if status == 401 || status == 403 { return .authorization }
         if status == 400 {
@@ -28,11 +30,14 @@ enum SyncBackupUploadFailure: Equatable {
         case .authorization: return "authorization"
         case .serverRejected: return "server_rejected"
         case .unavailable: return "unavailable"
+        case .upgradeRequired: return "upgrade_required"
         }
     }
 
     var message: String {
         switch self {
+        case .upgradeRequired:
+            return "Update VortX to sync this account. Your changes are still on this device."
         case .tooLarge:
             return "VortX couldn't save your backup because it is larger than the server accepts. Your changes are still on this device."
         case .invalidRevision, .serverRejected:
