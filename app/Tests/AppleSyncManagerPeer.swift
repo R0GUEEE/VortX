@@ -191,7 +191,6 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
     func persistLastSyncedVersion() {}
     static func markSawDocV2(_ account: String) {}
     func stampSyncSuccess() { stamped += 1 }
-    static func documentVersion(_ raw: Any?) -> Int? { raw as? Int }
     static func decodeDecryptedSyncDocument(_ data: Data) throws -> [String: Any] {
         guard let doc = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VortxNativeError.invalidSnapshot }
         return doc
@@ -362,7 +361,10 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
             if method == "PUT", command.keyABA == true {
                 dataKey = Data(repeating: 3, count: 32); retire(); dataKey = AppleSyncManagerPeer.key; retire()
             }
-            return ((response as? HTTPURLResponse)?.statusCode ?? 0, try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            // The canonical absent response is bodyless 404. Preserve that HTTP status;
+            // failing JSON decode must not turn a real authenticated absence into transport 0.
+            return ((response as? HTTPURLResponse)?.statusCode ?? 0,
+                    data.isEmpty ? nil : (try? JSONSerialization.jsonObject(with: data)) as? [String: Any])
         } catch { return (0, nil) }
     }
     func run() async throws -> [String: VortxJSON] {

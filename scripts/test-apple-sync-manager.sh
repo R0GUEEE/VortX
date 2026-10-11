@@ -26,7 +26,8 @@ xcrun swiftc -swift-version 6 -parse-as-library -strict-concurrency=complete -wa
     app/SourcesShared/VortxNativeSession.swift app/SourcesShared/VortxNativeProfiles.swift app/SourcesShared/ProfileAddonPreferences.swift \
     app/SourcesShared/VortxNativeProfileEditHost.swift app/SourcesShared/VortxProfileOverlayWitness.swift app/SourcesShared/NativePreferenceIntentStore.swift \
     app/SourcesShared/VortXSyncCrypto.swift app/SourcesShared/NativeForegroundSyncPolicy.swift \
-    app/SourcesShared/SyncDocumentRevisionPolicy.swift app/SourcesShared/SettingsDirtyKeys.swift app/SourcesShared/SyncBackupUploadFailure.swift \
+    app/SourcesShared/SyncDocumentRevisionPolicy.swift app/SourcesShared/ProfileRosterSyncPolicy.swift app/SourcesShared/LegacySyncRetention.swift \
+    app/SourcesShared/SettingsDirtyKeys.swift app/SourcesShared/SyncBackupUploadFailure.swift \
     "$fixture_dir/UserProfile.swift" "$fixture_dir/Discovery.swift" "$fixture_dir/Combined.swift" \
     "$library" -framework Security -framework SystemConfiguration -o "$fixture_dir/manager-peer"
 if [[ ${VORTX_SYNC_DIRTY_GLOBALS_ONLY:-0} == 1 ]]; then

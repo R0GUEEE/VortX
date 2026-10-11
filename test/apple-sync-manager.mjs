@@ -31,6 +31,7 @@ if (process.argv[2] === '--extract') {
     return text.slice(start, end + 6);
   };
   selected.push(block(source, '    private struct DerivedSyncDoc {'),
+    block(source, '    private static func documentVersion('),
     source.slice(source.indexOf('    private func dirtySettingsKey('), source.indexOf('    private var dirtySettings:')),
     block(source, '    private var dirtySettings:'));
   const environment = preferenceFixture.slice(preferenceFixture.indexOf('private struct PlaybackMutationTarget'), preferenceFixture.indexOf('@MainActor private final class CoreBridge'))
@@ -94,13 +95,16 @@ const run = promisify(execFile);
 const wire = [];
 let stored = null;
 let replyMode = 'normal';
+let getReplyMode = 'normal';
 let sameBaseReaders = null;
 const server = createServer(async (req, res) => {
   assert.equal(req.url, '/v1/backup');
   assert.equal(req.headers.authorization, 'Bearer synthetic-fixture-only');
   res.setHeader('content-type', 'application/json');
   if (req.method === 'GET') {
-    wire.push({ method: 'GET', version: stored?.version });
+    wire.push({ method: 'GET', version: stored?.version ?? null, replyMode: getReplyMode });
+    if (getReplyMode === 'null-document') { res.end(JSON.stringify({ document: null, version: 0 })); return; }
+    if (getReplyMode === 'unavailable') { res.statusCode = 503; res.end(); return; }
     if (sameBaseReaders) {
       sameBaseReaders.push(res);
       if (sameBaseReaders.length === 2) {
@@ -111,16 +115,23 @@ const server = createServer(async (req, res) => {
       return;
     }
     res.statusCode = stored ? 200 : 404;
-    res.end(JSON.stringify(stored ?? {})); return;
+    res.end(stored ? JSON.stringify(stored) : undefined); return;
   }
+  assert.equal(req.method, 'PUT');
   let raw = ''; for await (const part of req) raw += part;
   const body = JSON.parse(raw);
-  assert.deepEqual(Object.keys(body).sort(), ['document', 'version']);
-  assert(body.document.startsWith('v2.')); assert(Number.isSafeInteger(body.version));
-  const accepted = !stored || body.version > stored.version;
-  if (accepted) stored = body;
-  wire.push({ method: 'PUT', version: body.version, accepted });
-  res.end(JSON.stringify(replyMode === 'missing' ? {} : replyMode === 'number' ? { accepted: 1 } : { accepted, version: stored.version }));
+  assert.deepEqual(Object.keys(body).sort(), ['baseRevision', 'document', 'version']);
+  assert(body.document.startsWith('v2.')); assert(Number.isSafeInteger(body.version) && body.version >= 0);
+  assert(body.baseRevision === null || (Number.isSafeInteger(body.baseRevision) && body.baseRevision >= 0));
+  assert.equal(body.version, body.baseRevision === null ? 0 : body.baseRevision + 1);
+  const previousVersion = stored?.version ?? null;
+  const accepted = body.baseRevision === previousVersion;
+  if (accepted) stored = { document: body.document, version: body.version };
+  wire.push({ method: 'PUT', baseRevision: body.baseRevision, version: body.version, previousVersion, accepted, replyMode });
+  if (replyMode === 'lost-once') { replyMode = 'normal'; res.destroy(); return; }
+  res.end(JSON.stringify(replyMode === 'missing' ? {} : replyMode === 'number' ? { accepted: 1 }
+    : replyMode === 'string' ? { accepted: 'true' }
+    : accepted ? { ok: true, accepted: true } : { ok: true, accepted: false, version: previousVersion }));
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const baseURL = `http://127.0.0.1:${server.address().port}`;
@@ -137,8 +148,19 @@ const owner = '10000000-0000-0000-0000-000000000001';
 const viewer = '10000000-0000-0000-0000-000000000002';
 const watchField = 'watchlist.series.' + Buffer.from('tt-naruto-fixture').toString('base64url');
 let failures = 0;
-function check(condition, label) { console.log(`${condition ? 'PASS' : 'FAIL'} ${label}`); if (!condition) failures++; }
+const checks = [];
+function check(condition, label) {
+  checks.push({ name: label, passed: !!condition });
+  console.log(`${condition ? 'PASS' : 'FAIL'} ${label}`); if (!condition) failures++;
+}
 try {
+  for (const mode of ['null-document', 'unavailable']) {
+    getReplyMode = mode;
+    const failed = await peer(`absent-${mode}`, 'push');
+    check(!failed.accepted && failed.stamped === 0 && failed.putVersions.length === 0 && stored === null,
+      `${mode} response is not an authenticated absent witness and cannot seed a backup`);
+  }
+  getReplyMode = 'normal';
   await peer('phone', 'edit', { actions: [
     { type: 'add_profile', id: viewer, name: 'Viewer' },
     { type: 'add_library_item', profileId: owner, item: { kind: 'standard', id: 'tt-naruto-fixture', type: 'series', name: 'Synthetic Naruto', poster: null } },
@@ -153,6 +175,10 @@ try {
     'unexported preference retains its exact pending desired value and dirty stamp');
   check(blocked.pendingPush === false && blocked.queueDrainRetainedExactPreferenceReceipt === true && blocked.queueDrainNativeUnchanged === true,
     'accepted idempotent follow-up releases the live transport pull guard without acknowledging unapplied preference or changing native state');
+  const firstPuts = wire.filter(entry => entry.method === 'PUT');
+  check(firstPuts.length === 2 && firstPuts[0].baseRevision === null && firstPuts[0].version === 0
+    && firstPuts[1].baseRevision === 0 && firstPuts[1].version === 1,
+    'bodyless authenticated 404 creates at null/0; existing version zero uses its exact 0/1 witness');
   if (!blocked.accepted) {
     await writeFile(join(root, 'receipt.json'), JSON.stringify({ result: 'RED', failures, wire, members }, null, 2));
     process.exitCode = 1;
@@ -196,19 +222,54 @@ try {
     const addedMac = '10000000-0000-0000-0000-000000000004';
     await peer('phone', 'edit', { actions: [{ type: 'add_profile', id: addedPhone, name: 'Phone concurrent edit' }] });
     await peer('mac', 'edit', { actions: [{ type: 'add_profile', id: addedMac, name: 'Mac concurrent edit' }] });
+    const raceStart = wire.length;
+    const raceBase = stored.version;
     sameBaseReaders = [];
     const raced = await Promise.all([peer('phone', 'push'), peer('mac', 'push')]);
     check(raced.every(x => x.accepted) && raced.reduce((sum, x) => sum + x.putVersions.length, 0) === 3,
       'two actual manager clients from the same base reject and rebuild the losing encrypted PUT');
+    const raceWire = wire.slice(raceStart);
+    const racePuts = raceWire.filter(entry => entry.method === 'PUT');
+    check(racePuts.length === 3 && racePuts.slice(0, 2).every(entry => entry.baseRevision === raceBase && entry.version === raceBase + 1)
+      && racePuts[0].accepted && !racePuts[1].accepted && racePuts[2].accepted
+      && racePuts[2].baseRevision === raceBase + 1 && racePuts[2].version === raceBase + 2
+      && raceWire.slice(raceWire.indexOf(racePuts[1]) + 1, raceWire.indexOf(racePuts[2]))
+        .some(entry => entry.method === 'GET' && entry.version === raceBase + 1),
+      'same-base loser rereads the authenticated winner before proposing exact base-plus-one; rejection echo is not a witness');
     const converged = await peer('cold', 'pull');
     check(converged.state.roster.profiles[addedPhone]?.name === 'Phone concurrent edit'
       && converged.state.roster.profiles[addedMac]?.name === 'Mac concurrent edit', 'cold native client receives both concurrent profile edits');
-    for (const mode of ['missing', 'number']) {
+    for (const mode of ['missing', 'number', 'string']) {
       replyMode = mode;
       const invalid = await peer('phone', 'push');
       check(!invalid.accepted && invalid.stamped === 0, 'non-boolean or absent relay acceptance never becomes success');
     }
     replyMode = 'normal';
+    await peer('lost-reply', 'pull');
+    await peer('lost-reply', 'inspect', { preferenceCommand: 'prepare-theme', preferenceValue: 'indigo' });
+    replyMode = 'lost-once';
+    const lost = await peer('lost-reply', 'push');
+    const lostPut = wire.findLast(entry => entry.method === 'PUT');
+    check(lostPut.accepted && lostPut.replyMode === 'lost-once' && !lost.accepted && lost.stamped === 0
+      && lost.lastVersion === 0 && lost.pendingPreferenceIntentCount === 1,
+      'accepted PUT with a dropped response cannot stamp success or retire the exact durable preference intent');
+    const interveningID = '10000000-0000-0000-0000-000000000005';
+    await peer('mac', 'edit', { actions: [{ type: 'add_profile', id: interveningID, name: 'Intervening peer' }] });
+    check((await peer('mac', 'push')).accepted, 'independent native peer commits after the accepted but unacknowledged write');
+    const recoveryStart = wire.length, recoveryBase = stored.version;
+    const recovered = await peer('lost-reply', 'push');
+    const recoveryWire = wire.slice(recoveryStart);
+    check(recovered.accepted && recovered.stamped === 1 && recovered.pendingPreferenceIntentCount === 0
+      && recoveryWire[0].method === 'GET' && recoveryWire[0].version === recoveryBase
+      && recoveryWire.find(entry => entry.method === 'PUT')?.baseRevision === recoveryBase,
+      'cold restart reconciles the lost response from a fresh read including intervening peer state before exact ACK');
+    const lostCold = await peer('lost-cold', 'pull');
+    check(lostCold.state.roster.profiles[owner].settings.accent === 'indigo'
+      && lostCold.state.roster.profiles[interveningID]?.name === 'Intervening peer'
+      && lostCold.state.libraries[owner].items.some(item => item.id === 'tt-naruto-fixture')
+      && lostCold.playback.resumeById['tt-naruto-fixture:1:2'].offsetMs === 120000
+      && lostCold.host.profiles[owner].fields[watchField].value.addedAt === 123.5,
+      'cold third installation receives repaired preference and intervening profile while library, Watchlist and episode progress survive');
     // Isolate the intent lifecycle so each process gets a clean relay history. These cases
     // cross process boundaries and use a real encrypted journal plus the static native C ABI.
     stored = null;
@@ -431,11 +492,15 @@ try {
       'offline generation and synthetic accepted-callback scenarios perform no cloud upload');
 
     const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex');
-    await writeFile(join(root, 'receipt.json'), JSON.stringify({ result: failures ? 'FAIL' : 'GREEN', failures, wire, members,
+    await writeFile(join(root, 'receipt.json'), JSON.stringify({ result: failures ? 'FAIL' : 'GREEN', failures, checks, wire, members,
       managerSHA256: await digest('app/SourcesShared/VortXSyncManager.swift'), compiledMethodsSHA256: await digest(join(root, 'Combined.swift')),
+      fixtureSHA256: await digest('app/Tests/AppleSyncManagerPeer.swift'), relaySHA256: await digest('test/apple-sync-manager.mjs'),
+      revisionPolicySHA256: await digest('app/SourcesShared/SyncDocumentRevisionPolicy.swift'),
+      rosterPolicySHA256: await digest('app/SourcesShared/ProfileRosterSyncPolicy.swift'),
+      retentionSHA256: await digest('app/SourcesShared/LegacySyncRetention.swift'),
       binarySHA256: await digest(peerBinary), librarySHA256: process.env.VORTX_SYNC_TEST_LIBRARY_SHA256,
       headerSHA256: process.env.VORTX_SYNC_TEST_HEADER_SHA256,
-      boundary: 'Actual extracted manager upload/merge/crypto/ACK/retry/queue plus native preference context/value/snapshot/admission/prepare/finish/replay, startup intent wake, local settings dirty detection, projection quarantine/mount gate and cloud receipt ACK methods; actual Profiles.saveNative and preference projection acknowledgement helpers. Real NativePreferenceIntentStore encrypted journal, native C ABI sessions, profile mutation/project converters and checkpoint stores. Journal directory and synthetic key are injected only by the peer fixture; no user Application Support or Keychain is read. Loopback blind relay contract model. Session mount, credential and legacy UserDefaults collaborators are synthetic. Does not exercise installed app/UI, complete syncDown, providers, WebSocket or deployed worker.' }, null, 2));
+      boundary: 'Actual extracted manager upload/merge/crypto/ACK/retry/queue and documentVersion plus native preference context/value/snapshot/admission/prepare/finish/replay, startup intent wake, local settings dirty detection, projection quarantine/mount gate and cloud receipt ACK methods; actual Profiles.saveNative and preference projection acknowledgement helpers. Real NativePreferenceIntentStore encrypted journal, native C ABI sessions, profile mutation/project converters and checkpoint stores. Journal directory and synthetic key are injected only by the peer fixture; no user Application Support or Keychain is read. Loopback exact-base CAS relay model with bodyless authenticated404, null/0 create, base+1 update, conflict reread, strict verdicts and accepted lost-response recovery. Session mount, credential and legacy UserDefaults collaborators are synthetic. Full LegacySyncRetention is a compiled input but this native path does not execute legacy summary serialization. Does not exercise installed app/UI, complete syncDown, providers, WebSocket or deployed worker.' }, null, 2));
     if (failures) process.exitCode = 1;
   }
   console.log(`Receipt: ${join(root, 'receipt.json')}`);

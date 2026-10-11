@@ -16,16 +16,20 @@ const server = createServer(async (req, res) => {
   res.setHeader('content-type', 'application/json');
   if (req.method === 'GET') {
     wire.push({ method: 'GET', version: stored?.version });
-    res.statusCode = stored ? 200 : 404; res.end(JSON.stringify(stored ?? {})); return;
+    res.statusCode = stored ? 200 : 404; res.end(stored ? JSON.stringify(stored) : undefined); return;
   }
   assert.equal(req.method, 'PUT');
   let raw = ''; for await (const bytes of req) raw += bytes;
   const body = JSON.parse(raw);
-  assert(body.document.startsWith('v2.')); assert(Number.isSafeInteger(body.version));
-  const accepted = !stored || body.version > stored.version;
-  if (accepted) stored = body;
-  wire.push({ method: 'PUT', accepted, version: body.version });
-  res.end(JSON.stringify({ accepted, version: stored.version }));
+  assert.deepEqual(Object.keys(body).sort(), ['baseRevision', 'document', 'version']);
+  assert(body.document.startsWith('v2.')); assert(Number.isSafeInteger(body.version) && body.version >= 0);
+  assert(body.baseRevision === null || (Number.isSafeInteger(body.baseRevision) && body.baseRevision >= 0));
+  assert.equal(body.version, body.baseRevision === null ? 0 : body.baseRevision + 1);
+  const previousVersion = stored?.version ?? null;
+  const accepted = body.baseRevision === previousVersion;
+  if (accepted) stored = { document: body.document, version: body.version };
+  wire.push({ method: 'PUT', accepted, baseRevision: body.baseRevision, version: body.version, previousVersion });
+  res.end(JSON.stringify(accepted ? { ok: true, accepted: true } : { ok: true, accepted: false, version: previousVersion }));
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const baseURL = `http://127.0.0.1:${server.address().port}`;
