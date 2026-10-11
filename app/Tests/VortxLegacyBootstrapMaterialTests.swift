@@ -275,8 +275,8 @@ enum VortxLegacyBootstrapMaterialTests {
         }
 
         // A current schema-4 slot is newer than legacyImport.baseline after a same-UID rebind.
-        // Its complete typed carrier must therefore decide witness admission, rather than letting
-        // an immutable historical baseline fabricate a stale pending result.
+        // Its complete typed carrier decides overlay witness admission, but must not relift
+        // already acknowledged native events into the older global legacy receipt.
         let witnessedOverlayBytes = try JSONSerialization.data(withJSONObject: overlay, options: [.sortedKeys, .withoutEscapingSlashes])
         let witnessedOverlayReceipt = VortxLegacyBootstrapMaterial.OwnAccountSource(profileID: own.id,
             verifiedStreamingUID: "verified-own-uid", sourceDocument: try ownSourceEnvelope(schemaVersion: 2,
@@ -304,8 +304,22 @@ enum VortxLegacyBootstrapMaterialTests {
               "The active schema-4 own slot takes precedence over historical legacyImport baseline")
         let slottedCold = try material(rootWithOwnOverlay, roster: [owner, own], documentData: rootWithOwnOverlayBytes, retainedOwnAccountBaseline: retainedOverlayBaseline,
                                        retainedOwnAccountSlotBaselines: [activeSlot], deferredOwnAccountOverlays: witnessedDisposition)
-        check(((slottedCold["ownAccountSources"] as! [String: Object])[own.id.uuidString]!)["sourceDocumentSha256"] as? String == witnessedOverlayReceipt.sourceDocumentSHA256,
-              "Witness-admitted cold material copies the active slot tuple verbatim")
+        let historicalOverlayMaterial = try JSONSerialization.jsonObject(with: retainedOverlayBaseline) as! Object
+        check(NSDictionary(dictionary: (slottedCold["ownAccountSources"] as! [String: Object])[own.id.uuidString]!).isEqual(to:
+              (historicalOverlayMaterial["ownAccountSources"] as! [String: Object])[own.id.uuidString]!),
+              "Witness-admitted cold material retains the acknowledged global source tuple")
+        for field in ["addons", "libraries", "watches", "identityLinks"] {
+            let currentField = try JSONSerialization.data(withJSONObject: slottedCold[field]!, options: [.sortedKeys])
+            let acknowledgedField = try JSONSerialization.data(withJSONObject: historicalOverlayMaterial[field]!, options: [.sortedKeys])
+            check(currentField == acknowledgedField,
+                  "Cold material must not relift already native slot events into legacy " + field)
+        }
+        let activeEnvelope = VortxLegacyBootstrapMaterial.RetainedOwnAccountSourceEnvelope(profileID: own.id, sourceDocument: witnessedOverlayReceipt.sourceDocument)
+        let slottedWithEnvelope = try material(rootWithOwnOverlay, roster: [owner, own], documentData: rootWithOwnOverlayBytes,
+            retainedOwnAccountBaseline: retainedOverlayBaseline, retainedOwnAccountSourceEnvelopes: [activeEnvelope],
+            retainedOwnAccountSlotBaselines: [activeSlot], deferredOwnAccountOverlays: witnessedDisposition)
+        check(NSDictionary(dictionary: slottedWithEnvelope).isEqual(to: slottedCold),
+              "Active sealed envelope proves the overlay without relabelling the older typed source")
 
         // Material 1 predates a profile that later became independently authenticated. Its
         // complete schema-4 active slot is sufficient; historical absence is not a malformed
@@ -355,9 +369,39 @@ enum VortxLegacyBootstrapMaterialTests {
               "A changed raw own overlay remains distinguishably pending against the active slot witness")
         let deferredChanged = try material(changedRootOverlay, roster: [owner, own], documentData: changedRootOverlayBytes, retainedOwnAccountBaseline: retainedOverlayBaseline,
                                            retainedOwnAccountSlotBaselines: [activeSlot], deferredOwnAccountOverlays: changedDisposition)
-        check(NSArray(array: watches(deferredChanged, profile: own)).isEqual(to: watches(witnessedOverlayMaterial, profile: own))
+        check(NSArray(array: watches(deferredChanged, profile: own)).isEqual(to: watches(historicalOverlayMaterial, profile: own))
               && !(watches(deferredChanged, profile: own).contains { $0["videoId"] as? String == "newer-overlay-video" }),
-              "A classifier-issued changed disposition preserves the kernel tuple and never acknowledges raw pending overlay")
+              "A classifier-issued changed disposition preserves the legacy tuple and never acknowledges raw pending overlay")
+        let deferredChangedEnvelope = try material(changedRootOverlay, roster: [owner, own], documentData: changedRootOverlayBytes,
+            retainedOwnAccountBaseline: retainedOverlayBaseline, retainedOwnAccountSourceEnvelopes: [activeEnvelope],
+            retainedOwnAccountSlotBaselines: [activeSlot], deferredOwnAccountOverlays: changedDisposition)
+        check(NSDictionary(dictionary: deferredChangedEnvelope).isEqual(to: deferredChanged),
+              "Changed raw overlay stays pending even when the prior active envelope is retained")
+        do {
+            _ = try material(rootWithOwnOverlay, roster: [owner, own], documentData: rootWithOwnOverlayBytes,
+                retainedOwnAccountBaseline: retainedOverlayBaseline, retainedOwnAccountSourceEnvelopes: [activeEnvelope],
+                retainedOwnAccountSlotBaselines: [activeSlot], deferredOwnAccountOverlays: changedDisposition)
+            preconditionFailure("Disposition from a different exact root admitted")
+        } catch is VortxLegacyBootstrapMaterial.ReconciliationRequired {}
+        do {
+            _ = try material(rootWithOwnOverlay, roster: [owner, own], documentData: rootWithOwnOverlayBytes,
+                ownAccountSources: [witnessedOverlayReceipt], retainedOwnAccountBaseline: retainedOverlayBaseline,
+                retainedOwnAccountSlotBaselines: [activeSlot], deferredOwnAccountOverlays: witnessedDisposition)
+            preconditionFailure("Retained disposition borrowed by a fresh authenticated source")
+        } catch is VortxLegacyBootstrapMaterial.ReconciliationRequired {}
+        let anotherSourceReceipt = VortxLegacyBootstrapMaterial.OwnAccountSource(profileID: own.id,
+            verifiedStreamingUID: witnessedOverlayReceipt.verifiedStreamingUID,
+            sourceDocument: witnessedOverlayReceipt.sourceDocument + Data(" ".utf8),
+            profileOverlaySHA256: witnessedOverlayReceipt.profileOverlaySHA256)
+        let anotherSourceMaterial = try material(rootWithOwnOverlay, roster: [owner, own], ownAccountSources: [anotherSourceReceipt])
+        let anotherSlot = VortxLegacyBootstrapMaterial.RetainedOwnAccountSlotBaseline(profileID: own.id,
+            sourceBaseline: try sourceBaseline(anotherSourceMaterial))
+        do {
+            _ = try material(rootWithOwnOverlay, roster: [owner, own], documentData: rootWithOwnOverlayBytes,
+                retainedOwnAccountBaseline: retainedOverlayBaseline, retainedOwnAccountSlotBaselines: [anotherSlot],
+                deferredOwnAccountOverlays: witnessedDisposition)
+            preconditionFailure("Disposition from another source digest admitted")
+        } catch is VortxLegacyBootstrapMaterial.ReconciliationRequired {}
 
         let sealedDisposition = try VortxLegacyBootstrapMaterial.classifyDeferredOwnAccountOverlays(document: rootWithOwnOverlayBytes,
             roster: [owner, own], ownerProfileID: owner.id, retainedOwnAccountBaseline: retainedOverlayBaseline,

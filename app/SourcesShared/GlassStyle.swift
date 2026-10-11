@@ -201,6 +201,7 @@ enum VortXGlass {
     static func blurLayer<S: InsettableShape>(in shape: S, reduceTransparency: Bool,
                                               material: Material = .ultraThinMaterial,
                                               glassTint: Color? = nil,
+                                              interactive: Bool = false,
                                               hugsTightly: Bool = false) -> some View {
         if reduceTransparency {
             // No blur when transparency is reduced: an opaque warm surface keeps the chrome legible.
@@ -215,7 +216,11 @@ enum VortXGlass {
             // in place. VortX's tint + highlight + shadow still layer on top, so identity is preserved.
             // For the prominent path `glassTint` colors the glass itself so ember reads through the gloss.
             if let glassTint {
-                shape.fill(.clear).glassEffect(.regular.tint(glassTint), in: shape)
+                if interactive {
+                    shape.fill(.clear).glassEffect(.regular.tint(glassTint).interactive(), in: shape)
+                } else {
+                    shape.fill(.clear).glassEffect(.regular.tint(glassTint), in: shape)
+                }
             } else {
                 shape.fill(.clear).glassEffect(.regular, in: shape)
             }
@@ -583,7 +588,50 @@ private struct VortXGlassStripModifier: ViewModifier {
     }
 }
 
+/// Opt-in chrome for profile-themed controls, separate from the neutral card/TV scrolling presets.
+/// The normal face is tinted glass itself, without the old half-opaque grey veil above the material.
+private struct VortXGlassControlModifier<S: InsettableShape>: ViewModifier {
+    let shape: S
+    let active: Bool
+    let shadow: VortXGlass.Shadow
+    @ObservedObject private var theme = ThemeManager.shared
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.isEnabled) private var enabled
+
+    func body(content: Content) -> some View {
+        let accent = Theme.Palette.accent
+        let opaque = reduceTransparency || contrast == .increased || !enabled
+        content
+            .background {
+                ZStack {
+                    VortXGlass.blurLayer(in: shape, reduceTransparency: opaque,
+                                        glassTint: accent.opacity(active ? 0.42 : 0.28),
+                                        interactive: true)
+                    // Older systems get the same profile wash over frosted material. Accessibility
+                    // keeps its opaque base; this wash does not compromise its text contrast.
+                    if opaque {
+                        shape.fill(accent.opacity(enabled ? (active ? 0.22 : 0.12) : 0.04))
+                    } else if #available(iOS 26.0, tvOS 26.0, macOS 26.0, *) {
+                        EmptyView()
+                    } else {
+                        shape.fill(accent.opacity(active ? 0.28 : 0.18))
+                    }
+                }
+                .clipShape(shape)
+            }
+            .overlay(shape.strokeBorder(accent.opacity(contrast == .increased ? 0.7 : active ? 0.5 : 0.3), lineWidth: 1))
+            .clipShape(shape)
+            .contentShape(shape)
+            .shadow(color: shadow.color, radius: shadow.radius, x: shadow.x, y: shadow.y)
+    }
+}
+
 extension View {
+    func vortxGlassControl<S: InsettableShape>(in shape: S, active: Bool = false,
+                                              shadow: VortXGlass.Shadow = .flat) -> some View {
+        modifier(VortXGlassControlModifier(shape: shape, active: active, shadow: shadow))
+    }
     /// Cinema Glass's broad media and library surfaces. This stays separate from the compact row preset:
     /// cards are intentionally a little more raised and use the shared rounded Cinema radius, while still
     /// inheriting Reduce Transparency and Liquid Glass behavior from the base modifier.

@@ -154,6 +154,7 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
     var pendingSync: Task<Void, Never>?
     var pendingSyncCapture: CredentialScopeRegistry.Capture?
     var pendingSyncID: UUID?
+    var pendingSyncAwaitsProgressWindow = false
     var realtimeActive = false
     var nativePreferenceIntentStatus = "idle"
     var nativePreferenceLocalAdmissions: [UUID: [NativePreferenceIntentStore.Group: NativePreferenceLocalAdmission]] = [:]

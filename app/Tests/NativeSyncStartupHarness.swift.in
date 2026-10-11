@@ -44,6 +44,7 @@ private final class CredentialScopeRegistry {
     var pendingSync: Task<Void, Never>?
     var pendingSyncCapture: CredentialScopeRegistry.Capture?
     var pendingSyncID: UUID?
+    var pendingSyncAwaitsProgressWindow = false
     var pendingNativeMutationPush: CredentialScopeRegistry.Capture?
     var nativePushQueue = NativeForegroundSyncPolicy.PushQueue()
     var nativeDurablePushPending = true

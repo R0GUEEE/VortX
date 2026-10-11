@@ -266,7 +266,15 @@ enum CoreLoadable<T: Decodable>: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let tag = try container.decode(String.self, forKey: .type)
         switch tag {
-        case "Ready": self = .ready(try container.decode(T.self, forKey: .content))
+        case "Ready":
+            // These are provider resource payloads, not account/checkpoint authority.
+            // One malformed provider must settle as failed without preventing healthy
+            // peer catalogs, metadata or streams in the same snapshot from publishing.
+            do { self = .ready(try container.decode(T.self, forKey: .content)) }
+            catch is DecodingError {
+                NSLog("%@", "[core] CoreLoadable invalid Ready payload; treating as terminal (.err)")
+                self = .err
+            }
         case "Err": self = .err
         case "Loading": self = .loading
         // Any other tag (an engine "Err"-shape rename, or a genuinely errored group with an
@@ -751,10 +759,14 @@ struct CoreMetaItem: Decodable {
         if let yt = (trailerStreams ?? []).compactMap(\.ytId).first(where: { !$0.isEmpty }) {
             return yt
         }
-        let trailerLink = (links ?? []).first {
-            $0.category.caseInsensitiveCompare("Trailer") == .orderedSame
+        let trailerLinks = (links ?? []).filter { $0.category.caseInsensitiveCompare("Trailer") == .orderedSame }
+        for link in trailerLinks {
+            if let url = link.url, let id = Self.youTubeID(from: url) { return id }
         }
-        return trailerLink.flatMap { Self.youTubeID(from: $0.name) }
+        for link in trailerLinks {
+            if let id = Self.youTubeID(from: link.name) { return id }
+        }
+        return nil
     }
 
     /// All episodes ordered (season, then episode, then id) across EVERY season, the list handed to the

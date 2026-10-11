@@ -1049,6 +1049,19 @@ enum StreamRanking {
         return playablePairs(groups).max { (score($0.stream, debridCachedHashes: debridCachedHashes) + pinBonus($0.stream, addon: $0.addon, pin: pin)) < (score($1.stream, debridCachedHashes: debridCachedHashes) + pinBonus($1.stream, addon: $1.addon, pin: pin)) }?.stream
     }
 
+    /// Availability only: exactly the picker eligibility/labels, without scoring, flattening or sorting.
+    static func hasMultipleResolutions(_ groups: [CoreStreamSourceGroup]) -> Bool {
+        var firstLabel: String?
+        for group in groups {
+            for stream in group.streams where stream.playableURL != nil && !stream.isYouTubeTrailer {
+                let label = qualityLabel(stream)
+                if let firstLabel, firstLabel != label { return true }
+                if firstLabel == nil { firstLabel = label }
+            }
+        }
+        return false
+    }
+
     /// The best playable stream for each distinct resolution (4K, 1080p, …), best-first; feeds the
     /// "Watch in 4K" button's resolution dropdown.
     static func resolutionOptions(_ groups: [CoreStreamSourceGroup]) -> [(label: String, stream: CoreStream)] {

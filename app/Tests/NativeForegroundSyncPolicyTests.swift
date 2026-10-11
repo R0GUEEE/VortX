@@ -93,10 +93,58 @@ enum NativeForegroundSyncPolicyTests {
         SettingsDirtyKeys.clearPushed(sent, from: &dirty)
         precondition(dirty["layout"] == 2)
         print("PASS failed transport/newer checkpoint edit remains pending; exact dirty stamp survives older ACK")
+        progressCadence()
 
         try await twoDeviceColdHydration()
         try causalRollbackRepair()
         try productionWiring()
+    }
+
+    /// Playback progress (every few seconds) must not export the whole account each time, yet a
+    /// real edit keeps its immediate cadence and progress still lands within the bounded window.
+    static func progressCadence() {
+        typealias Queue = NativeForegroundSyncPolicy.PushQueue
+        let t0 = Date(timeIntervalSince1970: 50_000)
+        var urgent = Queue()
+        precondition(urgent.nextUploadDelay(now: t0, failureBackoff: nil) == nil)
+        urgent.request(at: t0)
+        precondition(urgent.nextUploadDelay(now: t0, failureBackoff: nil) == Queue.urgentDelay)
+
+        var playing = Queue()
+        playing.request(progressOnly: true, at: t0)
+        precondition(playing.nextUploadDelay(now: t0, failureBackoff: nil) == Queue.progressQuiet)
+        // Continuous reports every 6s keep extending the quiet window but never past the cap.
+        for second in stride(from: 6.0, through: 54.0, by: 6.0) {
+            playing.request(progressOnly: true, at: t0.addingTimeInterval(second))
+        }
+        precondition(playing.nextUploadDelay(now: t0.addingTimeInterval(54), failureBackoff: nil) == Queue.progressMaxWait - 54)
+        // Pause/exit: no further reports, so the quiet window decides.
+        var paused = Queue()
+        paused.request(progressOnly: true, at: t0)
+        paused.request(progressOnly: true, at: t0.addingTimeInterval(6))
+        precondition(paused.nextUploadDelay(now: t0.addingTimeInterval(21), failureBackoff: nil) == 0)
+        // A failed upload's retry delay is never shortened by a progress window.
+        precondition(paused.nextUploadDelay(now: t0.addingTimeInterval(21), failureBackoff: 10) == 10)
+
+        // A real edit during playback uploads at the immediate cadence.
+        playing.request(at: t0.addingTimeInterval(55))
+        precondition(playing.hasUrgentPush && playing.nextUploadDelay(now: t0.addingTimeInterval(55), failureBackoff: nil) == Queue.urgentDelay)
+        let uploaded = playing.generation
+        // Progress accepted while that upload is in flight stays pending on its own window.
+        playing.request(progressOnly: true, at: t0.addingTimeInterval(58))
+        playing.acknowledge(uploaded, accepted: true)
+        precondition(playing.hasPendingPush && !playing.hasUrgentPush)
+        precondition(playing.nextUploadDelay(now: t0.addingTimeInterval(58), failureBackoff: nil) == Queue.progressQuiet)
+        // A failed upload keeps the edit urgent.
+        playing.request(at: t0.addingTimeInterval(59))
+        playing.acknowledge(playing.generation, accepted: false)
+        precondition(playing.hasUrgentPush)
+        playing.acknowledge(playing.generation, accepted: true)
+        precondition(!playing.hasPendingPush && playing.nextUploadDelay(now: t0.addingTimeInterval(60), failureBackoff: nil) == nil)
+
+        precondition(Queue.nextFailureBackoff(after: nil) == 5 && Queue.nextFailureBackoff(after: 20) == 30
+                     && Queue.nextFailureBackoff(after: 30) == 30)
+        print("PASS playback progress coalesces to quiet/max windows; real edits stay immediate; failures keep backoff")
     }
 
     /// This fixture tests manager admission/ACK order and the real public host carrier. The native
@@ -199,7 +247,12 @@ enum NativeForegroundSyncPolicyTests {
         precondition(manager.contains("activeSyncDown?.capture != capture, activeSyncUp?.capture != capture"))
         precondition(manager.contains("self?.drainNativeMutationPush()"))
         precondition(manager.contains("self.ws === task, self.wsCapture == capture, self.isCurrent(capture) else { return }"))
-        precondition(manager.contains("Task { await syncDown(credentialCapture: capture) }"))
+        precondition(manager.contains("Task { await syncDown(credentialCapture: capture, routineReceive: true) }"))
+        precondition(manager.contains("self.nativePushQueue.nextUploadDelay(now: Date(), failureBackoff: failureBackoff)"))
+        precondition(manager.contains("if !progressOnly, pendingSync != nil, pendingSyncAwaitsProgressWindow {"))
+        precondition(bridge.contains("nativeMutationDidCommit(credentialCapture: capture, progressOnly: true)"))
+        let facade = try String(contentsOfFile: "app/SourcesShared/VortxNativeCoreFacade.swift", encoding: .utf8)
+        precondition(facade.contains(#"if type == "report_progress", hostEdits.isEmpty, !websiteChanged, let progressAccepted = self.progressAccepted {"#))
         precondition(manager.contains("if appliedHomeRailLayout { HomeRailPreferences.shared.reloadFromDefaults() }"))
         precondition(bridge.contains("nativeMutationDidCommit(credentialCapture: capture)"))
         precondition(bridge.contains("EpisodePlaybackIdentity.isEpisodicContext(type: meta.type"))

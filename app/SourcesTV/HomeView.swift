@@ -344,7 +344,7 @@ struct HomeView: View {
             historySnapshot: historySnapshot
         )   // "Because you watched <title>" rail; no-ops on an unchanged seed set
         if becauseYouWatched.historyInputReady {
-            topPicks.refresh(profileID: profiles.activeID, cw: localHistory, library: localLibrary)
+            topPicks.refresh(profileID: profiles.activeID, cw: localHistory, library: localLibrary, ownerKey: becauseYouWatchedOwnerKey)
         } else {
             topPicks.clear()
         }

@@ -42,6 +42,7 @@ const declarations = [
   block(read('app/SourcesShared/ContinueWatchingDedupe.swift'), 'enum WatchedMembershipPolicy {'),
 ];
 const predicates = ['private static func metaDetailsNeedsRepublish(', 'private static func metaDetailsStreamsChanged('];
+predicates.push('private static func currentReadyStreamCount(');
 predicates.push(core.includes('private static func streamSetsEqual(') ? 'private static func streamSetsEqual(' : 'private static func streamSetSignature(');
 declarations.push(`@MainActor final class AddonPublicationProbe {
   var metaDetails: CoreMetaDetails?
@@ -55,6 +56,7 @@ declarations.push(`@MainActor final class AddonPublicationProbe {
   ${block(core, 'private func assembleStreamGroups(')}
   func needs(_ next: CoreMetaDetails?) -> Bool { Self.metaDetailsNeedsRepublish(current: metaDetails, next: next) }
   func streamsChange(_ next: CoreMetaDetails?) -> Bool { Self.metaDetailsStreamsChanged(current: metaDetails, next: next) }
+  func readyCount(_ group: [String: Any]) -> Int? { Self.currentReadyStreamCount(group) }
   func groups(streamID: String? = nil) -> [CoreStreamSourceGroup] {
     guard let metaDetails else { return [] }
     return assembleStreamGroups(metaDetails, streamId: streamID)

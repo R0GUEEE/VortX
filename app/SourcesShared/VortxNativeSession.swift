@@ -33,33 +33,150 @@ enum VortxCheckpointDiagnostics {
     }
 }
 
+/// Immutable, owner-only installation identity. Publication never replaces an existing key,
+/// including when two independent app processes race. Legacy access is migration-only.
+final class VortxNativeInstallationKeyFileStore: @unchecked Sendable {
+    enum Boundary { case beforePublish, afterPublish }
+    private let directory: URL
+    private let legacyRead: () throws -> Data?
+    private let randomBytes: () throws -> Data
+    private let boundary: (Boundary) throws -> Void
+    private let lock = NSLock()
+    private var cached: Data?
+    private let filename = "native-installation-v2.key"
+    init(directory: URL, legacyRead: @escaping () throws -> Data?, randomBytes: @escaping () throws -> Data,
+         boundary: @escaping (Boundary) throws -> Void = { _ in }) {
+        self.directory = directory; self.legacyRead = legacyRead; self.randomBytes = randomBytes; self.boundary = boundary
+    }
+    private func openDirectory() throws -> Int32 {
+        let parent = Darwin.open(directory.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard parent >= 0 else { throw VortxNativeError.unavailable }
+        defer { Darwin.close(parent) }
+        let name = directory.lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else { throw VortxNativeError.unavailable }
+        guard Darwin.mkdirat(parent, name, mode_t(0o700)) == 0 || errno == EEXIST else { throw VortxNativeError.unavailable }
+        let fd = Darwin.openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else { throw VortxNativeError.unavailable }
+        var info = stat()
+        guard Darwin.fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFDIR, info.st_uid == geteuid(),
+              Darwin.fchmod(fd, mode_t(0o700)) == 0, Darwin.fstat(fd, &info) == 0,
+              info.st_mode & mode_t(0o7777) == mode_t(0o700), Darwin.fsync(parent) == 0 else {
+            Darwin.close(fd); throw VortxNativeError.unavailable
+        }
+        return fd
+    }
+    private func readFinal(_ directoryFD: Int32) throws -> Data? {
+        let fd = Darwin.openat(directoryFD, filename, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        if fd < 0 {
+            if errno == ENOENT { return nil }
+            throw VortxNativeError.unavailable
+        }
+        var closed = false
+        defer { if !closed { Darwin.close(fd) } }
+        var info = stat()
+        guard Darwin.fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == geteuid(),
+              info.st_mode & mode_t(0o7777) == mode_t(0o600), info.st_size == 32 else { throw VortxNativeError.unavailable }
+        var bytes = Data(count: 33), count = 0
+        try bytes.withUnsafeMutableBytes { buffer in
+            while count < 33 {
+                let read = Darwin.read(fd, buffer.baseAddress!.advanced(by: count), 33 - count)
+                if read < 0 && errno == EINTR { continue }
+                guard read >= 0 else { throw VortxNativeError.unavailable }
+                if read == 0 { break }
+                count += read
+            }
+        }
+        guard count == 32 else { throw VortxNativeError.unavailable }
+        let result = Darwin.close(fd); closed = true
+        guard result == 0 else { throw VortxNativeError.unavailable }
+        return Data(bytes.prefix(count))
+    }
+    func loadOrCreateBytes() throws -> Data {
+        lock.lock(); defer { lock.unlock() }
+        if let cached { return cached }
+        let directoryFD = try openDirectory()
+        defer { Darwin.close(directoryFD) }
+        if let existing = try readFinal(directoryFD) {
+            // Also heals a prior publication whose directory sync was interrupted.
+            guard Darwin.fsync(directoryFD) == 0 else { throw VortxNativeError.unavailable }
+            cached = existing; return existing
+        }
+        let legacy = try legacyRead(), candidate = try legacy ?? randomBytes()
+        guard candidate.count == 32 else { throw VortxNativeError.unavailable }
+        let stage = ".native-installation-\(UUID().uuidString).stage"
+        let fd = Darwin.openat(directoryFD, stage, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
+        guard fd >= 0 else { throw VortxNativeError.unavailable }
+        var closed = false
+        defer { if !closed { Darwin.close(fd) }; Darwin.unlinkat(directoryFD, stage, 0) }
+        guard Darwin.fchmod(fd, mode_t(0o600)) == 0 else { throw VortxNativeError.unavailable }
+        try candidate.withUnsafeBytes { buffer in
+            var count = 0
+            while count < candidate.count {
+                let written = Darwin.write(fd, buffer.baseAddress!.advanced(by: count), candidate.count - count)
+                if written < 0 && errno == EINTR { continue }
+                guard written > 0 else { throw VortxNativeError.unavailable }
+                count += written
+            }
+        }
+        guard Darwin.fsync(fd) == 0 else { throw VortxNativeError.unavailable }
+        let closeResult = Darwin.close(fd); closed = true
+        guard closeResult == 0 else { throw VortxNativeError.unavailable }
+        try boundary(.beforePublish)
+        let linked = Darwin.linkat(directoryFD, stage, directoryFD, filename, 0)
+        let collision = linked != 0 && errno == EEXIST
+        guard linked == 0 || collision else { throw VortxNativeError.unavailable }
+        try boundary(.afterPublish)
+        guard Darwin.unlinkat(directoryFD, stage, 0) == 0, Darwin.fsync(directoryFD) == 0,
+              let winner = try readFinal(directoryFD),
+              (collision && legacy == nil) || winner == candidate else { throw VortxNativeError.unavailable }
+        cached = winner; return winner
+    }
+}
+// End immutable installation-key file store (mechanically extracted by its regression gate).
+
 /// This key authenticates only the local checkpoint inventory. Account ciphertext remains readable
 /// with its independent account key after device-key loss; no installation identity is exported.
 enum VortxNativeInstallationKey {
     private static let lock = NSLock()
-    static func loadOrCreate() throws -> SymmetricKey {
-        lock.lock(); defer { lock.unlock() }
+    private static func readLegacy() throws -> Data? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "tv.vortx.native-installation", kSecAttrAccount as String: "checkpoint-inventory-v2",
             kSecAttrSynchronizable as String: false]
-        func read() throws -> Data? {
-            var request = query; request[kSecReturnData as String] = true; request[kSecMatchLimit as String] = kSecMatchLimitOne
-            var result: CFTypeRef?
-            let status = SecItemCopyMatching(request as CFDictionary, &result)
-            if status == errSecItemNotFound { return nil }
-            guard status == errSecSuccess, let bytes = result as? Data, bytes.count == 32 else { throw VortxNativeError.unavailable }
-            return bytes
-        }
-        if let existing = try read() { return SymmetricKey(data: existing) }
+        var request = query; request[kSecReturnData as String] = true; request[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(request as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let bytes = result as? Data, bytes.count == 32 else { throw VortxNativeError.unavailable }
+        return bytes
+    }
+    private static func randomBytes() throws -> Data {
         var bytes = Data(count: 32)
         let randomStatus = bytes.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
         guard randomStatus == errSecSuccess else { throw VortxNativeError.unavailable }
+        return bytes
+    }
+    #if os(macOS)
+    private static let fileStore = VortxNativeInstallationKeyFileStore(
+        directory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("VortX", isDirectory: true),
+        legacyRead: { try readLegacy() }, randomBytes: { try randomBytes() })
+    #endif
+    static func loadOrCreate() throws -> SymmetricKey {
+        #if os(macOS)
+        return SymmetricKey(data: try fileStore.loadOrCreateBytes())
+        #else
+        lock.lock(); defer { lock.unlock() }
+        if let existing = try readLegacy() { return SymmetricKey(data: existing) }
+        let bytes = try randomBytes()
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "tv.vortx.native-installation", kSecAttrAccount as String: "checkpoint-inventory-v2",
+            kSecAttrSynchronizable as String: false]
         var item = query; item[kSecValueData as String] = bytes
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(item as CFDictionary, nil)
-        guard status == errSecSuccess || status == errSecDuplicateItem, let confirmed = try read(),
+        guard status == errSecSuccess || status == errSecDuplicateItem, let confirmed = try readLegacy(),
               status == errSecDuplicateItem || confirmed == bytes else { throw VortxNativeError.unavailable }
         return SymmetricKey(data: confirmed)
+        #endif
     }
 }
 
@@ -545,6 +662,104 @@ private final class VortxScopeWriter: @unchecked Sendable {
 /// An explicitly constructed, account-owned native session, selected only by the compile-time gate,
 /// never a UI preference. All state mutation is copy/apply/checkpoint/swap: a failed durable write leaves the
 /// published runtime unchanged. Actor isolation fences logout/profile switches across async loads.
+/// Privacy-safe outline of a held legacy delta, for diagnostics: which material buckets changed for
+/// which profile slot (owner, p1, p2…), entry counts, and the schema field names that differ.
+/// Never titles, names, identifiers or values, so a device log can say what was held.
+enum VortxLegacyDeltaSummary {
+    private static let perProfile = ["addons", "libraries", "watches", "identityLinks", "ownAccountSources"]
+    /// Same row identity the kernel reconciles on (watch: videoId, else metaId).
+    private static let identityKeys = ["videoId", "metaId", "_id", "id", "key", "transportUrl"]
+    private static let maxLength = 600
+
+    static func describe(base: VortxJSON, next: VortxJSON, ownerProfileID: String) -> String {
+        var parts: [String] = []
+        if let before = number(base["rosterModifiedSeconds"]), let after = number(next["rosterModifiedSeconds"]), before != after {
+            parts.append("rosterClock=" + (after < before ? "older" : "newer"))
+        }
+        if let change = diff(base["roster"], next["roster"]) { parts.append("roster(\(change))") }
+        if let change = diff(base["deletedProfileIds"], next["deletedProfileIds"]) { parts.append("deletedProfiles(\(change))") }
+        let slots = slotLabels(base: base, next: next, owner: ownerProfileID)
+        for field in perProfile {
+            let lhs = object(base[field]), rhs = object(next[field])
+            for id in Set(lhs.keys).union(rhs.keys).sorted(by: { (slots[$0] ?? "px") < (slots[$1] ?? "px") }) {
+                let slot = slots[id] ?? "px"
+                if isObject(lhs[id]) || isObject(rhs[id]) {
+                    let before = object(lhs[id]), after = object(rhs[id])
+                    for sub in Set(before.keys).union(after.keys).sorted() {
+                        if let change = diff(before[sub], after[sub]) { parts.append("\(field).\(sub):\(slot)(\(change))") }
+                    }
+                } else if let change = diff(lhs[id], rhs[id]) {
+                    parts.append("\(field):\(slot)(\(change))")
+                }
+            }
+        }
+        let text = parts.isEmpty ? "none" : parts.joined(separator: ",")
+        return text.count <= maxLength ? text : String(text.prefix(maxLength)) + "..."
+    }
+
+    /// `+added/-removed/~changed:fields`, `reordered`, or `~` for a changed scalar/object.
+    private static func diff(_ lhs: VortxJSON?, _ rhs: VortxJSON?) -> String? {
+        guard lhs != rhs else { return nil }
+        guard isArrayOrAbsent(lhs), isArrayOrAbsent(rhs) else { return "~" }
+        let before = keyed(lhs?.array ?? []), after = keyed(rhs?.array ?? [])
+        let added = after.keys.filter { before[$0] == nil }.count
+        let removed = before.keys.filter { after[$0] == nil }.count
+        var changed = 0, fields = Set<String>()
+        for (key, row) in after {
+            guard let old = before[key], old != row else { continue }
+            changed += 1
+            let oldFields = object(old), newFields = object(row)
+            fields.formUnion(Set(oldFields.keys).union(newFields.keys).filter { oldFields[$0] != newFields[$0] })
+        }
+        var out: [String] = []
+        if added > 0 { out.append("+\(added)") }
+        if removed > 0 { out.append("-\(removed)") }
+        if changed > 0 { out.append("~\(changed)" + (fields.isEmpty ? "" : ":" + fields.sorted().prefix(6).joined(separator: "|"))) }
+        return out.isEmpty ? "reordered" : out.joined(separator: "/")
+    }
+    private static func keyed(_ rows: [VortxJSON]) -> [String: VortxJSON] {
+        var result: [String: VortxJSON] = [:]
+        for row in rows { result[identity(row)] = row }
+        return result
+    }
+    private static func identity(_ row: VortxJSON) -> String {
+        for key in identityKeys { if case .string(let id)? = row[key] { return key + ":" + id } }
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        return (try? encoder.encode(row)).map { String(decoding: $0, as: UTF8.self) } ?? "?"
+    }
+    private static func slotLabels(base: VortxJSON, next: VortxJSON, owner: String) -> [String: String] {
+        var labels = [owner: "owner"], index = 0
+        for row in (base["roster"]?.array ?? []) + (next["roster"]?.array ?? []) {
+            guard case .string(let id)? = row["id"], labels[id] == nil else { continue }
+            index += 1
+            labels[id] = "p\(index)"
+        }
+        return labels
+    }
+    private static func object(_ value: VortxJSON?) -> [String: VortxJSON] {
+        if case .object(let fields)? = value { return fields }
+        return [:]
+    }
+    private static func isObject(_ value: VortxJSON?) -> Bool {
+        if case .object? = value { return true }
+        return false
+    }
+    private static func isArrayOrAbsent(_ value: VortxJSON?) -> Bool {
+        switch value {
+        case nil, .null?, .array?: return true
+        default: return false
+        }
+    }
+    private static func number(_ value: VortxJSON?) -> Double? {
+        switch value {
+        case .integer(let v)?: return Double(v)
+        case .unsigned(let v)?: return Double(v)
+        case .number(let v)?: return v
+        default: return nil
+        }
+    }
+}
+
 actor VortxNativeSession {
     enum CatalogScreen: String, Sendable { case board, discover, search }
     let scope: VortxAccountScope
@@ -555,6 +770,10 @@ actor VortxNativeSession {
     private var hostPreferences: VortxNativeHostPreferences
     private let legacyBaseline: Data?
     private let legacyProfileEdits: VortxJSON?
+    /// Outcome of the latest legacy carrier offer (first adoption or dispatch); nil before one.
+    private(set) var legacyReconciliation: LegacyReconciliation?
+    /// Host diagnostics sink. Only outcome transitions are reported, never material bytes.
+    private let diagnostics: (@Sendable (String) -> Void)?
     private var closed = false
     private var persistenceFailed = false
     private var epoch = UUID()
@@ -573,8 +792,9 @@ actor VortxNativeSession {
          allowNewAccount: Bool = false, legacy: VortxLegacyImport? = nil,
          initialActions: [String] = [], hostActor: String = UUID().uuidString.lowercased(),
          sourceAuthority: (any VortxMutationAuthority)? = nil, authenticatedSourceArchive: Data? = nil,
-         initialLegacyMaterial: Data? = nil) throws {
+         initialLegacyMaterial: Data? = nil, diagnostics: (@Sendable (String) -> Void)? = nil) throws {
         try scope.validate()
+        self.diagnostics = diagnostics
         guard legacy == nil || legacy?.scope == scope else { throw VortxNativeError.invalidSnapshot }
         self.scope = scope; self.abi = abi; self.store = store; self.transport = transport
         legacyBaseline = try store.readLegacyMaterial(scope: scope)
@@ -605,7 +825,11 @@ actor VortxNativeSession {
             try Self.bind(runtime, scope: scope)
             for action in initialActions { try Self.apply(runtime, action: action) }
             if let initialLegacyMaterial {
-                try Self.validateLegacyReceipt(runtime, scope: scope, material: initialLegacyMaterial, baselineMaterial: legacyBaseline)
+                let outcome = try Self.validateLegacyReceipt(runtime, scope: scope, material: initialLegacyMaterial, baselineMaterial: legacyBaseline, abi: abi)
+                legacyReconciliation = outcome
+                if case .held(let reason, let delta) = outcome {
+                    diagnostics?("legacy_reconcile result=held stage=adoption reason=\(reason) delta=\(delta)")
+                }
             }
             let bound = try runtime.stateJSON()
             _ = try scope.validateSnapshot(bound)
@@ -744,24 +968,44 @@ actor VortxNativeSession {
         }
         return try scope.validateSnapshot(candidate.stateJSON())["nativeSync"]
     }
+    enum LegacyCompatibilityStage: String { case scope, hydration, binding, nativeMerge = "native_merge", receipt, replay, reconciliation }
+    /// The kernel's answer when offered the current legacy cloud carriers.
+    enum LegacyReconciliation: Equatable, Sendable {
+        case accepted
+        /// The kernel rejected this legacy delta. Its reconcile is atomic, so nothing from it was
+        /// imported; the immutable migration bootstrap is unchanged and the untouched legacy
+        /// carriers are offered again on the next sync. Native state keeps mounting and syncing.
+        /// `delta` is a `VortxLegacyDeltaSummary` outline of what was held.
+        case held(reason: String, delta: String)
+    }
+    @discardableResult
     nonisolated static func validateLegacyCompatibility(scope: VortxAccountScope, ownerName: String,
                                                         snapshot: String?, nativeSync: VortxJSON?, material: Data,
-                                                        abi: any VortxRuntimeABI, baselineMaterial: Data? = nil) throws {
+                                                        abi: any VortxRuntimeABI, baselineMaterial: Data? = nil,
+                                                        onStage: (LegacyCompatibilityStage) -> Void = { _ in }) throws -> LegacyReconciliation {
+        onStage(.scope)
         try scope.validate()
         let candidate: VortxNativeRuntime
         if let snapshot {
+            onStage(.hydration)
             _ = try scope.validateSnapshot(snapshot)
             candidate = try VortxNativeRuntime(abi: abi, snapshot: snapshot)
         } else { candidate = try VortxNativeRuntime(abi: abi, ownerID: scope.ownerProfileID, ownerName: ownerName) }
         defer { candidate.close() }
+        onStage(.binding)
         try bind(candidate, scope: scope)
         if let nativeSync {
+            onStage(.nativeMerge)
             let action: VortxJSON = .object(["type": .string("merge_native_sync"), "document": nativeSync])
             try apply(candidate, action: String(decoding: JSONEncoder().encode(action), as: UTF8.self))
         }
-        try validateLegacyReceipt(candidate, scope: scope, material: material, baselineMaterial: baselineMaterial)
+        return try validateLegacyReceipt(candidate, scope: scope, material: material, baselineMaterial: baselineMaterial, abi: abi, onStage: onStage)
     }
-    private static func validateLegacyReceipt(_ candidate: VortxNativeRuntime, scope: VortxAccountScope, material: Data, baselineMaterial: Data?) throws {
+    @discardableResult
+    private static func validateLegacyReceipt(_ candidate: VortxNativeRuntime, scope: VortxAccountScope, material: Data, baselineMaterial: Data?,
+                                             abi: any VortxRuntimeABI,
+                                             onStage: (LegacyCompatibilityStage) -> Void = { _ in }) throws -> LegacyReconciliation {
+        onStage(.receipt)
         let state = try scope.validateSnapshot(candidate.stateJSON())
         let nativeSchema = legacyImportSchema(state["nativeSync"]?["legacyImport"]?["schemaVersion"])
         let materialValue = try strictJSONObject(material)
@@ -771,8 +1015,9 @@ actor VortxNativeSession {
         let replay: VortxJSON = .object(["type": .string("import_legacy_sync"), "scope": .string(scope.account),
                                        "ownerProfileId": .string(scope.ownerProfileID),
                                        "material": materialValue])
+        onStage(.replay)
         let replayResult = try candidate.dispatch(String(decoding: JSONEncoder().encode(replay), as: UTF8.self), now: UInt64(Date().timeIntervalSince1970))
-        if try JSONDecoder().decode(VortxJSON.self, from: Data(replayResult.utf8))["ok"] == .bool(true) { return }
+        if try JSONDecoder().decode(VortxJSON.self, from: Data(replayResult.utf8))["ok"] == .bool(true) { return .accepted }
         // Only the private kernel decides which old-peer causal changes are supported. Older
         // artifacts reject this additive action and remain closed; there is no host reducer.
         var reconciliation: [String: VortxJSON] = ["type": .string("reconcile_legacy_sync"), "scope": .string(scope.account),
@@ -780,7 +1025,39 @@ actor VortxNativeSession {
         if state["nativeSync"]?["legacyImport"]?["baseline"] == nil, let baselineMaterial {
             reconciliation["baselineMaterial"] = try strictJSONObject(baselineMaterial)
         }
-        try apply(candidate, action: String(decoding: JSONEncoder().encode(VortxJSON.object(reconciliation)), as: UTF8.self))
+        onStage(.reconciliation)
+        let result = try candidate.dispatch(String(decoding: JSONEncoder().encode(VortxJSON.object(reconciliation)), as: UTF8.self),
+                                            now: UInt64(Date().timeIntervalSince1970))
+        let response = try JSONDecoder().decode(VortxJSON.self, from: Data(result.utf8))
+        if response["ok"] == .bool(true) { return .accepted }
+        // A rejected legacy delta must not take native restore, export and receive down with it.
+        let base = state["nativeSync"]?["legacyImport"]?["baseline"] ?? baselineMaterial.flatMap { canonicalLegacyMaterial($0, scope: scope, abi: abi) }
+        let next = canonicalLegacyMaterial(material, scope: scope, abi: abi)
+        let delta: String
+        if let base, let next { delta = VortxLegacyDeltaSummary.describe(base: base, next: next, ownerProfileID: scope.ownerProfileID) }
+        else { delta = base == nil ? "baseline_unavailable" : "canonical_unavailable" }
+        return .held(reason: legacyRejectionCode(response["error"]), delta: delta)
+    }
+    /// The kernel's canonical form of a legacy material (what it stores as a receipt baseline), via a
+    /// detached scratch import, so a held delta is outlined like-for-like rather than raw vs normalized.
+    private static func canonicalLegacyMaterial(_ material: Data, scope: VortxAccountScope, abi: any VortxRuntimeABI) -> VortxJSON? {
+        (try? detachedLegacySync(scope: scope, ownerName: "Owner", material: material, abi: abi))?["legacyImport"]?["baseline"]
+    }
+    /// The kernel's reconcile rejections are fixed lowercase phrases. Anything else (for example
+    /// a serde message quoting material bytes) is reduced to a constant so no account data is logged.
+    nonisolated static func legacyRejectionCode(_ error: VortxJSON?) -> String {
+        guard case .string(let text) = error, text.count <= 120,
+              text.range(of: "^[a-z][a-z0-9 /_-]*$", options: .regularExpression) != nil else { return "unclassified" }
+        return text.replacingOccurrences(of: " ", with: "_")
+    }
+    private func recordLegacyReconciliation(_ outcome: LegacyReconciliation) {
+        defer { legacyReconciliation = outcome }
+        guard outcome != legacyReconciliation else { return }
+        switch outcome {
+        case .held(let reason, let delta): diagnostics?("legacy_reconcile result=held stage=sync reason=\(reason) delta=\(delta)")
+        case .accepted where legacyReconciliation != nil: diagnostics?("legacy_reconcile result=accepted stage=sync")
+        case .accepted: break
+        }
     }
     private static func strictJSONObject(_ data: Data) throws -> VortxJSON {
         let object = try VortxProfileOverlayWitness.decodeObject(json: data)
@@ -909,7 +1186,9 @@ actor VortxNativeSession {
             guard value["ok"] == .bool(true) else { throw VortxNativeError.invalidResponse }
             results.append(result)
         }
-        if let legacyMaterial { try Self.validateLegacyReceipt(candidate, scope: scope, material: legacyMaterial, baselineMaterial: legacyBaseline) }
+        if let legacyMaterial {
+            recordLegacyReconciliation(try Self.validateLegacyReceipt(candidate, scope: scope, material: legacyMaterial, baselineMaterial: legacyBaseline, abi: abi))
+        }
         var state = try scope.validateSnapshot(candidate.stateJSON())
         try Self.validateAuthenticatedSources(authenticatedSourceArchive, state: state)
         var candidateHost = hostPreferences

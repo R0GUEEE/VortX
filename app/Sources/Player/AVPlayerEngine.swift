@@ -331,6 +331,9 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         let claimsPublishedTailRetry: Bool
     }
     private var deferredEventOwnedRecovery: DeferredEventOwnedRecovery?
+    /// A growing playlist left static by a lead-parked producer while paused; AVFoundation expires it
+    /// (CoreMedia -12888) even though the mount is healthy. Shared by the deferral and the Play resume.
+    private static let pausedExpiryRecoveryReason = "paused failed-to-end on healthy published tail"
     /// A CoreMedia consumer failure or a growing-playlist item-end owns one short event-local corroboration
     /// task. Its item/token/generation/mount fences make cancellation and a later source switch harmless.
     private var eventOwnedRecoveryTask: Task<Void, Never>?
@@ -2191,6 +2194,17 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// Wait through more than one segment-publication cadence. A new segment admits a same-mount item
     /// immediately; otherwise a byte-budget-parked producer may still use a rich existing HLS window at the
     /// bounded deadline. A genuinely starved or input-opening mount never spends a destructive replacement.
+    private func pausedExpiryAdmitsImmediateReplacement(_ item: AVPlayerItem) -> Bool {
+        guard let progress = remuxMountProgress, progress.initPublished, !progress.failed else { return false }
+        let bounds = mountedPlayerWindowBounds
+        let playerSeconds = item.currentTime().seconds
+        return AVPlayerEventRecoveryPolicy.admitsFreshItem(
+            producerAdvanced: false,
+            inputOpenInFlight: progress.inputOpenInFlight,
+            publishedAheadSeconds: playerSeconds.isFinite ? max(0, bounds.producedEdge - playerSeconds) : 0,
+            publishedWindowSeconds: bounds.servedStart.map { max(0, bounds.producedEdge - $0) } ?? 0)
+    }
+
     private func scheduleEventOwnedRecovery(
         receipt: EventOwnedRecoveryReceipt,
         eventItem: AVPlayerItem,
@@ -2467,9 +2481,20 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
                 deliverTerminal(.error(reason), loadToken: loadToken, generation: itemGeneration)
                 logTransport("play -> deferred event became producer failure")
             case .recoverablePublishedTail:
-                if deferred.receipt.loadToken == loadToken,
-                   deferred.receipt.generation == itemGeneration,
-                   deferred.receipt.mountIdentity == playbackMountIdentity,
+                let ownsDeferred = deferred.receipt.loadToken == loadToken
+                    && deferred.receipt.generation == itemGeneration
+                    && deferred.receipt.mountIdentity == playbackMountIdentity
+                // The expired playlist only advances once the playhead does, so the observation window
+                // below can never see progress here; it would only delay a resume the window can serve.
+                if ownsDeferred, deferred.reason == Self.pausedExpiryRecoveryReason,
+                   pausedExpiryAdmitsImmediateReplacement(currentItem),
+                   retryFreshItemOnHealthyMount(reason: deferred.reason,
+                                                claimsPublishedTailRetry: deferred.claimsPublishedTailRetry) {
+                    logTransport("play -> replaced paused-expired item without observation wait")
+                    emit(MPVProperty.pause, false)
+                    return
+                }
+                if ownsDeferred,
                    scheduleEventOwnedRecovery(
                     receipt: deferred.receipt,
                     eventItem: currentItem,
@@ -4941,7 +4966,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
                 if let receipt = makeEventOwnedRecoveryReceipt(for: failedItem, loadToken: loadToken) {
                     deferredEventOwnedRecovery = DeferredEventOwnedRecovery(
                         receipt: receipt, terminal: .error(message),
-                        reason: "paused failed-to-end on healthy published tail",
+                        reason: Self.pausedExpiryRecoveryReason,
                         claimsPublishedTailRetry: true)
                     let ns = err as NSError?
                     let underlying = ns?.userInfo[NSUnderlyingErrorKey] as? NSError

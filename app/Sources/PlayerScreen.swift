@@ -480,25 +480,32 @@ private struct PlayerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
             .shadow(color: .black.opacity(shadowOpacity), radius: shadowRadius, x: 0, y: shadowY)
     }
 
-    /// Keep the material inside the exact disc/pill silhouette. A fixed neutral veil protects white
-    /// glyphs over bright video; only a selected setting adds a small accent cue over that glass.
+    /// Profile-tinted glass inside the exact disc/pill silhouette. The accent sits UNDER a dark veil:
+    /// a tint on top lifts light accents (Mono, Gold) over a white frame below 4.5:1 for white glyphs,
+    /// while tint-then-veil keeps every accent readable and reads as a deep shade of the profile colour.
+    /// Accessibility keeps a dark, fully opaque readable face.
     @ViewBuilder private var surface: some View {
         ZStack {
             if reduceTransparency || contrast == .increased || !isEnabled {
                 shape.fill(neutral)
+                if isEnabled { shape.fill(Theme.Palette.accent.opacity(active ? 0.22 : 0.12)) }
             } else {
-                shape.fill(.ultraThinMaterial)
-                    .environment(\.colorScheme, .dark)
-                shape.fill(neutral.opacity(prominent ? 0.56 : 0.60))
-            }
-            if active && isEnabled {
-                shape.fill(Theme.Palette.accent.opacity(0.16))
+                if #available(iOS 26.0, macOS 26.0, *) {
+                    shape.fill(.clear)
+                        .glassEffect(.regular.interactive(), in: shape)
+                        .environment(\.colorScheme, .dark)
+                } else {
+                    shape.fill(.ultraThinMaterial)
+                        .environment(\.colorScheme, .dark)
+                }
+                shape.fill(Theme.Palette.accent.opacity(active ? 0.56 : 0.38))
+                shape.fill(neutral.opacity(0.58))
             }
         }
         .clipShape(shape)
     }
 
-    // Player chrome floats over arbitrary video, so it must not inherit profile-tinted app surfaces.
+    // Dark face: opaque for accessibility, a 0.58 veil over the profile tint for normal video chrome.
     private var neutral: Color { Color(.sRGB, white: 0.08, opacity: 1) }
 
     private var foreground: Color {
@@ -519,7 +526,7 @@ private struct PlayerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
 }
 
 private extension View {
-    /// Player-only neutral glass. Callers still decide the visual size/tap target before the modifier.
+    /// Player-only profile glass. Callers still decide the visual size/tap target before the modifier.
     func playerControlSurface<S: InsettableShape>(in shape: S,
                                                    prominent: Bool = false,
                                                    active: Bool = false) -> some View {
@@ -569,6 +576,26 @@ private struct PlayerControlButton: View {
         // label. Its own Capsule/RoundedRectangle is the complete visual and hit surface.
         .buttonStyle(.plain)
     }
+}
+
+private enum PlayerSourceAvailability {
+    static func hasAlternates(_ groups: [CoreStreamSourceGroup], playable: (CoreStream) -> Bool) -> Bool {
+        var foundOne = false
+        for group in groups {
+            for stream in group.streams where playable(stream) {
+                if foundOne { return true }
+                foundOne = true
+            }
+        }
+        return false
+    }
+}
+
+private struct PlayerChapterInventoryOwner: Equatable {
+    let engine: ObjectIdentifier
+    let loadToken: PlayerLoadToken
+    let itemGeneration: UInt64?
+    let sourceGeneration: Int
 }
 
 private struct PlayerTransportToolbar: View {
@@ -773,27 +800,187 @@ private enum PlayerVideoSizeGesturePolicy {
 
 /// An exclusive recognizer prevents a completed pinch from also toggling controls. It lives below
 /// the chrome, so slider drags and control taps retain their own independent targets.
-private struct PlayerVideoInteractionSurface: View {
+private struct PlayerVideoTouchPolicy<TouchID: Hashable> {
+    private(set) var cycle: UInt64 = 0
+    private var activeTouches: Set<TouchID> = []
+    private var multiTouchOwned = false
+    private var tapDelivered = false
+    private var pinchDelivered = false
+
+    mutating func began(_ touches: Set<TouchID>) -> UInt64 {
+        guard !touches.isEmpty else { return cycle }
+        if activeTouches.isEmpty {
+            cycle &+= 1
+            multiTouchOwned = false
+            tapDelivered = false
+            pinchDelivered = false
+        }
+        activeTouches.formUnion(touches)
+        if activeTouches.count > 1 { multiTouchOwned = true }
+        return cycle
+    }
+
+    mutating func finished(_ touches: Set<TouchID>) {
+        activeTouches.subtract(touches)
+        // Keep ownership through the ended/cancelled delivery order. Only a NEW touch
+        // cycle may reset it; a failed pinch must not strand the next ordinary tap.
+    }
+
+    mutating func claimPinch() -> UInt64? {
+        guard cycle != 0 else { return nil }
+        multiTouchOwned = true
+        return cycle
+    }
+
+    mutating func consumePinch(_ expectedCycle: UInt64) -> Bool {
+        guard expectedCycle == cycle, multiTouchOwned, !pinchDelivered else { return false }
+        pinchDelivered = true
+        return true
+    }
+
+    mutating func consumeTap(_ expectedCycle: UInt64) -> Bool {
+        guard cycle != 0, expectedCycle == cycle, !multiTouchOwned, !tapDelivered else { return false }
+        tapDelivered = true
+        return true
+    }
+
+    mutating func invalidate() {
+        cycle &+= 1
+        activeTouches.removeAll()
+        multiTouchOwned = true
+        tapDelivered = true
+        pinchDelivered = true
+    }
+}
+
+#if os(iOS)
+@MainActor private struct PlayerVideoInteractionSurface: UIViewRepresentable {
     let locked: Bool
     let pinchEnabled: Bool
     let onTap: () -> Void
     let onPinch: (CGFloat) -> Void
 
-    var body: some View {
-        Color.clear.contentShape(Rectangle())
-            .gesture(MagnificationGesture(minimumScaleDelta: 0.02)
-                .exclusively(before: TapGesture())
-                .onEnded { result in
-                    switch result {
-                    case .first(let scale): if pinchEnabled && !locked { onPinch(scale) }
-                    case .second: onTap()
-                    }
-                })
-            .ignoresSafeArea()
-            .accessibilityLabel(locked ? "Unlock player controls" : "Show player controls")
-            .accessibilityAction { onTap() }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> TouchView {
+        let view = TouchView()
+        view.backgroundColor = .clear
+        view.isOpaque = false
+        view.isMultipleTouchEnabled = true
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:)))
+        tap.numberOfTapsRequired = 1
+        tap.numberOfTouchesRequired = 1
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.pinched(_:)))
+        for recognizer in [tap as UIGestureRecognizer, pinch] {
+            recognizer.delegate = context.coordinator
+            recognizer.cancelsTouchesInView = false
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = false
+            view.addGestureRecognizer(recognizer)
+        }
+        context.coordinator.tap = tap
+        context.coordinator.pinch = pinch
+        view.began = { [weak coordinator = context.coordinator] touches in
+            guard let coordinator else { return }
+            coordinator.tapCycle = coordinator.ownership.began(touches)
+        }
+        view.finished = { [weak coordinator = context.coordinator] touches in
+            coordinator?.ownership.finished(touches)
+        }
+        view.activate = { [weak coordinator = context.coordinator] in
+            guard let coordinator, coordinator.attached else { return false }
+            coordinator.onTap()
+            return true
+        }
+        updateUIView(view, context: context)
+        return view
+    }
+
+    func updateUIView(_ view: TouchView, context: Context) {
+        // Refresh callbacks BEFORE toggling recognition, since disabling a live pinch cancels it.
+        let coordinator = context.coordinator
+        coordinator.onTap = onTap
+        coordinator.onPinch = onPinch
+        coordinator.locked = locked
+        coordinator.pinchEnabled = pinchEnabled
+        coordinator.attached = true
+        coordinator.pinch?.isEnabled = pinchEnabled && !locked
+        view.isAccessibilityElement = true
+        view.accessibilityTraits = .button
+        view.accessibilityLabel = locked ? "Unlock player controls" : "Show player controls"
+    }
+
+    static func dismantleUIView(_ view: TouchView, coordinator: Coordinator) {
+        coordinator.attached = false
+        coordinator.ownership.invalidate()
+        coordinator.pinchCycle = nil
+        coordinator.onTap = {}
+        coordinator.onPinch = { _ in }
+        view.began = nil
+        view.finished = nil
+        view.activate = nil
+    }
+
+    @MainActor final class TouchView: UIView {
+        var began: ((Set<ObjectIdentifier>) -> Void)?
+        var finished: ((Set<ObjectIdentifier>) -> Void)?
+        var activate: (() -> Bool)?
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            began?(Set(touches.map(ObjectIdentifier.init)))
+        }
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            finished?(Set(touches.map(ObjectIdentifier.init)))
+        }
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            finished?(Set(touches.map(ObjectIdentifier.init)))
+        }
+        override func accessibilityActivate() -> Bool { activate?() ?? false }
+    }
+
+    @MainActor final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var ownership = PlayerVideoTouchPolicy<ObjectIdentifier>()
+        var tapCycle: UInt64 = 0
+        var pinchCycle: UInt64?
+        weak var tap: UITapGestureRecognizer?
+        weak var pinch: UIPinchGestureRecognizer?
+        var attached = false
+        var locked = false
+        var pinchEnabled = false
+        var onTap: () -> Void = {}
+        var onPinch: (CGFloat) -> Void = { _ in }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            (gestureRecognizer === tap && other === pinch) || (gestureRecognizer === pinch && other === tap)
+        }
+
+        @objc func tapped(_ recognizer: UITapGestureRecognizer) {
+            guard attached, recognizer.state == .ended, ownership.consumeTap(tapCycle) else { return }
+            onTap() // The current caller chooses toggle versus locked unlock-chip behavior.
+        }
+
+        @objc func pinched(_ recognizer: UIPinchGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                pinchCycle = ownership.claimPinch()
+            case .changed:
+                break // Ownership remains with this cycle, without repeated engine actions.
+            case .ended:
+                defer { pinchCycle = nil }
+                guard attached, pinchEnabled, !locked, let pinchCycle,
+                      ownership.consumePinch(pinchCycle) else { return }
+                onPinch(recognizer.scale) // Existing size policy still validates scale/current mode.
+            case .cancelled, .failed:
+                pinchCycle = nil // Do not reset touch-cycle ownership here.
+            default:
+                break
+            }
+        }
     }
 }
+
+#endif
 
 private struct PlayerSizeModeFeedback: View {
     let title: String
@@ -812,6 +999,7 @@ private struct PlayerSizeModeFeedback: View {
             }
     }
 }
+
 
 private struct PlayerTouchIconButton: View {
     let icon: String
@@ -1895,6 +2083,8 @@ struct PlayerScreen: View {
     // Skip intro / outro (chapter-derived + crowd-sourced timings), shown as a pill while controls hide.
     @State private var skipSegments: [SkipSegment] = []
     @State private var chapterFractions: [Double] = []   // chapter boundary positions (0...1) for scrubber ticks
+    @State private var chapterInventoryOwner: PlayerChapterInventoryOwner?
+    @State private var chapterInventoryCount = 0
     @State private var upNextSuppressed = false           // user tapped Watch Credits: hide the band + don't auto-advance this episode
     @State private var apiSkipCandidates: [SegmentCandidate] = []
     @State private var currentSkip: SkipSegment?
@@ -2129,14 +2319,13 @@ struct PlayerScreen: View {
 
             playerSurface
 
-            // Reliable tap-to-toggle: a transparent hit-test layer over the video. The UIKit
-            // recognizer on the Metal view frequently missed taps (you had to tap many times);
-            // a SwiftUI contentShape layer catches every tap. The controls sit above it, so their
-            // buttons still work and a tap on empty space falls through here to toggle.
+            // A dedicated transparent surface owns one-finger taps independently of pinch. Actual
+            // buttons/panels remain above it; decorative buffering must not steal its hit tests.
             #if os(iOS)
             PlayerVideoInteractionSurface(locked: isLocked, pinchEnabled: touchPinchEnabled,
                 onTap: { if isLocked { revealUnlockChip() } else { toggleControls() } },
                 onPinch: handleVideoPinch)
+                .ignoresSafeArea()
             #else
             Color.clear.contentShape(Rectangle())
                 .onTapGesture { if isLocked { revealUnlockChip() } else { toggleControls() } }
@@ -8064,6 +8253,7 @@ struct PlayerScreen: View {
             }
         }
         .transition(.opacity)
+        .allowsHitTesting(false)
     }
 
     private var loadErrorOverlay: some View {
@@ -8142,6 +8332,8 @@ struct PlayerScreen: View {
     /// republishes truth from the newly mounted engine; until then the chrome must show no prior engine's
     /// codec or channel count, especially during an AVPlayer-to-libmpv demotion.
     private func clearCachedAudioOutputTruth() {
+        chapterInventoryOwner = nil
+        chapterInventoryCount = 0
         audioCodec = ""
         audioChannels = 0
         metadataLine = computeMetadataLine()
@@ -8593,13 +8785,14 @@ struct PlayerScreen: View {
     }
 
     private var bottomTransportToolbar: PlayerTransportToolbar {
-        PlayerTransportToolbar(
+        let sourceGroups = currentSourceGroups
+        return PlayerTransportToolbar(
             speed: controlButton("speedometer", speed == 1.0 ? "Speed" : speedLabel(speed), active: speed != 1.0) { openPanel(.speed) },
             subtitles: controlButton("captions.bubble", "Subtitles") { openPanel(.subtitles) },
             audio: audioTracks.isEmpty ? nil : controlButton("waveform", "Audio") { openPanel(.audio) },
             aspect: controlButton("aspectratio", "Aspect") { openPanel(.video) },
-            quality: hasMultipleQualities ? controlButton("4k.tv", "Quality") { openPanel(.quality) } : nil,
-            sources: hasAlternateSources ? controlButton("rectangle.stack", "Sources") { openPanel(.sources) } : nil,
+            quality: StreamRanking.hasMultipleResolutions(sourceGroups) ? controlButton("4k.tv", "Quality") { openPanel(.quality) } : nil,
+            sources: PlayerSourceAvailability.hasAlternates(sourceGroups, playable: { playableURL(for: $0) != nil }) ? controlButton("rectangle.stack", "Sources") { openPanel(.sources) } : nil,
             episodes: isEpisodePlaybackContext ? controlButton("list.bullet", "Episodes") { openPanel(.episodes) } : nil,
             chapters: hasChapters ? controlButton("list.bullet.below.rectangle", "Chapters") { openPanel(.chapters) } : nil,
             grab: controlButton("camera.viewfinder", "Grab") { grabFrame() },
@@ -9209,6 +9402,8 @@ struct PlayerScreen: View {
     }
     private func refreshSkipSegments() {
         let chapters = coordinator.player?.chapters() ?? []
+        chapterInventoryOwner = currentChapterInventoryOwner
+        chapterInventoryCount = chapters.count
         let chapterCandidates = SkipSegments.chapterCandidates(chapters: chapters, duration: duration)
         skipSegments = SegmentResolver.resolve(chapterCandidates + apiSkipCandidates, duration: duration)
         chapterFractions = ChapterMarks.fractions(chapters: chapters, duration: duration)
@@ -10381,7 +10576,7 @@ struct PlayerScreen: View {
 
     /// True when more than one playable source is loaded for the current title / episode.
     private var hasAlternateSources: Bool {
-        currentSourceGroups.reduce(0) { $0 + $1.streams.filter { playableURL(for: $0) != nil }.count } > 1
+        PlayerSourceAvailability.hasAlternates(currentSourceGroups, playable: { playableURL(for: $0) != nil })
     }
 
     /// The stream currently on screen: the loaded source whose playable URL matches what mpv is playing.
@@ -10425,13 +10620,23 @@ struct PlayerScreen: View {
     /// More than one distinct resolution is available for the current title, so the Quality picker is worth
     /// showing (one tap to drop 4K -> 1080p -> 720p, or climb back up, at the current position).
     private var hasMultipleQualities: Bool {
-        StreamRanking.resolutionOptions(currentSourceGroups).count > 1
+        StreamRanking.hasMultipleResolutions(currentSourceGroups)
     }
 
     /// The file carries embedded chapter markers (more than the implicit single whole-file chapter), so the
-    /// Chapters navigator is worth offering. Reads mpv's chapter-list, the same data the skip-intro detector
-    /// already uses.
-    private var hasChapters: Bool { (coordinator.player?.chapters().count ?? 0) > 1 }
+    /// Chapters navigator is worth offering. The inventory is captured by the existing track/duration
+    /// refresh, never synchronously re-read from libmpv for each chrome/body evaluation.
+    private var hasChapters: Bool {
+        guard let owner = currentChapterInventoryOwner else { return false }
+        return chapterInventoryOwner == owner && chapterInventoryCount > 1
+    }
+
+    private var currentChapterInventoryOwner: PlayerChapterInventoryOwner? {
+        guard let player = coordinator.player, let loadToken = player.activeLoadToken else { return nil }
+        return PlayerChapterInventoryOwner(engine: ObjectIdentifier(player), loadToken: loadToken,
+            itemGeneration: (player as? AVPlayerEngineController)?.currentItemGeneration,
+            sourceGeneration: sourceSwitchGeneration)
+    }
 
     /// Up to a capped number of loaded sources, grouped by add-on in their existing priority order, so
     /// switching is quick. The full (sometimes thousands-long) list stays on the detail page; capping

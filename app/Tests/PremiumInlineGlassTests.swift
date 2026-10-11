@@ -3,7 +3,7 @@ import SwiftUI
 
 // Inert palette glue for exact production Theme tokens and GlassStyle. Values match the VortX gold
 // ThemeManager ladder, but no real preferences, profile store or singleton is constructed by this test.
-struct ThemeManager: Sendable {
+final class ThemeManager: ObservableObject, @unchecked Sendable {
     static let shared = ThemeManager()
     let textScale = 1.0
     var accent: Color { Color(.sRGB, red: 0.851, green: 0.467, blue: 0.024) }

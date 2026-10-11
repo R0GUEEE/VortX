@@ -23,6 +23,7 @@
     var pendingSync: Task<Void, Never>?
     var pendingSyncCapture: CredentialScopeRegistry.Capture?
     var pendingSyncID: UUID?
+    var pendingSyncAwaitsProgressWindow = false
     var realtimeActive = false
     var syncUpCompletionWaiters: [UUID: [UUID: CheckedContinuation<Void, Never>]] = [:]
     var nativePreparedSeedCapture: CredentialScopeRegistry.Capture?

@@ -59,8 +59,8 @@ private final class OwnSourceCommitGate: VortxMutationAuthority, @unchecked Send
         for field in ["addons", "libraries", "watches", "identityLinks", "ownAccountSources"] {
             check(coldTyped[field]?[own.id.uuidString] == retainedTyped[field]?[own.id.uuidString])
         }
-        try VortxNativeSession.validateLegacyCompatibility(scope: scope, ownerName: owner.name,
-            snapshot: nil, nativeSync: state["nativeSync"], material: coldMaterial, abi: VortxCABI())
+        check(try VortxNativeSession.validateLegacyCompatibility(scope: scope, ownerName: owner.name,
+            snapshot: nil, nativeSync: state["nativeSync"], material: coldMaterial, abi: VortxCABI()) == .accepted)
         guard case .object(var foreign) = state["nativeSync"] else { fatalError("missing native state") }
         foreign["scope"] = .string("account.foreign")
         do {

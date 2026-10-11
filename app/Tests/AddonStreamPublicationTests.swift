@@ -88,6 +88,21 @@ import Foundation
     }
 
     static func main() throws {
+        let statusProbe = AddonPublicationProbe()
+        let currentRequest: [String: Any] = ["base": base,
+            "path": ["resource": "stream", "type": "series", "id": "synthetic-title:1:2"]]
+        let goodGroup: [String: Any] = ["request": currentRequest,
+            "content": ["type": "Ready", "content": [["url": "https://media.invalid/current"]]]]
+        check(statusProbe.readyCount(goodGroup) == 1, "current typed stream response has the exact ready count")
+        let badGroup: [String: Any] = ["request": currentRequest,
+            "content": ["type": "Ready", "content": [["url": 42]]]]
+        check(statusProbe.readyCount(badGroup) == nil, "unreadable Ready stream is terminal rather than falsely reported ready")
+        let missingGroup: [String: Any] = ["request": currentRequest, "content": ["type": "Ready"]]
+        check(statusProbe.readyCount(missingGroup) == nil, "missing Ready stream payload is not reported as a successful empty response")
+        let emptyGroup: [String: Any] = ["request": currentRequest, "content": ["type": "Ready", "content": []]]
+        check(statusProbe.readyCount(emptyGroup) == 0, "valid successful empty response remains non-error")
+        check(statusProbe.readyCount(["request": ["base": base], "content": ["type": "Ready", "content": []]]) == nil,
+              "malformed current request remains failed rather than borrowing a previous episode")
         let old = try details([original])
         let changes: [(String, String, VortxJSON)] = [
             ("same-count URL", "url", .string("https://media.invalid/refreshed")),

@@ -63,7 +63,7 @@ enum VortxLegacyBootstrapMaterial {
     /// A complete token-free carrier exported by the *active* schema-4 account slot.  The host
     /// may obtain these only after it has validated/merged nativeSync with the private engine.
     /// They deliberately remain distinct from `legacyImport.baseline`: a later same-UID rebind
-    /// changes the active slot while the historical baseline remains an immutable migration record.
+    /// changes the active slot without advancing the historical, last-acknowledged migration receipt.
     struct RetainedOwnAccountSlotBaseline: Sendable, Equatable {
         let profileID: UUID
         /// Exact JSON bytes of the kernel-exported `sourceBaseline` carrier. No raw credential or
@@ -363,9 +363,10 @@ enum VortxLegacyBootstrapMaterial {
                 return id.uuidString
             })
             try require(!deleted.contains(owner.id.uuidString), "Owner profile is tombstoned")
-            let sources = try resolveOwnAccountSources(ownAccountSources, retainedBaseline: retainedOwnAccountBaseline,
+            let resolved = try resolveOwnAccountSources(ownAccountSources, retainedBaseline: retainedOwnAccountBaseline,
                                                         retainedSourceEnvelopes: retainedOwnAccountSourceEnvelopes,
                                                         retainedSlotBaselines: retainedOwnAccountSlotBaselines)
+            let sources = resolved.material
             for profile in roster {
                 watches[profile.id.uuidString] = []
                 titles[profile.id.uuidString] = [:]
@@ -373,7 +374,7 @@ enum VortxLegacyBootstrapMaterial {
             let nativeRoster = try roster.map { try projectProfile($0, ownSource: sources[$0.id.uuidString]) }
             let addons = try addonBucket()
             let library = try ownerLibrary()
-            try validateOwnProfileOverlayBindings(sources, deferred: deferredOwnAccountOverlays,
+            try validateOwnProfileOverlayBindings(resolved.overlayAuthority, deferred: deferredOwnAccountOverlays,
                                                   rootDocumentSHA256: rootDocumentSHA256)
             // An independent source owns its profile's overlay context. Avoid parsing the root
             // bucket first: watched-only rows can rely on metadata in that independent library,
@@ -643,9 +644,13 @@ enum VortxLegacyBootstrapMaterial {
                           deferProfileEdits: false, allowIndependentSource: true)
         }
 
+        private struct ResolvedOwnSources {
+            let material: [String: ResolvedOwnAccountSource]
+            let overlayAuthority: [String: ResolvedOwnAccountSource]
+        }
         private func resolveOwnAccountSources(_ rawSources: [OwnAccountSource], retainedBaseline: Data?,
                                               retainedSourceEnvelopes: [RetainedOwnAccountSourceEnvelope],
-                                              retainedSlotBaselines: [RetainedOwnAccountSlotBaseline]) throws -> [String: ResolvedOwnAccountSource] {
+                                              retainedSlotBaselines: [RetainedOwnAccountSlotBaseline]) throws -> ResolvedOwnSources {
             let ownProfiles = roster.filter { !$0.isOwner && $0.usesOwnAccount }
             var sources: [String: ResolvedOwnAccountSource] = [:]
             for source in rawSources {
@@ -676,40 +681,53 @@ enum VortxLegacyBootstrapMaterial {
             let freshSourceIDs = Set(sources.keys)
             let historical = try retainedOwnAccountSources(retainedBaseline, requiredProfiles: ownProfiles)
             let activeSlots = try retainedOwnAccountSlotSources(retainedSlotBaselines, requiredProfiles: ownProfiles)
+            var overlayAuthority = sources
             for profile in ownProfiles where sources[profile.id.uuidString] == nil {
-                guard let source = Self.preferredRetainedSource(profileID: profile.id.uuidString,
+                let id = profile.id.uuidString
+                guard let acknowledgedOverlay = Self.preferredRetainedSource(profileID: id,
                                                                  activeSlots: activeSlots, historical: historical) else {
                     throw fail("Own-account profiles require exactly one authenticated streaming-account source")
                 }
-                sources[profile.id.uuidString] = source
+                // A slot refresh already owns its causal native events. Relifting its newer
+                // watch/membership buckets into the older global migration receipt would replay
+                // those events as new legacy edits and can reject on equal native clocks.
+                // Reconcile against the latest acknowledged global receipt, not the immutable
+                // first bootstrap. The active tuple remains authority for exact overlay proofs.
+                sources[id] = historical[id] ?? acknowledgedOverlay
+                overlayAuthority[id] = acknowledgedOverlay
             }
             var retainedEnvelopeIDs = Set<String>()
             for envelope in retainedSourceEnvelopes {
                 let profileID = envelope.profileID.uuidString
                 try require(retainedEnvelopeIDs.insert(profileID).inserted, "Duplicate retained own-account source envelope")
                 try require(!freshSourceIDs.contains(profileID), "Retained source envelope conflicts with a fresh authenticated source")
-                guard let retainedSource = sources[profileID], let retainedBuckets = retainedSource.retainedBuckets else {
+                guard let retainedSource = overlayAuthority[profileID], let retainedBuckets = retainedSource.retainedBuckets else {
                     throw fail("Retained source envelope lacks a validated own-account tuple")
                 }
                 try require(envelope.sourceDocumentSHA256 == retainedSource.sourceDocumentSHA256,
                             "Retained source envelope does not match the acknowledged source digest")
                 let document = try Self.decodeOwnAccountEnvelope(envelope.sourceDocument, profileID: profileID)
-                try require(sources[profileID]?.isRetained == true, "Retained source envelope has no active own-account profile")
-                sources[profileID] = ResolvedOwnAccountSource(profileID: profileID,
+                try require(retainedSource.isRetained, "Retained source envelope has no active own-account profile")
+                let enveloped = ResolvedOwnAccountSource(profileID: profileID,
                     verifiedStreamingUID: retainedSource.verifiedStreamingUID,
                     sourceDocumentSHA256: retainedSource.sourceDocumentSHA256,
                     profileOverlaySHA256: retainedSource.profileOverlaySHA256,
                     sourceDocument: document, retainedBuckets: retainedBuckets)
+                overlayAuthority[profileID] = enveloped
+                // A current source archive must never relabel the older material tuple.
+                if sources[profileID]?.sourceDocumentSHA256 == retainedSource.sourceDocumentSHA256 {
+                    sources[profileID] = enveloped
+                }
             }
             let ownIDs = Set(ownProfiles.map { $0.id.uuidString })
             try require(Set(sources.keys) == ownIDs, "Own-account profiles require exactly one authenticated streaming-account source")
-            return sources
+            return ResolvedOwnSources(material: sources, overlayAuthority: overlayAuthority)
         }
 
-        /// `legacyImport.baseline` is the immutable historical account source. A current active
-        /// slot can replace it only for a verified refresh of that same UID; a distinct A→B rebind
-        /// remains a runtime account-selection fact and must not rewrite legacy reconciliation as
-        /// though historical A had been imported from B.
+        /// `legacyImport.baseline` is the latest acknowledged global account source. A current active
+        /// slot can prove an overlay already consumed by a verified refresh of that same UID.
+        /// This is overlay authority only, not permission to replace migration material buckets.
+        /// A distinct A→B rebind cannot attribute the historical UUID-only A overlay to B.
         private static func preferredRetainedSource(profileID: String, activeSlots: [String: ResolvedOwnAccountSource],
                                                     historical: [String: ResolvedOwnAccountSource]) -> ResolvedOwnAccountSource? {
             guard let historical = historical[profileID] else { return activeSlots[profileID] }
@@ -898,21 +916,26 @@ enum VortxLegacyBootstrapMaterial {
             }
             for (profileID, source) in sources {
                 let rootSlice = try Self.profileOverlaySlice(document, profileID: profileID)
-                if let sourceDocument = source.sourceDocument {
-                    let sourceSlice = try Self.profileOverlaySlice(sourceDocument, profileID: profileID)
-                    try require(try Self.equivalentJSON(rootSlice, sourceSlice),
-                                "Own-account root overlay differs from its authenticated source")
-                } else {
-                    if rootSlice.isEmpty { continue }
-                    guard let disposition = deferrals.removeValue(forKey: profileID) else {
-                        throw fail("Current own-account overlay requires an authenticated source refresh")
-                    }
+                if let disposition = deferrals.removeValue(forKey: profileID) {
+                    // The classifier proof binds current bytes to a separately acknowledged
+                    // overlay tuple. It can retain an unmatched slice as pending, but cannot
+                    // change the typed reconciliation material or invent a source assertion.
+                    try require(source.isRetained, "Deferred own-account overlay has no retained source")
                     try require(disposition.sourceDocumentSHA256 == source.sourceDocumentSHA256,
                                 "Deferred own-account overlay does not match the retained source digest")
                     try require(disposition.retainedProfileOverlaySHA256 == source.profileOverlaySHA256,
                                 "Deferred own-account overlay does not match the retained source witness")
                     try require(disposition.currentProfileOverlaySHA256 == Self.profileOverlayWitness(rootSlice),
                                 "Deferred own-account overlay does not match the current root slice")
+                    continue
+                }
+                if let sourceDocument = source.sourceDocument {
+                    let sourceSlice = try Self.profileOverlaySlice(sourceDocument, profileID: profileID)
+                    try require(try Self.equivalentJSON(rootSlice, sourceSlice),
+                                "Own-account root overlay differs from its authenticated source")
+                } else {
+                    if rootSlice.isEmpty { continue }
+                    throw fail("Current own-account overlay requires an authenticated source refresh")
                 }
             }
             try require(deferrals.isEmpty, "Deferred own-account overlay has no retained own-account profile")

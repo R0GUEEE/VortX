@@ -24,7 +24,7 @@ const seekSurface = slice(player, 'private struct PlayerBufferedBand:', '#if !os
 const skipMarkers = slice(player, '#if !os(tvOS)\nprivate struct PlayerSkipTimelineBands', '/// GeometryReader returns this named');
 const timelineTrack = slice(player, '/// GeometryReader returns this named', '/// The build-255 failure');
 const bottomTimeline = slice(player, 'private struct PlayerBottomTimeline:', 'private struct PlayerSkipEditorSection:');
-const controlChrome = slice(player, 'private enum PlayerControlReduceTransparencyOverrideKey', 'private struct PlayerTransportToolbar:');
+const controlChrome = slice(player, 'private enum PlayerControlReduceTransparencyOverrideKey', 'private enum PlayerSourceAvailability {');
 const seekStyleRenderer = slice(styles, 'import SwiftUI', '/// Settings list of the seek-bar styles');
 if (!seekSurface.includes('#if os(iOS) || os(macOS)') || !seekSurface.includes('PlayerStyledSeekSlider(')) {
   throw new Error('Production macOS seek surface no longer routes through the styled slider');

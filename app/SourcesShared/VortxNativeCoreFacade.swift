@@ -28,6 +28,8 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     private var checkpointReopenRequired = false
     private let changed: @Sendable ([String]) -> Void
     private let mutationAccepted: @Sendable () -> Void
+    /// Playback progress alone; nil keeps reporting it through `mutationAccepted`.
+    private let progressAccepted: (@Sendable () -> Void)?
     private var failure: String?
     private var resourceRegistryValid = true
     // Full engine materialization: includes protected and profile-disabled members. Resource/UI
@@ -155,9 +157,11 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
 
     static func create(session: VortxNativeSession, registry: [VortxResourceAddon],
                        mutationAccepted: @escaping @Sendable () -> Void = {},
+                       progressAccepted: (@Sendable () -> Void)? = nil,
                        changed: @escaping @Sendable ([String]) -> Void) async throws -> VortxNativeCoreFacade {
         guard Set(registry.map(\.id)).count == registry.count else { throw VortxNativeError.invalidResponse }
-        let facade = VortxNativeCoreFacade(session: session, registry: registry, mutationAccepted: mutationAccepted, changed: changed)
+        let facade = VortxNativeCoreFacade(session: session, registry: registry, mutationAccepted: mutationAccepted,
+                                           progressAccepted: progressAccepted, changed: changed)
         let addonSnapshot = try await session.addonSnapshot()
         let state = addonSnapshot.state
         facade.addonInventories = addonSnapshot.inventories
@@ -168,8 +172,10 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         facade.sourceArchive = try await session.authenticatedSourceArchive()
         return facade
     }
-    private init(session: VortxNativeSession, registry: [VortxResourceAddon], mutationAccepted: @escaping @Sendable () -> Void, changed: @escaping @Sendable ([String]) -> Void) {
+    private init(session: VortxNativeSession, registry: [VortxResourceAddon], mutationAccepted: @escaping @Sendable () -> Void,
+                 progressAccepted: (@Sendable () -> Void)?, changed: @escaping @Sendable ([String]) -> Void) {
         self.session = session; self.registry = registry; self.changed = changed; self.mutationAccepted = mutationAccepted
+        self.progressAccepted = progressAccepted
     }
     func stateData(_ field: String) -> Data? {
         // VortxJSON is a copy-on-write value. Encoding a large board under this shared lock
@@ -415,7 +421,11 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                     let saved = publication?.fields["library"]?["catalog"]?.array?.count ?? 0
                     NSLog("[VortXNative] mutation=%@ result=acknowledged continueWatching=%ld savedLibrary=%ld", type, count, saved)
                 }
-                if !["get_state", "merge_native_sync", "bind_sync_scope"].contains(type) || !hostEdits.isEmpty || websiteChanged { self.mutationAccepted() }
+                if type == "report_progress", hostEdits.isEmpty, !websiteChanged, let progressAccepted = self.progressAccepted {
+                    progressAccepted()
+                } else if !["get_state", "merge_native_sync", "bind_sync_scope"].contains(type) || !hostEdits.isEmpty || websiteChanged {
+                    self.mutationAccepted()
+                }
                 completion?(.success(document))
             } catch VortxNativeError.checkpointUncertain {
                 self.lock.withLock { self.checkpointReopenRequired = true }

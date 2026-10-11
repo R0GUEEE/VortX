@@ -20,6 +20,7 @@ private enum CredentialScopeRegistry { struct Capture: Equatable { let generatio
     var pendingSync: Task<Void, Never>?
     var pendingSyncCapture: CredentialScopeRegistry.Capture?
     var pendingSyncID: UUID?
+    var pendingSyncAwaitsProgressWindow = false
     var nativePushQueue = NativeForegroundSyncPolicy.PushQueue()
     var nativeDurablePushPending = false
     var hasPendingPush = false

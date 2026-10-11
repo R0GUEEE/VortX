@@ -547,8 +547,7 @@ final class CoreBridge: ObservableObject {
     func nativeCredentialSlot(profileID: UUID) -> String? {
         nativeFacadeLock.withLock {
             guard let capture = nativeCredentialCapture, CredentialScopeRegistry.shared.isCurrent(capture),
-                  let data = nativeFacadeStorage?.stateData("native_state"),
-                  let state = try? JSONDecoder().decode(VortxJSON.self, from: data),
+                  let state = nativeFacadeStorage?.profileSnapshot()?.state,
                   let expected = try? VortxNativeProfiles.expectedBinding(state: state, profileID: profileID) else { return nil }
             if expected.document["account"]?["kind"] == .string("local_only") || expected.document["account"]?["kind"] == .string("shared") {
                 guard let owner = nativeFacadeStorage?.registryBinding?.scope.ownerProfileID, let ownerID = UUID(uuidString: owner) else { return nil }
@@ -558,7 +557,7 @@ final class CoreBridge: ObservableObject {
         }
     }
     func nativeAccountMode(profileID: UUID) -> String? {
-        guard let data = nativeFacade?.stateData("native_state"), let state = try? JSONDecoder().decode(VortxJSON.self, from: data),
+        guard let state = nativeFacade?.profileSnapshot()?.state,
               case .string(let kind) = state["roster"]?["profiles"]?[profileID.uuidString]?["account"]?["kind"] else { return nil }
         return kind
     }
@@ -762,6 +761,11 @@ final class CoreBridge: ObservableObject {
             Task { @MainActor in
                 guard CredentialScopeRegistry.shared.isCurrent(capture) else { return }
                 VortXSyncManager.shared.nativeMutationDidCommit(credentialCapture: capture)
+            }
+        }, progressAccepted: {
+            Task { @MainActor in
+                guard CredentialScopeRegistry.shared.isCurrent(capture) else { return }
+                VortXSyncManager.shared.nativeMutationDidCommit(credentialCapture: capture, progressOnly: true)
             }
         }) { [weak self] fields in
             guard CredentialScopeRegistry.shared.isCurrent(capture),
@@ -3159,8 +3163,13 @@ final class CoreBridge: ObservableObject {
                 let content = group["content"] as? [String: Any]
                 switch content?["type"] as? String {
                 case "Ready":
-                    let n = (content?["content"] as? [[String: Any]])?.count ?? 0
-                    out.append(.init(base: base, name: name, ready: n, loading: false, error: nil))
+                    // Decode this exact current request, not a possibly stale publication for
+                    // another episode. A typed-payload failure is terminal, never a false Ready.
+                    if let count = Self.currentReadyStreamCount(group) {
+                        out.append(.init(base: base, name: name, ready: count, loading: false, error: nil))
+                    } else {
+                        out.append(.init(base: base, name: name, ready: 0, loading: false, error: "Unreadable add-on response"))
+                    }
                 case "Err":
                     let msg = Self.describeResourceError(content?["content"])
                     out.append(.init(base: base, name: name, ready: 0, loading: false, error: msg))
@@ -3174,6 +3183,14 @@ final class CoreBridge: ObservableObject {
         if addonStatesCache.count > 8 { addonStatesCache.removeAll(keepingCapacity: true) }
         addonStatesCache[cacheKey] = (streamsEpoch, out)
         return out
+    }
+
+    /// Runs only on the existing epoch-cache miss; no extra engine read or per-body work.
+    private static func currentReadyStreamCount(_ group: [String: Any]) -> Int? {
+        guard let data = try? JSONSerialization.data(withJSONObject: group),
+              let current = try? JSONDecoder().decode(CoreStreamGroup.self, from: data),
+              let streams = current.content?.ready else { return nil }
+        return streams.count
     }
 
     /// Flatten stremio-core's `ResourceError` / `EnvError` JSON into a short human string. Returns nil

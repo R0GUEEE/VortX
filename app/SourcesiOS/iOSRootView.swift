@@ -223,6 +223,7 @@ struct iOSRootView: View {
     /// one profile and none has been chosen this launch, the "Who's watching?" picker is owed at cold
     /// start (and re-presented from Settings' Switch Profile), exactly as tvOS RootView drives it.
     @EnvironmentObject private var profiles: ProfileStore
+    @EnvironmentObject private var theme: ThemeManager
     /// Process-wide "a fullscreen player is up" signal. The tvOS launch picker gates on
     /// `presenter.request == nil`; on touch / Mac the player presents from within the shell, so this is
     /// the equivalent "no player cover is presented" guard.
@@ -654,8 +655,9 @@ struct iOSRootView: View {
                         measuredTabContent.environment(\.cinemaNavigationArtworkInset, navigationHeight)
                     }
                 } else {
-                    VStack(spacing: 0) {
-                        measuredTabContent.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    CinemaCompactNavigationShell {
+                        measuredTabContent
+                    } navigation: {
                         bottomTabBarRow
                     }
                 }
@@ -1040,6 +1042,19 @@ struct iOSRootView: View {
     }
 }
 
+/// Shipping and offline render fixtures share the same inset owner, so the floating pill reserves
+/// scroll clearance while the screen's safe-area background can continue behind and around it.
+struct CinemaCompactNavigationShell<Screen: View, Navigation: View>: View {
+    @ViewBuilder let screen: Screen
+    @ViewBuilder let navigation: Navigation
+
+    var body: some View {
+        screen
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .safeAreaInset(edge: .bottom, spacing: 0) { navigation }
+    }
+}
+
 /// Shared compact navigation chrome. RootTabView supplies the real destination buttons; the offline
 /// Cinema fixture supplies inert buttons, which lets it render the actual safe-area treatment without
 /// constructing the root's account/session state.
@@ -1055,7 +1070,7 @@ struct CinemaTabBarChrome<Content: View>: View {
             .accessibilityLabel("Tabs")
             .padding(.horizontal, Theme.Space.sm)
             .padding(.vertical, Theme.Space.xs)
-            .vortxGlass(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .vortxGlassControl(in: RoundedRectangle(cornerRadius: 26, style: .continuous), shadow: .bar)
             .padding(.horizontal, Theme.Space.md)
             .padding(.vertical, Theme.Space.xs)
     }
@@ -1642,14 +1657,15 @@ struct iOSHomeView: View {
                 if compactPhoneHome, let onBrowse, path.isEmpty {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Button(action: onBrowse) {
-                            Text("Discover")
-                                .font(.system(size: 14, weight: .semibold))
+                            Label("Discover", systemImage: "safari")
+                                .labelStyle(.iconOnly)
+                                .font(.system(size: 17, weight: .semibold))
                                 .foregroundStyle(Theme.Palette.textPrimary)
-                                .padding(.horizontal, 12)
-                                .frame(minHeight: 44)
-                                .vortxGlass(in: Capsule(), fillAlpha: VortXGlass.pillFillAlpha, shadow: .pill)
+                                .frame(width: 44, height: 44)
+                                .vortxGlassControl(in: Circle(), shadow: .disc)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Discover")
                         .accessibilityHint("Browse genres and catalogs")
                     }
                 }
@@ -2226,7 +2242,7 @@ struct iOSHomeView: View {
             historySnapshot: historySnapshot
         )   // "Because you watched <title>" rail; no-ops on an unchanged seed set
         if becauseYouWatched.historyInputReady {
-            topPicks.refresh(profileID: profiles.activeID, cw: cw, library: library)
+            topPicks.refresh(profileID: profiles.activeID, cw: cw, library: library, ownerKey: becauseYouWatchedOwnerKey)
         } else {
             topPicks.clear()
         }

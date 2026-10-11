@@ -946,6 +946,20 @@ final class VortXSyncManager: ObservableObject {
         if nativeOwnAccountOverlayPending != ids { nativeOwnAccountOverlayPending = ids }
         nativeOwnAccountOverlayUnattributed = ids.filter { records[$0.uuidString]?["verifiedStreamingUid"] == nil }
     }
+    private var loggedNativeLegacyReconciliation: VortxNativeSession.LegacyReconciliation?
+    /// A held legacy delta no longer blocks native mount/export, so make each transition visible
+    /// in diagnostics (once, not on every sync) together with the kernel's sanitized reason.
+    private func noteNativeLegacyReconciliation(_ outcome: VortxNativeSession.LegacyReconciliation?, stage: String) {
+        guard let outcome, outcome != loggedNativeLegacyReconciliation else { return }
+        defer { loggedNativeLegacyReconciliation = outcome }
+        switch outcome {
+        case .held(let reason, let delta):
+            DiagnosticsLog.log("native-profiles", "legacy_reconcile result=held stage=\(stage) reason=\(reason) delta=\(delta)")
+        case .accepted where loggedNativeLegacyReconciliation != nil:
+            DiagnosticsLog.log("native-profiles", "legacy_reconcile result=accepted stage=\(stage)")
+        case .accepted: break
+        }
+    }
     private func prepareNativeLegacyMaterial(_ document: [String: Any], capture: CredentialScopeRegistry.Capture,
                                              enforceMountedFence: Bool = true) async throws -> NativeLegacyPreparation {
         guard isCurrent(capture), let roster = Self.resolveRoster(from: document, fullOnly: true),
@@ -1232,7 +1246,8 @@ final class VortXSyncManager: ObservableObject {
             guard isCurrent(capture), !Task.isCancelled, nativeCheckpointGeneration == generation,
                   ProfileStore.shared.activeID == selectedProfile else { throw VortxNativeError.superseded }
             let session = try VortxNativeSession(scope: recovery.scope, ownerName: ownerName, abi: VortxCABI(), store: store,
-                                                transport: VortxCResourceTransport(), hostActor: nativeHostActor(capture: capture))
+                                                transport: VortxCResourceTransport(), hostActor: nativeHostActor(capture: capture),
+                                                diagnostics: { DiagnosticsLog.log("native-profiles", $0) })
             do {
                 if state["activeProfileId"] != .string(selectedProfile.uuidString) {
                     let action = VortxJSON.object(["type": .string("switch_profile"), "id": .string(selectedProfile.uuidString)])
@@ -1252,6 +1267,7 @@ final class VortXSyncManager: ObservableObject {
                 applyNativeGlobals(acceptedHost)
                 try publishNativeWebsiteOutcome(websiteOutcome, capture: capture)
                 nativeCheckpointStatus = "mounted_offline"
+                DiagnosticsLog.log("native-profiles", "restore result=mounted mode=offline")
                 CoreBridge.shared.replayNativeResourceRestore(resourceRestore, target: CoreBridge.shared.captureNativePlaybackTarget())
                 return true
             } catch { await session.close(); throw error }
@@ -1384,9 +1400,11 @@ final class VortXSyncManager: ObservableObject {
                 }
                 if hadCheckpoint || remoteNative != nil {
                     stage = "legacy_compatibility"
-                    try VortxNativeSession.validateLegacyCompatibility(scope: scope, ownerName: owners[0].name,
+                    let reconciliation = try VortxNativeSession.validateLegacyCompatibility(scope: scope, ownerName: owners[0].name,
                                                                        snapshot: checkpoint, nativeSync: remoteNative,
-                                                                       material: material, abi: VortxCABI(), baselineMaterial: probe.readLegacyMaterial(scope: scope))
+                                                                       material: material, abi: VortxCABI(), baselineMaterial: probe.readLegacyMaterial(scope: scope),
+                                                                       onStage: { stage = "legacy_compatibility_" + $0.rawValue })
+                    self.noteNativeLegacyReconciliation(reconciliation, stage: "restore")
                 }
                 let didImportLegacy = !hadCheckpoint && remoteNative == nil
                 var initialActions: [String] = []
@@ -1423,7 +1441,8 @@ final class VortXSyncManager: ObservableObject {
                                                     transport: VortxCResourceTransport(), allowNewAccount: !hadCheckpoint, initialActions: initialActions,
                                                     hostActor: self.nativeHostActor(capture: capture), sourceAuthority: prepared.authority,
                                                     authenticatedSourceArchive: !hadCheckpoint ? prepared.sourceArchive : nil,
-                                                    initialLegacyMaterial: !hadCheckpoint && remoteNative != nil ? material : nil)
+                                                    initialLegacyMaterial: !hadCheckpoint && remoteNative != nil ? material : nil,
+                                                    diagnostics: { DiagnosticsLog.log("native-profiles", $0) })
                 do {
                     stage = "account_merge"
                     let hostRemote = try document["nativeHostPreferences"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
@@ -1685,14 +1704,14 @@ final class VortXSyncManager: ObservableObject {
 
     /// Stronger than a defaults notification: a kernel mutation was committed to its checkpoint.
     /// A remote projection's notification-suppression turn must not drop this upload admission.
-    func nativeMutationDidCommit(credentialCapture capture: CredentialScopeRegistry.Capture) {
+    func nativeMutationDidCommit(credentialCapture capture: CredentialScopeRegistry.Capture, progressOnly: Bool = false) {
         guard isSignedIn, isCurrent(capture) else { return }
         // Record the generation immediately, including the suppression turn. Otherwise an older
         // upload could clear the durable flag before this deferred admission reaches its worker.
-        nativePushQueue.request()
+        nativePushQueue.request(progressOnly: progressOnly)
         nativeDurablePushPending = true
         if isApplyingRemote { pendingNativeMutationPush = capture }
-        else { requestSyncSoon() }
+        else { requestSyncSoon(progressOnly: progressOnly) }
     }
 
     private func drainNativeMutationPush() {
@@ -3662,8 +3681,10 @@ final class VortXSyncManager: ObservableObject {
         guard VortxNativeSyncExportPolicy.permitsStateOnlyExport(hasDirtySettings: (try? nativeGlobalEdits()) == nil,
                                                                 hasLegacyAddonOrderIntent: orderIntent != nil || pendingAddonOrderIntent != nil) else { return nil }
         var exportedDirtySettings: [String: Double] = [:]
+        var exportStage = "provider_prepare"
         do {
             var providers = try mergedNativeProviderState(doc, capture: capture)
+            exportStage = "legacy_prepare"
             let prepared = try await prepareNativeLegacyMaterial(doc, capture: capture)
             guard isCurrent(capture), sourceIsCurrent() else { return nil }
             let remote = try doc["nativeSync"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
@@ -3671,10 +3692,12 @@ final class VortXSyncManager: ObservableObject {
             exportedDirtySettings = dirtySettings
             var globalEdits = try nativeGlobalEdits()
             exportedDirtySettings = nativeDirtySettingsForExport(globalEdits, snapshot: exportedDirtySettings)
+            exportStage = "native_merge"
             var merged = try await CoreBridge.shared.mergeNativeAccountDocument(remote, hostRemote: hostRemote, capture: capture,
                                                                                legacyMaterial: prepared.material, hostEdits: globalEdits, websiteEvents: Self.nativeWebsiteEvents(doc), websiteAddonEvents: Self.nativeWebsiteAddonEvents(doc), legacyWatchlists: self.nativeLegacyWatchlists(doc),
                                                                                sourceAuthority: prepared.authority, authenticatedSourceArchive: prepared.sourceArchive)
             guard isCurrent(capture), sourceIsCurrent() else { return nil }
+            exportStage = "preference_replay"
             let replayed = await replayNativePreferenceIntents(capture: capture)
             guard isCurrent(capture), sourceIsCurrent() else { return nil }
             // Only still-owned warm projections are eligible; unknown cold stamps stay quarantined.
@@ -3685,21 +3708,24 @@ final class VortXSyncManager: ObservableObject {
                 exportedDirtySettings = dirtySettings
                 globalEdits = try nativeGlobalEdits()
                 exportedDirtySettings = nativeDirtySettingsForExport(globalEdits, snapshot: exportedDirtySettings)
+                exportStage = "native_remerge"
                 merged = try await CoreBridge.shared.mergeNativeAccountDocument(nil, hostRemote: nil, capture: capture,
                     legacyMaterial: prepared.material, hostEdits: globalEdits, websiteEvents: [], websiteAddonEvents: [],
                     legacyWatchlists: [:], sourceAuthority: prepared.authority, authenticatedSourceArchive: prepared.sourceArchive)
                 guard isCurrent(capture), sourceIsCurrent() else { return nil }
             }
+            exportStage = "export_projection"
             doc["nativeSync"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(merged["nativeSync"]!))
             doc["nativeHostPreferences"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(merged["nativeHostPreferences"]!))
             doc["profileEditResults"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(merged["profileEditResults"]!))
             try publishNativeWebsiteOutcome(merged["profileEditResults"]!, capture: capture)
+            exportStage = "provider_persist"
             providers = try persistMergedNativeProviders(providers, capture: capture)
             doc["nativeProviderCredentials"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(providers.document))
             doc["apiKeys"] = try mirrorNativeProviderKeys(providers, original: doc["apiKeys"])
             applyNativeGlobals(merged["nativeHostPreferences"]!)
         } catch {
-            DiagnosticsLog.log("sync", "operation=native_sync_export result=failed reason=\(VortxNativeError.diagnosticCode(error))")
+            DiagnosticsLog.log("sync", "operation=native_sync_export result=failed stage=\(exportStage) reason=\(VortxNativeError.diagnosticCode(error))")
             return nil
         }
         // Never rewrite the legacy migration baseline from native/profile/overlay mirrors. Until
@@ -5447,8 +5473,10 @@ final class VortXSyncManager: ObservableObject {
 #if VORTX_NATIVE_DATA_ENGINE
     private var pendingSyncCapture: CredentialScopeRegistry.Capture?
     private var pendingSyncID: UUID?
+    /// The worker is only waiting out a playback-progress window (no upload in flight).
+    private var pendingSyncAwaitsProgressWindow = false
 #endif
-    func requestSyncSoon() {
+    func requestSyncSoon(progressOnly: Bool = false) {
         guard isSignedIn else { return }
         // Universal "do not schedule a push from this write" gate. While syncDown is applying a remote pull
         // (isApplyingRemote), the writes it makes must NOT arm a push, or the receiving device re-pushes the
@@ -5465,9 +5493,17 @@ final class VortXSyncManager: ObservableObject {
             pendingSync = nil
             nativePushQueue = .init()
         }
-        nativePushQueue.request()
+        nativePushQueue.request(progressOnly: progressOnly)
         nativeDurablePushPending = true
         guard backupUploadFailure != .upgradeRequired else { return }
+        // A real edit must not wait behind a playback-progress window. Only a worker that is
+        // merely sleeping on that window is replaced; an executing upload is never cancelled.
+        if !progressOnly, pendingSync != nil, pendingSyncAwaitsProgressWindow {
+            pendingSync?.cancel()
+            pendingSync = nil
+            pendingSyncID = nil
+            pendingSyncAwaitsProgressWindow = false
+        }
         // Do not cancel an executing upload for a later local edit. Its captured generation
         // will ACK only itself; the same worker exports the newer checkpoint next.
         guard pendingSync == nil else { return }
@@ -5480,18 +5516,25 @@ final class VortXSyncManager: ObservableObject {
                 if self.pendingSyncID == workerID {
                     self.pendingSync = nil
                     self.pendingSyncID = nil
+                    self.pendingSyncAwaitsProgressWindow = false
                 }
             }
-            var retryDelay: UInt64 = 2_500_000_000
+            var failureBackoff: TimeInterval?
             while self.isSignedIn, self.isCurrent(capture), !Task.isCancelled {
-                do { try await Task.sleep(nanoseconds: retryDelay) } catch { return }
+                guard let delay = self.nativePushQueue.nextUploadDelay(now: Date(), failureBackoff: failureBackoff) else { return }
+                self.pendingSyncAwaitsProgressWindow = !self.nativePushQueue.hasUrgentPush
+                do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) } catch { return }
                 guard self.isCurrent(capture), self.pendingSyncID == workerID else { return }
+                // Newer progress moves a quiet window later; wait out the remainder first.
+                if failureBackoff == nil, let remaining = self.nativePushQueue.nextUploadDelay(now: Date(), failureBackoff: nil),
+                   remaining > 0.05, !self.nativePushQueue.hasUrgentPush { continue }
+                self.pendingSyncAwaitsProgressWindow = false
                 let generation = self.nativePushQueue.generation
                 let accepted = await self.syncUp()
                 guard self.isCurrent(capture), self.pendingSyncID == workerID else { return }
                 guard self.backupUploadFailure != .upgradeRequired else { return }
                 self.nativePushQueue.acknowledge(generation, accepted: accepted)
-                retryDelay = accepted ? 2_500_000_000 : min(retryDelay * 2, 30_000_000_000)
+                failureBackoff = accepted ? nil : NativeForegroundSyncPolicy.PushQueue.nextFailureBackoff(after: failureBackoff)
                 if !self.nativePushQueue.hasPendingPush {
                     self.nativeDurablePushPending = false
                     return

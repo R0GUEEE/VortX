@@ -2529,7 +2529,7 @@ struct iOSDetailView: View {
                     Label(sourceTotal > 0 ? "Sources · \(sourceTotal)" : "Sources",
                           systemImage: "list.bullet")
                 }
-                .buttonStyle(ChipButtonStyle())
+                .buttonStyle(ChipButtonStyle(profileTinted: true))
 
                 trailerButton
                 iOSLibraryChip(expectedID: metaRequestID, expectedType: effectiveType)
@@ -2572,7 +2572,7 @@ struct iOSDetailView: View {
             } label: {
                 Label("Quality", systemImage: "chevron.up.chevron.down")
             }
-            .buttonStyle(ChipButtonStyle())
+            .buttonStyle(ChipButtonStyle(profileTinted: true))
         }
     }
 
@@ -2594,7 +2594,7 @@ struct iOSDetailView: View {
             Label(selectedLabel ?? "Audio",
                   systemImage: "captions.bubble")
         }
-        .buttonStyle(ChipButtonStyle(selected: selected != nil))
+        .buttonStyle(ChipButtonStyle(selected: selected != nil, profileTinted: true))
         .accessibilityLabel("Audio")
         .accessibilityValue(selectedLabel ?? "Auto")
         .accessibilityHint("Changes source ranking for this title without changing your saved audio preference.")
@@ -2616,7 +2616,7 @@ struct iOSDetailView: View {
         } label: {
             Label(launchPlayerLabel, systemImage: "play.rectangle")
         }
-        .buttonStyle(ChipButtonStyle(selected: launchEnginePreference != nil))
+        .buttonStyle(ChipButtonStyle(selected: launchEnginePreference != nil, profileTinted: true))
         .accessibilityLabel("Player for next launch")
         .accessibilityHint("AVPlayer is used only for compatible sources. Other sources use the safe VortX route.")
     }
@@ -6903,7 +6903,7 @@ struct iOSSourceList: View {
                     Label(showAllSources ? "Hide sources" : "All sources · \(streamCount)",
                           systemImage: showAllSources ? "chevron.up" : "list.bullet")
                 }
-                .buttonStyle(ChipButtonStyle(selected: showAllSources))
+                .buttonStyle(ChipButtonStyle(selected: showAllSources, profileTinted: true))
                 Spacer(minLength: 0)
             }
         }
@@ -6928,7 +6928,7 @@ struct iOSSourceList: View {
             } label: {
                 Label("Quality", systemImage: "chevron.up.chevron.down")
             }
-            .buttonStyle(ChipButtonStyle())
+            .buttonStyle(ChipButtonStyle(profileTinted: true))
         }
     }
 
@@ -6946,7 +6946,7 @@ struct iOSSourceList: View {
             Label(selected.flatMap { code in TrackPreferences.commonLanguages.first(where: { $0.id == code })?.label } ?? "Audio",
                   systemImage: "captions.bubble")
         }
-        .buttonStyle(ChipButtonStyle(selected: selected != nil))
+        .buttonStyle(ChipButtonStyle(selected: selected != nil, profileTinted: true))
     }
 
     /// Session-only route for the next launch from this source list. The parent owns the value, so
@@ -6960,7 +6960,7 @@ struct iOSSourceList: View {
             } label: {
                 Label(launchPlayerLabel, systemImage: "play.rectangle")
             }
-            .buttonStyle(ChipButtonStyle(selected: launchEnginePreference != nil))
+            .buttonStyle(ChipButtonStyle(selected: launchEnginePreference != nil, profileTinted: true))
             .accessibilityLabel("Player for next launch")
             .accessibilityHint("AVPlayer is used only for compatible sources")
         }
