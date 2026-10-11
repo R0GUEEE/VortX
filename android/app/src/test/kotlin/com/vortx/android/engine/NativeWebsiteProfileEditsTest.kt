@@ -175,4 +175,99 @@ class NativeWebsiteProfileEditsTest {
         source.getJSONObject("accountBindings").put(upper, binding)
         assertTrue(runCatching { admitLibrary(source) }.isFailure)
     }
+
+    private val upperProfile = "ABCDEF01-0000-4000-8000-000000000001"
+    private val lowerProfile get() = upperProfile.lowercase()
+    private fun uuidEvent(): JSONObject = event().also { source ->
+        source.put("hostBases", JSONObject().put(lowerProfile, source.getJSONObject("hostBases").getJSONObject("owner")))
+        source.getJSONArray("roster").getJSONObject(0).put("id", upperProfile)
+    }
+    private fun uuidResponse(): JSONObject = response().also { reply ->
+        val applied = reply.getJSONArray("events").getJSONObject(0)
+        applied.put("hostPatch", JSONObject().put(upperProfile, applied.getJSONObject("hostPatch").getJSONObject("owner")))
+    }
+    private fun uuidFallback() = JSONObject().put(upperProfile, JSONObject().put("avatar", "moon"))
+    private fun uuidAdmit(source: JSONObject, reply: JSONObject = uuidResponse(), local: JSONObject = NativeHostPreferences.local(scope),
+        certificates: JSONObject = JSONObject(), receipt: JSONObject? = null) =
+        NativeWebsiteProfileEdits.admit(scope, source, reply, local, uuidFallback(), certificates, receipt)
+
+    @Test fun `uppercase sparse patch admits lowercase absent base without changing immutable source or receipt`() {
+        val source = uuidEvent(); val reply = uuidResponse()
+        val sourceBytes = source.toString(); val replyBytes = reply.toString()
+        val sourceHash = hash(NativeWebsiteProfileEdits.canonical(source))
+        val basesHash = hash(NativeWebsiteProfileEdits.canonical(source.getJSONObject("hostBases")))
+        val replyHash = hash(NativeWebsiteProfileEdits.canonical(reply))
+        val applied = uuidAdmit(source, reply)
+        val register = applied.host.getJSONObject("document").getJSONObject("profiles").getJSONObject(upperProfile).getJSONObject("fields").getJSONObject("avatar")
+        assertEquals(8L, register.getLong("clock")); assertEquals(id, register.getString("actor")); assertEquals("🍿", register.getString("value"))
+        assertEquals(sourceBytes, source.toString()); assertEquals(replyBytes, reply.toString())
+        assertEquals(sourceHash, hash(NativeWebsiteProfileEdits.canonical(source)))
+        assertEquals(basesHash, hash(NativeWebsiteProfileEdits.canonical(source.getJSONObject("hostBases"))))
+        assertEquals(replyHash, hash(NativeWebsiteProfileEdits.canonical(reply)))
+    }
+
+    @Test fun `lowercase sealed current base admits uppercase patch and paired replay keeps newer null`() {
+        val host = NativeHostPreferences.recordProfiles(scope, NativeHostPreferences.local(scope), JSONObject(),
+            JSONObject().put(upperProfile, JSONObject().put("avatar", "moon")))
+        val groups = host.getJSONObject("document").getJSONObject("profiles")
+        groups.put(lowerProfile, groups.remove(upperProfile))
+        val entry = groups.getJSONObject(lowerProfile).getJSONObject("fields").getJSONObject("avatar")
+        val source = uuidEvent()
+        source.getJSONObject("hostBases").getJSONObject(lowerProfile).put("avatar", JSONObject().put("clock", entry.getLong("clock"))
+            .put("actor", entry.getString("actor")).put("valueHash", hash("\"moon\"")))
+        val hostBytes = host.toString(); val sourceBytes = source.toString()
+        val applied = uuidAdmit(source, local = host)
+        assertEquals(hostBytes, host.toString()); assertEquals(sourceBytes, source.toString())
+        val receipt = uuidResponse().getJSONArray("events").getJSONObject(0).getJSONObject("receipt")
+        val paired = uuidAdmit(source, local = applied.host, receipt = receipt)
+        assertTrue(NativeHostPreferences.equal(applied.host, paired.host))
+        val replay = uuidAdmit(source, local = applied.host, certificates = applied.certificates)
+        assertEquals(8L, replay.host.getJSONObject("document").getJSONObject("profiles").getJSONObject(upperProfile)
+            .getJSONObject("fields").getJSONObject("avatar").getLong("clock"))
+        val newer = JSONObject(applied.host.toString())
+        newer.getJSONObject("document").getJSONObject("profiles").getJSONObject(upperProfile).getJSONObject("fields").put("avatar",
+            JSONObject().put("clock", 9).put("actor", "00000000-0000-4000-8000-000000000009").put("value", JSONObject.NULL))
+        newer.put("counter", 9)
+        assertTrue(uuidAdmit(source, local = newer, receipt = receipt).host.getJSONObject("document").getJSONObject("profiles")
+            .getJSONObject(upperProfile).getJSONObject("fields").getJSONObject("avatar").isNull("value"))
+    }
+
+    @Test fun `canonical duplicate bases patches and sparse rows reject even on replay without mutation`() {
+        for (target in listOf("bases", "patch", "rows")) {
+            val pairedHost = uuidAdmit(uuidEvent()).host
+            val pairedHostBytes = pairedHost.toString()
+            val pairedReceipt = uuidResponse().getJSONArray("events").getJSONObject(0).getJSONObject("receipt")
+            val source = uuidEvent(); val reply = uuidResponse()
+            when (target) {
+                "bases" -> source.getJSONObject("hostBases").put(upperProfile, source.getJSONObject("hostBases").getJSONObject(lowerProfile))
+                "patch" -> reply.getJSONArray("events").getJSONObject(0).getJSONObject("hostPatch").put(lowerProfile,
+                    reply.getJSONArray("events").getJSONObject(0).getJSONObject("hostPatch").getJSONObject(upperProfile))
+                else -> source.getJSONArray("roster").put(JSONObject(source.getJSONArray("roster").getJSONObject(0).toString()).put("id", lowerProfile))
+            }
+            val sourceBytes = source.toString(); val replyBytes = reply.toString()
+            val local = NativeHostPreferences.local(scope); val localBytes = local.toString()
+            val certificates = JSONObject().put(id, "a".repeat(64)); val certificateBytes = certificates.toString()
+            assertTrue(runCatching { uuidAdmit(source, reply, local, certificates) }.isFailure)
+            assertTrue(runCatching { uuidAdmit(source, reply, pairedHost, JSONObject(), pairedReceipt) }.isFailure)
+            assertEquals(sourceBytes, source.toString()); assertEquals(replyBytes, reply.toString())
+            assertEquals(localBytes, local.toString()); assertEquals(certificateBytes, certificates.toString())
+            assertEquals(pairedHostBytes, pairedHost.toString())
+        }
+    }
+
+    @Test fun `canonical base lookup still rejects absent and stale witnesses and nonUUID case differences`() {
+        val missing = uuidEvent().put("hostBases", JSONObject())
+        val missingLocal = NativeHostPreferences.local(scope); val certificates = JSONObject()
+        val missingBytes = missing.toString(); val missingLocalBytes = missingLocal.toString()
+        assertTrue(runCatching { uuidAdmit(missing, local = missingLocal, certificates = certificates) }.exceptionOrNull() is NativeWebsiteProfileEdits.Conflict)
+        assertEquals(missingBytes, missing.toString()); assertEquals(missingLocalBytes, missingLocal.toString()); assertEquals(0, certificates.length())
+        val stale = uuidEvent()
+        val local = NativeHostPreferences.recordProfiles(scope, NativeHostPreferences.local(scope), JSONObject(), uuidFallback())
+        val staleBytes = stale.toString(); val localBytes = local.toString()
+        assertTrue(runCatching { uuidAdmit(stale, local = local, certificates = certificates) }.exceptionOrNull() is NativeWebsiteProfileEdits.Conflict)
+        assertEquals(staleBytes, stale.toString()); assertEquals(localBytes, local.toString()); assertEquals(0, certificates.length())
+        val exact = event(); exact.put("hostBases", JSONObject().put("OWNER", exact.getJSONObject("hostBases").getJSONObject("owner")))
+        assertTrue(runCatching { NativeWebsiteProfileEdits.admit(scope, exact, response(), NativeHostPreferences.local(scope),
+            JSONObject().put("owner", JSONObject().put("avatar", "moon")), JSONObject(), null) }.exceptionOrNull() is NativeWebsiteProfileEdits.Conflict)
+    }
 }

@@ -127,12 +127,22 @@ internal object NativeWebsiteProfileEdits {
         require(event.get("editedAt") is Number && event.getDouble("editedAt").isFinite() && event.getDouble("editedAt") > 0.0)
         require((event.has("observedNativeClock") && event.get("observedNativeClock") is Number && exactClock(event.get("observedNativeClock"))) ||
             (!event.has("observedNativeClock") && event.has("legacyBootstrapFingerprint") && hex.matches(event.getString("legacyBootstrapFingerprint"))))
-        event.optJSONArray("roster")?.let { rows -> (0 until rows.length()).forEach { require(rows.optJSONObject(it) != null) } }
+        event.optJSONArray("roster")?.let { rows ->
+            val ids = mutableSetOf<String>()
+            (0 until rows.length()).forEach { index ->
+                val row = rows.optJSONObject(index) ?: throw IllegalArgumentException("Website roster must contain objects")
+                val raw = row.getString("id")
+                require(raw.isNotBlank() && '\u0000' !in raw && ids.add(NativeHostPreferences.canonicalProfileID(raw))) {
+                    "Duplicate or invalid website profile identity"
+                }
+            }
+        }
         event.optJSONObject("libraryAdds")?.let { additions -> additions.keys().forEach { require(additions.optJSONArray(it) != null) } }
         if (event.has("accountBindings")) validateAccountBindings(event)
         if (event.has("observedHostClock") || event.has("hostBases")) {
             require(uuid.matches(event.getString("eventId")) && event.has("observedHostClock") && exactClock(event.get("observedHostClock")))
-            event.optJSONObject("hostBases") ?: throw IllegalArgumentException("Website host bases required")
+            val bases = event.optJSONObject("hostBases") ?: throw IllegalArgumentException("Website host bases required")
+            NativeHostPreferences.profileKeyIndex(bases)
         }
     }
 
@@ -173,7 +183,7 @@ internal object NativeWebsiteProfileEdits {
 
     private fun bindingProfileId(raw: String): String {
         require(validBindingIdentity(raw, 512)) { "Invalid website account binding profile identity" }
-        return if (uuid.matches(raw.lowercase())) raw.uppercase() else raw
+        return NativeHostPreferences.canonicalProfileID(raw)
     }
 
     private fun validBindingIdentity(raw: Any?, maxBytes: Int): Boolean = raw is String && raw.isNotEmpty() &&
@@ -186,6 +196,7 @@ internal object NativeWebsiteProfileEdits {
     }
 
     private fun validatePatch(event: JSONObject, patch: JSONObject) {
+        val actualKeys = NativeHostPreferences.profileKeyIndex(patch)
         for (profileId in patch.keys()) {
             val fields = patch.getJSONObject(profileId)
             for (path in fields.keys()) {
@@ -206,7 +217,10 @@ internal object NativeWebsiteProfileEdits {
             settings.optJSONObject("playback")?.let { playback -> playback.keys().forEach { key -> patchFields.put("settings.playback.$key", playback.get(key)) } }
             if (patchFields.length() > 0) expected.put(row.getString("id"), patchFields)
         } }
-        require(NativeHostPreferences.equal(expected, patch)) { "Website host patch does not match immutable event" }
+        val expectedKeys = NativeHostPreferences.profileKeyIndex(expected)
+        require(expectedKeys.keys == actualKeys.keys && expectedKeys.all { (id, raw) ->
+            NativeHostPreferences.equal(expected.get(raw), patch.get(actualKeys.getValue(id)))
+        }) { "Website host patch does not match immutable event" }
     }
 
     private fun validatePlayback(key: String, value: Any) {
@@ -229,14 +243,18 @@ internal object NativeWebsiteProfileEdits {
 
     private fun compareBases(event: JSONObject, patch: JSONObject, local: JSONObject, fallbackProfiles: JSONObject) {
         val bases = event.getJSONObject("hostBases")
-        for (profileId in patch.keys()) {
-            val fields = patch.getJSONObject(profileId)
+        val baseKeys = NativeHostPreferences.profileKeyIndex(bases)
+        val profiles = local.getJSONObject("document").getJSONObject("profiles")
+        val profileKeys = NativeHostPreferences.profileKeyIndex(profiles)
+        val fallbackKeys = NativeHostPreferences.profileKeyIndex(fallbackProfiles)
+        for ((profileId, raw) in NativeHostPreferences.profileKeyIndex(patch)) {
+            val fields = patch.getJSONObject(raw)
             for (topLevel in fields.keys().asSequence().map { if (it == "settings.avatar") "avatar" else "playback" }.toSet()) {
-                val base = bases.optJSONObject(profileId)?.optJSONObject(topLevel) ?: throw Conflict("Website host base missing")
-                val current = local.getJSONObject("document").getJSONObject("profiles").optJSONObject(profileId)?.getJSONObject("fields")?.optJSONObject(topLevel)
+                val base = baseKeys[profileId]?.let(bases::optJSONObject)?.optJSONObject(topLevel) ?: throw Conflict("Website host base missing")
+                val current = profileKeys[profileId]?.let(profiles::optJSONObject)?.getJSONObject("fields")?.optJSONObject(topLevel)
                 if (current == null) {
                     if (!(base.optBoolean("absent") && base.keys().asSequence().toSet() == setOf("absent", "valueHash"))) throw Conflict("Website absent host base mismatch")
-                    if (base.getString("valueHash") != hash(fallbackProfiles.optJSONObject(profileId)?.opt(topLevel) ?: JSONObject.NULL)) throw Conflict("Website host fallback changed")
+                    if (base.getString("valueHash") != hash(fallbackKeys[profileId]?.let(fallbackProfiles::optJSONObject)?.opt(topLevel) ?: JSONObject.NULL)) throw Conflict("Website host fallback changed")
                 } else {
                     if (!(base.keys().asSequence().toSet() == setOf("clock", "actor", "valueHash") && exactClock(base.get("clock")) &&
                         base.getLong("clock") <= event.getLong("observedHostClock") && uuid.matches(base.getString("actor")) &&
@@ -251,15 +269,19 @@ internal object NativeWebsiteProfileEdits {
         val clock = event.getLong("observedHostClock") + 1
         require(clock <= NativeHostPreferences.MAX_CLOCK)
         val document = local.getJSONObject("document"); val profiles = document.getJSONObject("profiles")
-        for (profileId in patch.keys()) {
-            val values = patch.getJSONObject(profileId)
-            val bucket = profiles.optJSONObject(profileId) ?: JSONObject().put("fields", JSONObject()).also { profiles.put(profileId, it) }
+        val profileKeys = NativeHostPreferences.profileKeyIndex(profiles)
+        val fallbackKeys = NativeHostPreferences.profileKeyIndex(fallbackProfiles)
+        for ((profileId, raw) in NativeHostPreferences.profileKeyIndex(patch)) {
+            val values = patch.getJSONObject(raw)
+            // local() already canonicalized sealed groups; keep a unique lookup for admission.
+            val existing = profileKeys[profileId]?.let(profiles::optJSONObject)
+            val bucket = existing ?: JSONObject().put("fields", JSONObject()).also { profiles.put(profileId, it) }
             val fields = bucket.getJSONObject("fields")
             for (topLevel in values.keys().asSequence().map { if (it == "settings.avatar") "avatar" else "playback" }.toSet()) {
                 val current = fields.optJSONObject(topLevel)
                 if (replay && current != null && compare(current, clock, event.getString("eventId")) >= 0) continue
                 val value = if (topLevel == "avatar") values.get("settings.avatar") else {
-                    val base = fallbackProfiles.optJSONObject(profileId)?.optJSONObject("playback") ?: JSONObject()
+                    val base = fallbackKeys[profileId]?.let(fallbackProfiles::optJSONObject)?.optJSONObject("playback") ?: JSONObject()
                     val playback = when {
                         current == null -> JSONObject(base.toString())
                         current.isNull("value") -> JSONObject()
@@ -281,9 +303,10 @@ internal object NativeWebsiteProfileEdits {
         require(expectedClock <= NativeHostPreferences.MAX_CLOCK)
         val actor = event.getString("eventId")
         val profiles = local.getJSONObject("document").getJSONObject("profiles")
-        for (profileId in patch.keys()) {
-            val values = patch.getJSONObject(profileId)
-            val fields = profiles.optJSONObject(profileId)?.getJSONObject("fields")
+        val profileKeys = NativeHostPreferences.profileKeyIndex(profiles)
+        for ((profileId, raw) in NativeHostPreferences.profileKeyIndex(patch)) {
+            val values = patch.getJSONObject(raw)
+            val fields = profileKeys[profileId]?.let(profiles::optJSONObject)?.getJSONObject("fields")
             for (topLevel in values.keys().asSequence().map { if (it == "settings.avatar") "avatar" else "playback" }.toSet()) {
                 val entry = fields?.optJSONObject(topLevel) ?: throw Conflict("Website peer receipt lacks paired host result")
                 val ordering = compare(entry, expectedClock, actor)

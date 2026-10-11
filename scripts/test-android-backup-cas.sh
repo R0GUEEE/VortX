@@ -28,6 +28,7 @@ zip -qd "$test_dir/retained-app.jar" 'com/vortx/android/BuildConfig*' 'com/vortx
     'com/vortx/android/sync/NativeAccountMountToken*' 'com/vortx/android/sync/NativeSyncPublicationPolicy*' \
     'com/vortx/android/sync/VortXSyncRealtime*' 'com/vortx/android/engine/NativeAccountCoordinator*' \
     'com/vortx/android/engine/NativeWebsiteProfileEdits*' \
+    'com/vortx/android/engine/NativeHostPreferences*' \
     'com/vortx/android/profile/ProfileStore*' 'com/vortx/android/backup/SettingsBackup*' \
     'com/vortx/android/integrations/NativeProviderCredentials*' 'com/vortx/android/integrations/NativeProviderAccess*' \
     'com/vortx/android/integrations/NativeProviderVault*' 'com/vortx/android/integrations/NativeProviderAdmission*' \
@@ -45,19 +46,21 @@ test_source="$repo_root/android/app/src/test/kotlin/com/vortx/android"
     "$source_dir/integrations/NativeProviderCredentials.kt" "$source_dir/integrations/NativeProviderAccess.kt" \
     "$source_dir/engine/NativeAccountCoordinator.kt" "$source_dir/engine/NativeLegacyMaterial.kt" \
     "$source_dir/engine/NativeWebsiteProfileEdits.kt" \
+    "$source_dir/engine/NativeHostPreferences.kt" \
     "$source_dir/ui/viewmodel/VortXAccountViewModel.kt" "$source_dir/VortXApplication.kt" \
     "$test_source/sync/VortXSyncManagerBackupRevisionTest.kt" "$test_source/sync/VortXSyncManagerLegacyBackupRevisionTest.kt" \
     "$test_source/sync/VortXBackupCasContractTest.kt" "$test_source/sync/BackupRevisionPolicyTest.kt" \
     "$test_source/sync/NativeAccountSyncTest.kt" "$test_source/sync/AndroidRealtimeSyncTest.kt" \
     "$test_source/integrations/NativeProviderCredentialsTest.kt" \
     "$test_source/engine/NativeWebsiteProfileEditsTest.kt" \
+    "$test_source/engine/NativeHostPreferencesTest.kt" \
     -d "$test_dir/classes" 2>&1 | tee "$test_dir/compile.log"
 cd "$repo_root/android/app"
 "$java_bin" -Xmx512m -Dvortx.test.native=true -cp "$test_dir/classes:$test_cp" org.junit.runner.JUnitCore \
     com.vortx.android.sync.VortXBackupCasContractTest com.vortx.android.sync.BackupRevisionPolicyTest \
     com.vortx.android.sync.NativeAccountSyncTest com.vortx.android.sync.AndroidRealtimeSyncTest \
     com.vortx.android.integrations.NativeProviderCredentialsTest \
-    com.vortx.android.engine.NativeWebsiteProfileEditsTest 2>&1 | tee "$test_dir/native-host.log"
+    com.vortx.android.engine.NativeWebsiteProfileEditsTest com.vortx.android.engine.NativeHostPreferencesTest 2>&1 | tee "$test_dir/native-host.log"
 "$java_bin" -Xmx512m -Dvortx.test.native=false -cp "$test_dir/classes:$test_cp" org.junit.runner.JUnitCore \
     com.vortx.android.sync.VortXSyncManagerLegacyBackupRevisionTest 2>&1 | tee "$test_dir/legacy-host.log"
 printf 'Retained verification directory: %s\n' "$test_dir"
