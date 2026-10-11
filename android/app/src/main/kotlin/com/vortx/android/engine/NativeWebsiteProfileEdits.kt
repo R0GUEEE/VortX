@@ -20,7 +20,7 @@ internal object NativeWebsiteProfileEdits {
 
     private val hex = Regex("[0-9a-f]{64}")
     private val uuid = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-    private val top = setOf("eventId", "editedAt", "observedNativeClock", "observedHostClock", "hostBases", "roster", "libraryAdds", "legacyBootstrapFingerprint")
+    private val top = setOf("eventId", "editedAt", "observedNativeClock", "observedHostClock", "hostBases", "roster", "libraryAdds", "accountBindings", "legacyBootstrapFingerprint")
     private val playbackStrings = setOf("audioLang", "subtitleLang", "forced", "subFont", "subSize", "subColor", "subBackground", "safetyMode")
     private val playbackBooleans = setOf("useAddonOrder", "instantOnly", "hideDeadTorrents", "hdrOnly", "excludeAV1", "keywordsAreRegex")
     private val languageCodes = setOf("", "en", "es", "fr", "de", "it", "pt", "hi", "ja", "ko", "zh", "ar", "ru")
@@ -129,11 +129,56 @@ internal object NativeWebsiteProfileEdits {
             (!event.has("observedNativeClock") && event.has("legacyBootstrapFingerprint") && hex.matches(event.getString("legacyBootstrapFingerprint"))))
         event.optJSONArray("roster")?.let { rows -> (0 until rows.length()).forEach { require(rows.optJSONObject(it) != null) } }
         event.optJSONObject("libraryAdds")?.let { additions -> additions.keys().forEach { require(additions.optJSONArray(it) != null) } }
+        if (event.has("accountBindings")) validateAccountBindings(event)
         if (event.has("observedHostClock") || event.has("hostBases")) {
             require(uuid.matches(event.getString("eventId")) && event.has("observedHostClock") && exactClock(event.get("observedHostClock")))
             event.optJSONObject("hostBases") ?: throw IllegalArgumentException("Website host bases required")
         }
     }
+
+    /** Public website AccountBindingRevision witnesses are forwarded unchanged to the kernel,
+     * which alone proves own-slot eligibility/current attribution. Never infer a default account. */
+    private fun validateAccountBindings(event: JSONObject) {
+        val bindings = event.optJSONObject("accountBindings") ?: throw IllegalArgumentException("Website account bindings must be an object")
+        val additions = event.optJSONObject("libraryAdds") ?: throw IllegalArgumentException("Website library additions required for account bindings")
+        val required = mutableSetOf<String>()
+        val additionIds = mutableSetOf<String>()
+        for (rawId in additions.keys()) {
+            val id = bindingProfileId(rawId)
+            require(additionIds.add(id)) { "Duplicate website library profile identity" }
+            val items = additions.optJSONArray(rawId) ?: throw IllegalArgumentException("Website library additions must be arrays")
+            if (items.length() > 0) required.add(id)
+        }
+        val supplied = mutableSetOf<String>()
+        for (rawId in bindings.keys()) {
+            val id = bindingProfileId(rawId)
+            require(supplied.add(id)) { "Duplicate website account binding profile identity" }
+            val binding = bindings.optJSONObject(rawId) ?: throw IllegalArgumentException("Invalid website account binding revision")
+            require(binding.keys().asSequence().toSet() == setOf("account", "revision", "transactionId"))
+            val account = binding.optJSONObject("account") ?: throw IllegalArgumentException("Invalid website account binding")
+            when (account.opt("kind")) {
+                "own", "shared" -> {
+                    require(account.keys().asSequence().toSet() == setOf("kind", "value"))
+                    require(validBindingIdentity(account.opt("value"), if (account.getString("kind") == "own") 256 else 512))
+                }
+                "pending_own", "local_only" -> require(account.keys().asSequence().toSet() == setOf("kind"))
+                else -> throw IllegalArgumentException("Unsupported website account binding kind")
+            }
+            val revision = binding.get("revision")
+            require(revision is Number && exactClock(revision)) { "Invalid website account binding revision" }
+            require(binding.isNull("transactionId") || validBindingIdentity(binding.opt("transactionId"), 128))
+        }
+        require(supplied == required) { "Website account bindings must match nonempty library targets exactly" }
+    }
+
+    private fun bindingProfileId(raw: String): String {
+        require(validBindingIdentity(raw, 512)) { "Invalid website account binding profile identity" }
+        return if (uuid.matches(raw.lowercase())) raw.uppercase() else raw
+    }
+
+    private fun validBindingIdentity(raw: Any?, maxBytes: Int): Boolean = raw is String && raw.isNotEmpty() &&
+        raw.trim() == raw && raw.toByteArray(Charsets.UTF_8).size <= maxBytes &&
+        raw.none { it.code <= 0x1f || it.code in 0x7f..0x9f }
 
     private fun validateRetainedSource(scope: VortxAccountScope, event: JSONObject) {
         scope.rejectCredentials(event)

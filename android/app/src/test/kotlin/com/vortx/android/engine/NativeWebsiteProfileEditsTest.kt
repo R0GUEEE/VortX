@@ -97,4 +97,82 @@ class NativeWebsiteProfileEditsTest {
         pending = NativeWebsiteProfileEdits.retain(scope, pending, JSONObject().put("eventId", "later").put("value", "C"))
         assertEquals(3, pending.getJSONArray("events").length())
     }
+
+    private fun libraryEvent(account: JSONObject = JSONObject().put("kind", "own").put("value", "own-slot-fixture")): JSONObject =
+        event().put("libraryAdds", JSONObject().put("owner", JSONArray().put(JSONObject().put("id", "tt123").put("name", "Fixture").put("type", "movie"))))
+            .put("accountBindings", JSONObject().put("owner", JSONObject().put("account", account).put("revision", 3).put("transactionId", JSONObject.NULL)))
+
+    private fun admitLibrary(source: JSONObject) = NativeWebsiteProfileEdits.admit(scope, source, response(),
+        NativeHostPreferences.local(scope), JSONObject().put("owner", JSONObject().put("avatar", "moon")), JSONObject(), null)
+
+    @Test fun `optional exact website account binding witnesses remain immutable and own attributed`() {
+        val cases = listOf(JSONObject().put("kind", "own").put("value", "own-slot-fixture"),
+            JSONObject().put("kind", "shared").put("value", "account.test"),
+            JSONObject().put("kind", "pending_own"), JSONObject().put("kind", "local_only"))
+        for (account in cases) {
+            val source = libraryEvent(account)
+            val original = source.toString()
+            val binding = source.getJSONObject("accountBindings").getJSONObject("owner")
+            binding.put("revision", NativeHostPreferences.MAX_CLOCK).put("transactionId", "transaction-fixture")
+            val witnessed = source.toString()
+            assertEquals("a".repeat(64), admitLibrary(source).certificates.getString(id))
+            assertEquals(witnessed, source.toString())
+            val retained = NativeWebsiteProfileEdits.retain(scope, JSONObject().put("events", JSONArray()), source)
+            assertTrue(NativeHostPreferences.equal(source, retained.getJSONArray("events").getJSONObject(0)))
+            assertNotEquals(original, witnessed)
+        }
+        // Historical events without a witness remain optional; the kernel decides eligibility.
+        assertEquals("a".repeat(64), admitLibrary(libraryEvent().also { it.remove("accountBindings") }).certificates.getString(id))
+    }
+
+    @Test fun `website account binding malformed enum revision identities and extras fail closed`() {
+        val invalidBindings = listOf(
+            JSONObject().put("kind", "own"), JSONObject().put("kind", "own").put("value", ""),
+            JSONObject().put("kind", "own").put("value", "x".repeat(257)),
+            JSONObject().put("kind", "own").put("value", "🍿".repeat(65)),
+            JSONObject().put("kind", "shared").put("value", "x".repeat(513)),
+            JSONObject().put("kind", "shared").put("value", " padded "),
+            JSONObject().put("kind", "shared").put("value", "control\u0085"),
+            JSONObject().put("kind", "pending_own").put("value", "invented"),
+            JSONObject().put("kind", "local_only").put("unknown", true), JSONObject().put("kind", "unknown"))
+        for (binding in invalidBindings) assertTrue(runCatching { admitLibrary(libraryEvent(binding)) }.isFailure)
+        for (revision in listOf<Any>(-1, 1.5, "3", NativeHostPreferences.MAX_CLOCK + 1)) {
+            val source = libraryEvent()
+            source.getJSONObject("accountBindings").getJSONObject("owner").put("revision", revision)
+            assertTrue(runCatching { admitLibrary(source) }.isFailure)
+        }
+        for (transaction in listOf<Any>("", "x".repeat(129), "line\nbreak", 1)) {
+            val source = libraryEvent()
+            source.getJSONObject("accountBindings").getJSONObject("owner").put("transactionId", transaction)
+            assertTrue(runCatching { admitLibrary(source) }.isFailure)
+        }
+        for (field in listOf("account", "revision", "transactionId")) {
+            val source = libraryEvent(); source.getJSONObject("accountBindings").getJSONObject("owner").remove(field)
+            assertTrue(runCatching { admitLibrary(source) }.isFailure)
+        }
+        val extra = libraryEvent(); extra.getJSONObject("accountBindings").getJSONObject("owner").put("unexpected", true)
+        assertTrue(runCatching { admitLibrary(extra) }.isFailure)
+        val credentials = libraryEvent(); credentials.getJSONObject("accountBindings").getJSONObject("owner").getJSONObject("account").put("token", "not-a-secret-fixture")
+        assertTrue(runCatching { admitLibrary(credentials) }.isFailure)
+    }
+
+    @Test fun `website account bindings require exact nonempty targets and canonical duplicate rejection`() {
+        val missing = libraryEvent().put("accountBindings", JSONObject())
+        assertTrue(runCatching { admitLibrary(missing) }.isFailure)
+        val unrelated = libraryEvent(); unrelated.getJSONObject("accountBindings").put("child", unrelated.getJSONObject("accountBindings").getJSONObject("owner"))
+        assertTrue(runCatching { admitLibrary(unrelated) }.isFailure)
+        val emptyTarget = libraryEvent().put("libraryAdds", JSONObject().put("owner", JSONArray()))
+        assertTrue(runCatching { admitLibrary(emptyTarget) }.isFailure)
+        val nonObject = libraryEvent().put("accountBindings", JSONArray())
+        assertTrue(runCatching { admitLibrary(nonObject) }.isFailure)
+        val upper = "ABCDEF01-0000-4000-8000-000000000001"
+        val lower = upper.lowercase()
+        val source = libraryEvent()
+        val binding = source.getJSONObject("accountBindings").getJSONObject("owner")
+        source.put("libraryAdds", JSONObject().put(upper, JSONArray().put(JSONObject().put("id", "tt123"))))
+            .put("accountBindings", JSONObject().put(lower, binding))
+        assertEquals("a".repeat(64), admitLibrary(source).certificates.getString(id))
+        source.getJSONObject("accountBindings").put(upper, binding)
+        assertTrue(runCatching { admitLibrary(source) }.isFailure)
+    }
 }

@@ -17,6 +17,15 @@ internal object NativeSyncPublicationPolicy {
             (joined.hostPreferences != null && !same(remote.optJSONObject("nativeHostPreferences"), joined.hostPreferences))
     }
 
+    /** A securely joined provider register can retain an ACKed fact without new local intent. */
+    fun needsProviderRepublish(remote: JSONObject, joined: JSONObject): Boolean {
+        val carrier = joined.optJSONObject("nativeProviderCredentials") ?: return false
+        // Empty initialized vaults contribute no causal facts and must not arm an idle echo.
+        if (carrier.optJSONObject("fields")?.length() == 0) return false
+        return !same(remote.optJSONObject("nativeProviderCredentials"), carrier) ||
+            !same(remote.opt("apiKeys"), joined.opt("apiKeys"))
+    }
+
     internal fun same(left: Any?, right: Any?): Boolean = when {
         left === right -> true
         left == null || right == null -> false

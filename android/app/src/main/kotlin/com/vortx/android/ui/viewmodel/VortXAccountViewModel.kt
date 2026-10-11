@@ -9,6 +9,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
@@ -142,6 +143,12 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
     /// One-line, non-blocking status under the signed-in card ("Synced." / "Couldn't reach...").
     private val _syncNotice = MutableStateFlow<String?>(null)
     val syncNotice: StateFlow<String?> = _syncNotice.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            sync.syncProblem.collect { problem -> _syncNotice.value = problem }
+        }
+    }
 
     fun onModeChange(mode: VortXAccountMode) {
         if (_mode.value == mode) return
@@ -324,7 +331,7 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
             }
             VortXSyncManager.SignInReconcile.HAS_ACCOUNT_DATA -> _showReconcile.value = true
             VortXSyncManager.SignInReconcile.UNREACHABLE -> {
-                _syncNotice.value = "Signed in. Your synced data wasn't reachable yet; it will catch up automatically."
+                _syncNotice.value = sync.syncProblem.value ?: "Signed in. Your synced data wasn't reachable yet; it will catch up automatically."
                 sync.startRealtime()
             }
         }
@@ -337,7 +344,7 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
             VortXSyncManager.SignInReconcile.SEEDED_FROM_DEVICE -> _syncNotice.value = null
             VortXSyncManager.SignInReconcile.HAS_ACCOUNT_DATA -> sync.useAccountData()
             VortXSyncManager.SignInReconcile.UNREACHABLE ->
-                _syncNotice.value = "Signed in. Your synced data wasn't reachable yet; it will catch up automatically."
+                _syncNotice.value = sync.syncProblem.value ?: "Signed in. Your synced data wasn't reachable yet; it will catch up automatically."
         }
         sync.startRealtime()
     }
@@ -379,7 +386,7 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
         _syncing.value = true
         viewModelScope.launch {
             val pushed = sync.mergeBoth()
-            _syncNotice.value = if (pushed) "Synced." else "Couldn't sync right now. It will retry automatically."
+            _syncNotice.value = sync.syncProblem.value ?: if (pushed) "Synced." else "Couldn't sync right now. It will retry automatically."
             _syncing.value = false
         }
     }
