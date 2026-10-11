@@ -42,12 +42,28 @@ struct VortxNativeHostPreferences: Sendable {
         return globalArrays.contains(key) && value.array?.allSatisfy { if case .string = $0 { return true }; return false } == true
     }
     static func validActor(_ actor: String) -> Bool { UUID(uuidString: actor)?.uuidString.lowercased() == actor }
+    static func canonicalProfileID(_ id: String) -> String {
+        guard id.range(of: "\\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\z",
+                       options: .regularExpression) != nil else { return id }
+        return UUID(uuidString: id)?.uuidString ?? id
+    }
+    /// Index only: immutable website evidence can use this without rewriting its fingerprint.
+    /// Even equal aliases in one document are ambiguous and must never be silently unioned.
+    static func profileKeysByCanonicalID<Value>(_ groups: [String: Value]) throws -> [String: String] {
+        var keys: [String: String] = [:]
+        for id in groups.keys {
+            guard !id.isEmpty, keys.updateValue(id, forKey: canonicalProfileID(id)) == nil else {
+                throw VortxNativeError.invalidSnapshot
+            }
+        }
+        return keys
+    }
     init(scope: VortxAccountScope, actor: String, sealed: Data? = nil) throws {
         guard Self.validActor(actor) else { throw VortxNativeError.invalidSnapshot }
         if let sealed {
             var value = try JSONDecoder().decode(Local.self, from: sealed)
             guard Self.validActor(value.actor), value.counter <= Self.maxClock else { throw VortxNativeError.invalidSnapshot }
-            try Self.validate(value.document, scope: scope)
+            value.document = try Self.canonicalDocument(value.document, scope: scope)
             try VortxNativeProfileEditHost.validateJournal(value)
             try VortxNativeWebsiteAddonEdits.validateJournal(value)
             if let archive = value.authenticatedSourceArchive {
@@ -99,15 +115,15 @@ struct VortxNativeHostPreferences: Sendable {
         guard let remote else { return }
         guard case .object(let keys) = remote, Set(keys.keys) == ["schemaVersion", "scope", "ownerProfileId", "profiles", "globals"] else { throw VortxNativeError.invalidSnapshot }
         guard case .object(let profiles) = remote["profiles"] else { throw VortxNativeError.invalidSnapshot }
+        _ = try Self.profileKeysByCanonicalID(profiles)
         for group in Array(profiles.values) + [remote["globals"]!] {
             guard case .object(let wrapper) = group, Set(wrapper.keys) == ["fields"], case .object(let fields) = wrapper["fields"] else { throw VortxNativeError.invalidSnapshot }
             for register in fields.values {
                 guard case .object(let values) = register, Set(values.keys) == ["clock", "actor", "value"] else { throw VortxNativeError.invalidSnapshot }
             }
         }
-        let incoming = try remote.decode(Document.self)
-        try Self.validate(incoming, scope: scope)
-        var candidate = local.document
+        let incoming = try Self.canonicalDocument(remote.decode(Document.self), scope: scope)
+        var candidate = try Self.canonicalDocument(local.document, scope: scope)
         candidate.globals = try Self.mergeFields(candidate.globals, incoming.globals)
         for (id, fields) in incoming.profiles { candidate.profiles[id] = try Self.mergeFields(candidate.profiles[id] ?? Fields(), fields) }
         local.document = candidate; local.counter = max(local.counter, Self.maximum(candidate))
@@ -115,7 +131,9 @@ struct VortxNativeHostPreferences: Sendable {
     mutating func edit(profileID: String?, fields: [String: VortxJSON], scope: VortxAccountScope) throws {
         guard !fields.isEmpty else { return }
         if let profileID { guard !profileID.isEmpty else { throw VortxNativeError.invalidSnapshot } }
+        let profileID = profileID.map(Self.canonicalProfileID)
         var candidate = local
+        candidate.document = try Self.canonicalDocument(candidate.document, scope: scope)
         for name in fields.keys.sorted() {
             try Self.validateField(name, value: fields[name]!, global: profileID == nil)
             guard candidate.counter < Self.maxClock else { throw VortxNativeError.invalidSnapshot }
@@ -125,19 +143,22 @@ struct VortxNativeHostPreferences: Sendable {
                 var current = candidate.document.profiles[profileID] ?? Fields(); current.fields[name] = value; candidate.document.profiles[profileID] = current
             } else { candidate.document.globals.fields[name] = value }
         }
-        try Self.validate(candidate.document, scope: scope); local = candidate
+        candidate.document = try Self.canonicalDocument(candidate.document, scope: scope); local = candidate
     }
     static func validateSealed(_ data: Data, scope: VortxAccountScope) throws {
         let value = try JSONDecoder().decode(Local.self, from: data)
         _ = try Self(scope: scope, actor: value.actor, sealed: data)
     }
-    private static func validate(_ document: Document, scope: VortxAccountScope) throws {
+    private static func canonicalDocument(_ document: Document, scope: VortxAccountScope) throws -> Document {
         guard document.schemaVersion == 1, document.scope == scope.account, document.ownerProfileId == scope.ownerProfileID else { throw VortxNativeError.invalidSnapshot }
-        for (id, fields) in document.profiles {
-            guard !id.isEmpty else { throw VortxNativeError.invalidSnapshot }
+        let keys = try profileKeysByCanonicalID(document.profiles)
+        for fields in document.profiles.values {
             for (name, value) in fields.fields { try validateRegister(name, value: value, global: false) }
         }
         for (name, value) in document.globals.fields { try validateRegister(name, value: value, global: true) }
+        var canonical = document
+        canonical.profiles = Dictionary(uniqueKeysWithValues: keys.map { ($0.key, document.profiles[$0.value]!) })
+        return canonical
     }
     private static func validateRegister(_ name: String, value: Register, global: Bool) throws {
         guard value.clock <= maxClock, validActor(value.actor) else { throw VortxNativeError.invalidSnapshot }
