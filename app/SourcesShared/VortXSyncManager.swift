@@ -313,7 +313,7 @@ final class VortXSyncManager: ObservableObject {
     private func nativePreferenceStore(capture: CredentialScopeRegistry.Capture) throws -> NativePreferenceIntentStore {
         guard isSignedIn, isCurrent(capture), case .account = capture.scope,
               let key = dataKey, key.count == 32 else { throw VortxNativeError.superseded }
-        let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let root = try VortxNativeStorage.root()
             .appendingPathComponent("VortX/native-preference-intents", isDirectory: true)
         return NativePreferenceIntentStore(directoryURL: root, key: key, namespace: capture.namespace)
     }
@@ -955,6 +955,8 @@ final class VortXSyncManager: ObservableObject {
         switch outcome {
         case .held(let reason, let delta):
             DiagnosticsLog.log("native-profiles", "legacy_reconcile result=held stage=\(stage) reason=\(reason) delta=\(delta)")
+        case .partial(let reason, let imported, let remaining):
+            DiagnosticsLog.log("native-profiles", "legacy_reconcile result=partial stage=\(stage) reason=\(reason) imported=\(imported) remaining=\(remaining)")
         case .accepted where loggedNativeLegacyReconciliation != nil:
             DiagnosticsLog.log("native-profiles", "legacy_reconcile result=accepted stage=\(stage)")
         case .accepted: break
@@ -969,7 +971,7 @@ final class VortXSyncManager: ObservableObject {
         let mountedSourceFence = CoreBridge.shared.captureNativeSourceFence()
         guard let keyBytes = dataKey, keyBytes.count == 32 else { throw VortxNativeError.unavailable }
         let scope = VortxAccountScope(account: capture.namespace, ownerProfileID: owner.id.uuidString)
-        let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let directory = try VortxNativeStorage.root()
             .appendingPathComponent("VortX/native-engine-v1", isDirectory: true)
         let probe = try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(data: keyBytes))
         let remote = try document["nativeSync"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
@@ -1180,7 +1182,7 @@ final class VortXSyncManager: ObservableObject {
     private func nativeEmptyAccountDocument(capture: CredentialScopeRegistry.Capture) throws -> [String: Any] {
         guard isCurrent(capture), lastSyncedVersion == 0, !nativeBackupSeen(capture: capture), account != nil,
               let keyBytes = dataKey, keyBytes.count == 32 else { throw VortxNativeError.invalidSnapshot }
-        let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let directory = try VortxNativeStorage.root()
             .appendingPathComponent("VortX/native-engine-v1", isDirectory: true)
         let store = try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(data: keyBytes), installationKey: VortxNativeInstallationKey.loadOrCreate())
         if let recovery = try store.recovery(account: capture.namespace) {
@@ -1203,7 +1205,7 @@ final class VortXSyncManager: ObservableObject {
               let roster = Self.resolveRoster(from: baseline, fullOnly: true),
               let owner = roster.profiles.first(where: \.isOwner) else { throw VortxNativeError.invalidSnapshot }
         let scope = VortxAccountScope(account: capture.namespace, ownerProfileID: owner.id.uuidString)
-        let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let directory = try VortxNativeStorage.root()
             .appendingPathComponent("VortX/native-engine-v1", isDirectory: true)
         let probe = try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(data: keyBytes), installationKey: VortxNativeInstallationKey.loadOrCreate())
         // Preserve historical, already-mounted provisional checkpoints and every edit in them.
@@ -1230,7 +1232,7 @@ final class VortXSyncManager: ObservableObject {
         guard let keyBytes = dataKey, keyBytes.count == 32, let selectedProfile,
               isCurrent(capture), !Task.isCancelled else { return false }
         do {
-            let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            let directory = try VortxNativeStorage.root()
                 .appendingPathComponent("VortX/native-engine-v1", isDirectory: true)
             let store = try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(data: keyBytes), installationKey: VortxNativeInstallationKey.loadOrCreate())
             guard let recovery = try store.recovery(account: capture.namespace) else { throw VortxNativeError.invalidSnapshot }
@@ -1379,7 +1381,7 @@ final class VortXSyncManager: ObservableObject {
             do {
                 let scope = VortxAccountScope(account: capture.namespace, ownerProfileID: owners[0].id.uuidString)
                 _ = try self.mergedNativeProviderState(document, capture: capture) // validate before any native checkpoint commit
-                let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+                let directory = try VortxNativeStorage.root()
                     .appendingPathComponent("VortX/native-engine-v1", isDirectory: true)
                 let documentBytes = try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys, .withoutEscapingSlashes])
                 let probe = try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(data: keyBytes), installationKey: VortxNativeInstallationKey.loadOrCreate())
@@ -1489,7 +1491,9 @@ final class VortXSyncManager: ObservableObject {
             } catch {
                 if self.isCurrent(capture), self.nativeCheckpointGeneration == generation,
                    ProfileStore.shared.activeID == selectedProfile { self.nativeCheckpointStatus = (error as? VortxNativeWatchedArchive.Failure) == .pending ? "watched_migration_pending" : "native_checkpoint_unavailable" }
-                DiagnosticsLog.log("native-profiles", "restore result=failed stage=\(stage) reason=\(VortxNativeError.diagnosticCode(error))")
+                // A system error has no VortX code; its domain and number (never paths) name the failing layer.
+                let system = error is VortxNativeError ? "" : " domain=\((error as NSError).domain) code=\((error as NSError).code)"
+                DiagnosticsLog.log("native-profiles", "restore result=failed stage=\(stage) reason=\(VortxNativeError.diagnosticCode(error))\(system)")
                 return false // No empty account, legacy token dispatch, or destructive repair fallback.
             }
         }

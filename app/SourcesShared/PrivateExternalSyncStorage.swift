@@ -31,8 +31,14 @@ struct PrivateExternalSyncStorage: Sendable {
 
     static func live(provider: String, file: String, legacyFiles: [String]) throws -> Self {
         let manager = FileManager.default
+        // A physical Apple TV cannot create Application Support; tvOS keeps these caches in Caches.
+        #if os(tvOS)
+        let base: FileManager.SearchPathDirectory = .cachesDirectory
+        #else
+        let base: FileManager.SearchPathDirectory = .applicationSupportDirectory
+        #endif
         guard let support = try? manager.url(
-            for: .applicationSupportDirectory,
+            for: base,
             in: .userDomainMask,
             appropriateFor: nil,
             create: true
