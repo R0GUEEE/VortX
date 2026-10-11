@@ -117,6 +117,7 @@ async function serverFor(s, initial = legacyDoc()) {
   let lostResponses = 0;
   let getFailures = 0;
   let conditional = true;
+  let upgradeRequired = false;
   let activeGets = 0;
   let maxGets = 0;
   let activePuts = 0;
@@ -134,15 +135,19 @@ async function serverFor(s, initial = legacyDoc()) {
     if (init.method === "PUT") {
       activePuts++; maxPuts = Math.max(maxPuts, activePuts);
       const body = JSON.parse(init.body);
+      assert.ok(Object.hasOwn(body, "baseRevision"), "every writer carries a candidate witness");
+      assert.ok(body.baseRevision === null || (Number.isSafeInteger(body.baseRevision) && body.baseRevision >= 0));
+      assert.equal(body.version, body.baseRevision === null ? 0 : body.baseRevision + 1);
       puts.push(body);
       const gate = nextPutGate; nextPutGate = undefined;
       if (gate) await gate;
       activePuts--;
+      if (upgradeRequired) return json({ error: "upgrade_required", accepted: false }, 426);
       if (failures) { failures--; return json({ error: "synthetic offline" }, 503); }
-      const accepted = body.version > version;
+      const accepted = body.baseRevision === version && body.version === version + 1;
       if (accepted) { version = body.version; document = body.document; }
       if (lostResponses) { lostResponses--; throw new Error("synthetic response lost after storage"); }
-      return json({ accepted });
+      return json({ ok: true, accepted, ...(!accepted ? { version } : {}) });
     }
     activeGets++; maxGets = Math.max(maxGets, activeGets);
     const result = { document, version };
@@ -163,6 +168,7 @@ async function serverFor(s, initial = legacyDoc()) {
     losePutResponse(count = 1) { lostResponses = count; },
     failGet(count = 1) { getFailures = count; },
     conditional(value) { conditional = value; },
+    requireUpgrade() { upgradeRequired = true; },
     holdGet() { let release; nextGetGate = new Promise((r) => { release = r; }); return release; },
     holdPut() { let release; nextPutGate = new Promise((r) => { release = r; }); return release; },
     async remote(doc) { version++; document = await seal(doc); },
@@ -236,6 +242,37 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
     assert.equal(doc.profileEdits.roster[0].settings.accent, "royal"); assert.equal(doc.profileEdits.roster[0].settings.oled, true);
     assert.deepEqual(doc.foreign, { preserve: true }); assert.equal(server.maxPuts, 1);
     assert.equal(journalsFor(s).length, 0, "ACK removes durable intent");
+  });
+
+  await t.test("in-place token rotation fences a delayed receive and creates a fresh receiver on adoption", async () => {
+    clean(); const s = makeSession(), server = await serverFor(s), release = server.holdGet();
+    account.adoptSession(s); stop = account.startAccountSync();
+    await until(() => server.requests.length === 1, "held old-token GET");
+    const old = FakeSocket.instances.at(-1); s.token = "synthetic-rotated-token"; vault.saveSession(s);
+    release(); await settle();
+    assert.equal(account.accountSyncStatus().receivedVersion, undefined, "old reader never admits its response under the new token");
+    assert.equal(local.get("vortx.syncVer." + s.account.id), undefined, "old response never raises storage floor");
+    account.adoptSession(s);
+    await until(() => account.accountSyncStatus().appliedVersion === 20, "fresh token reader");
+    assert.ok(old.closed); assert.notEqual(FakeSocket.instances.at(-1), old);
+  });
+
+  await t.test("upgrade-required retains durable intent and stops timer, foreground and socket writes until another account binds", async () => {
+    clean(); const s = makeSession(), server = await serverFor(s);
+    account.adoptSession(s); stop = account.startAccountSync();
+    await until(() => account.accountSyncStatus().appliedVersion === 20, "initial account admitted");
+    server.requireUpgrade(); settings.updateSettings({ accentID: "gold" }); await advance(800);
+    assert.equal(server.puts.length, 1); assert.equal(account.accountSyncStatus().upgradeRequired, true);
+    assert.ok(journalsFor(s).some(([, raw]) => JSON.parse(raw).settings.accentID === "gold"));
+    await advance(60_000); window.dispatchEvent(new Event("online")); window.dispatchEvent(new Event("pageshow"));
+    FakeSocket.instances.at(-1).update(server.version); settings.updateSettings({ background: "oled" }); await advance(5_000);
+    assert.equal(server.puts.length, 1, "upgrade is not a retryable revision conflict");
+    assert.ok(journalsFor(s).length, "new explicit edits are still durable while held");
+    const other = makeSession(), nextServer = await serverFor(other); account.adoptSession(other);
+    await until(() => account.accountSyncStatus().appliedVersion === 20, "other account admitted");
+    assert.equal(account.accountSyncStatus().upgradeRequired, undefined);
+    settings.updateSettings({ accentID: "royal" }); await advance(800);
+    assert.equal(nextServer.puts.length, 1); assert.ok(journalsFor(s).length, "old account's retained intent remains separate");
   });
 
   await t.test("add-on failure retries exact descriptor/removal intent and retains edits arriving during PUT", async () => {

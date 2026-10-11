@@ -213,8 +213,10 @@ export interface Session {
 // the vortx.tv dashboard. SESSION_KEY is shared across this origin's web clients and must not change.
 const SESSION_KEY = "vortx.session.v1";
 const DATAKEY_KEY = "vortx.dk.v1";
+let syncSessionGeneration = 0;
 
 export function saveSession(s: Session): void {
+  syncSessionGeneration++;
   try {
     localStorage.setItem(SESSION_KEY, JSON.stringify({ token: s.token, account: s.account }));
     sessionStorage.setItem(DATAKEY_KEY, b64(s.dataKey));
@@ -245,6 +247,7 @@ export function loadSession(): Session | null {
   }
 }
 export function clearSession(): void {
+  syncSessionGeneration++;
   try {
     localStorage.removeItem(SESSION_KEY);
     sessionStorage.removeItem(DATAKEY_KEY);
@@ -519,7 +522,7 @@ export async function disable2fa(session: Session, code: string): Promise<void> 
 
 // --- Encrypted sync document --------------------------------------------------------------------
 // The synced backup is one AES-GCM blob the server stores opaquely; only this tab (holding the data
-// key) can read or write it. getSyncDoc/putSyncDoc are the decrypted read/write helpers; fetchSync
+// key) can read or write it. getSyncDoc/mutateSyncDoc are the decrypted read/write helpers; fetchSync
 // reports status + the decoded contents for a "what is synced" view.
 
 export interface SyncStatus {
@@ -533,16 +536,43 @@ export interface SyncStatus {
   unchanged?: boolean;
 }
 
-export async function fetchSync(session: Session, options: { version?: number; signal?: AbortSignal } = {}): Promise<SyncStatus> {
+export class SyncUpgradeRequiredError extends Error {
+  constructor() { super("Update VortX to continue syncing. Your unsaved changes are retained."); this.name = "SyncUpgradeRequiredError"; }
+}
+function snapshotSyncSession(session: Session): Session {
+  return { ...session, account: { ...session.account }, dataKey: session.dataKey.slice() };
+}
+function captureSyncWriter(source: Session): () => void {
+  const snapshot = snapshotSyncSession(source), stored = loadSession(), generation = syncSessionGeneration;
+  const matches = (value: Session | null) => !!value && value.token === snapshot.token && value.account.id === snapshot.account.id
+    && value.dataKey.length === snapshot.dataKey.length && snapshot.dataKey.every((byte, index) => byte === value.dataKey[index]);
+  return () => {
+    const current = loadSession();
+    if (generation !== syncSessionGeneration || !matches(source) || ((stored || current) && !matches(current))) throw new Error("Account session changed.");
+  };
+}
+function candidateBaseRevision(status: SyncStatus): number | null {
+  if (!status.synced) return null; // Only an authenticated GET 404 creates this result.
+  if (status.decryptFailed || status.unchanged || !status.contents || !Number.isSafeInteger(status.version)
+    || status.version! < 0 || status.version! >= Number.MAX_SAFE_INTEGER) throw new Error("Could not read a safe account revision. Please try again.");
+  return status.version!;
+}
+
+export async function fetchSync(session: Session, options: { version?: number; signal?: AbortSignal; isCurrent?: () => boolean } = {}): Promise<SyncStatus> {
+  session = snapshotSyncSession(session);
+  const assertCurrent = () => { options.signal?.throwIfAborted(); if (options.isCurrent?.() === false) throw new Error("Account session changed."); };
+  assertCurrent();
   const r = await api("/v1/backup", {
     token: session.token,
     signal: options.signal,
     headers: options.version === undefined ? undefined : { "if-none-match": `"${options.version}"` },
   });
-  if (r.status === 304) return { synced: true, unchanged: true, version: options.version };
+  assertCurrent();
+  if (r.status === 304 && Number.isSafeInteger(options.version) && options.version! >= 0) return { synced: true, unchanged: true, version: options.version };
   if (r.status === 404) return { synced: false };
   if (r.status !== 200) throw new Error("offline");
   const data = r.data as { document: string; version: number };
+  if (typeof data?.document !== "string" || !Number.isSafeInteger(data.version) || data.version < 0) throw new Error("Sync data unavailable: invalid revision or document.");
   const acct = session.account.id;
   const isV2 = data.document.startsWith(DOC_V2_PREFIX);
   let contents: Record<string, unknown> | undefined;
@@ -554,6 +584,7 @@ export async function fetchSync(session: Session, options: { version?: number; s
     decryptFailed = true;
   } else {
     const pt = await openDocument(session.dataKey, data.document, acct, data.version);
+    assertCurrent();
     if (pt) {
       try {
         contents = JSON.parse(td.decode(pt)) as Record<string, unknown>;
@@ -586,64 +617,50 @@ export async function getSyncDoc(session: Session): Promise<Record<string, unkno
   if (s.synced && s.decryptFailed) throw new Error("Could not read your account right now. Please try again.");
   return (s.contents as Record<string, unknown>) ?? {};
 }
-/** Write the decrypted sync document back, re-encrypted under the data key. */
-export async function putSyncDoc(session: Session, doc: Record<string, unknown>): Promise<void> {
-  const version = Date.now(); // ONE value, bound into the AAD and sent as the row version, so they match
-  const ciphertext = await sealDocument(session.dataKey, enc(JSON.stringify(doc)), session.account.id, version, WRITE_SYNC_DOC_V2);
-  const r = await api("/v1/backup", {
-    method: "PUT",
-    token: session.token,
-    body: { document: ciphertext, version },
-  });
-  if (r.status !== 200) throw new Error("Could not save to your account.");
-  bumpSyncFloor(session.account.id, version);                          // H-2: never accept below this again
-  if (WRITE_SYNC_DOC_V2) markSawV2(session.account.id);                // H-1: our stored doc is now v2
-}
-
-/** Read-modify-write the sync document with optimistic concurrency. Fetches the current doc + version,
- *  runs `mutate` on it in place, then PUTs at version+1. The worker stores a PUT only when its version
- *  is strictly greater (ON CONFLICT ... WHERE excluded.version > backups.version) and reports
- *  `{ accepted }`; a rejected (stale) write means another device won the race, so we re-fetch and retry.
- *  This is the SAFE alternative to putSyncDoc's blind Date.now() write, which silently loses a concurrent
- *  change (a 200 with accepted:false reads as success). The `mutate` callback MUST only touch web-owned
- *  sibling keys (doc.profileEdits, doc.apiKeys, doc.addons) and NEVER doc.vortx.* (app-authoritative). */
+/** Carry the exact GET revision with its derived encrypted candidate. A later read or conflict echo
+ *  cannot advance this witness. Rejected writes re-read and re-apply the durable intent. The callback
+ *  touches only owned fields and retains all foreign/native carriers from the fresh document. */
 export async function mutateSyncDoc(
   session: Session,
   mutate: (doc: Record<string, unknown>) => void | false,
   isCurrent: () => boolean = () => true,
   receipt: { rejected?: () => void; accepted?: () => void } = {},
 ): Promise<void> {
-  const guard = (): void => { if (!isCurrent()) throw new Error("Account session changed."); };
+  const sessionGuard = captureSyncWriter(session);
+  session = snapshotSyncSession(session);
+  const guard = (): void => { sessionGuard(); if (!isCurrent()) throw new Error("Account session changed."); };
   for (let attempt = 0; attempt < 5; attempt++) {
     guard();
-    const status = await fetchSync(session);
+    const status = await fetchSync(session, { isCurrent: () => { guard(); return true; } });
     guard();
     // Refuse to write onto a doc we could not read: mutating an assumed-empty {} and PUTing it would wipe
     // the whole account at a winning version. Fail loudly instead (mirrors the app + vortx-site).
     if (status.synced && status.decryptFailed) throw new Error("Could not read your account right now. Please try again.");
-    const base = status.synced ? status.version ?? 0 : 0;
+    const baseRevision = candidateBaseRevision(status);
     const doc = (status.contents as Record<string, unknown>) ?? {};
     // A causal writer may have witnessed its exact durable edit in this authenticated read.
     // No-op receipt must not create a fresh row revision or echo a received update.
-    if (mutate(doc) === false) return;
-    const version = base + 1; // ONE value, bound into the AAD and sent as the row version
+    const changed = mutate(doc);
+    guard();
+    if (changed === false) return;
+    const version = baseRevision === null ? 0 : baseRevision + 1;
     const ciphertext = await sealDocument(session.dataKey, enc(JSON.stringify(doc)), session.account.id, version, WRITE_SYNC_DOC_V2);
     guard();
     const r = await api("/v1/backup", {
       method: "PUT",
       token: session.token,
-      body: { document: ciphertext, version },
+      body: { document: ciphertext, version, baseRevision },
     });
     guard();
+    if (r.status === 426) throw new SyncUpgradeRequiredError();
     if (r.status !== 200) throw new Error("Could not save to your account.");
-    if (r.data?.accepted !== false) {
+    if (r.data?.accepted === true) {
       bumpSyncFloor(session.account.id, version);                      // H-2: never accept below this again
       if (WRITE_SYNC_DOC_V2) markSawV2(session.account.id);            // H-1: our stored doc is now v2
-      // Legacy workers omit this field. Preserve their historical return behavior, but a causal
-      // writer may treat only an explicit boolean true as a definite stored-edit receipt.
-      if (r.data?.accepted === true) receipt.accepted?.();
-      return; // stored (accepted true, or older worker without the field)
+      receipt.accepted?.();
+      return;
     }
+    if (r.data?.accepted !== false) throw new Error("Could not confirm your account edit. Please retry.");
     // accepted === false: a newer version landed between our read and write; loop to re-fetch and merge.
     receipt.rejected?.();
   }

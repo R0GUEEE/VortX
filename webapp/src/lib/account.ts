@@ -6,7 +6,7 @@
 //   - an account-scoped journal of explicit edits, ACKed only after serialized successful writes.
 // vault.ts owns session persistence and encrypted transport. Journals carry no session/key/socket URL.
 
-import { loadSession, clearSession, validateSession, saveSession, getSyncDoc, fetchSync, connectSyncSocket, mutateSyncDoc, type Session } from "./vault";
+import { loadSession, clearSession, validateSession, saveSession, getSyncDoc, fetchSync, connectSyncSocket, mutateSyncDoc, SyncUpgradeRequiredError, type Session } from "./vault";
 import {
   mergeInstalledAddons,
   pruneInstalledAddons,
@@ -496,7 +496,8 @@ function bindReceiveSession(session: Session | null): void {
   if (session && receiveState && sameSession(receiveState.session, session)) return;
   if (receiveState) disposeReceiver(receiveState);
   receiveState = session ? {
-    session, pull: null, pullAgain: false, abort: null, socket: null, reconnectAttempt: 0,
+    session: { ...session, account: { ...session.account }, dataKey: session.dataKey.slice() },
+    pull: null, pullAgain: false, abort: null, socket: null, reconnectAttempt: 0,
   } : null;
   if (receiveState) resumeReceiver(receiveState, true);
   notifyReceiveStatus();
@@ -579,7 +580,8 @@ function requestAccountPull(state: ReceiveState): Promise<void> {
       state.abort = abort;
       const deadline = setTimeout(() => abort.abort(), 15_000);
       try {
-        const status = await fetchSync(state.session, { version: state.receivedVersion, signal: abort.signal });
+        const status = await fetchSync(state.session, { version: state.receivedVersion, signal: abort.signal,
+          isCurrent: () => isCurrentReceiver(state) && syncIsActive() });
         if (!isCurrentReceiver(state) || !syncIsActive() || abort.signal.aborted) return;
         if (status.unchanged || status.decryptFailed) continue;
         if (status.version !== undefined && state.receivedVersion !== undefined && status.version < state.receivedVersion) continue;
@@ -633,9 +635,10 @@ export function startAccountSync(): () => void {
   };
 }
 
-export function accountSyncStatus(): { receivedVersion?: number; appliedVersion?: number; projectionPending: boolean } {
+export function accountSyncStatus(): { receivedVersion?: number; appliedVersion?: number; projectionPending: boolean; upgradeRequired?: true } {
   return { receivedVersion: receiveState?.receivedVersion, appliedVersion: receiveState?.appliedVersion,
-    projectionPending: receiveState?.projectionPending ?? false };
+    projectionPending: receiveState?.projectionPending ?? false,
+    ...(settingsSyncState.upgradeRequired ? { upgradeRequired: true as const } : {}) };
 }
 
 function notifyReceiveStatus(): void {
@@ -699,6 +702,7 @@ interface SettingsSyncState {
   hostCounter: number;
   revision: number;
   retryAttempt: number;
+  upgradeRequired: boolean;
   journalSources: Map<string, string>;
   journalOwners: Set<string>;
 }
@@ -1017,7 +1021,7 @@ function createSettingsSyncState(session: Session | null, ownerSnapshot?: Settin
     writeQueued: false,
     profileAtLastChange: activeProfileId(),
     ownerSettingsSnapshot: copySettings(ownerSnapshot ?? initialOwnerSettings()),
-    addonIntents: Object.create(null), progressIntents: Object.create(null), hostIntents: Object.create(null), hostCounter: 0, revision: 0, retryAttempt: 0,
+    addonIntents: Object.create(null), progressIntents: Object.create(null), hostIntents: Object.create(null), hostCounter: 0, revision: 0, retryAttempt: 0, upgradeRequired: false,
     journalSources: new Map(),
     journalOwners: new Set(),
   };
@@ -1196,7 +1200,7 @@ async function pushHostEdit(state: SettingsSyncState, edit: QueuedHostEdit, isSe
     accepted: () => { edit.intent.accepted = true; persistIntents(state); },
   });
   if (!isCurrent()) throw new Error("Account session changed.");
-  const readback = await fetchSync(session);
+  const readback = await fetchSync(session, { isCurrent });
   if (!isCurrent() || readback.decryptFailed || !readback.contents) throw new Error("Waiting for the account edit receipt.");
   const receipt = applyHostIntent(readback.contents, edit.intent, state.hostCounter);
   if (!receipt.alreadyApplied) throw new Error("Waiting for the account edit receipt.");
@@ -1494,19 +1498,26 @@ function syncableSettingsKeys(
 function queueSettingsPush(state: SettingsSyncState): void {
   state.pushTimer = undefined;
   discardTransferredIntents(state);
-  if (state !== settingsSyncState || !state.session || !hasPendingIntents(state) || state.writeQueued) return;
+  if (state !== settingsSyncState || !state.session || state.upgradeRequired || !hasPendingIntents(state) || state.writeQueued) return;
   state.writeQueued = true;
 
   const write = async (): Promise<void> => {
-    if (state !== settingsSyncState || !state.session) {
+    if (state !== settingsSyncState || !state.session || state.upgradeRequired) {
       state.writeQueued = false;
       return;
     }
     const session = state.session;
-    const isCurrent = () => state === settingsSyncState && sameSession(state.session, session) && ownsJournals(state);
+    const isCurrent = () => state === settingsSyncState && !state.upgradeRequired && sameSession(state.session, session) && ownsJournals(state);
     let failed = Object.keys(state.retainedNativeSettings).length > 0;
     const attempt = async (job: () => Promise<void>): Promise<void> => {
-      try { if (isCurrent()) await job(); } catch { failed = true; }
+      try { if (isCurrent()) await job(); } catch (error) {
+        failed = true;
+        if (error instanceof SyncUpgradeRequiredError) {
+          state.upgradeRequired = true;
+          persistIntents(state);
+          notifyReceiveStatus();
+        }
+      }
     };
     try {
       for (const [id, edit] of Object.entries(state.hostIntents)) await attempt(async () => {
@@ -1578,7 +1589,7 @@ function queueSettingsPush(state: SettingsSyncState): void {
       failed = true; // Unacknowledged intent never leaves the journal, including across reload/sign-out.
     } finally {
       state.writeQueued = false;
-      if (state === settingsSyncState && state.session && hasPendingIntents(state)) {
+      if (state === settingsSyncState && state.session && !state.upgradeRequired && hasPendingIntents(state)) {
         scheduleIntentPush(state, failed
           ? Math.min(30_000, SETTINGS_RETRY_DELAY * 2 ** Math.min(state.retryAttempt++, 5))
           : 350);
@@ -1593,7 +1604,7 @@ function hasPendingIntents(state: SettingsSyncState): boolean {
 }
 
 function scheduleIntentPush(state: SettingsSyncState, delay: number): void {
-  if (state !== settingsSyncState || !state.session || !hasPendingIntents(state) || state.pushTimer) return;
+  if (state !== settingsSyncState || !state.session || state.upgradeRequired || !hasPendingIntents(state) || state.pushTimer) return;
   state.pushTimer = setTimeout(() => queueSettingsPush(state), delay);
 }
 
@@ -1623,6 +1634,8 @@ function scheduleSettingsPush(
   state.pendingSettings = next;
   persistIntents(state);
   if (state.pushTimer) clearTimeout(state.pushTimer);
+  state.pushTimer = undefined;
+  if (state.upgradeRequired) return;
   state.pushTimer = setTimeout(() => queueSettingsPush(state), SETTINGS_PUSH_DELAY);
 }
 

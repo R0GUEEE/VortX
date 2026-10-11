@@ -186,6 +186,7 @@ function accountSection(): string {
 
 function accountSyncMessage(): string {
   const status = accountSyncStatus();
+  if (status.upgradeRequired) return "Update VortX to continue syncing. Your unsaved changes are retained on this browser.";
   if (status.projectionPending) return "Account update received. Supported browser data updates automatically; some native data or profile protections still require VortX.";
   if (hasNativeProfiles()) return "Account updates apply automatically. Account Watchlist, trailer autoplay, direct-only links and performance settings sync with durable offline retries. Browser Save is local; other native profile-setting and playback edits stay queued pending compatible sync support. Metadata API keys sync independently.";
   return status.appliedVersion === undefined ? "Checking for account updates…" : "Account updates apply automatically while this page is active.";
