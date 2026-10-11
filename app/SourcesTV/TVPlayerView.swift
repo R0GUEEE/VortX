@@ -1120,7 +1120,7 @@ struct TVPlayerView: View {
             // competitor and every press falls through to here. Swipes come via the pan recognizer.
             RemoteCatcher(
                 onPress: { handlePress($0) },
-                onSwipe: { noteInteraction(); if !stillWatching { showControls() } },
+                onSwipe: { noteInteraction(); if !stillWatching && !showStreamQR { showControls() } },
                 accessibilityItems: remoteAccessibilityItems,
                 accessibilityFocusedID: remoteAccessibilityFocusedID,
                 accessibilityAnnouncement: remoteAccessibilityAnnouncement,
@@ -1162,7 +1162,8 @@ struct TVPlayerView: View {
             if controlsHidden, upNextRemaining != nil || isCreditsUpNext { upNextBand }
             if showStats, !loadFailed { statsOverlay }
             if showStreamQR, let link = shareLink {
-                StreamLinkQRView(title: isTorrentPlayback ? "Magnet link" : "Stream link", link: link)
+                StreamLinkQRView(title: isTorrentPlayback ? "Magnet link" : "Stream link", link: link,
+                                 onClose: { showStreamQR = false }, closeHighlighted: !stillWatching)
             }
             if let note = engineNote {
                 Text(note)
@@ -11695,6 +11696,13 @@ struct TVPlayerView: View {
             ]
         }
 
+        if showStreamQR {
+            return [
+                .init(id: "stream-qr.close", label: "Close stream link",
+                      hint: "Returns to the playing video", traits: [.button, .selected])
+            ]
+        }
+
         if showOptions {
             var items: [RemoteCatcher.AccessibilityItem] = [
                 .init(id: "panel.heading.\(panelTitle)", label: panelTitle, traits: .header, isEnabled: false)
@@ -11769,6 +11777,7 @@ struct TVPlayerView: View {
 
     private var remoteAccessibilityFocusedID: String? {
         if stillWatching { return stillWatchingWantsStop ? "still-watching.stop" : "still-watching.continue" }
+        if showStreamQR { return "stream-qr.close" }
         if showOptions, panelRows.indices.contains(optionRow) {
             return "option.\(panelRows[optionRow].accessibilityID)"
         }
@@ -11841,6 +11850,9 @@ struct TVPlayerView: View {
     }
 
     private func remoteAccessibilityFocus(_ identity: String) {
+        // Delayed accessibility callbacks cannot regain controls hidden by a newer overlay.
+        guard remoteAccessibilityItems.contains(where: { $0.id == identity && $0.isEnabled }) else { return }
+        if showStreamQR && !stillWatching { return } // The sole QR target is already highlighted.
         if identity.hasPrefix("option."),
            let index = panelRows.firstIndex(where: { "option.\($0.accessibilityID)" == identity }),
            !panelRows[index].isHeader, panelRows[index].isEnabled {
@@ -11870,7 +11882,12 @@ struct TVPlayerView: View {
     }
 
     private func remoteAccessibilityActivate(_ identity: String) {
+        guard remoteAccessibilityItems.contains(where: { $0.id == identity && $0.isEnabled }) else { return }
         noteInteraction()
+        if showStreamQR && !stillWatching {
+            if identity == "stream-qr.close" { showStreamQR = false }
+            return
+        }
         if identity.hasPrefix("option."),
            let index = panelRows.firstIndex(where: { "option.\($0.accessibilityID)" == identity }) {
             optionRow = index
@@ -11909,6 +11926,9 @@ struct TVPlayerView: View {
     }
 
     private func remoteAccessibilityAdjust(_ identity: String, _ direction: Int) {
+        guard remoteAccessibilityItems.contains(where: {
+            $0.id == identity && $0.isEnabled && $0.isAdjustable
+        }) else { return }
         guard identity == "control.scrub" else { return }
         selected = .scrub
         scrubBy(direction)

@@ -22,9 +22,12 @@ struct BackupImportView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 660)
             VortXAccountJoinerView(onSignedIn: { dismiss() })
+            Button("Back") { dismiss() }
+                .buttonStyle(ChipButtonStyle(selected: false))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(Theme.Space.xl)
         .background(Theme.Palette.canvas.ignoresSafeArea())
+        .onExitCommand { dismiss() }
     }
 }
