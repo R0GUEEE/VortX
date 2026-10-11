@@ -87,6 +87,10 @@ const player = await import("./player.ts");
 const { renderLibrary } = await import("../views/library.ts");
 const nativeFixture = JSON.parse(readFileSync(new URL("./fixtures/native-sync-carrier.json", import.meta.url), "utf8"));
 const { sealDocument, openDocument } = vault.__syncCryptoTestHooks;
+const { profileEditEventFingerprintSync, canonicalJSONHashSync } = await import("./nativeProfileEvents.ts");
+const { applyHostIntent, createHostIntent } = await import("./nativeHostEdits.ts");
+const { createProfileIntent, applyProfileIntent, applyAddonEventIntent } = await import("./nativeBrowserEvents.ts");
+const { projectNativeSync } = await import("./nativeSyncProjection.ts");
 const json = (value, status = 200) => new Response(JSON.stringify(value), {
   status, headers: { "content-type": "application/json" },
 });
@@ -503,21 +507,22 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
     settings.updateSettings({ accentID: "royal", tmdbKey: "synthetic-metadata-key" });
     await store.addAddon("https://native-held.test/manifest.json");
     store.recordProgress({ id: "native-held-progress", type: "movie", name: "Native browser progress" }, 20, 100);
-    await advance(1_000); await until(() => server.puts.length === 1, "supported metadata subset ACK: " + JSON.stringify({ requests: server.requests.map((r) => r.method), pending: journalsFor(s).map(([, raw]) => Object.keys(JSON.parse(raw).settings)) }));
-    assert.equal(server.puts.length, 1, "only supported metadata subset is ACKed");
+    await advance(1_000); await until(() => server.puts.length === 2, "profile event publication and independent metadata ACK");
+    assert.equal(server.puts.length, 2, "profile publication is not a native receipt; metadata ACK is independent");
     const accepted = await server.read();
     assert.equal(accepted.apiKeys.tmdb, "synthetic-metadata-key");
     assert.deepEqual(accepted.nativeSync, doc.nativeSync); assert.deepEqual(accepted.nativeHostPreferences, doc.nativeHostPreferences);
     assert.deepEqual(accepted.nativeProviderCredentials, doc.nativeProviderCredentials); assert.equal(accepted.profileEdits, undefined);
     assert.equal(accepted.webProgress, undefined);
+    assert.equal(accepted.profileEditEvents.events[0].roster[0].settings.accent, "royal");
     assert.ok(journalsFor(s).some(([, raw]) => raw.includes("native-held-progress") && raw.includes("native-held.test") && raw.includes("royal")));
     const missing = { ...legacyDoc(), foreign: { preserve: true } };
     await server.remote(missing); await advance(3_000);
-    assert.equal(server.puts.length, 1, "binding-captured edits cannot fall through to a missing native carrier");
+    assert.equal(server.puts.length, 2, "binding-captured edits cannot fall through to a missing native carrier");
     assert.ok(journalsFor(s).length);
     account.signOut(); timers.clear(); account.adoptSession(s); account.applySyncDoc(doc);
     assert.equal(settings.getSettings().accentID, "royal", "native dirty settings survive account re-adoption");
-    await advance(1_000); assert.equal(server.puts.length, 1); assert.ok(journalsFor(s).length);
+    await advance(1_000); assert.equal(server.puts.length, 2); assert.ok(journalsFor(s).length);
   });
 
   await t.test("pre-hydration unbound browser progress cannot be attributed or ACKed by a native carrier", async () => {
@@ -661,11 +666,234 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
     return server;
   };
   const hostJournal = (s) => journalsFor(s).flatMap(([, raw]) => Object.values(JSON.parse(raw).host ?? {}));
+  const profileJournal = (s) => journalsFor(s).flatMap(([, raw]) => Object.values(JSON.parse(raw).profile ?? {}));
+  const fullPlayback = { audioLang: "en", subtitleLang: "hi", forcedPolicy: "always", subFont: "modern", subSize: "m", subColor: "white", subBackground: "outline",
+    subBrightness: "100", preferKeywords: "retained-preference", futurePlayback: { opaque: true } };
+  const playbackDoc = (s) => {
+    const doc = hostDoc(s), owner = doc.nativeSync.ownerProfileId;
+    doc.nativeHostPreferences.profiles[owner].fields.playback = { clock: 10, actor: "11111111-1111-4111-8111-111111111111", value: structuredClone(fullPlayback) };
+    return doc;
+  };
+
+  await t.test("full native playback register carries keyword/filter controls and preserves authenticated unmodeled siblings", async () => {
+    clean(); const s = makeSession(), doc = playbackDoc(s), server = await startNative(s, doc);
+    settings.updateSettings({ hideWords: "cam,screener", requireWords: "dual", sourceOrder: ["torrent", "debrid"], safetyFilter: "strict", subtitleScale: 1.2 });
+    assert.equal(hostJournal(s).filter((edit) => "playback" in edit.intent.fields).length, 1);
+    await advance(900);
+    const accepted = await server.read(), value = accepted.nativeHostPreferences.profiles[doc.nativeSync.ownerProfileId].fields.playback.value;
+    assert.equal(value.excludeKeywords, "cam,screener"); assert.equal(value.includeKeywords, "dual"); assert.equal(value.safetyMode, "strict");
+    assert.deepEqual(value.sourceTypeOrder, ["torrent", "debrid"]); assert.equal(value.subSizeScale, 1.2);
+    for (const [key, expected] of Object.entries(fullPlayback)) assert.deepEqual(value[key], expected);
+    assert.deepEqual(accepted.nativeSync, doc.nativeSync); assert.equal(accepted.profileEdits, undefined);
+    assert.equal(hostJournal(s).length, 0); assert.equal(journalsFor(s).length, 0);
+    assert.equal(settings.getSettings().hideWords, "cam,screener"); assert.equal(server.puts.length, 1);
+  });
+
+  await t.test("lost playback PUT response and definite stale rejection retain full-register identity and fresh siblings", async () => {
+    clean(); const s = makeSession(), doc = playbackDoc(s), server = await startNative(s, doc), owner = doc.nativeSync.ownerProfileId;
+    server.losePutResponse(); settings.updateSettings({ hideWords: "first" }); await advance(900);
+    const planned = structuredClone(hostJournal(s)[0].intent.registers);
+    await advance(1200); assert.equal(hostJournal(s).length, 0); assert.equal(server.puts.length, 1);
+    assert.deepEqual((await server.read()).nativeHostPreferences.profiles[owner].fields.playback, planned.playback);
+    settings.updateSettings({ requireWords: "second" }); const release = server.holdPut();
+    const advanceWrite = advance(900); await until(() => server.puts.length === 2, "held playback write");
+    const peer = await server.read(); peer.nativeHostPreferences.profiles[owner].fields.playback = { clock: 900,
+      actor: "ffffffff-ffff-ffff-ffff-ffffffffffff", value: { ...peer.nativeHostPreferences.profiles[owner].fields.playback.value, subBrightness: "85", peerOnly: "preserve" } };
+    await server.remote(peer); release(); await advanceWrite;
+    const value = (await server.read()).nativeHostPreferences.profiles[owner].fields.playback.value;
+    assert.equal(value.includeKeywords, "second"); assert.equal(value.excludeKeywords, "first"); assert.equal(value.subBrightness, "85"); assert.equal(value.peerOnly, "preserve");
+    assert.equal(hostJournal(s).length, 0); assert.equal(server.puts.length, 3);
+  });
+
+  await t.test("six-field native look event remains pending after publication and retires only exact paired native receipt", async () => {
+    clean(); const s = makeSession(), doc = playbackDoc(s), server = await startNative(s, doc), owner = doc.nativeSync.ownerProfileId;
+    settings.updateSettings({ accentID: "royal", background: "oled", textScale: 1.15, audioLang: "fr", subtitleLang: "es", subtitlesMode: "off" });
+    assert.equal(profileJournal(s).length, 1); await advance(900);
+    const published = await server.read(), event = published.profileEditEvents.events[0];
+    assert.deepEqual(event.roster[0].settings, { accent: "royal", oled: true, textScale: 1.15, playback: { audioLang: "fr", subtitleLang: "es", forced: "off" } });
+    assert.equal(profileJournal(s).length, 1, "encrypted PUT alone never ACKs native semantics");
+    await advance(3100); assert.equal(server.puts.length, 1, "already-published pending event never echoes another PUT");
+    const fingerprint = profileEditEventFingerprintSync(event, { scope: published.nativeSync.scope, ownerProfileId: owner });
+    published.nativeSync.legacyProfileEditReceipts = { [fingerprint]: { schemaVersion: 1, eventId: "different-event", source: { fingerprint } } };
+    await server.remote(published); await advance(3100); assert.equal(profileJournal(s).length, 1, "mismatched receipt cannot retire intent");
+    const accepted = await server.read();
+    accepted.nativeSync.legacyProfileEditReceipts[fingerprint] = { schemaVersion: 1, eventId: event.eventId, source: { fingerprint, editedAtMs: event.editedAt, observedNativeClock: event.observedNativeClock } };
+    Object.assign(accepted.nativeSync.profiles[owner].profile.settings, { accent: "royal", oled: true, textScale: 1150 });
+    accepted.nativeHostPreferences.profiles[owner].fields.playback = { clock: event.observedHostClock + 1, actor: event.eventId,
+      value: { ...fullPlayback, audioLang: "fr", subtitleLang: "es", forcedPolicy: "off" } };
+    await server.remote(accepted); await advance(7000);
+    assert.equal(profileJournal(s).length, 0); assert.equal(journalsFor(s).length, 0); assert.equal(server.puts.length, 1);
+    assert.equal(settings.getSettings().accentID, "royal"); assert.equal(settings.getSettings().audioLang, "fr");
+    assert.ok(![...local.keys()].some((key) => key.includes(".look-intent.") && key.includes(encodeURIComponent(`account.${s.account.id}`))));
+  });
+
+  await t.test("published native look survives lost response and reload with immutable event bytes, not new IDs", async () => {
+    clean(); const s = makeSession(), doc = playbackDoc(s), server = await startNative(s, doc);
+    server.losePutResponse(); settings.updateSettings({ accentID: "ocean" }); await advance(900);
+    const planned = structuredClone(profileJournal(s)[0].intent.event); assert.ok(planned);
+    stop(); stop = undefined; account.signOut(); timers.clear();
+    account = await import(`./account.ts?profile-event-reload=${now}`); account.adoptSession(s); stop = account.startAccountSync(); await advance(4000);
+    assert.deepEqual(profileJournal(s)[0].intent.event, planned);
+    assert.equal((await server.read()).profileEditEvents.events.length, 1); assert.equal(server.puts.length, 1);
+    assert.ok(journalsFor(s).length);
+  });
+
+  await t.test("exact profile receipt retires matching retained migration values but preserves newer values and another binding", async () => {
+    clean(); const s = makeSession(), doc = playbackDoc(s), server = await startNative(s, doc), owner = doc.nativeSync.ownerProfileId;
+    settings.updateSettings({ accentID: "royal", audioLang: "fr" }); await advance(900);
+    const edit = profileJournal(s)[0], target = `${owner}|${edit.intent.target.binding}`;
+    const otherBinding = `${owner}|${JSON.stringify({ account: { kind: "own", value: "0123456789abcdef01234567" }, revision: 1, transactionId: null })}`;
+    const [journalKey, raw] = journalsFor(s).at(-1), journal = JSON.parse(raw);
+    journal.retainedNativeSettings = { [target]: { accentID: "royal", audioLang: "newer-language" }, [otherBinding]: { accentID: "ember" } };
+    stop(); stop = undefined; account.signOut(); timers.clear();
+    local.set(journalKey, JSON.stringify(journal));
+    account = await import(`./account.ts?retained-profile-reload=${now}`); account.adoptSession(s); stop = account.startAccountSync(); await advance(1000);
+    assert.equal(profileJournal(s)[0].intent.event.eventId, edit.intent.event.eventId, "reload restores the exact originally published event");
+    const accepted = await server.read(), event = accepted.profileEditEvents.events[0];
+    const fingerprint = profileEditEventFingerprintSync(event, { scope: accepted.nativeSync.scope, ownerProfileId: owner });
+    accepted.nativeSync.legacyProfileEditReceipts = { [fingerprint]: { schemaVersion: 1, eventId: event.eventId,
+      source: { fingerprint, editedAtMs: event.editedAt, observedNativeClock: event.observedNativeClock } } };
+    accepted.nativeSync.profiles[owner].profile.settings.accent = "royal";
+    accepted.nativeHostPreferences.profiles[owner].fields.playback = { clock: event.observedHostClock + 1, actor: event.eventId, value: { ...fullPlayback, audioLang: "fr" } };
+    await server.remote(accepted); await advance(7000);
+    const retained = JSON.parse(journalsFor(s).at(-1)[1]).retainedNativeSettings;
+    const pending = profileJournal(s);
+    assert.ok(pending.every((entry) => entry.intent.event?.eventId !== event.eventId), "accepted historical edit cannot remain queued");
+    assert.deepEqual(pending[0]?.look, { audioLang: "newer-language" }, "newer same-binding explicit migration value remains an independent pending intent");
+    assert.deepEqual(retained[target], { audioLang: "newer-language" });
+    assert.deepEqual(retained[otherBinding], { accentID: "ember" }); assert.equal(settings.getSettings().audioLang, "newer-language");
+    const remainingLook = [...local.entries()].filter(([key]) => key.includes(".look-intent.") && key.includes(encodeURIComponent(`account.${s.account.id}`)));
+    assert.deepEqual(remainingLook.map(([, raw]) => JSON.parse(raw)), [{ audioLang: "newer-language" }]);
+  });
+
+  await t.test("published language event is not deadlocked by a later keyword register intent", async () => {
+    clean(); const s = makeSession(), doc = playbackDoc(s), server = await startNative(s, doc), owner = doc.nativeSync.ownerProfileId;
+    settings.updateSettings({ audioLang: "fr" }); await advance(900);
+    const published = await server.read(), event = published.profileEditEvents.events[0];
+    settings.updateSettings({ hideWords: "cam" }); await advance(900);
+    assert.equal(server.puts.length, 1); assert.equal(hostJournal(s).length, 1); assert.equal(profileJournal(s).length, 1);
+    const fingerprint = profileEditEventFingerprintSync(event, { scope: published.nativeSync.scope, ownerProfileId: owner });
+    published.nativeSync.legacyProfileEditReceipts = { [fingerprint]: { schemaVersion: 1, eventId: event.eventId,
+      source: { fingerprint, editedAtMs: event.editedAt, observedNativeClock: event.observedNativeClock } } };
+    published.nativeHostPreferences.profiles[owner].fields.playback = { clock: event.observedHostClock + 1, actor: event.eventId, value: { ...fullPlayback, audioLang: "fr" } };
+    await server.remote(published); await advance(7000);
+    const final = (await server.read()).nativeHostPreferences.profiles[owner].fields.playback.value;
+    assert.equal(final.audioLang, "fr"); assert.equal(final.excludeKeywords, "cam");
+    assert.equal(profileJournal(s).length, 0); assert.equal(hostJournal(s).length, 0); assert.equal(server.puts.length, 2);
+  });
+
+  await t.test("restored immutable plans fail closed for unintended profile mutations and malformed full native DTOs", async () => {
+    clean(); const s = makeSession(), doc = playbackDoc(s), owner = doc.nativeSync.ownerProfileId;
+    const view = projectNativeSync(doc, `account.${s.account.id}`), profile = view.profiles.find((row) => row.id === owner);
+    const target = { scope: view.scope, ownerProfileId: owner, profileId: owner, binding: profile.binding };
+    const actor = "22222222-2222-4222-8222-222222222222";
+    const host = createHostIntent(target, { playback: { excludeKeywords: "cam" } }, false, actor);
+    applyHostIntent(structuredClone(doc), host, 0);
+    for (const [field, value] of [["useAddonOrder", "bad"], ["maxResolution", 2147483648], ["sourceTypeOrder", ["direct", 1]]]) {
+      const invalid = structuredClone(host), candidate = structuredClone(doc); invalid.registers.playback.value[field] = value;
+      assert.throws(() => applyHostIntent(candidate, invalid, 0)); assert.deepEqual(candidate, doc);
+    }
+    const look = createProfileIntent(target, { accent: "royal", playback: { audioLang: "fr" } });
+    await applyProfileIntent(structuredClone(doc), look);
+    for (const corrupt of [(event) => { event.roster[0].deleted = true; }, (event) => { event.roster[0].name = "Injected"; },
+      (event) => { event.libraryAdds = []; }, (event) => { event.hostBases[owner].playback.extra = true; }]) {
+      const invalid = structuredClone(look), candidate = structuredClone(doc); corrupt(invalid.event);
+      await assert.rejects(applyProfileIntent(candidate, invalid)); assert.deepEqual(candidate, doc);
+    }
+    const addon = { target, mutations: [{ url: "https://planned-addon.test/manifest.json", added: true, descriptor: { transportUrl: "https://planned-addon.test/manifest.json", name: "Synthetic", manifest: { id: "synthetic", name: "Synthetic", version: "1.0.0", types: [], catalogs: [], resources: [] } } }] };
+    applyAddonEventIntent(structuredClone(doc), addon);
+    for (const corrupt of [(event) => { event.counter = 1; }, (event) => { event.counter = ["1"]; }, (event) => { event.eventId = [event.eventId]; },
+      (event) => { event.observed = {}; }, (event) => { event.observed.order.updatedAt = "1"; }, (event) => { event.mutations[0].extra = true; },
+      (event) => { event.mutations[0].addon.flags.official = true; }]) {
+      const invalid = structuredClone(addon), candidate = structuredClone(doc); corrupt(invalid.event);
+      assert.throws(() => applyAddonEventIntent(candidate, invalid)); assert.deepEqual(candidate, doc);
+    }
+    const remove = { target, mutations: [{ url: "https://planned-addon.test/manifest.json", added: false }] };
+    applyAddonEventIntent(structuredClone(doc), remove); remove.event.mutations[0].addon = {};
+    assert.throws(() => applyAddonEventIntent(structuredClone(doc), remove));
+    for (const extension of [{ token: "synthetic" }, { apiKey: "synthetic" }, { extension: { password: "synthetic" } }]) {
+      const invalid = structuredClone(addon), candidate = structuredClone(doc); delete invalid.event;
+      Object.assign(invalid.mutations[0].descriptor.manifest, extension);
+      assert.throws(() => applyAddonEventIntent(candidate, invalid)); assert.deepEqual(candidate, doc);
+    }
+    const considered = structuredClone(doc); applyAddonEventIntent(considered, addon);
+    const event = addon.event, fingerprint = canonicalJSONHashSync(event, "vortx.website-addon.v1\n");
+    considered.nativeSync.websiteAddonReceipts = { [event.eventId]: { schemaVersion: 1, eventId: event.eventId, counter: event.counter,
+      fingerprint, scope: event.scope, ownerProfileId: event.ownerProfileId, profileId: event.profileId, expectedBinding: event.expectedBinding } };
+    const second = structuredClone(addon); delete second.event; second.mutations[0].url = second.mutations[0].descriptor.transportUrl = "https://second-addon.test/manifest.json";
+    applyAddonEventIntent(considered, second);
+    assert.deepEqual(considered.webAddonEdits.events.map((entry) => entry.eventId), [event.eventId, second.event.eventId], "a receipt without install materialization cannot compact the first source");
+    const newer = createProfileIntent(target, { accent: "ocean" }), published = structuredClone(doc);
+    await applyProfileIntent(published, look); await applyProfileIntent(published, newer);
+    assert.ok(newer.event.editedAt > look.event.editedAt, "new explicit source strictly follows earlier published source at same wall time");
+  });
+
+  await t.test("full host writer preserves one lowercase UUID alias but paired profile event fails closed until public native admission supports it", async () => {
+    clean(); const s = makeSession(), original = playbackDoc(s), originalOwner = original.nativeSync.ownerProfileId;
+    const owner = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE", doc = JSON.parse(JSON.stringify(original).replaceAll(originalOwner, owner));
+    doc.nativeHostPreferences.profiles[owner.toLowerCase()] = doc.nativeHostPreferences.profiles[owner]; delete doc.nativeHostPreferences.profiles[owner];
+    const view = projectNativeSync(doc, `account.${s.account.id}`), profile = view.profiles.find((row) => row.id === owner);
+    const target = { scope: view.scope, ownerProfileId: owner, profileId: owner, binding: profile.binding };
+    const host = createHostIntent(target, { playback: { excludeKeywords: "cam" } }, false, "22222222-2222-4222-8222-222222222222"), candidate = structuredClone(doc);
+    applyHostIntent(candidate, host, 0);
+    assert.equal(candidate.nativeHostPreferences.profiles[owner], undefined); assert.equal(candidate.nativeHostPreferences.profiles[owner.toLowerCase()].fields.playback.value.preferKeywords, "retained-preference");
+    const look = createProfileIntent(target, { playback: { audioLang: "fr" } }), snapshot = structuredClone(candidate);
+    await assert.rejects(applyProfileIntent(candidate, look)); assert.deepEqual(candidate, snapshot); assert.equal(look.event, undefined);
+  });
+
+  await t.test("native owner add-on event is immutable across lost response and ACKs only its exact bound native receipt", async () => {
+    clean(); const s = makeSession(), doc = playbackDoc(s), server = await startNative(s, doc);
+    globalThis.fetch = async (input, init = {}) => String(input).startsWith("https://api.vortx.tv/") ? server.fetch(input, init)
+      : json({ id: "synthetic-native-addon", name: "Synthetic Native", version: "1.0.0", resources: [], types: [], catalogs: [] });
+    server.losePutResponse(); await store.addAddon("https://native-event.test/manifest.json"); await advance(500);
+    const published = await server.read(), event = published.webAddonEdits.events[0];
+    assert.equal(event.mutations[0].state, "present"); assert.equal(event.mutations[0].addon.manifest.version, "1.0.0");
+    assert.ok(journalsFor(s).some(([, raw]) => Object.keys(JSON.parse(raw).addons).length));
+    await advance(3100); assert.equal(server.puts.length, 1); assert.equal((await server.read()).webAddonEdits.events.length, 1);
+    const fingerprint = canonicalJSONHashSync(event, "vortx.website-addon.v1\n");
+    published.nativeSync.websiteAddonReceipts = { [event.eventId]: { schemaVersion: 1, eventId: event.eventId, counter: event.counter,
+      fingerprint: "0".repeat(64), scope: event.scope, ownerProfileId: event.ownerProfileId, profileId: event.profileId, expectedBinding: event.expectedBinding } };
+    await server.remote(published); await advance(3100); assert.ok(journalsFor(s).length);
+    const accepted = await server.read(); accepted.nativeSync.websiteAddonReceipts[event.eventId].fingerprint = fingerprint;
+    await server.remote(accepted); await advance(7000);
+    assert.ok(journalsFor(s).length, "receipt of consideration without native materialization cannot ACK install");
+    const mutation = event.mutations[0], clock = 1790000001;
+    const source = { schemaVersion: 1, counter: event.counter, eventId: event.eventId, fingerprint, observedClock: 1790000000 };
+    accepted.nativeSync.addons[event.profileId].records[mutation.transportUrl] = { value: mutation.addon, valueAt: clock, addedAt: clock, removedAt: 0,
+      webSources: { addedAt: source, valueAt: source } };
+    await server.remote(accepted); await advance(7000);
+    assert.equal(journalsFor(s).length, 0); assert.equal(server.puts.length, 1); assert.deepEqual(accepted.nativeSync.profiles, doc.nativeSync.profiles);
+  });
+
+  await t.test("recovered revision-linked add-on event cannot publish or ACK another URL or stale manifest", async () => {
+    for (const mode of ["different-url", "stale-manifest"]) {
+      clean(); const s = makeSession(), doc = playbackDoc(s), server = await startNative(s, doc);
+      globalThis.fetch = async (input, init = {}) => String(input).startsWith("https://api.vortx.tv/") ? server.fetch(input, init)
+        : json({ id: "synthetic-linked-addon", name: "Synthetic Linked", version: "1.0.0", resources: [], types: [], catalogs: [] });
+      server.fail(); await store.addAddon("https://linked-addon.test/manifest.json"); await advance(500);
+      const [journalKey, raw] = journalsFor(s).at(-1), journal = JSON.parse(raw), linked = Object.values(journal.addonEvents)[0];
+      assert.ok(linked.intent.event); assert.equal(server.puts.length, 1);
+      if (mode === "different-url") {
+        linked.intent.mutations[0].url = linked.intent.mutations[0].descriptor.transportUrl = "https://different-linked-addon.test/manifest.json";
+        linked.intent.event.mutations[0].transportUrl = linked.intent.event.mutations[0].addon.transportUrl = linked.intent.mutations[0].url;
+      } else {
+        linked.intent.mutations[0].descriptor.manifest.version = linked.intent.event.mutations[0].addon.manifest.version = "0.5.0";
+      }
+      const frozen = structuredClone(linked.intent);
+      stop(); stop = undefined; account.signOut(); timers.clear(); local.set(journalKey, JSON.stringify(journal));
+      account = await import(`./account.ts?addon-link-reload=${mode}-${now}`); account.adoptSession(s); stop = account.startAccountSync(); await advance(7000);
+      assert.equal(server.puts.length, 1, "revision collision never publishes mismatched frozen effect");
+      const restored = JSON.parse(journalsFor(s).at(-1)[1]);
+      assert.ok(Object.values(restored.addons).some((intent) => intent.url === "https://linked-addon.test/manifest.json" && intent.descriptor.manifest.version === "1.0.0"));
+      assert.deepEqual(Object.values(restored.addonEvents)[0].intent, frozen, "invalid linkage remains durable without changing immutable identity");
+      assert.equal((await server.read()).webAddonEdits, undefined);
+    }
+  });
 
   await t.test("supported native global settings use actual host registers and do not starve held native edits", async () => {
     clean(); const s = makeSession(), doc = hostDoc(s), server = await startNative(s, doc);
     settings.updateSettings({ autoplayTrailers: false, directLinksOnly: true, performance: "reduced", sourceOrder: ["torrent"], tmdbKey: "synthetic-host-key" });
-    assert.equal(hostJournal(s).length, 3, "supported explicit host edits are durable before upload");
+    assert.equal(hostJournal(s).filter((edit) => edit.intent.global).length, 3, "supported explicit global edits are durable before upload");
     await advance(900);
     const accepted = await server.read(), fields = accepted.nativeHostPreferences.globals.fields;
     assert.deepEqual([fields["stremiox.autoplayTrailers"].value, fields["stremiox.directLinksOnly"].value, fields["stremiox.performanceMode"].value], [false, true, "reduced"]);
@@ -673,7 +901,8 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
     assert.deepEqual(accepted.nativeSync, doc.nativeSync); assert.deepEqual(accepted.nativeProviderCredentials, doc.nativeProviderCredentials);
     assert.deepEqual(accepted.futureCarrier, doc.futureCarrier); assert.equal(accepted.profileEdits, undefined);
     assert.equal(accepted.apiKeys.tmdb, "synthetic-host-key");
-    assert.equal(hostJournal(s).length, 0, "only verified host receipts retire their intent");
+    assert.equal(hostJournal(s).filter((edit) => edit.intent.global).length, 0, "only verified host receipts retire their intent");
+    assert.equal(hostJournal(s).filter((edit) => !edit.intent.global).length, 1, "playback waits for an authenticated full-register baseline");
     assert.ok(journalsFor(s).some(([, raw]) => JSON.parse(raw).settings.sourceOrder?.[0] === "torrent"), "unsupported core settings stay durable");
     assert.equal(server.maxPuts, 1);
   });
@@ -870,18 +1099,19 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
     await server.remote(b); account = await import(`./account.ts?host-source-recovery=${now}`);
     account.adoptSession(s); stop = account.startAccountSync(); await until(() => account.accountSyncStatus().appliedVersion === 21, "B loaded while recovered A remains held");
     settings.updateSettings({ directLinksOnly: true }); settings.updateSettings({ directLinksOnly: false });
-    assert.equal(hostJournal(s).length, 1); assert.notEqual(hostJournal(s)[0].intent.target.binding, bindingA);
+    const globals = hostJournal(s).filter((edit) => edit.intent.global);
+    assert.equal(globals.length, 1); assert.notEqual(globals[0].intent.target.binding, bindingA);
     assert.equal(local.get(sourceKey), undefined, "only after merged checkpoint succeeded is the exact adopted source retired");
     stop(); stop = undefined; account.signOut(); timers.clear();
     account = await import(`./account.ts?host-b-before-ack=${now}`);
     account.adoptSession(s); stop = account.startAccountSync(); await advance(400);
-    assert.equal(hostJournal(s).length, 0, "B ACKs independently while unsupported native sourceOrder stays queued");
+    assert.equal(hostJournal(s).filter((edit) => edit.intent.global).length, 0, "B ACKs independently while sourceOrder lacks a full playback baseline");
     assert.ok(journalsFor(s).some(([, raw]) => JSON.parse(raw).settings.sourceOrder?.[0] === "torrent"));
     const stored = await server.read(); a.nativeHostPreferences = stored.nativeHostPreferences; await server.remote(a);
     stop(); stop = undefined; account.signOut(); timers.clear();
     account = await import(`./account.ts?host-a-after-partial-ack=${now}`);
     account.adoptSession(s); stop = account.startAccountSync(); await advance(3100);
-    assert.equal(hostJournal(s).length, 0, "old unplanned A cannot be revived from a source or retained global delta");
+    assert.equal(hostJournal(s).filter((edit) => edit.intent.global).length, 0, "old unplanned A cannot be revived from a source or retained global delta");
     assert.equal(server.puts.length, 1); assert.equal(settings.getSettings().directLinksOnly, false);
   });
 

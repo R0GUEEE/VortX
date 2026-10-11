@@ -622,7 +622,7 @@ export async function getSyncDoc(session: Session): Promise<Record<string, unkno
  *  touches only owned fields and retains all foreign/native carriers from the fresh document. */
 export async function mutateSyncDoc(
   session: Session,
-  mutate: (doc: Record<string, unknown>) => void | false,
+  mutate: (doc: Record<string, unknown>) => void | false | Promise<void | false>,
   isCurrent: () => boolean = () => true,
   receipt: { rejected?: () => void; accepted?: () => void } = {},
 ): Promise<void> {
@@ -640,7 +640,7 @@ export async function mutateSyncDoc(
     const doc = (status.contents as Record<string, unknown>) ?? {};
     // A causal writer may have witnessed its exact durable edit in this authenticated read.
     // No-op receipt must not create a fresh row revision or echo a received update.
-    const changed = mutate(doc);
+    const changed = await mutate(doc);
     guard();
     if (changed === false) return;
     const version = baseRevision === null ? 0 : baseRevision + 1;

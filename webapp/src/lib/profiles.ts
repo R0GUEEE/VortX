@@ -30,6 +30,18 @@ const ACTIVE_KEY = "vortx.web.activeProfile.v1";
 const NATIVE_LOOK_DEFAULTS: ProfileLook = { accentID: "ember", background: "warm", textScale: 1, audioLang: "", subtitleLang: "", subtitlesMode: "always" };
 
 const listeners = new Set<() => void>();
+let nativeLookPusher: ((profileId: string, binding: string, patch: Partial<ProfileLook>) => void) | undefined;
+export function registerNativeLookSyncPusher(pusher: typeof nativeLookPusher): void { nativeLookPusher = pusher; }
+export function pendingNativeLookIntent(profileId: string, binding: string): Partial<ProfileLook> { return nativeLookIntent(profileId, binding); }
+export function retireNativeLookIntent(scope: string, profileId: string, binding: string, accepted: Partial<ProfileLook>): void {
+  if (nativeScope !== scope) return;
+  const pending = nativeLookIntent(profileId, binding);
+  for (const key of Object.keys(accepted) as (keyof ProfileLook)[]) if (pending[key] === accepted[key]) delete pending[key];
+  try {
+    const key = nativeLookKey(profileId, binding);
+    if (Object.keys(pending).length) localStorage.setItem(key, JSON.stringify(pending)); else localStorage.removeItem(key);
+  } catch { /* A live newer edit must never be retired by this receipt. */ }
+}
 let cache: Profile[] | null = null;
 let nativeRoster: Profile[] | null = null;
 let nativeScope = "";
@@ -79,11 +91,15 @@ function persist(profiles: Profile[]): void {
       const previous = nativeRoster.find((row) => row.id === profile.id);
       if (!previous || !profile.nativeBinding || previous.restricted) continue;
       const patch = nativeLookIntent(profile.id, profile.nativeBinding);
+      const changed: Partial<ProfileLook> = {};
       for (const key of Object.keys(profile.look) as (keyof ProfileLook)[]) {
-        if (previous.look[key] !== profile.look[key]) Object.assign(patch, { [key]: profile.look[key] });
+        if (previous.look[key] !== profile.look[key]) {
+          Object.assign(patch, { [key]: profile.look[key] }); Object.assign(changed, { [key]: profile.look[key] });
+        }
       }
       try { if (Object.keys(patch).length) localStorage.setItem(nativeLookKey(profile.id, profile.nativeBinding), JSON.stringify(patch)); }
       catch { /* Network journal and current live look remain available when storage is blocked. */ }
+      if (Object.keys(changed).length) nativeLookPusher?.(profile.id, profile.nativeBinding, changed);
     }
     nativeRoster = profiles;
     listeners.forEach((fn) => fn());
@@ -274,4 +290,4 @@ onSettingsChange((s) => {
   persist(list.map((p) => (p.id === id ? { ...p, look } : p)));
 });
 
-export type { Background, SubtitlesMode };
+export type { Background, SubtitlesMode, ProfileLook };

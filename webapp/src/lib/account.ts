@@ -38,6 +38,10 @@ import {
   setNativeProfiles,
   blockNativeProfiles,
   hasNativeProfiles,
+  registerNativeLookSyncPusher,
+  retireNativeLookIntent,
+  pendingNativeLookIntent,
+  type ProfileLook,
   type SyncedProfile,
 } from "./profiles";
 import { getSettings, updateSettings, onSettingsChange, type Settings } from "./settings";
@@ -52,6 +56,8 @@ import type { MetaItem } from "./types";
 import { effectiveAddonRemovals, applyAddonIntents } from "./addonRemovals";
 import { projectNativeSync, type NativeSyncProjection } from "./nativeSyncProjection";
 import { applyHostIntent, createHostIntent, hostSettingField, watchlistField, watchlistValue, type HostIntent, type HostTarget } from "./nativeHostEdits";
+import { applyProfileIntent, createProfileIntent, profileIntentAcknowledged, applyAddonEventIntent, addonEventAcknowledged, addonIdentity, type ProfileIntent, type AddonEventIntent } from "./nativeBrowserEvents";
+import { canonicalJSON } from "./nativeProfileEvents";
 let appliedNativeProjection: NativeSyncProjection | null = null;
 function nativeSettingsTarget(profile: NativeSyncProjection["profiles"][number]): string { return `${profile.id}|${profile.binding}`; }
 
@@ -251,7 +257,7 @@ function applyNativeProjection(view: NativeSyncProjection, doc: Record<string, u
       const profile = view.profiles.find((profile) => profile.main ? scope === "" : profile.id === scope);
       return !!profile && profile.binding === intent.binding;
     }).map(([key, intent]) => [intent.scope ?? key, intent])),
-    watchlist: Object.values(settingsSyncState.hostIntents).filter((edit) => !edit.intent.global).flatMap(({ intent }) =>
+    watchlist: Object.values(settingsSyncState.hostIntents).filter((edit) => !edit.intent.global && Object.keys(edit.intent.fields)[0].startsWith("watchlist.")).flatMap(({ intent }) =>
       Object.values(intent.fields).map((value) => {
         const field = Object.keys(intent.fields)[0], parts = field.split(".");
         const token = parts[2].replace(/-/g, "+").replace(/_/g, "/");
@@ -263,6 +269,15 @@ function applyNativeProjection(view: NativeSyncProjection, doc: Record<string, u
     .map((profile) => ({ ...profile, look: nativeSettingsPatch(profile), restricted: profile.pending || profile.locked || profile.kids })));
   settingsSyncState.profileAtLastChange = activeProfileId();
   const owner = view.profiles.find((profile) => profile.main)!;
+  // Migrate already-durable local look overlays into the same target-bound outbound journal.
+  // A projection/hydration is not a new edit: only explicit retained look bytes are recovered.
+  let recovered = false;
+  for (const profile of view.profiles) {
+    const target = hostTarget(view, profile), look = pendingNativeLookIntent(profile.id, profile.binding);
+    if (Object.keys(look).length && !settingsSyncState.profileIntents[JSON.stringify(target)]) {
+      queueProfileLook(settingsSyncState, profile.id, profile.binding, look); recovered = true;
+    }
+  }
   // Recover the previously durable supported settings slice only under its originally captured
   // binding. Receiving a different slot is never permission to retarget a queued action.
   const restored = { ...settingsSyncState.retainedNativeSettings[nativeSettingsTarget(owner)] };
@@ -275,6 +290,12 @@ function applyNativeProjection(view: NativeSyncProjection, doc: Record<string, u
     const target = hostTarget(view, owner), id = JSON.stringify([target, true, field]);
     if (!settingsSyncState.hostIntents[id]) { queueHostSetting(settingsSyncState, key, value); persistIntents(settingsSyncState); scheduleIntentPush(settingsSyncState, 350); }
   }
+  if (Object.keys(restored).some((key) => PLAYBACK_SETTING_KEYS.includes(key as keyof Settings)) &&
+    !Object.values(settingsSyncState.hostIntents).some((edit) => !edit.intent.global && "playback" in edit.intent.fields && edit.intent.target.binding === owner.binding)) {
+    queuePlaybackSettings(settingsSyncState, { ...settingsSyncState.ownerSettingsSnapshot, ...restored }, Object.keys(restored) as (keyof Settings)[]);
+    recovered = true;
+  }
+  if (recovered) { persistIntents(settingsSyncState); scheduleIntentPush(settingsSyncState, 350); }
   const keys = doc.apiKeys && typeof doc.apiKeys === "object" ? doc.apiKeys as Record<string, unknown> : {};
   const ownerPatch: Partial<Settings> = { ...ACCOUNT_SCOPED_SETTING_DEFAULTS, ...NATIVE_HOST_SETTING_DEFAULTS, ...view.globals, ...nativeSettingsPatch(owner),
     ...localProfiles().find((profile) => profile.id === owner.id)?.look, tmdbKey: typeof keys.tmdb === "string" ? keys.tmdb : "",
@@ -699,6 +720,8 @@ interface SettingsSyncState {
   addonIntents: Record<string, AddonIntent>;
   progressIntents: Record<string, ProgressIntent>;
   hostIntents: Record<string, QueuedHostEdit>;
+  profileIntents: Record<string, QueuedProfileEdit>;
+  addonEvents: Record<string, QueuedAddonEvent>;
   hostCounter: number;
   revision: number;
   retryAttempt: number;
@@ -710,7 +733,9 @@ interface SettingsSyncState {
 interface AddonIntent { url: string; added: boolean; at: number; revision: number; profileId?: string; binding?: string;
   descriptor?: { transportUrl: string; name: string; manifest: unknown } }
 interface ProgressIntent { entries: WebProgressEntry[]; tombstones: CWTombstone[]; revision: number; binding?: string; scope?: string }
-interface QueuedHostEdit { intent: HostIntent; revision: number; settingKey?: keyof Settings }
+interface QueuedHostEdit { intent: HostIntent; revision: number; settingKey?: keyof Settings; settingValues?: Partial<Settings> }
+interface QueuedProfileEdit { intent: ProfileIntent; revision: number; look: Partial<ProfileLook> }
+interface QueuedAddonEvent { intent: AddonEventIntent; revision: number; revisions: Record<string, number> }
 function hostIntentKey(intent: HostIntent): string {
   return JSON.stringify([intent.target, intent.global, Object.keys(intent.fields)[0]]);
 }
@@ -741,6 +766,46 @@ function queueHostSetting(state: SettingsSyncState, key: keyof Settings, value: 
   const intent = createHostIntent(hostTarget(view, owner), { [field]: value }, true, journalPageId);
   enqueueHostEdit(state, { intent, revision: ++state.revision, settingKey: key });
 }
+
+const PLAYBACK_SETTING_KEYS: readonly (keyof Settings)[] = ["subtitleScale", "subtitleFont", "subtitleColor", "subtitleEdge", "useAddonOrder", "sourceOrder", "safetyFilter", "instantOnly", "hideDeadTorrents", "hdrOnly", "hideAV1", "hideWords", "requireWords", "maxQuality", "maxFileSizeGB"];
+function queuePlaybackSettings(state: SettingsSyncState, snapshot: Settings, keys: readonly (keyof Settings)[]): void {
+  const view = appliedNativeProjection, changed = keys.filter((key) => PLAYBACK_SETTING_KEYS.includes(key));
+  if (!view || !changed.length) return;
+  const owner = view.profiles.find((profile) => profile.main)!;
+  const target = hostTarget(view, owner);
+  const old = Object.values(state.hostIntents).find((edit) => !edit.intent.global && edit.intent.target.profileId === target.profileId
+    && edit.intent.target.binding === target.binding && "playback" in edit.intent.fields);
+  const patch = mergeWebappSettingsPatchIntoProfile({}, snapshot, changed).playback as Record<string, unknown>;
+  const values = { ...old?.settingValues, ...Object.fromEntries(changed.map((key) => [key, snapshot[key]])) };
+  const intent = createHostIntent(target, { playback: { ...(old?.intent.fields.playback as Record<string, unknown> ?? {}), ...patch } }, false, journalPageId);
+  enqueueHostEdit(state, { intent, revision: ++state.revision, settingValues: values });
+}
+
+function queueProfileLook(state: SettingsSyncState, profileId: string, binding: string, look: Partial<ProfileLook>): void {
+  const view = appliedNativeProjection, profile = view?.profiles.find((row) => row.id === profileId && row.binding === binding);
+  if (!state.session || !view || !profile || profile.pending || profile.locked || profile.kids) return;
+  const target = hostTarget(view, profile), id = JSON.stringify(target), prior = state.profileIntents[id];
+  const complete = { ...prior?.look, ...look }, settings = nativeLookSettings(complete);
+  state.profileIntents[id] = { intent: createProfileIntent(target, settings), revision: ++state.revision, look: complete };
+}
+function nativeLookSettings(complete: Partial<ProfileLook>): Record<string, any> {
+  const settings: Record<string, any> = {}, playback: Record<string, unknown> = {};
+  if (complete.accentID !== undefined) settings.accent = complete.accentID;
+  if (complete.background !== undefined) settings.oled = complete.background === "oled";
+  if (complete.textScale !== undefined) settings.textScale = complete.textScale;
+  if (complete.audioLang !== undefined) playback.audioLang = complete.audioLang;
+  if (complete.subtitleLang !== undefined) playback.subtitleLang = complete.subtitleLang;
+  if (complete.subtitlesMode !== undefined) playback.forced = complete.subtitlesMode;
+  if (Object.keys(playback).length) settings.playback = playback;
+  return settings;
+}
+registerNativeLookSyncPusher((profileId, binding, patch) => {
+  const state = settingsSyncState;
+  if (state.suppressUpDepth > 0) return;
+  discardTransferredIntents(state);
+  queueProfileLook(state, profileId, binding, patch);
+  persistIntents(state); scheduleIntentPush(state, SETTINGS_PUSH_DELAY);
+});
 
 registerWatchlistSyncPusher((item, added) => {
   const state = settingsSyncState, view = appliedNativeProjection;
@@ -806,7 +871,7 @@ function discardTransferredIntents(state: SettingsSyncState): void {
   state.pendingKeys.clear(); state.pendingSettings = null;
   state.nativeSettingKeys.clear();
   state.nativeSettingBindings = {};
-  state.hostIntents = {}; state.hostCounter = 0;
+  state.hostIntents = {}; state.hostCounter = 0; state.profileIntents = {}; state.addonEvents = {};
   state.retainedNativeSettings = {};
   state.addonIntents = Object.create(null); state.progressIntents = Object.create(null);
   state.journalSources.clear(); state.journalOwners.clear();
@@ -854,7 +919,7 @@ function persistIntents(state: SettingsSyncState): void {
         settings, nativeSettingKeys: [...state.nativeSettingKeys], nativeSettingBindings: state.nativeSettingBindings,
         retainedNativeSettings: state.retainedNativeSettings,
         addons: state.addonIntents, progress: state.progressIntents, revision: state.revision,
-        host: state.hostIntents, hostCounter: state.hostCounter,
+        host: state.hostIntents, hostCounter: state.hostCounter, profile: state.profileIntents, addonEvents: state.addonEvents,
       }));
       // Transfer only after the complete merged checkpoint is durable. Older source bytes must
       // not outlive this receipt: otherwise a partial ACK or explicit supersession could replay
@@ -942,12 +1007,35 @@ function restoreIntents(state: SettingsSyncState, onlyOrphans = false): boolean 
           if (captured.registers) intent.registers = captured.registers;
           if (captured.accepted === true) intent.accepted = true;
           const settingKey = edit.settingKey && hostSettingField(edit.settingKey) === Object.keys(intent.fields)[0] ? edit.settingKey : undefined;
+          const settingValues = !intent.global && "playback" in intent.fields && edit.settingValues ? edit.settingValues : undefined;
+          if (settingValues && Object.keys(settingValues).some((key) => !PLAYBACK_SETTING_KEYS.includes(key as keyof Settings))) continue;
+          if (settingValues) {
+            const wire = mergeWebappSettingsPatchIntoProfile({}, { ...state.ownerSettingsSnapshot, ...settingValues }, Object.keys(settingValues) as (keyof Settings)[]).playback;
+            if (JSON.stringify(Object.entries(wire as Record<string, unknown>).sort()) !== JSON.stringify(Object.entries(intent.fields.playback as Record<string, unknown>).sort())) continue;
+          }
           if (intent.global && !settingKey) continue;
           if (onlyOrphans && liveHostAddresses.has(hostAddress(intent))) continue;
           // Journals are already ordered by editedAt; per-page revision counters are not a
           // cross-page clock. Keep the latest restored address, not every old binding capture.
-          enqueueHostEdit(state, { intent, revision: edit.revision, settingKey });
+          enqueueHostEdit(state, { intent, revision: edit.revision, settingKey, settingValues });
         } catch { /* Invalid durable DTO cannot become a native host edit. */ }
+      }
+      for (const raw of Object.values(saved.profile ?? {})) {
+        try {
+          const edit = raw as QueuedProfileEdit;
+          if (edit.intent.target.scope !== `account.${state.session.account.id.toLowerCase()}` || !Number.isSafeInteger(edit.revision)) continue;
+          const intent = createProfileIntent(edit.intent.target, edit.intent.settings);
+          if (!edit.look || Object.keys(edit.look).some((key) => !PROFILE_SCOPED_SETTING_KEYS.includes(key as keyof Settings))
+            || JSON.stringify(createProfileIntent(edit.intent.target, nativeLookSettings(edit.look)).settings) !== JSON.stringify(intent.settings)) continue;
+          if (edit.intent.event) intent.event = edit.intent.event;
+          const id = JSON.stringify(intent.target);
+          if (!onlyOrphans || !state.profileIntents[id]) state.profileIntents[id] = { intent, revision: edit.revision, look: edit.look };
+        } catch { /* Invalid stored intent cannot author a native event. */ }
+      }
+      for (const [id, raw] of Object.entries(saved.addonEvents ?? {})) {
+        const edit = raw as QueuedAddonEvent;
+        if (edit?.intent?.target?.scope === `account.${state.session.account.id.toLowerCase()}` && Array.isArray(edit.intent.mutations)
+          && (!onlyOrphans || !state.addonEvents[id])) state.addonEvents[id] = edit;
       }
     }
     return journals.length > 0;
@@ -1021,7 +1109,7 @@ function createSettingsSyncState(session: Session | null, ownerSnapshot?: Settin
     writeQueued: false,
     profileAtLastChange: activeProfileId(),
     ownerSettingsSnapshot: copySettings(ownerSnapshot ?? initialOwnerSettings()),
-    addonIntents: Object.create(null), progressIntents: Object.create(null), hostIntents: Object.create(null), hostCounter: 0, revision: 0, retryAttempt: 0, upgradeRequired: false,
+    addonIntents: Object.create(null), progressIntents: Object.create(null), hostIntents: Object.create(null), profileIntents: Object.create(null), addonEvents: Object.create(null), hostCounter: 0, revision: 0, retryAttempt: 0, upgradeRequired: false,
     journalSources: new Map(),
     journalOwners: new Set(),
   };
@@ -1205,6 +1293,50 @@ async function pushHostEdit(state: SettingsSyncState, edit: QueuedHostEdit, isSe
   const receipt = applyHostIntent(readback.contents, edit.intent, state.hostCounter);
   if (!receipt.alreadyApplied) throw new Error("Waiting for the account edit receipt.");
   state.hostCounter = receipt.counter;
+  return { contents: readback.contents, version: readback.version };
+}
+
+async function pushProfileEdit(state: SettingsSyncState, edit: QueuedProfileEdit, isSessionCurrent: () => boolean): Promise<{ contents: Record<string, unknown>; version?: number }> {
+  const session = state.session!, id = JSON.stringify(edit.intent.target);
+  const isCurrent = () => isSessionCurrent() && state.profileIntents[id] === edit;
+  await mutateSyncDoc(session, async (doc) => {
+    const changed = await applyProfileIntent(doc, edit.intent);
+    persistIntents(state); // Freeze immutable event bytes before transport can become uncertain.
+    return changed ? undefined : false;
+  }, isCurrent);
+  const readback = await fetchSync(session, { isCurrent });
+  if (!isCurrent() || !readback.contents || !profileIntentAcknowledged(readback.contents, edit.intent)) throw new Error("Waiting for native profile receipt.");
+  return { contents: readback.contents, version: readback.version };
+}
+
+async function pushNativeAddonEvent(state: SettingsSyncState, addons: AddonIntent[], isSessionCurrent: () => boolean): Promise<{ contents: Record<string, unknown>; version?: number }> {
+  const session = state.session!, view = appliedNativeProjection;
+  const profile = view?.profiles.find((row) => row.main);
+  if (!view || !profile || addons.some((intent) => intent.profileId !== profile.id || intent.binding !== profile.binding)) throw new Error("Native owner add-on target changed; intent remains queued.");
+  const target = hostTarget(view, profile), id = JSON.stringify(target), revisions = Object.fromEntries(addons.map((intent) => [addonIntentKey(intent), intent.revision]));
+  let edit = state.addonEvents[id];
+  if (!edit || canonicalJSON(edit.revisions) !== canonicalJSON(revisions)) {
+    edit = { intent: { target, mutations: addons.map((intent) => ({ url: intent.url, added: intent.added, descriptor: intent.descriptor })) }, revision: ++state.revision, revisions };
+    state.addonEvents[id] = edit; persistIntents(state);
+  }
+  // Per-page revisions can collide across recovered journals. A frozen source must represent
+  // these exact queued effects, not merely share their revision numbers. Never repair/rebuild
+  // mismatched uncertain bytes and subsequently retire a different user's pending add-on.
+  const effect = (mutation: { url: string; added: boolean; descriptor?: { manifest: unknown } }) =>
+    [addonIdentity(mutation.url), mutation.added, mutation.added ? mutation.descriptor?.manifest ?? null : null];
+  const effects = (mutations: typeof addons | AddonEventIntent["mutations"]) => mutations.map(effect).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  if (canonicalJSON(edit.intent.target) !== canonicalJSON(target) || canonicalJSON(effects(edit.intent.mutations)) !== canonicalJSON(effects(addons))) {
+    throw new Error("Recovered add-on source does not match its queued target; intent remains retained.");
+  }
+  const captured = edit, isCurrent = () => isSessionCurrent() && state.addonEvents[id] === captured;
+  await mutateSyncDoc(session, (doc) => {
+    const changed = applyAddonEventIntent(doc, captured.intent);
+    persistIntents(state);
+    return changed ? undefined : false;
+  }, isCurrent);
+  const readback = await fetchSync(session, { isCurrent });
+  if (!isCurrent() || !readback.contents || !addonEventAcknowledged(readback.contents, captured.intent)) throw new Error("Waiting for native add-on receipt.");
+  if (state.addonEvents[id] === captured) delete state.addonEvents[id];
   return { contents: readback.contents, version: readback.version };
 }
 
@@ -1521,6 +1653,9 @@ function queueSettingsPush(state: SettingsSyncState): void {
     };
     try {
       for (const [id, edit] of Object.entries(state.hostIntents)) await attempt(async () => {
+        if (!edit.intent.global && "playback" in edit.intent.fields && Object.values(state.profileIntents).some((profile) =>
+          profile.intent.target.profileId === edit.intent.target.profileId && profile.intent.target.binding === edit.intent.target.binding
+          && profile.intent.event && profile.intent.settings.playback)) throw new Error("Waiting for the earlier profile playback receipt.");
         const readback = await pushHostEdit(state, edit, isCurrent);
         if (!isCurrent()) throw new Error("Account session changed.");
         if (state.hostIntents[id]?.revision === edit.revision) delete state.hostIntents[id];
@@ -1536,14 +1671,46 @@ function queueSettingsPush(state: SettingsSyncState): void {
           }
           if (!state.pendingKeys.size) state.pendingSettings = null;
         }
+        if (edit.settingValues) {
+          const target = `${edit.intent.target.profileId}|${edit.intent.target.binding}`;
+          for (const [rawKey, value] of Object.entries(edit.settingValues)) {
+            const key = rawKey as keyof Settings;
+            if (state.nativeSettingBindings[key] === target && JSON.stringify(state.pendingSettings?.[key]) === JSON.stringify(value)) {
+              state.pendingKeys.delete(key); state.nativeSettingKeys.delete(key); delete state.nativeSettingBindings[key];
+            }
+            if (JSON.stringify(state.retainedNativeSettings[target]?.[key]) === JSON.stringify(value)) delete state.retainedNativeSettings[target][key];
+          }
+          if (!Object.keys(state.retainedNativeSettings[target] ?? {}).length) delete state.retainedNativeSettings[target];
+          if (!state.pendingKeys.size) state.pendingSettings = null;
+        }
         persistIntents(state);
         withSuppressedUp(() => applyHostReadback(readback, session));
         notifyReceiveStatus();
         window.dispatchEvent(new Event("vortx:watchlist-changed"));
       });
+      for (const [id, edit] of Object.entries(state.profileIntents)) await attempt(async () => {
+        if (!edit.intent.event && edit.intent.settings.playback && Object.values(state.hostIntents).some((host) => !host.intent.global && "playback" in host.intent.fields
+          && host.intent.target.profileId === edit.intent.target.profileId && host.intent.target.binding === edit.intent.target.binding)) throw new Error("Waiting for the earlier host playback receipt.");
+        const readback = await pushProfileEdit(state, edit, isCurrent);
+        if (!isCurrent() || state.profileIntents[id] !== edit) throw new Error("Account profile intent changed.");
+        delete state.profileIntents[id];
+        retireNativeLookIntent(edit.intent.target.scope, edit.intent.target.profileId, edit.intent.target.binding, edit.look);
+        const target = `${edit.intent.target.profileId}|${edit.intent.target.binding}`;
+        for (const [rawKey, value] of Object.entries(edit.look)) {
+          const key = rawKey as keyof Settings;
+          if (state.nativeSettingBindings[key] === target && JSON.stringify(state.pendingSettings?.[key]) === JSON.stringify(value)) {
+            state.pendingKeys.delete(key); state.nativeSettingKeys.delete(key); delete state.nativeSettingBindings[key];
+          }
+          if (JSON.stringify(state.retainedNativeSettings[target]?.[key]) === JSON.stringify(value)) delete state.retainedNativeSettings[target][key];
+        }
+        if (!Object.keys(state.retainedNativeSettings[target] ?? {}).length) delete state.retainedNativeSettings[target];
+        if (!state.pendingKeys.size) state.pendingSettings = null;
+        persistIntents(state); withSuppressedUp(() => applyHostReadback(readback, session)); notifyReceiveStatus();
+      });
       // Independent supported API-key deltas must not be starved by a held native settings edit.
       for (const changedKeys of [[...state.pendingKeys].filter((key) => API_KEY_SETTING_KEYS.includes(key)),
-        [...state.pendingKeys].filter((key) => !API_KEY_SETTING_KEYS.includes(key) && !(state.nativeSettingKeys.has(key) && hostSettingField(key)))]) if (state.pendingSettings && changedKeys.length) {
+        [...state.pendingKeys].filter((key) => !API_KEY_SETTING_KEYS.includes(key) && !(state.nativeSettingKeys.has(key) &&
+          (hostSettingField(key) || PLAYBACK_SETTING_KEYS.includes(key) || PROFILE_SCOPED_SETTING_KEYS.includes(key))))]) if (state.pendingSettings && changedKeys.length) {
         await attempt(async () => {
           if (!state.pendingSettings) return;
           const snapshot = copySettings(state.pendingSettings);
@@ -1567,13 +1734,15 @@ function queueSettingsPush(state: SettingsSyncState): void {
       // A held own-slot target cannot block independently supported owner/global membership.
       for (const addons of addonGroups.values()) {
         await attempt(async () => {
-          await pushAddons(session, addons, isCurrent);
+          const readback = addons.some((intent) => intent.binding) ? await pushNativeAddonEvent(state, addons, isCurrent) : undefined;
+          if (!readback) await pushAddons(session, addons, isCurrent);
           if (!isCurrent()) throw new Error("Account session changed.");
           for (const intent of addons) {
             const key = addonIntentKey(intent);
             if (state.addonIntents[key]?.revision === intent.revision) delete state.addonIntents[key];
           }
           persistIntents(state);
+          if (readback) withSuppressedUp(() => applyHostReadback(readback, session));
         });
       }
       for (const [scope, intent] of Object.entries(state.progressIntents)) {
@@ -1600,7 +1769,7 @@ function queueSettingsPush(state: SettingsSyncState): void {
 }
 
 function hasPendingIntents(state: SettingsSyncState): boolean {
-  return state.pendingKeys.size > 0 || Object.keys(state.retainedNativeSettings).length > 0 || Object.keys(state.hostIntents).length > 0 || Object.keys(state.addonIntents).length > 0 || Object.keys(state.progressIntents).length > 0;
+  return state.pendingKeys.size > 0 || Object.keys(state.retainedNativeSettings).length > 0 || Object.keys(state.hostIntents).length > 0 || Object.keys(state.profileIntents).length > 0 || Object.keys(state.addonEvents).length > 0 || Object.keys(state.addonIntents).length > 0 || Object.keys(state.progressIntents).length > 0;
 }
 
 function scheduleIntentPush(state: SettingsSyncState, delay: number): void {
@@ -1632,6 +1801,7 @@ function scheduleSettingsPush(
     }
   }
   state.pendingSettings = next;
+  if (target) queuePlaybackSettings(state, next, changedKeys);
   persistIntents(state);
   if (state.pushTimer) clearTimeout(state.pushTimer);
   state.pushTimer = undefined;
@@ -1663,7 +1833,7 @@ onSettingsChange((next) => {
     return; // the overlay changed only one of its six profile-scoped fields
   }
   rememberOwnerSettings(ownerNext);
-  const syncableKeys = syncableSettingsKeys(changedKeys);
+  const syncableKeys = syncableSettingsKeys(changedKeys).filter((key) => !appliedNativeProjection || !PROFILE_SCOPED_SETTING_KEYS.includes(key));
   if (!syncableKeys.length) return;
   const session = currentSession();
   if (!session || state !== settingsSyncState || !sameSession(state.session, session)) return;
