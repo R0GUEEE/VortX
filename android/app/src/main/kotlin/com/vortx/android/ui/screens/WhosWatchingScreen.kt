@@ -167,10 +167,12 @@ fun WhosWatchingScreen(
         // same selection transaction so a legacy SwitchAccount token or NeedsSignIn state cannot be replaced
         // by a synthetic picker message or an ABA-prone roster re-read.
         val request = try {
-            val nativeAdmission = if (BuildConfig.NATIVE_ENGINE_ENABLED) {
+            val nativeAdmission: (() -> Boolean)? = if (BuildConfig.NATIVE_ENGINE_ENABLED) {
                 val selected = checkNotNull(store.active) { "Choose the profile again." }
                 val captured = checkNotNull(nativeModel?.captureSelection(selected)) { "Choose the profile again." }
-                { nativeModel?.commitEditor(captured) {} == true }
+                // A typed value: a bare lambda on the next line would bind as checkNotNull's trailing lambda.
+                val admission: () -> Boolean = { nativeModel?.commitEditor(captured) {} == true }
+                admission
             } else null
             captureProfileSelection(store, profile, outcome, nativeAdmission = nativeAdmission)
         } catch (cancelled: CancellationException) {
@@ -223,6 +225,8 @@ fun WhosWatchingScreen(
             ProfilePickerLayoutPolicy(widthDp = maxWidth.value, largeText = largeText, isPhone = isPhone)
         }
         ProfilePickerCinematicBackdrop(movie = movie, reducedMotion = reducedMotion, modifier = Modifier.fillMaxSize())
+        // Read here: the Column content scope cannot reach BoxWithConstraints' maxHeight implicitly.
+        val pickerHeight = maxHeight
 
         Column(
             modifier = Modifier
@@ -236,7 +240,7 @@ fun WhosWatchingScreen(
             if (layout.isPhone) {
                 // Preserve Apple's established phone composition: the picker sits lower over the readable
                 // bottom fade, while tablet/desktop surfaces use true centered populated rows.
-                Spacer(Modifier.height(maxOf(40.dp, maxHeight * 0.34f)))
+                Spacer(Modifier.height(maxOf(40.dp, pickerHeight * 0.34f)))
             } else {
                 Spacer(Modifier.weight(1f))
             }

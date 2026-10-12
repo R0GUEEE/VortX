@@ -159,7 +159,7 @@ class ProfilePickerArtworkController(
         // is no second rotation clock and no unbounded queue of catalog/artwork requests.
         var prewarm: Job? = launch { preload(candidates[nextIndex(currentIndex)]) }
         if (reducedMotion) {
-            prewarm.join()
+            prewarm?.join()
             return@coroutineScope
         }
 
