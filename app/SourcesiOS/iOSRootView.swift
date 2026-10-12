@@ -6292,8 +6292,9 @@ private struct PosterContextMenu: ViewModifier {
                     Label("Details", systemImage: "info.circle")
                 }
             }
+            Divider()
             Button(role: .destructive) {
-                CoreBridge.shared.removeFromLibrary(id: id)
+                CoreBridge.shared.removeFromContinueWatching(id: id)
             } label: {
                 Label("Remove from Continue Watching", systemImage: "minus.circle")
             }
@@ -6325,6 +6326,7 @@ private struct PosterContextMenu: ViewModifier {
             } label: {
                 Label("Mark as Unwatched", systemImage: "circle")
             }
+            Divider()
             Button(role: .destructive) {
                 CoreBridge.shared.removeFromLibrary(id: id)
             } label: {

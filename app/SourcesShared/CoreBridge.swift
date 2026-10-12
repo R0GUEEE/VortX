@@ -3684,15 +3684,18 @@ final class CoreBridge: ObservableObject {
 
     // MARK: Library / Continue Watching mutations (Ctx actions; CW + library refresh live via events)
 
-    /// Remove a title from the library entirely (the engine sets `removed = true`). Used by both the
-    /// Continue Watching "dismiss" (Stremio auto-adds to the library on play, so dismissing is a library
-    /// removal, matching the reference apps) and the Library tab's "Remove from Library". The engine
-    /// re-emits `continue_watching_preview` + `library`, so both rails update on their own.
+    /// Remove a title from the library entirely (the engine sets `removed = true`). The Library tab's
+    /// "Remove from Library", and on the legacy engine also the Continue Watching dismiss (Stremio auto-adds
+    /// to the library on play, so dismissing there is a library removal). The engine re-emits
+    /// `continue_watching_preview` + `library`, so both rails update on their own.
     func removeFromLibrary(id: String) {
 #if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
+            // Native profiles keep the saved Library, Continue Watching and watch history separate, so a
+            // Library removal never dismisses Continue Watching (and the reverse, below).
+            DiagnosticsLog.log("library", "action=remove_saved surface=menu")
             if library?.catalog.contains(where: { $0.id == id }) == true { dispatchCtx(["action": "RemoveFromLibrary", "args": id]) }
-            nativeDismissContinueWatching(id: id); return
+            return
         }
 #endif
         guard ProfileStore.shared.activeUsesEngineHistory else {
@@ -3721,6 +3724,19 @@ final class CoreBridge: ObservableObject {
             let ok = await VortXSyncManager.shared.pushThisDevice()
             NSLog("[library] removal of %@ pushed to sync immediately (ok=%@)", id, ok ? "yes" : "no")
         }
+    }
+
+    /// Dismiss a title from Continue Watching only. Native profiles record a Continue Watching dismissal
+    /// (a later resume or watch revives it) and never delete the saved Library entry. The legacy engine has
+    /// no separate rail: its Continue Watching membership is library membership, so it keeps the removal.
+    func removeFromContinueWatching(id: String) {
+#if VORTX_NATIVE_DATA_ENGINE
+        if usesNativeProfileState {
+            DiagnosticsLog.log("library", "action=dismiss_continue_watching surface=menu")
+            nativeDismissContinueWatching(id: id); return
+        }
+#endif
+        removeFromLibrary(id: id)
     }
 
     /// Clear the WHOLE Continue Watching rail durably (Settings > Advanced). Per title this is exactly the
