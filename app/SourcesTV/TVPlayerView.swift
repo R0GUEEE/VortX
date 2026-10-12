@@ -335,7 +335,8 @@ struct TVPlayerView: View {
     private func rememberAcceptedSeriesChoice() {
         guard let key = seriesStickyKey else { return }
         if let choice = manualSourceToRemember, currentPickWasExplicit {
-            SeriesSourceSticky.record(seriesKey: key, addon: choice.addon, bingeGroup: choice.bingeGroup)
+            SeriesSourceSticky.record(seriesKey: key, addon: choice.addon, bingeGroup: choice.bingeGroup,
+                                      resolution: curHint.flatMap(StreamRanking.knownResolution))
             manualSourceToRemember = nil
             invalidateNextEpisodePreparation(reason: "accepted manual source")
         }
@@ -9925,6 +9926,7 @@ struct TVPlayerView: View {
                         sticky: choice?.source, stickyAuthoritative: false,
                         preserveChosenRelease: true,
                         desiredAudioLanguage: choice?.audioLanguage,
+                        qualityFloor: choice?.resolution,
                         providerPenalty: { ProviderHealth.penaltyActive(addonName: $0) },
                         debridCachedHashes: debridCachedHashes
                     ).filter { !rejectedStreams.contains($0.id) }
@@ -10293,6 +10295,7 @@ struct TVPlayerView: View {
                 pin: pin,
                 sticky: sticky,
                 desiredAudioLanguage: choice?.audioLanguage,
+                qualityFloor: choice?.resolution,
                 debridCachedHashes: debridCachedHashes,
                 attemptDeadline: attempt.deadline
             )
@@ -10420,6 +10423,7 @@ struct TVPlayerView: View {
         pin: ResolvedPin?,
         sticky: (addon: String?, bingeGroup: String?)?,
         desiredAudioLanguage: String?,
+        qualityFloor: Int?,
         debridCachedHashes: Set<String>,
         attemptDeadline: TimeInterval
     ) async -> PreloadResolution? {
@@ -10473,6 +10477,7 @@ struct TVPlayerView: View {
             sticky: sticky, stickyAuthoritative: false,
             preserveChosenRelease: true,
             desiredAudioLanguage: desiredAudioLanguage,
+            qualityFloor: qualityFloor,
             providerPenalty: { ProviderHealth.penaltyActive(addonName: $0) },
             debridCachedHashes: effectiveCachedHashes
         )

@@ -226,12 +226,13 @@ enum StreamRanking {
                      stickyAuthoritative: Bool = true,
                      preserveChosenRelease: Bool = false,
                      desiredAudioLanguage: String? = nil,
+                     qualityFloor: Int? = nil,
                      providerPenalty: ((String) -> Bool)? = nil,
                      debridCachedHashes: Set<String> = []) -> CoreStream? {
         if preserveChosenRelease {
             return rankedCandidates(groups, continuity: hint, binge: binge, pin: pin, sticky: sticky,
                                     stickyAuthoritative: stickyAuthoritative, preserveChosenRelease: true,
-                                    desiredAudioLanguage: desiredAudioLanguage,
+                                    desiredAudioLanguage: desiredAudioLanguage, qualityFloor: qualityFloor,
                                     providerPenalty: providerPenalty, debridCachedHashes: debridCachedHashes).first
         }
         let groups = applyUserFilters(groups, debridCachedHashes: debridCachedHashes)
@@ -278,6 +279,7 @@ enum StreamRanking {
                                  stickyAuthoritative: Bool = true,
                                  preserveChosenRelease: Bool = false,
                                  desiredAudioLanguage: String? = nil,
+                                 qualityFloor: Int? = nil,
                                  providerPenalty: ((String) -> Bool)? = nil,
                                  debridCachedHashes: Set<String> = []) -> [CoreStream] {
         // The actual selected audio owns binge ranking, including the optional preferred-audio filter.
@@ -287,8 +289,8 @@ enum StreamRanking {
             return TrackPreferences.$audioLanguagesOverride.withValue([desiredAudioLanguage]) {
                 rankedCandidates(groups, continuity: hint, binge: binge, pin: pin, sticky: sticky,
                                  stickyAuthoritative: stickyAuthoritative, preserveChosenRelease: true,
-                                 desiredAudioLanguage: desiredAudioLanguage, providerPenalty: providerPenalty,
-                                 debridCachedHashes: debridCachedHashes)
+                                 desiredAudioLanguage: desiredAudioLanguage, qualityFloor: qualityFloor,
+                                 providerPenalty: providerPenalty, debridCachedHashes: debridCachedHashes)
             }
         }
         let groups = applyUserFilters(groups, debridCachedHashes: debridCachedHashes)
@@ -339,12 +341,14 @@ enum StreamRanking {
                     + pinBonus(stream, addon: addon, pin: pin)
                     + healthPenalty(addon: addon, isUnhealthy: providerPenalty)
                 let compatible = !continuityLanguageMismatch(stream, desired: desiredAudioLanguage)
+                let meetsFloor = ChosenReleaseContinuityPolicy.meetsFloor(resolution: resolutionRank(stream), floor: qualityFloor)
                 return (stream: stream, offset: entry.offset, pinned: pinned, priority: priority, rank: rank,
-                        compatible: compatible)
+                        compatible: compatible, meetsFloor: meetsFloor)
             }.sorted {
                 ChosenReleaseContinuityPolicy.precedes(
-                    pinned: $0.pinned, priority: $0.priority, rank: $0.rank, offset: $0.offset,
+                    pinned: $0.pinned, priority: $0.priority, rank: $0.rank, offset: $0.offset, meetsFloor: $0.meetsFloor,
                     otherPinned: $1.pinned, otherPriority: $1.priority, otherRank: $1.rank, otherOffset: $1.offset,
+                    otherMeetsFloor: $1.meetsFloor,
                     languageCompatible: $0.compatible, otherLanguageCompatible: $1.compatible
                 )
             }.map { $0.stream }
@@ -1466,14 +1470,26 @@ enum StreamRanking {
 /// Opaque add-on binge groups are compared for equality only, and scoped to their add-on when known.
 /// No previous episode URL or provider-specific parsing participates in next-episode selection.
 enum ChosenReleaseContinuityPolicy {
-    static func precedes(pinned: Bool, priority: Int, rank: Int, offset: Int,
-                         otherPinned: Bool, otherPriority: Int, otherRank: Int, otherOffset: Int,
+    /// The chosen add-on leads; within it the chosen resolution or better leads, so one fallback episode can
+    /// never become the next episode's baseline; then the exact release, then the generic rank.
+    static func precedes(pinned: Bool, priority: Int, rank: Int, offset: Int, meetsFloor: Bool = true,
+                         otherPinned: Bool, otherPriority: Int, otherRank: Int, otherOffset: Int, otherMeetsFloor: Bool = true,
                          languageCompatible: Bool = true, otherLanguageCompatible: Bool = true) -> Bool {
         if languageCompatible != otherLanguageCompatible { return languageCompatible }
         if pinned != otherPinned { return pinned }
+        let chosenAddon = priority >= 2, otherChosenAddon = otherPriority >= 2
+        if chosenAddon != otherChosenAddon { return chosenAddon }
+        if meetsFloor != otherMeetsFloor { return meetsFloor }
         if priority != otherPriority { return priority > otherPriority }
         if rank != otherRank { return rank > otherRank }
         return offset < otherOffset
+    }
+
+    /// The explicitly chosen release's resolution is a floor: equal or better meets it. No recorded
+    /// resolution means no floor.
+    static func meetsFloor(resolution: Int, floor: Int?) -> Bool {
+        guard let floor, floor > 0 else { return true }
+        return resolution >= floor
     }
 
     static func priority(addon: String, bingeGroup: String?, preferredAddon: String?,

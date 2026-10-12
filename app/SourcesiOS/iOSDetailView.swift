@@ -199,6 +199,7 @@ func iOSResolveEpisodeStream(videoId: String, in videos: [CoreVideo], seriesId: 
                                         sticky: sticky, stickyAuthoritative: false,
                                         preserveChosenRelease: preserveChosenRelease,
                                         desiredAudioLanguage: SeriesSourceSticky.resolvingChoice?.audioLanguage,
+                                        qualityFloor: choice.resolution,
                                         providerPenalty: { ProviderHealth.penaltyActive(addonName: $0) },
                                         debridCachedHashes: cachedHashes)
         .filter { !SeriesSourceSticky.rejectedStreams.contains($0.id) }
@@ -5708,7 +5709,8 @@ struct iOSEpisodeStreams: View {
                                                     nativeUsenetLease: ref?.nativeUsenetLease, nativeOwner: owner)
         if !priorIDs.contains(record.id), let stored = DownloadStore.shared.record(id: record.id), stored.state != .failed, let sourceAddon {
             SeriesSourceSticky.record(seriesKey: meta.id, addon: sourceAddon,
-                                      bingeGroup: stream.behaviorHints?.bingeGroup)
+                                      bingeGroup: stream.behaviorHints?.bingeGroup,
+                                      resolution: StreamRanking.knownResolution(StreamRanking.signature(stream)))
         }
     }
     #else
@@ -5934,6 +5936,7 @@ struct iOSEpisodeStreams: View {
                                             sticky: sticky, stickyAuthoritative: false,
                                             preserveChosenRelease: true,
                                             desiredAudioLanguage: choice.audioLanguage,
+                                            qualityFloor: choice.resolution,
                                             providerPenalty: { ProviderHealth.penaltyActive(addonName: $0) },
                                             debridCachedHashes: debridCache.cachedHashes)
             .filter { !SeriesSourceSticky.rejectedStreams.contains($0.id) }
@@ -6124,6 +6127,7 @@ struct iOSEpisodeStreams: View {
             sticky: sticky, stickyAuthoritative: false,
             preserveChosenRelease: true,
             desiredAudioLanguage: choice.audioLanguage,
+            qualityFloor: choice.resolution,
             providerPenalty: { ProviderHealth.penaltyActive(addonName: $0) },
             debridCachedHashes: debridCache.cachedHashes
         ).filter { !StreamRanking.continuityLanguageMismatch($0, desired: choice.audioLanguage) }

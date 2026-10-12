@@ -197,7 +197,7 @@ func tvResolveEpisodeRequest(video v: CoreVideo, in episodes: [CoreVideo], serie
     let candidates = StreamRanking.rankedCandidates(
         groups, continuity: continuity, binge: binge, pin: pin,
         sticky: sticky, stickyAuthoritative: false,
-        preserveChosenRelease: true, desiredAudioLanguage: choice.audioLanguage,
+        preserveChosenRelease: true, desiredAudioLanguage: choice.audioLanguage, qualityFloor: choice.resolution,
         providerPenalty: { ProviderHealth.penaltyActive(addonName: $0) }
     ).filter { !SeriesSourceSticky.rejectedStreams.contains($0.id) }
     var selected: (stream: CoreStream, url: URL, ref: DebridPlaybackRef?)?

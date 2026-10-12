@@ -6559,7 +6559,8 @@ struct PlayerScreen: View {
     private func rememberAcceptedSeriesChoice() {
         guard let key = seriesStickyKey else { return }
         if let choice = manualSourceToRemember, currentPickWasExplicit {
-            SeriesSourceSticky.record(seriesKey: key, addon: choice.addon, bingeGroup: choice.bingeGroup)
+            SeriesSourceSticky.record(seriesKey: key, addon: choice.addon, bingeGroup: choice.bingeGroup,
+                                      resolution: (curHint ?? recordQualityText).flatMap(StreamRanking.knownResolution))
             manualSourceToRemember = nil
             invalidatePreparedEpisode(reason: "accepted manual source")
         }
