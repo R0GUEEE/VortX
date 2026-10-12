@@ -374,7 +374,6 @@ struct iOSDetailView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var accessibilityContrast
-    @Environment(\.cinemaNavigationArtworkInset) private var navigationArtworkInset
 #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 #endif
@@ -899,7 +898,6 @@ struct iOSDetailView: View {
                             } else {
                                 // The Sources action in the hero row scrolls to this anchor.
                                 hero(width: geo.size.width, height: geo.size.height) { withAnimation { proxy.scrollTo(Self.sourcesAnchor, anchor: .top) } }
-                                    .cinemaHeroScrollOffsetTracking(enabled: navigationArtworkInset > 0)
                                 // #9: on a wide iPad/Mac window keep the hero full-bleed but cap the
                                 // source-heavy content to a readable column and center it (long lines hurt
                                 // readability). iPhone (and any narrow width) stays full-width as before.
@@ -1394,7 +1392,6 @@ struct iOSDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.lg) {
                     heroBanner(width: geo.size.width, height: geo.size.height)
-                        .cinemaHeroScrollOffsetTracking(enabled: navigationArtworkInset > 0)
                     heroBelow(width: geo.size.width) { withAnimation { proxy.scrollTo(Self.sourcesAnchor, anchor: .top) } }
                     // #9: cap the source-heavy content to a readable column and center it on a wide window.
                     if isEpisodic {
@@ -1413,7 +1410,7 @@ struct iOSDetailView: View {
                 .padding(.bottom, Theme.Space.xl)
                 .frame(width: geo.size.width, alignment: .leading)
         }
-        .coordinateSpace(name: CinemaDetailHeroScrollOffsetKey.coordinateSpace)
+        .coordinateSpace(name: Self.detailScrollSpace)
     }
     #endif
 
@@ -1423,7 +1420,7 @@ struct iOSDetailView: View {
         let band = heroBandHeight(width: width, viewport: height)
         let cardWidth = CinemaHeroCardGeometry.innerWidth(viewport: width)
         return ZStack(alignment: .bottomLeading) {
-            backdrop(height: band, confined: true)
+            backdrop(height: band)
                 // #44: cross-fade a muted, looping trailer clip over the still backdrop a beat after it
                 // shows. Mounted ONLY for VOD with a resolved YouTube id and when motion is allowed; the
                 // still backdrop underneath is the permanent fallback. Live channels never get a trailer.
@@ -1634,7 +1631,7 @@ struct iOSDetailView: View {
 
     /// Full-bleed artwork with the same two scrims tvOS uses: a vertical canvas fade so the lower text
     /// block stays readable, and a leading canvas fade for the title column.
-    private func backdrop(height: CGFloat, confined: Bool = false) -> some View {
+    private func backdrop(height: CGFloat) -> some View {
         // Fall back through: meta background -> meta poster -> the hub card's seed backdrop ->
         // metahub-by-tt (so a meta=nil unreleased title still paints art) -> the seed logo's poster.
         // Without this the hero blanked to surface1 whenever Cinemeta meta was nil (Cocktail 2,
@@ -1649,8 +1646,6 @@ struct iOSDetailView: View {
             url: bg,
             contentMode: (effectiveType == "series" && (meta?.background?.isEmpty ?? true)) ? .fit : .fill
         )
-        .frame(height: CinemaArtworkGeometry.expandedHeight(band: height, navigation: confined ? 0 : navigationArtworkInset))
-        .offset(y: confined ? 0 : -navigationArtworkInset)
         .frame(height: height, alignment: .top)
         // The backdrop is the ZStack's WIDTH ANCHOR: it greedily takes the full viewport width and
         // pins to the leading edge, so the ZStack's leading edge is the screen's leading edge. Before
@@ -1691,8 +1686,6 @@ struct iOSDetailView: View {
         let contentMode: ContentMode
 
         @Environment(\.displayScale) private var displayScale
-        @Environment(\.cinemaNavigationArtworkInset) private var navigationArtworkInset
-        @Environment(\.cinemaNavigationArtworkOwner) private var navigationArtworkOwner
         @State private var image: VXPosterImage?
         @State private var imageRequest: Request?
 
@@ -1717,12 +1710,11 @@ struct iOSDetailView: View {
                 )
                 Group {
                     if let image, imageRequest == request {
-                        renderedImage(image, request: request, height: viewport.size.height)
+                        renderedImage(image)
                     } else if let cached = cachedImage(for: request) {
-                        renderedImage(cached, request: request, height: viewport.size.height)
+                        renderedImage(cached)
                     } else {
                         Theme.Palette.surface1
-                            .preference(key: CinemaNavigationArtworkKey.self, value: nil)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1766,23 +1758,12 @@ struct iOSDetailView: View {
         }
 
         @ViewBuilder
-        private func renderedImage(_ image: VXPosterImage, request: Request, height: CGFloat) -> some View {
+        private func renderedImage(_ image: VXPosterImage) -> some View {
             #if canImport(UIKit)
             Image(uiImage: image).resizable().aspectRatio(contentMode: contentMode)
-                .preference(key: CinemaNavigationArtworkKey.self,
-                            value: navigationArtwork(image.cgImage, request: request, height: height))
             #else
             Image(nsImage: image).resizable().aspectRatio(contentMode: contentMode)
-                .preference(key: CinemaNavigationArtworkKey.self,
-                            value: navigationArtwork(image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-                                                     request: request, height: height))
             #endif
-        }
-
-        private func navigationArtwork(_ image: CGImage?, request: Request, height: CGFloat) -> CinemaNavigationArtwork? {
-            guard navigationArtworkInset > 0, let image else { return nil }
-            return .init(owner: navigationArtworkOwner, identity: request.url ?? "", image: image,
-                         height: height, contentMode: contentMode, panEpoch: nil, reduceMotion: true)
         }
     }
 
@@ -4794,7 +4775,6 @@ struct CinemaEpisodeRailCard: View {
 struct iOSEpisodeStreams: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.cinemaNavigationArtworkInset) private var navigationArtworkInset
     let meta: CoreMetaItem
     let video: CoreVideo
     let season: Int
@@ -4927,19 +4907,16 @@ struct iOSEpisodeStreams: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.lg) {
                     macEpisodeBanner(width: geo.size.width, height: episodeBandHeight(viewport: geo.size.height))
-                        .cinemaHeroScrollOffsetTracking(enabled: navigationArtworkInset > 0)
                     episodeOverviewText
                     sourceListView(width: geo.size.width)
                 }
                 .padding(.bottom, Theme.Space.xl)
                 .frame(width: geo.size.width, alignment: .leading)
         }
-        .coordinateSpace(name: CinemaDetailHeroScrollOffsetKey.coordinateSpace)
         #else
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.lg) {
                 hero(width: geo.size.width, viewport: geo.size.height)
-                        .cinemaHeroScrollOffsetTracking(enabled: navigationArtworkInset > 0)
                 sourceListView(width: geo.size.width,
                                heroOwnsPrimaryPlay: SourcePresentationPolicy.mobileHeroActionOverlap(
                                    width: geo.size.width, viewport: geo.size.height) > 0)
@@ -4947,7 +4924,6 @@ struct iOSEpisodeStreams: View {
             .padding(.bottom, Theme.Space.xl)
             .frame(width: geo.size.width, alignment: .leading)
         }
-        .coordinateSpace(name: CinemaDetailHeroScrollOffsetKey.coordinateSpace)
         #endif
         }
         .environment(\.cinemaSourceJump, { anchor in

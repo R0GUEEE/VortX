@@ -57,7 +57,6 @@ struct FeaturedHeroView: View {
     @EnvironmentObject private var theme: ThemeManager
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.cinemaNavigationArtworkInset) private var navigationArtworkInset
-    @Environment(\.cinemaNavigationArtworkOwner) private var navigationArtworkOwner
     /// The "Auto-play trailers" setting, honored by the other three hero clip call sites (tvOS home + both
     /// detail pages). The home billboard clip gates on it too so turning trailers off in Settings actually
     /// stops this ambient clip, not just reduced-motion.
@@ -84,31 +83,12 @@ struct FeaturedHeroView: View {
     /// atmosphere behind the art already carry the title's palette. nil (no art / not computed yet) keeps
     /// today's fixed canvas + gradients exactly, so this is purely additive ambience.
     @State private var heroTint: FeaturedHeroTintSnapshot<Color>?
-    @State private var navigationImage: NavigationImage?
-
-    private struct NavigationImage {
-        let key: FeaturedHeroTintKey
-        let owner: String
-        let image: CGImage
-        let panEpoch: CFTimeInterval
-    }
 
     private var heroTintKey: FeaturedHeroTintKey {
         .init(id: model.hero?.id, type: model.hero?.type,
               artwork: model.hero?.backdrop ?? model.hero?.poster)
     }
     private var currentHeroTint: Color? { heroTint?.value(for: heroTintKey) }
-
-    private var navigationArtwork: CinemaNavigationArtwork? {
-        guard navigationArtworkInset > 0, let navigationImage,
-              navigationImage.key == heroTintKey, navigationImage.owner == navigationArtworkOwner else { return nil }
-        return .init(owner: navigationArtworkOwner,
-                     identity: "\(heroTintKey.type ?? ""): \(heroTintKey.id ?? ""): \(heroTintKey.artwork ?? "")",
-                     image: navigationImage.image,
-                     height: CinemaArtworkGeometry.expandedHeight(band: heroHeight, navigation: navigationArtworkInset),
-                     contentMode: .fill, panEpoch: navigationImage.panEpoch, reduceMotion: reduceMotion)
-    }
-
 
     /// Hero band height. iPhone: the billboard must command MORE THAN HALF the screen (owner ask), so the
     /// band is a fraction of the device screen height; 0.58 lands 55-60% visible even with the notch /
@@ -187,11 +167,6 @@ struct FeaturedHeroView: View {
         }
         .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
-        .preference(key: CinemaNavigationArtworkKey.self, value: navigationArtwork)
-        .onChange(of: heroTintKey) { _ in navigationImage = nil }
-        .onChange(of: navigationArtworkOwner) { _ in navigationImage = nil }
-        // The artwork now stays inside this card. The shell can borrow its accepted bitmap as an
-        // ambient navigation wash without pretending that two differently sized viewports share a crop.
         // Mac branding now lives ONLY in the persistent top bar (iOSRootView.macTopBar); the old
         // hero-corner wordmark rendered a SECOND logo on every primary screen (owner report).
         // The rare "no trailer available right now" notice (both trailer paths out). A small capsule,
@@ -240,7 +215,6 @@ struct FeaturedHeroView: View {
                 .id(launch.id)
                 .ignoresSafeArea()
         }
-        .cinemaHeroScrollOffsetTracking(enabled: navigationArtworkInset > 0)
     }
 
     @MainActor
@@ -307,8 +281,6 @@ struct FeaturedHeroView: View {
         // this exact frame, so the wide macOS band never falls back to a natural image width with a bare
         // scrim beside it.
         GeometryReader { geo in
-            let requested = heroTintKey
-            let requestedOwner = navigationArtworkOwner
             ZStack {
                 // Dynamic dominant-color base: the featured art's average color under everything, so the
                 // band already carries the title's palette while the art streams in (and whenever a layer
@@ -330,11 +302,7 @@ struct FeaturedHeroView: View {
                 // host loads the 16:9 backdrop (poster fallback) through the shared PosterImageLoader.
                 KenBurnsLayerHost(backdrop: model.hero?.backdrop, poster: model.hero?.poster,
                                   reduceMotion: reduceMotion,
-                                  usesAcceptedImageFallback: navigationArtworkInset > 0, onArtwork: { image, epoch in
-                    guard navigationArtworkInset > 0, requested == heroTintKey,
-                          requestedOwner == navigationArtworkOwner else { return }
-                    navigationImage = NavigationImage(key: requested, owner: requestedOwner, image: image, panEpoch: epoch)
-                })
+                                  usesAcceptedImageFallback: navigationArtworkInset > 0)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
@@ -343,7 +311,7 @@ struct FeaturedHeroView: View {
         .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
         // Cross-fade the artwork itself on id change so a new featured title dissolves in.
-        .id(navigationArtworkInset > 0 ? "\(navigationArtworkOwner):\(model.hero?.id ?? "")" : model.hero?.id ?? "")
+        .id(model.hero?.id ?? "")
         .transition(reduceMotion ? .identity : .opacity)
         .overlay(
             // Smooth multi-stop vertical fade to canvas so the rails / grid below read cleanly and the band
@@ -814,7 +782,6 @@ final class KenBurnsBackingView: UIView {
     let fallbackLayer = CALayer()
     let artLayer = CALayer()
     let animationEpoch = CACurrentMediaTime()
-    var artworkHeight: CGFloat?
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false          // decorative art; the CTA/overlay sit in a sibling layer
@@ -829,7 +796,7 @@ final class KenBurnsBackingView: UIView {
         super.layoutSubviews()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         artLayer.contentsScale = layer.contentsScale   // crisp on Retina (sublayers don't inherit scale)
-        let height = artworkHeight ?? bounds.height
+        let height = bounds.height
         artLayer.bounds = CGRect(x: 0, y: 0, width: bounds.width, height: height)
         artLayer.position = CGPoint(x: bounds.midX, y: height / 2)
         fallbackLayer.contentsScale = artLayer.contentsScale
@@ -845,7 +812,6 @@ private struct KenBurnsLayerHost: UIViewRepresentable {
     let poster: String?
     let reduceMotion: Bool
     var usesAcceptedImageFallback = false
-    var onArtwork: ((CGImage, CFTimeInterval) -> Void)? = nil
 
     func makeCoordinator() -> KenBurnsLoader { KenBurnsLoader() }
 
@@ -870,7 +836,6 @@ private struct KenBurnsLayerHost: UIViewRepresentable {
                          onArtwork: { [weak view] image in
             guard let view else { return }
             if usesAcceptedImageFallback { view.fallbackLayer.contents = image }
-            onArtwork?(image, view.animationEpoch)
         })
     }
 
@@ -887,7 +852,6 @@ final class KenBurnsBackingView: NSView {
     let fallbackLayer = CALayer()
     let artLayer = CALayer()
     let animationEpoch = CACurrentMediaTime()
-    var artworkHeight: CGFloat?
     var screenChanged: (() -> Void)?
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -910,7 +874,7 @@ final class KenBurnsBackingView: NSView {
         super.layout()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         if let host = layer { artLayer.contentsScale = host.contentsScale }   // crisp on Retina
-        let height = artworkHeight ?? bounds.height
+        let height = bounds.height
         artLayer.bounds = CGRect(x: 0, y: 0, width: bounds.width, height: height)
         artLayer.position = CGPoint(x: bounds.midX, y: bounds.height - height / 2)
         fallbackLayer.contentsScale = artLayer.contentsScale
@@ -926,7 +890,6 @@ private struct KenBurnsLayerHost: NSViewRepresentable {
     let poster: String?
     let reduceMotion: Bool
     var usesAcceptedImageFallback = false
-    var onArtwork: ((CGImage, CFTimeInterval) -> Void)? = nil
 
     func makeCoordinator() -> KenBurnsLoader { KenBurnsLoader() }
 
@@ -953,7 +916,6 @@ private struct KenBurnsLayerHost: NSViewRepresentable {
                          onArtwork: { [weak view] image in
             guard let view else { return }
             if usesAcceptedImageFallback { view.fallbackLayer.contents = image }
-            onArtwork?(image, view.animationEpoch)
         })
     }
 
@@ -972,54 +934,6 @@ private struct KenBurnsLayerHost: NSViewRepresentable {
             guard let view, let coordinator else { return }
             load(on: view, coordinator: coordinator)
         }
-    }
-}
-#endif
-
-/// A second crop of the accepted immutable bitmap, never a second artwork loader. Its image
-/// bounds and compositor epoch match the hero, so the reserved navigation row continues it.
-#if canImport(UIKit)
-struct CinemaNavigationArtworkLayerHost: UIViewRepresentable {
-    let artwork: CinemaNavigationArtwork
-    func makeUIView(context: Context) -> KenBurnsBackingView {
-        let view = KenBurnsBackingView(frame: .zero)
-        if let epoch = artwork.panEpoch {
-            KenBurnsPan.configure(view.artLayer, reduceMotion: artwork.reduceMotion, epoch: epoch)
-        }
-        updateUIView(view, context: context)
-        return view
-    }
-    func updateUIView(_ view: KenBurnsBackingView, context: Context) {
-        view.artworkHeight = artwork.height
-        view.artLayer.contentsGravity = artwork.contentMode == .fill ? .resizeAspectFill : .resizeAspect
-        view.artLayer.contents = artwork.image
-        view.fallbackLayer.contents = artwork.panEpoch == nil ? nil : artwork.image
-        if let epoch = artwork.panEpoch {
-            KenBurnsPan.reconcile(view.artLayer, reduceMotion: artwork.reduceMotion, epoch: epoch)
-        }
-        view.setNeedsLayout()
-    }
-}
-#elseif canImport(AppKit)
-struct CinemaNavigationArtworkLayerHost: NSViewRepresentable {
-    let artwork: CinemaNavigationArtwork
-    func makeNSView(context: Context) -> KenBurnsBackingView {
-        let view = KenBurnsBackingView(frame: .zero)
-        if let epoch = artwork.panEpoch {
-            KenBurnsPan.configure(view.artLayer, reduceMotion: artwork.reduceMotion, epoch: epoch)
-        }
-        updateNSView(view, context: context)
-        return view
-    }
-    func updateNSView(_ view: KenBurnsBackingView, context: Context) {
-        view.artworkHeight = artwork.height
-        view.artLayer.contentsGravity = artwork.contentMode == .fill ? .resizeAspectFill : .resizeAspect
-        view.artLayer.contents = artwork.image
-        view.fallbackLayer.contents = artwork.panEpoch == nil ? nil : artwork.image
-        if let epoch = artwork.panEpoch {
-            KenBurnsPan.reconcile(view.artLayer, reduceMotion: artwork.reduceMotion, epoch: epoch)
-        }
-        view.needsLayout = true
     }
 }
 #endif

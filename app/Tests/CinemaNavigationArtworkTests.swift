@@ -35,12 +35,10 @@ enum CinemaNavigationArtworkTests {
         return context.makeImage()!
     }
 
-    static func renderLayer(_ image: CGImage, width: CGFloat, height: CGFloat,
-                            artworkHeight: CGFloat, name: String, directory: String,
+    static func renderLayer(_ image: CGImage, width: CGFloat, height: CGFloat, name: String, directory: String,
                             restingPan: Bool = false, acceptedFallback: Bool = false) throws -> NSBitmapImageRep {
-        // Actual production backing view used by BOTH header and hero, using its AppKit top crop.
+        // Actual production hero backing view.
         let view = KenBurnsBackingView(frame: CGRect(x: 0, y: 0, width: width, height: height))
-        view.artworkHeight = artworkHeight
         view.artLayer.contentsGravity = .resizeAspectFill
         view.artLayer.contents = image
         if acceptedFallback { view.fallbackLayer.contents = image }
@@ -63,28 +61,6 @@ enum CinemaNavigationArtworkTests {
     static func main() throws {
         let root = CommandLine.arguments[1], directory = CommandLine.arguments[2]
         let image = fixture()
-        for (name, width, band, navigation) in [("ipad", 1024.0, 450.0, 80.0),
-                                               ("mac", 1440.0, 620.0, 80.0),
-                                               ("mac-short", 900.0, 280.0, 104.0)] {
-            let expanded = CinemaArtworkGeometry.expandedHeight(band: band, navigation: navigation)
-            expect(expanded == band + navigation, "only artwork expands; existing hero band is preserved")
-            let full = try renderLayer(image, width: width, height: expanded, artworkHeight: expanded,
-                                       name: name + "-full", directory: directory)
-            let header = try renderLayer(image, width: width, height: navigation, artworkHeight: expanded,
-                                         name: name + "-header", directory: directory)
-            for y in [0, Int(navigation / 2), Int(navigation) - 1] {
-                for x in [0, Int(width / 2), Int(width) - 1] {
-                    let a = pixel(full, x: x, y: y), b = pixel(header, x: x, y: y)
-                    expect(abs(a.redComponent - b.redComponent) < 0.01
-                        && abs(a.blueComponent - b.blueComponent) < 0.01,
-                           "actual native header crop matches same expanded hero image coordinates")
-                    expect(b.redComponent + b.blueComponent > 0.2,
-                           "artwork reaches behind complete navigation width, including both outer edges")
-                }
-            }
-        }
-        expect(CinemaArtworkGeometry.expandedHeight(band: 523, navigation: 0) == 523,
-               "phone/narrow iPad retain their existing hero height and image crop")
         expect(EnvironmentValues().cinemaNavigationArtworkInset == 0,
                "standalone/TV consumers do not acquire a navigation reservation")
 
@@ -119,19 +95,12 @@ enum CinemaNavigationArtworkTests {
                 .write(to: URL(fileURLWithPath: directory + "/" + name + ".png"))
         }
 
-        let panFull = try renderLayer(image, width: 1024, height: 530, artworkHeight: 530,
-                                      name: "pan-full", directory: directory,
-                                      restingPan: true, acceptedFallback: true)
-        let panHeader = try renderLayer(image, width: 1024, height: 80, artworkHeight: 530,
-                                        name: "pan-header", directory: directory,
-                                        restingPan: true, acceptedFallback: true)
-        for y in [0, 40, 79] {
-            let a = pixel(panFull, x: 1023, y: y), b = pixel(panHeader, x: 1023, y: y)
-            expect(b.redComponent + b.blueComponent > 0.2,
+        let pan = try renderLayer(image, width: 1024, height: 530, name: "pan-hero", directory: directory,
+                                  restingPan: true, acceptedFallback: true)
+        for y in [0, 265, 529] {
+            let edge = pixel(pan, x: 1023, y: y)
+            expect(edge.redComponent + edge.blueComponent > 0.2,
                    "actual accepted-image underlay covers the pan's exposed rightmost edge")
-            expect(abs(a.redComponent - b.redComponent) < 0.01
-                && abs(a.blueComponent - b.blueComponent) < 0.01,
-                   "actual resting/reduced-motion edge joins the same hero underlay")
         }
 
         for navigation in [80, 104] {
@@ -160,16 +129,14 @@ enum CinemaNavigationArtworkTests {
         }
 
         let epoch = CACurrentMediaTime() - 4
-        let hero = CALayer(), header = CALayer()
+        let hero = CALayer()
         KenBurnsPan.configure(hero, reduceMotion: false, epoch: epoch)
-        KenBurnsPan.configure(header, reduceMotion: false, epoch: epoch)
-        expect(hero.animation(forKey: KenBurnsPan.animationKey)?.beginTime == epoch
-            && header.animation(forKey: KenBurnsPan.animationKey)?.beginTime == epoch,
-               "both art slices use one compositor epoch rather than restarting at the menu")
+        expect(hero.animation(forKey: KenBurnsPan.animationKey)?.beginTime == epoch,
+               "the hero pan runs on its view's compositor epoch")
         expect(hero.animation(forKey: KenBurnsPan.animationKey)?.duration == 18,
                "existing compositor motion keeps its original duration")
-        KenBurnsPan.reconcile(header, reduceMotion: true, epoch: epoch)
-        expect(header.animationKeys()?.isEmpty ?? true, "Reduce Motion leaves no navigation animation")
+        KenBurnsPan.reconcile(hero, reduceMotion: true, epoch: epoch)
+        expect(hero.animationKeys()?.isEmpty ?? true, "Reduce Motion leaves no hero animation")
 
         let dissolve = ImageRenderer(content: Color.red.mask(CinemaHeroDissolve()).frame(width: 100, height: 400))
         dissolve.scale = 1
@@ -191,22 +158,19 @@ enum CinemaNavigationArtworkTests {
         expect(rootSource.contains("if topNavigation {")
             && rootSource.contains("CinemaCompactNavigationShell {\n                        measuredTabContent\n                    } navigation: {\n                        bottomTabBarRow"),
                "phone/narrow iPad retain their existing bottom-navigation control viewport")
-        expect(rootSource.contains("artwork?.owner == navigationArtworkOwner ? artwork : nil")
-            && rootSource.components(separatedBy: "navigationArtwork.clear()").count == 3,
-               "shell independently rejects old route/owner artwork and clears tab/profile transitions")
-        expect(featured.contains("navigationImage.key == heroTintKey")
-            && featured.contains("requested == heroTintKey,")
-            && featured.contains("requestedOwner == navigationArtworkOwner else { return }"),
-               "hero rejects a late obsolete image before publishing either crop")
-        expect(featured.contains(".onChange(of: heroTintKey) { _ in navigationImage = nil }")
-            && featured.contains(".onChange(of: navigationArtworkOwner) { _ in navigationImage = nil }"),
-               "retired title/owner bitmap storage is released as well as hidden immediately")
+        for source in [rootSource, detail, featured, helper] {
+            expect(!source.contains("CinemaNavigationArtworkKey") && !source.contains("cinemaNavigationArtworkOwner")
+                && !source.contains("CinemaNavigationArtworkLayerHost") && !source.contains("cinemaHeroScrollOffsetTracking"),
+                   "no hero publishes an artwork copy for the floating bar")
+        }
+        expect(!detail.contains("expandedHeight") && !detail.contains("offset(y: -navigationArtworkInset)"),
+               "detail backdrop shows its whole image rather than hiding a bar-height crop")
         expect(featured.contains("usesAcceptedImageFallback: navigationArtworkInset > 0")
             && featured.components(separatedBy: "if usesAcceptedImageFallback { view.fallbackLayer.contents = image }").count == 3,
                "both native wide-hero hosts use the accepted bitmap beneath compositor pan edges")
         expect(featured.contains("onArtwork?(image)")
             && featured.contains("self.requestID == requestID"),
-               "navigation image comes from the actual accepted loader paint")
+               "the pan-edge fill uses the loader's own accepted paint")
         expect(!helper.contains("PosterImageLoader") && !helper.contains("URLSession")
             && !helper.contains(".task") && !helper.contains("onPreferenceChange"),
                "shell decoration has no image work, timer or scroll observer")

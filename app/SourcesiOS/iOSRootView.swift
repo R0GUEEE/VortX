@@ -6,61 +6,6 @@ import UIKit
 import AppKit
 #endif
 
-/// The detail hero's real top edge in its owning scroll view. Root consumes it only for the
-/// fixed navigation artwork copy; the scroll view itself remains the geometry owner.
-struct CinemaDetailHeroScrollOffsetKey: PreferenceKey {
-    static let coordinateSpace = "iOSDetailScrollSpace"
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-/// Reports a moving hero's real top edge in the owning scroll view. The geometry reader is
-/// omitted entirely when the view has no matching fixed navigation-artwork copy.
-struct CinemaHeroScrollOffsetTracking: ViewModifier {
-    let enabled: Bool
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if enabled {
-            content.background {
-                GeometryReader { heroFrame in
-                    Color.clear.preference(
-                        key: CinemaDetailHeroScrollOffsetKey.self,
-                        value: heroFrame.frame(in: .named(CinemaDetailHeroScrollOffsetKey.coordinateSpace)).minY)
-                }
-            }
-        } else {
-            content
-        }
-    }
-}
-
-extension View {
-    func cinemaHeroScrollOffsetTracking(enabled: Bool) -> some View {
-        modifier(CinemaHeroScrollOffsetTracking(enabled: enabled))
-    }
-}
-
-/// Mutable presentation data is observed by the artwork background leaf, not `iOSRootView`.
-@MainActor
-private final class CinemaNavigationArtworkPresentation: ObservableObject {
-    @Published var artwork: CinemaNavigationArtwork?
-    @Published private(set) var detailHeroOpacity: Double = 1
-
-    func clear() {
-        artwork = nil
-        detailHeroOpacity = 1
-    }
-
-    func updateDetailHero(minY: CGFloat, navigationHeight: CGFloat) {
-        guard minY.isFinite, navigationHeight.isFinite, navigationHeight > 0 else {
-            detailHeroOpacity = 1
-            return
-        }
-        detailHeroOpacity = min(1, max(0, 1 + Double(minY / navigationHeight)))
-    }
-}
-
 /// The Apple TV visual hierarchy adapted to each window: floating horizontal navigation on
 /// Mac/wide iPad and a compact bottom bar on phones/narrow iPad. One route owner still drives
 /// every destination; overflow never creates a second Settings or Add-ons presentation host.
@@ -160,7 +105,6 @@ struct iOSRootView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     // Reference state keeps high-frequency hero scroll progress scoped to the small artwork background
     // child; the root view itself does not subscribe to these per-scroll updates.
-    @State private var navigationArtwork = CinemaNavigationArtworkPresentation()
     @State private var navigationHeight: CGFloat = 80
     @ScaledMetric(relativeTo: .caption) private var compactLabelSize: CGFloat = 11
     /// A new release found by the once-per-foreground check, surfaced as a prominent top banner so users
@@ -273,11 +217,9 @@ struct iOSRootView: View {
         .overlay { CinemaQuickViewOverlay(presenter: quickViewPresenter) }
         .onChange(of: profiles.activeID) { _ in
             quickViewPresenter.close()
-            navigationArtwork.clear()
         }
         .onChange(of: tab) { newTab in
             quickViewPresenter.close()
-            navigationArtwork.clear()
             presentUpdateIfReady()
             // Diagnostic-only: record the current surface for the heartbeat and log the tab switch.
             VXProbeState.shared.setRoute(newTab.probeName)
@@ -650,17 +592,8 @@ struct iOSRootView: View {
         GeometryReader { geometry in
             selectedTabContent
                 .environment(\.cinemaCardViewportWidth, geometry.size.width)
-                .environment(\.cinemaNavigationArtworkOwner, navigationArtworkOwner)
-        }
-        .onPreferenceChange(CinemaNavigationArtworkKey.self) { artwork in
-            navigationArtwork.artwork = artwork?.owner == navigationArtworkOwner ? artwork : nil
-        }
-        .onPreferenceChange(CinemaDetailHeroScrollOffsetKey.self) { minY in
-            navigationArtwork.updateDetailHero(minY: minY, navigationHeight: navigationHeight)
         }
     }
-
-    private var navigationArtworkOwner: String { "\(tab.rawValue):\(profiles.activeID)" }
 
     private var cinematicTopBar: some View {
         HStack(spacing: Theme.Space.sm) {
@@ -1506,7 +1439,7 @@ struct iOSHomeView: View {
                     // no eyebrow so their heroes are unchanged).
                     // Keep the scroll-to-top identity on the hero itself. A zero-height first sibling still
                     // participates in LazyVStack spacing, which inserted one full `Theme.Space.lg` of canvas
-                    // between the reserved navigation row and the first artwork pixel on Mac.
+                    // between the navigation bar and the first artwork pixel on Mac.
                     homeFeaturedHero
                         .scrollToTopAnchor()
                     // Once this marker (just below the hero) scrolls out of view, the floating
@@ -1582,7 +1515,6 @@ struct iOSHomeView: View {
                 }
                 .padding(.bottom, Theme.Space.md)
             }
-            .coordinateSpace(name: CinemaDetailHeroScrollOffsetKey.coordinateSpace)
             // A scroll gesture quiets the ambient hero rotation (resumes after inactivity), the
             // billboard never yanks the page while the user is browsing (#53).
             .scrollDismissesHeroRotation(model: hero)
@@ -2667,7 +2599,6 @@ struct iOSLibraryView: View {
                         .frame(minHeight: 420)
                 }
             }
-            .coordinateSpace(name: CinemaDetailHeroScrollOffsetKey.coordinateSpace)
             .scrollDismissesHeroRotation(model: hero)
             // Re-tapping the active Library tab scrolls back to the top.
             .scrollToTopOnBump(TabScrollKeys.library)
@@ -3915,7 +3846,6 @@ struct iOSDiscoverView: View {
                 // clipping report. Home has only self-bounding horizontal rails, so it never needed this.
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .coordinateSpace(name: CinemaDetailHeroScrollOffsetKey.coordinateSpace)
             .scrollDismissesHeroRotation(model: hero)
             // Re-tapping the active Discover tab scrolls back to the top.
             .scrollToTopOnBump(TabScrollKeys.discover)

@@ -28,7 +28,6 @@ import AppKit
 import QuartzCore
 ${declaration('enum KenBurnsPan {')}
 ${declaration('final class KenBurnsBackingView: NSView {')}
-${declaration('struct CinemaNavigationArtworkLayerHost: NSViewRepresentable {')}
 `);
 NODE
 xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete -warnings-as-errors \

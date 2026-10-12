@@ -28,15 +28,6 @@ enum UIScreenshotSeamsContractTests {
             .components(separatedBy: "// MARK: - Per-episode source list")[0]
         let rowStyle = detail.components(separatedBy: "private struct iOSSourceRowFocusStyle: ButtonStyle {")[1]
             .components(separatedBy: "struct iOSSourceList: View {")[0]
-        let scrollTracking = root.components(separatedBy: "struct CinemaHeroScrollOffsetTracking: ViewModifier {")[1]
-            .components(separatedBy: "/// Mutable presentation data")[0]
-        func owningHeroScrollHasNamedSpace(_ source: String) -> Bool {
-            guard let scroll = source.range(of: "ScrollView {")?.lowerBound,
-                  let hero = source.range(of: "FeaturedHeroView(model: hero, onOpen: { path.append($0) })")?.lowerBound,
-                  let space = source.range(of: ".coordinateSpace(name: CinemaDetailHeroScrollOffsetKey.coordinateSpace)")?.lowerBound
-            else { return false }
-            return scroll < hero && hero < space
-        }
         let stepButton = tabs.components(separatedBy: "private func sourceAddonStepButton")[1]
             .components(separatedBy: "@ViewBuilder")[0]
 
@@ -87,20 +78,14 @@ enum UIScreenshotSeamsContractTests {
                      && detail.contains("private static let sourceWindowStep = 100")
                      && detail.contains("LazyVStack(spacing: Theme.Space.sm)"),
                      "large source sets stay lazy and incrementally windowed")
-        precondition(root.contains("heroFrame.frame(in: .named(CinemaDetailHeroScrollOffsetKey.coordinateSpace)).minY")
-                     && detail.contains(".frame(height: CinemaArtworkGeometry.expandedHeight(band: height, navigation: confined ? 0 : navigationArtworkInset))")
-                     && detail.contains(".offset(y: confined ? 0 : -navigationArtworkInset)"),
-                     "the real detail hero reports its scroll edge while preserving the shared origin crop")
-        precondition(detail.components(separatedBy: ".cinemaHeroScrollOffsetTracking(enabled: navigationArtworkInset > 0)").count - 1 == 4
-                     && scrollTracking.contains("if enabled") && scrollTracking.contains("GeometryReader")
-                     && scrollTracking.contains("else {\n            content"),
-                     "macOS and top-navigation iPad hero branches report offsets while compact phones add no geometry reader")
-        precondition(featured.contains(".cinemaHeroScrollOffsetTracking(enabled: navigationArtworkInset > 0)")
-                     && whitespaceFreeHome.contains("homeFeaturedHero.scrollToTopAnchor()")
-                     && whitespaceFreeHome.contains(".coordinateSpace(name:CinemaDetailHeroScrollOffsetKey.coordinateSpace)"),
-                     "Home's real moving hero reports through its owning scroll view only when the top artwork copy exists")
-        precondition(owningHeroScrollHasNamedSpace(library) && owningHeroScrollHasNamedSpace(discover),
-                     "Library and Discover heroes report through the same actual owning scroll views")
+        precondition(!detail.contains("expandedHeight")
+                     && detail.components(separatedBy: ".coordinateSpace(name: Self.detailScrollSpace)").count - 1 == 2
+                     && detail.contains(".named(Self.detailScrollSpace)"),
+                     "detail heroes show their whole image and both layouts keep the episode anchor's scroll space")
+        precondition([root, detail, featured, library, discover].allSatisfy {
+                        !$0.contains("cinemaHeroScrollOffsetTracking") && !$0.contains("CinemaDetailHeroScrollOffsetKey") }
+                     && whitespaceFreeHome.contains("homeFeaturedHero.scrollToTopAnchor()"),
+                     "heroes add no scroll-edge geometry readers; Home keeps its scroll-to-top anchor")
         precondition(!root.contains("CinemaNavigationArtworkBackground") && !topBar.contains("Theme.Palette.canvas")
                      && root.components(separatedBy: "CinemaNavigationShell {").count == 3,
                      "Mac and wide-iPad top bars float over scrolling content with no opaque backdrop")

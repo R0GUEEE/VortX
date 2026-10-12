@@ -26,13 +26,10 @@ function block(source, start) {
 const theme = read('app/SourcesShared/Theme.swift');
 const detail = read('app/SourcesiOS/iOSDetailView.swift');
 const root = read('app/SourcesiOS/iOSRootView.swift');
-const artwork = read('app/SourcesiOS/CinemaNavigationArtwork.swift');
-const featured = read('app/SourcesiOS/FeaturedHeroView.swift');
 const tokens = ['enum Palette', 'enum Space', 'enum Radius', 'enum Motion', 'enum Typography']
   .map(start => block(theme, start)).join('\n');
 const homeAtmospherePolicy = block(theme, 'enum HomeAtmospherePolicy {');
 const components = [
-  `@MainActor ${block(root, 'private final class CinemaNavigationArtworkPresentation: ObservableObject {').replace('private ', '')}`,
   block(detail, 'struct CinemaEpisodeRailCard: View {'),
   block(detail, 'private struct iOSSourceRowFocusStyle: ButtonStyle {').replaceAll('private ', ''),
   block(detail, 'private struct iOSSourceRowFocusContent: View {').replaceAll('private ', '')
@@ -56,11 +53,6 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
 }
 enum Theme { ${tokens} }
 ${homeAtmospherePolicy}
-${block(artwork, 'struct CinemaNavigationArtwork: Equatable {')}
-${block(artwork, 'struct CinemaNavigationArtworkStrip: View {')}
-${block(featured, 'enum KenBurnsPan {')}
-${block(featured, 'final class KenBurnsBackingView: NSView {')}
-${block(featured, 'struct CinemaNavigationArtworkLayerHost: NSViewRepresentable {')}
 ${components}
 `);
 NODE
