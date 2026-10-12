@@ -134,8 +134,6 @@ final class VortxNativeInstallationKeyFileStore: @unchecked Sendable {
 }
 // End immutable installation-key file store (mechanically extracted by its regression gate).
 
-/// This key authenticates only the local checkpoint inventory. Account ciphertext remains readable
-/// with its independent account key after device-key loss; no installation identity is exported.
 /// Root for the native account stores (checkpoints, preference intents). A physical Apple TV cannot
 /// create Library/Application Support (the simulator can), so tvOS keeps them in Caches. Caches may be
 /// purged under storage pressure; the encrypted cloud account stays authoritative, so a purge only means
@@ -150,6 +148,8 @@ enum VortxNativeStorage {
     }
 }
 
+/// This key authenticates only the local checkpoint inventory. Account ciphertext remains readable
+/// with its independent account key after device-key loss; no installation identity is exported.
 enum VortxNativeInstallationKey {
     private static let lock = NSLock()
     private static func readLegacy() throws -> Data? {
@@ -774,141 +774,6 @@ enum VortxLegacyDeltaSummary {
     }
 }
 
-/// Candidate legacy materials for a held delta: the acknowledged canonical baseline plus chosen units of
-/// the current material. Units mirror the kernel's own identities (watch: videoId else metaId; library:
-/// `type:id`; add-on: normalized transport URL). The kernel judges every candidate; this never decides safety.
-enum VortxLegacySubset {
-    struct Unit: Hashable, Sendable {
-        let field: String
-        let profile: String
-        let key: String
-    }
-    private static let addonOrderKey = "\u{0}order"
-
-    /// Changed units grouped per field and profile, most valuable first (progress before membership noise).
-    static func groups(base: VortxJSON, next: VortxJSON) -> [[Unit]] {
-        var groups: [[Unit]] = []
-        for (field, keyOf) in [("watches", watchKey), ("libraries", libraryKey), ("addons", addonKey)] as [(String, (VortxJSON) -> String)] {
-            let lhs = object(base[field]), rhs = object(next[field])
-            for profile in Set(lhs.keys).union(rhs.keys).sorted() {
-                var keys = Set<String>()
-                for sub in field == "watches" ? [""] : ["items", "intents"] {
-                    let before = keyed(rows(lhs[profile], sub), keyOf: sub == "intents" ? intentKey(field) : keyOf)
-                    let after = keyed(rows(rhs[profile], sub), keyOf: sub == "intents" ? intentKey(field) : keyOf)
-                    keys.formUnion(Set(before.keys).union(after.keys).filter { before[$0] != after[$0] })
-                }
-                if field == "addons", lhs[profile]?["order"] != rhs[profile]?["order"] { keys.insert(addonOrderKey) }
-                let units = keys.sorted().map { Unit(field: field, profile: profile, key: $0) }
-                if !units.isEmpty { groups.append(units) }
-            }
-        }
-        let lhsLinks = object(base["identityLinks"]), rhsLinks = object(next["identityLinks"])
-        for profile in Set(lhsLinks.keys).union(rhsLinks.keys).sorted() where lhsLinks[profile] != rhsLinks[profile] {
-            groups.append([Unit(field: "identityLinks", profile: profile, key: "")])
-        }
-        if ["roster", "rosterModifiedSeconds", "deletedProfileIds"].contains(where: { base[$0] != next[$0] }) {
-            groups.append([Unit(field: "roster", profile: "", key: "")])
-        }
-        if base["ownAccountSources"] != next["ownAccountSources"] {
-            groups.append([Unit(field: "ownAccountSources", profile: "", key: "")])
-        }
-        return groups
-    }
-
-    static func material(base: VortxJSON, next: VortxJSON, applying units: [Unit]) -> VortxJSON {
-        guard case .object(var result) = base else { return base }
-        for unit in units {
-            switch unit.field {
-            case "watches":
-                var buckets = object(result["watches"])
-                let kept = rows(buckets[unit.profile], "").filter { watchKey($0) != unit.key }
-                let added = rows(next["watches"]?[unit.profile], "").filter { watchKey($0) == unit.key }
-                buckets[unit.profile] = .array(kept + added)
-                result["watches"] = .object(buckets)
-            case "libraries", "addons":
-                var buckets = object(result[unit.field])
-                let source = next[unit.field]?[unit.profile]
-                // A profile absent from the baseline starts empty: only this unit's members may enter.
-                var bucket = buckets[unit.profile].map { object($0) } ?? object(source).mapValues { value in
-                    if case .array = value { return VortxJSON.array([]) }
-                    return value
-                }
-                if unit.key == addonOrderKey {
-                    bucket["order"] = source?["order"] ?? .array([])
-                } else {
-                    let keyOf = unit.field == "addons" ? addonKey : libraryKey
-                    bucket["items"] = .array(replacing(rows(bucket["items"], ""), with: rows(source, "items"), key: unit.key, keyOf: keyOf))
-                    bucket["intents"] = .array(replacing(rows(bucket["intents"], ""), with: rows(source, "intents"),
-                                                         key: unit.key, keyOf: intentKey(unit.field)))
-                }
-                buckets[unit.profile] = .object(bucket)
-                result[unit.field] = .object(buckets)
-            case "identityLinks":
-                var links = object(result["identityLinks"])
-                links[unit.profile] = next["identityLinks"]?[unit.profile]
-                result["identityLinks"] = .object(links)
-            case "roster":
-                for field in ["roster", "rosterModifiedSeconds", "deletedProfileIds"] { result[field] = next[field] }
-            default:
-                result["ownAccountSources"] = next["ownAccountSources"]
-            }
-        }
-        return .object(result)
-    }
-
-    /// In place, so retained members keep their relative order (a reorder is its own causal edit).
-    private static func replacing(_ current: [VortxJSON], with source: [VortxJSON], key: String,
-                                  keyOf: (VortxJSON) -> String) -> [VortxJSON] {
-        let incoming = source.filter { keyOf($0) == key }
-        var result: [VortxJSON] = [], inserted = false
-        for row in current {
-            if keyOf(row) == key {
-                if !inserted { result += incoming; inserted = true }
-            } else { result.append(row) }
-        }
-        return inserted ? result : result + incoming
-    }
-    private static func rows(_ value: VortxJSON?, _ sub: String) -> [VortxJSON] {
-        (sub.isEmpty ? value : value?[sub])?.array ?? []
-    }
-    private static func keyed(_ rows: [VortxJSON], keyOf: (VortxJSON) -> String) -> [String: [VortxJSON]] {
-        Dictionary(grouping: rows, by: keyOf)
-    }
-    private static func object(_ value: VortxJSON?) -> [String: VortxJSON] {
-        if case .object(let fields)? = value { return fields }
-        return [:]
-    }
-    private static func string(_ value: VortxJSON?) -> String? {
-        if case .string(let text)? = value { return text }
-        return nil
-    }
-    private static func intentKey(_ field: String) -> (VortxJSON) -> String {
-        field == "addons" ? { addonKey($0) } : { string($0["key"]) ?? "" }
-    }
-    static func watchKey(_ row: VortxJSON) -> String { string(row["videoId"]) ?? string(row["metaId"]) ?? "" }
-    static func libraryKey(_ row: VortxJSON) -> String {
-        let id = string(row["id"]) ?? ""
-        switch string(row["kind"]) {
-        case "native_magnet": return "native_magnet:" + id
-        case "torrent_playlist": return "torrent_playlist:" + id
-        default: return (string(row["type"]) ?? "") + ":" + id
-        }
-    }
-    /// The kernel's identity rule: lowercase scheme and host only; path, query and credentials verbatim.
-    static func addonKey(_ row: VortxJSON) -> String {
-        let raw = (string(row["transportUrl"]) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let separator = raw.range(of: "://") else { return raw }
-        let scheme = raw[..<separator.lowerBound].lowercased()
-        let rest = raw[separator.upperBound...]
-        let end = rest.firstIndex(where: { "/?#".contains($0) }) ?? rest.endIndex
-        let authority = rest[..<end]
-        let at = authority.lastIndex(of: "@")
-        let credentials = at.map { String(authority[...$0]) } ?? ""
-        let host = at.map { String(authority[authority.index(after: $0)...]) } ?? String(authority)
-        return scheme + "://" + credentials + host.lowercased() + rest[end...]
-    }
-}
-
 actor VortxNativeSession {
     enum CatalogScreen: String, Sendable { case board, discover, search }
     let scope: VortxAccountScope
@@ -921,10 +786,6 @@ actor VortxNativeSession {
     private let legacyProfileEdits: VortxJSON?
     /// Outcome of the latest legacy carrier offer (first adoption or dispatch); nil before one.
     private(set) var legacyReconciliation: LegacyReconciliation?
-    /// Last subset search, keyed by canonical next+baseline digests, so an unchanged held delta costs
-    /// no repeated kernel trials on every sync.
-    private var legacySubsetMemo: (key: String, material: VortxJSON?)?
-    private static let legacySubsetTrialLimit = 48
     /// Host diagnostics sink. Only outcome transitions are reported, never material bytes.
     private let diagnostics: (@Sendable (String) -> Void)?
     private var closed = false
@@ -1130,9 +991,6 @@ actor VortxNativeSession {
         /// carriers are offered again on the next sync. Native state keeps mounting and syncing.
         /// `delta` is a `VortxLegacyDeltaSummary` outline of what was held.
         case held(reason: String, delta: String)
-        /// The full delta was rejected, but the kernel accepted its safely clocked subset. `imported` and
-        /// `remaining` are `VortxLegacyDeltaSummary` outlines; the remainder stays held and retried.
-        case partial(reason: String, imported: String, remaining: String)
     }
     @discardableResult
     nonisolated static func validateLegacyCompatibility(scope: VortxAccountScope, ownerName: String,
@@ -1206,65 +1064,30 @@ actor VortxNativeSession {
               text.range(of: "^[a-z][a-z0-9 /_-]*$", options: .regularExpression) != nil else { return "unclassified" }
         return text.replacingOccurrences(of: " ", with: "_")
     }
-    /// Imports the part of a held legacy delta the kernel itself accepts: changed units are offered as
-    /// baseline-plus-units candidates (a whole group first, then halves). Nothing is imported unless the
-    /// kernel accepts it, so a rejected or unclocked unit simply stays held. Nil when nothing qualifies.
-    private func importSafeLegacySubset(_ candidate: VortxNativeRuntime, material: Data) throws -> (imported: String, remaining: String)? {
-        let state = try scope.validateSnapshot(candidate.stateJSON())
-        guard let base = state["nativeSync"]?["legacyImport"]?["baseline"],
-              let next = Self.canonicalLegacyMaterial(material, scope: scope, abi: abi) else { return nil }
-        let memoKey = try Self.digest(next) + "|" + Self.digest(base)
-        let chosen: VortxJSON?
-        if let memo = legacySubsetMemo, memo.key == memoKey { chosen = memo.material }
-        else {
-            chosen = try searchSafeLegacySubset(candidate, base: base, next: next)
-            legacySubsetMemo = (memoKey, chosen)
+    /// Which profiles' saved Library lost titles across a sync merge, as `owner(n)` / `p<tag>(n)`, so a
+    /// title that disappears can be traced to the sync that removed it. The tag is a short digest of the
+    /// profile ID, stable across devices; titles and IDs are never logged. Nil when nothing was removed.
+    nonisolated static func libraryShrink(from old: VortxJSON, to new: VortxJSON, ownerProfileID: String) -> String? {
+        guard case .object(let before)? = old["libraries"] else { return nil }
+        func members(_ library: VortxJSON?) -> Set<String> {
+            Set((library?["items"]?.array ?? []).map { item in
+                ["kind", "type", "id"].map { field in item[field].map { String(describing: $0) } ?? "" }.joined(separator: "|")
+            })
         }
-        guard let chosen, try Self.reconcileAccepts(candidate, scope: scope, material: chosen) else { return nil }
-        // Outline against the kernel's stored canonical baseline: the candidate's row order is not semantic.
-        let accepted = try scope.validateSnapshot(candidate.stateJSON())["nativeSync"]?["legacyImport"]?["baseline"] ?? chosen
-        return (VortxLegacyDeltaSummary.describe(base: base, next: accepted, ownerProfileID: scope.ownerProfileID),
-                VortxLegacyDeltaSummary.describe(base: accepted, next: next, ownerProfileID: scope.ownerProfileID))
-    }
-    private func searchSafeLegacySubset(_ candidate: VortxNativeRuntime, base: VortxJSON, next: VortxJSON) throws -> VortxJSON? {
-        let snapshot = try candidate.stateJSON()
-        var accepted: [VortxLegacySubset.Unit] = [], trials = 0
-        func admits(_ units: [VortxLegacySubset.Unit]) throws -> Bool {
-            guard trials < Self.legacySubsetTrialLimit else { return false }
-            trials += 1
-            let trial = try VortxNativeRuntime(abi: abi, snapshot: snapshot)
-            defer { trial.close() }
-            return try Self.reconcileAccepts(trial, scope: scope,
-                material: VortxLegacySubset.material(base: base, next: next, applying: accepted + units))
+        let parts = before.keys.sorted().compactMap { id -> String? in
+            let removed = members(before[id]).subtracting(members(new["libraries"]?[id])).count
+            guard removed > 0 else { return nil }
+            let tag = id == ownerProfileID ? "owner"
+                : "p" + SHA256.hash(data: Data(id.utf8)).prefix(2).map { String(format: "%02x", $0) }.joined()
+            return "\(tag)(\(removed))"
         }
-        func search(_ units: ArraySlice<VortxLegacySubset.Unit>) throws {
-            guard !units.isEmpty else { return }
-            if try admits(Array(units)) { accepted += units; return }
-            guard units.count > 1 else { return }
-            let middle = units.startIndex + units.count / 2
-            try search(units[..<middle])
-            try search(units[middle...])
-        }
-        for group in VortxLegacySubset.groups(base: base, next: next) { try search(group[...]) }
-        return accepted.isEmpty ? nil : VortxLegacySubset.material(base: base, next: next, applying: accepted)
-    }
-    private static func reconcileAccepts(_ runtime: VortxNativeRuntime, scope: VortxAccountScope, material: VortxJSON) throws -> Bool {
-        let action: VortxJSON = .object(["type": .string("reconcile_legacy_sync"), "scope": .string(scope.account),
-                                       "ownerProfileId": .string(scope.ownerProfileID), "material": material])
-        let result = try runtime.dispatch(String(decoding: JSONEncoder().encode(action), as: UTF8.self), now: UInt64(Date().timeIntervalSince1970))
-        return try JSONDecoder().decode(VortxJSON.self, from: Data(result.utf8))["ok"] == .bool(true)
-    }
-    private static func digest(_ value: VortxJSON) throws -> String {
-        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
-        return SHA256.hash(data: try encoder.encode(value)).map { String(format: "%02x", $0) }.joined()
+        return parts.isEmpty ? nil : parts.joined(separator: ",")
     }
     private func recordLegacyReconciliation(_ outcome: LegacyReconciliation) {
         defer { legacyReconciliation = outcome }
         guard outcome != legacyReconciliation else { return }
         switch outcome {
         case .held(let reason, let delta): diagnostics?("legacy_reconcile result=held stage=sync reason=\(reason) delta=\(delta)")
-        case .partial(let reason, let imported, let remaining):
-            diagnostics?("legacy_reconcile result=partial stage=sync reason=\(reason) imported=\(imported) remaining=\(remaining)")
         case .accepted where legacyReconciliation != nil: diagnostics?("legacy_reconcile result=accepted stage=sync")
         case .accepted: break
         }
@@ -1397,13 +1220,13 @@ actor VortxNativeSession {
             results.append(result)
         }
         if let legacyMaterial {
-            var outcome = try Self.validateLegacyReceipt(candidate, scope: scope, material: legacyMaterial, baselineMaterial: legacyBaseline, abi: abi)
-            if case .held(let reason, _) = outcome, let subset = try importSafeLegacySubset(candidate, material: legacyMaterial) {
-                outcome = .partial(reason: reason, imported: subset.imported, remaining: subset.remaining)
-            }
-            recordLegacyReconciliation(outcome)
+            recordLegacyReconciliation(try Self.validateLegacyReceipt(candidate, scope: scope, material: legacyMaterial, baselineMaterial: legacyBaseline, abi: abi))
         }
         var state = try scope.validateSnapshot(candidate.stateJSON())
+        if legacyMaterial != nil, let shrink = try? Self.libraryShrink(from: JSONDecoder().decode(VortxJSON.self, from: Data(old.utf8)),
+                                                                       to: state, ownerProfileID: scope.ownerProfileID) {
+            diagnostics?("library_shrink stage=sync removed=\(shrink)")
+        }
         try Self.validateAuthenticatedSources(authenticatedSourceArchive, state: state)
         var candidateHost = hostPreferences
         try candidateHost.retainAuthenticatedSourceArchive(authenticatedSourceArchive)

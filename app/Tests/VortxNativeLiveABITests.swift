@@ -705,6 +705,17 @@ private final class NativeFieldNotifications: @unchecked Sendable {
         let outline = VortxLegacyDeltaSummary.describe(base: summaryBase, next: summaryNext, ownerProfileID: summaryOwner)
         check(outline == "rosterClock=older,addons.items:owner(-1),libraries.items:owner(+1),watches:p1(+1/~1:positionMs)")
         check(VortxLegacyDeltaSummary.describe(base: summaryBase, next: summaryBase, ownerProfileID: summaryOwner) == "none")
+        func shrinkItem(_ id: String) -> VortxJSON { .object(["kind": .string("standard"), "type": .string("series"), "id": .string(id)]) }
+        let shrinkBefore: VortxJSON = .object(["libraries": .object([
+            summaryOwner: .object(["items": .array([shrinkItem("tt-kept"), shrinkItem("tt-gone")])]),
+            summaryChild: .object(["items": .array([shrinkItem("tt-child")])])])])
+        let shrinkAfter: VortxJSON = .object(["libraries": .object([
+            summaryOwner: .object(["items": .array([shrinkItem("tt-kept"), shrinkItem("tt-new")])]),
+            summaryChild: .object(["items": .array([])])])])
+        let shrink = VortxNativeSession.libraryShrink(from: shrinkBefore, to: shrinkAfter, ownerProfileID: summaryOwner) ?? ""
+        // A swap still reports the removed title; a profile is named by a digest tag, never its ID or titles.
+        check(shrink.hasPrefix("owner(1),p") && shrink.hasSuffix("(1)") && !shrink.contains(summaryChild) && !shrink.contains("tt-"))
+        check(VortxNativeSession.libraryShrink(from: shrinkBefore, to: shrinkBefore, ownerProfileID: summaryOwner) == nil)
         for remote in [nil, remoteCarrier] {
             requireHeld(try VortxNativeSession.validateLegacyCompatibility(scope: legacyScope, ownerName: owner.name, snapshot: migrationState,
                                                                           nativeSync: remote, material: changedBytes, abi: VortxCABI()),
@@ -739,42 +750,6 @@ private final class NativeFieldNotifications: @unchecked Sendable {
             check(try await migrated.stateJSON() == acceptedMigrationState) // acknowledged ancestor cannot undo rename
             check(try VortxNativeSession.validateLegacyCompatibility(scope: legacyScope, ownerName: owner.name, snapshot: nil,
                 nativeSync: acceptedState["nativeSync"], material: clockedBytes, abi: VortxCABI()) == .accepted)
-            // A held delta mixing an unclocked rename with a properly clocked new watch imports only the
-            // watch: the kernel judges each subset, the rename stays held, and a resend imports nothing.
-            let subsetState = try JSONDecoder().decode(VortxJSON.self, from: Data(try await migrated.stateJSON().utf8))
-            guard case .object(var subsetMaterial)? = subsetState["nativeSync"]?["legacyImport"]?["baseline"],
-                  case .array(var subsetRoster)? = subsetMaterial["roster"],
-                  case .object(var watchBuckets)? = subsetMaterial["watches"],
-                  case .array(let childRows)? = watchBuckets[child.id.uuidString],
-                  case .object(var newRow)? = childRows.first,
-                  let ownerIndex = subsetRoster.firstIndex(where: { $0["id"] == .string(owner.id.uuidString) }),
-                  case .object(var ownerRecord) = subsetRoster[ownerIndex] else { fatalError("missing subset baseline shape") }
-            ownerRecord["name"] = .string("Unclocked legacy rename")
-            subsetRoster[ownerIndex] = .object(ownerRecord)
-            newRow["metaId"] = .string("subset-series"); newRow["videoId"] = .string("subset-series:1:1")
-            newRow["name"] = .string("Subset Episode")
-            newRow["positionMs"] = .integer(30_000); newRow["lastPlayedAtMs"] = .number(1_720_100_000_000)
-            for clock in ["markedAtMs", "resetAtMs", "removedAtMs"] where newRow[clock] != nil { newRow[clock] = .null }
-            if newRow["watched"] != nil { newRow["watched"] = .bool(false) }
-            if newRow["timesWatched"] != nil { newRow["timesWatched"] = .integer(0) }
-            watchBuckets[child.id.uuidString] = .array(childRows + [.object(newRow)])
-            subsetMaterial["watches"] = .object(watchBuckets)
-            subsetMaterial["roster"] = .array(subsetRoster)
-            let subsetBytes = try JSONEncoder().encode(VortxJSON.object(subsetMaterial))
-            _ = try await migrated.dispatch([#"{"type":"get_state"}"#], now: 1720100100, legacyMaterial: subsetBytes)
-            guard case .partial(_, let imported, let remaining)? = await migrated.legacyReconciliation else {
-                fatalError("clocked watch was not imported from a held delta")
-            }
-            check(imported == "watches:p1(+1)" && remaining == "roster(~1:name)")
-            let afterSubset = try JSONDecoder().decode(VortxJSON.self, from: Data(try await migrated.stateJSON().utf8))
-            check(afterSubset["roster"]?["profiles"]?[owner.id.uuidString]?["name"] != .string("Unclocked legacy rename"))
-            let subsetAccepted = try await migrated.stateJSON()
-            _ = try await migrated.dispatch([#"{"type":"get_state"}"#], now: 1720100200, legacyMaterial: subsetBytes)
-            check(try await migrated.stateJSON() == subsetAccepted) // nothing re-imported on resend
-            guard case .held(_, let stillHeld)? = await migrated.legacyReconciliation else { fatalError("remainder was not held") }
-            check(stillHeld == "roster(~1:name)")
-            acceptedMigrationState = subsetAccepted
-            print("Live private legacy subset import: clocked watch imported, unclocked rename held, resend idempotent")
             print("Live private legacy reconciliation: clocked peer rename, immutable original receipt/archive, ancestor no-op and cold native peer admission passed")
         }
         await migrated.close()
@@ -782,7 +757,6 @@ private final class NativeFieldNotifications: @unchecked Sendable {
         check(try await migratedCold.stateJSON() == acceptedMigrationState)
         _ = try await migratedCold.dispatch([#"{"type":"switch_profile","id":"10000000-0000-0000-0000-000000000001"}"#], now: 11)
         check(try await migratedCold.resumeSeconds(id: "opaque-episode", profileID: child.id.uuidString) == 12.345)
-        check(try await migratedCold.resumeSeconds(id: "subset-series:1:1", profileID: child.id.uuidString) == 30) // imported subset persisted
         let profilesFacade = try await VortxNativeCoreFacade.create(session: migratedCold, registry: [], changed: { _ in })
         var editedChild = child; editedChild.name = "Updated Child"; editedChild.avatar = "moon"; editedChild.textScale = 1.25
         let profileMutation = try VortxNativeProfiles.mutation(editedChild, previous: child, ownerID: owner.id.uuidString)

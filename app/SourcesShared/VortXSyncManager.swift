@@ -955,8 +955,6 @@ final class VortXSyncManager: ObservableObject {
         switch outcome {
         case .held(let reason, let delta):
             DiagnosticsLog.log("native-profiles", "legacy_reconcile result=held stage=\(stage) reason=\(reason) delta=\(delta)")
-        case .partial(let reason, let imported, let remaining):
-            DiagnosticsLog.log("native-profiles", "legacy_reconcile result=partial stage=\(stage) reason=\(reason) imported=\(imported) remaining=\(remaining)")
         case .accepted where loggedNativeLegacyReconciliation != nil:
             DiagnosticsLog.log("native-profiles", "legacy_reconcile result=accepted stage=\(stage)")
         case .accepted: break
