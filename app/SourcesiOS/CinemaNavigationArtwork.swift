@@ -84,8 +84,9 @@ extension View {
     func cinemaHeroCard() -> some View { modifier(CinemaHeroCardTreatment()) }
 }
 
-/// The decorative continuation cannot change this layout reservation or the controls' viewport.
-struct CinemaNavigationReservedShell<Navigation: View, Content: View>: View {
+/// Floating top navigation. The bar is a top safe-area inset, so screens still start their controls
+/// beneath it, while scroll views run underneath and stay visible through it at every scroll position.
+struct CinemaNavigationShell<Navigation: View, Content: View>: View {
     let navigation: Navigation
     let content: Content
 
@@ -95,10 +96,50 @@ struct CinemaNavigationReservedShell<Navigation: View, Content: View>: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            navigation
-            content.frame(maxWidth: .infinity, maxHeight: .infinity)
+        content.frame(maxWidth: .infinity, maxHeight: .infinity)
+            .modifier(CinemaFloatingNavigationBar(navigation: navigation))
+    }
+}
+
+/// OS 26 hands the bar to the system, which softly blurs whatever scrolls beneath it (the iOS bar
+/// treatment). Older systems and Reduce Transparency draw their own backdrop instead.
+private struct CinemaFloatingNavigationBar<Navigation: View>: ViewModifier {
+    let navigation: Navigation
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, macOS 26.0, *), !reduceTransparency {
+            content
+                .safeAreaBar(edge: .top, spacing: 0) { navigation }
+                .scrollEdgeEffectStyle(.soft, for: .top)
+        } else {
+            content.safeAreaInset(edge: .top, spacing: 0) {
+                navigation.background { CinemaNavigationBackdrop(reduceTransparency: reduceTransparency) }
+            }
         }
+    }
+}
+
+/// Pre-26 backdrop: material that fades out at its lower edge, so content dissolves under the bar
+/// rather than meeting a hard line. Reduce Transparency keeps a near-opaque canvas for legibility.
+private struct CinemaNavigationBackdrop: View {
+    let reduceTransparency: Bool
+
+    var body: some View {
+        Group {
+            if reduceTransparency {
+                Theme.Palette.canvas.opacity(0.94)
+            } else {
+                Rectangle().fill(.ultraThinMaterial)
+                    .overlay(Theme.Palette.canvas.opacity(0.35))
+                    .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.7),
+                                                 .init(color: .clear, location: 1)],
+                                         startPoint: .top, endPoint: .bottom))
+            }
+        }
+        .ignoresSafeArea(edges: .top)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

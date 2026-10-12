@@ -33,7 +33,6 @@ const tokens = ['enum Palette', 'enum Space', 'enum Radius', 'enum Motion', 'enu
 const homeAtmospherePolicy = block(theme, 'enum HomeAtmospherePolicy {');
 const components = [
   `@MainActor ${block(root, 'private final class CinemaNavigationArtworkPresentation: ObservableObject {').replace('private ', '')}`,
-  block(root, 'private struct CinemaNavigationArtworkBackground: View {').replace('private ', ''),
   block(detail, 'struct CinemaEpisodeRailCard: View {'),
   block(detail, 'private struct iOSSourceRowFocusStyle: ButtonStyle {').replaceAll('private ', ''),
   block(detail, 'private struct iOSSourceRowFocusContent: View {').replaceAll('private ', '')
@@ -42,7 +41,7 @@ writeFileSync(`${directory}/ProductionUIScreenshotSeams.swift`, `import SwiftUI
 import AppKit
 import CoreGraphics
 import QuartzCore
-struct ThemeManager {
+final class ThemeManager: ObservableObject, @unchecked Sendable {
   static let shared = ThemeManager()
   let textScale = 1.0
   var canvas: Color { .black }

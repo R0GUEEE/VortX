@@ -61,25 +61,6 @@ private final class CinemaNavigationArtworkPresentation: ObservableObject {
     }
 }
 
-private struct CinemaNavigationArtworkBackground: View {
-    @ObservedObject var presentation: CinemaNavigationArtworkPresentation
-    let reduceTransparency: Bool
-    let highContrast: Bool
-
-    var body: some View {
-        ZStack {
-            CinemaNavigationArtworkStrip(artwork: presentation.artwork,
-                                         reduceTransparency: reduceTransparency,
-                                         highContrast: highContrast)
-            if presentation.artwork != nil {
-                Theme.Palette.canvas.opacity(1 - presentation.detailHeroOpacity)
-            }
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-}
-
 /// The Apple TV visual hierarchy adapted to each window: floating horizontal navigation on
 /// Mac/wide iPad and a compact bottom bar on phones/narrow iPad. One route owner still drives
 /// every destination; overflow never creates a second Settings or Add-ons presentation host.
@@ -176,8 +157,6 @@ struct iOSRootView: View {
     @FocusState private var macSearchFocused: Bool
     #endif
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Environment(\.colorSchemeContrast) private var accessibilityContrast
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     // Reference state keeps high-frequency hero scroll progress scoped to the small artwork background
     // child; the root view itself does not subscribe to these per-scroll updates.
@@ -563,10 +542,10 @@ struct iOSRootView: View {
     #endif
 
     #if os(macOS)
-    /// A real reserved row keeps every destination's controls below the floating chrome. The
-    /// visible hero borrows that row for artwork only, using its existing accepted decoded image.
+    /// The floating top bar keeps every destination's controls below it, while scrolling content
+    /// passes underneath and stays visible through its glass.
     private var macDesktopShell: some View {
-        CinemaNavigationReservedShell {
+        CinemaNavigationShell {
             cinematicTopBar
         } content: {
             measuredTabContent
@@ -645,11 +624,11 @@ struct iOSRootView: View {
             // Window width, not physical-screen width: Split View/Stage Manager retain the phone
             // treatment when narrow, and rotating a phone never turns it into a desktop shell.
             let topNavigation = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 760
-            // Nested detail GeometryReaders retain a real unobscured viewport. The existing
-            // hero image alone extends through the reserved top row via its artwork preference.
+            // Nested detail GeometryReaders retain a real unobscured viewport; scrolling content
+            // passes beneath the floating top bar.
             Group {
                 if topNavigation {
-                    CinemaNavigationReservedShell {
+                    CinemaNavigationShell {
                         cinematicTopBar
                     } content: {
                         measuredTabContent.environment(\.cinemaNavigationArtworkInset, navigationHeight)
@@ -708,11 +687,6 @@ struct iOSRootView: View {
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
         .frame(maxWidth: .infinity)
-        .background {
-            CinemaNavigationArtworkBackground(presentation: navigationArtwork,
-                                              reduceTransparency: reduceTransparency,
-                                              highContrast: accessibilityContrast == .increased)
-        }
         .background {
             GeometryReader { geometry in
                 Color.clear.preference(key: CinemaNavigationHeightKey.self, value: geometry.size.height)

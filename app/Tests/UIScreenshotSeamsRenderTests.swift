@@ -24,65 +24,6 @@ enum UIScreenshotSeamsRenderTests {
         return bitmap
     }
 
-    /// ImageRenderer substitutes a placeholder for NSViewRepresentable content. Host the actual
-    /// production layer bridge in an offscreen, ordered-out AppKit window so pixel assertions see
-    /// the synthetic CGImage installed by `CinemaNavigationArtworkLayerHost`, not that placeholder.
-    static func renderHostedArtwork<V: View>(_ view: V, expectedArtwork: CGImage,
-                                              directory: String, name: String) throws -> NSBitmapImageRep {
-        NSApplication.shared.setActivationPolicy(.prohibited)
-        let size = NSSize(width: 390, height: 80)
-        let host = NSHostingView(rootView: view.frame(width: size.width, height: size.height)
-            .background(Theme.Palette.canvas))
-        host.frame = NSRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
-                              styleMask: .borderless, backing: .buffered, defer: true)
-        defer { window.close() }
-        window.isReleasedWhenClosed = false
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.contentView = host
-        window.orderOut(nil) // Keep the layer host out of view and do not activate the app.
-        host.layoutSubtreeIfNeeded()
-        host.displayIfNeeded()
-        host.layer?.displayIfNeeded()
-
-        func installedArtwork(in view: NSView) -> CGImage? {
-            if let backing = view as? KenBurnsBackingView,
-               let contents = backing.artLayer.contents,
-               CFGetTypeID(contents as CFTypeRef) == CGImage.typeID {
-                // The explicit CF type check makes the bridge safe without Swift's always-true
-                // conditional-cast diagnostic for Core Foundation image types.
-                return (contents as! CGImage)
-            }
-            for child in view.subviews {
-                if let image = installedArtwork(in: child) { return image }
-            }
-            return nil
-        }
-        guard let installed = installedArtwork(in: host), installed === expectedArtwork else {
-            preconditionFailure("the production NSViewRepresentable did not install the expected artwork image")
-        }
-        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                            pixelsWide: Int(size.width),
-                                            pixelsHigh: Int(size.height),
-                                            bitsPerSample: 8,
-                                            samplesPerPixel: 4,
-                                            hasAlpha: true,
-                                            isPlanar: false,
-                                            colorSpaceName: .deviceRGB,
-                                            bitmapFormat: [],
-                                            bytesPerRow: 0,
-                                            bitsPerPixel: 0) else {
-            preconditionFailure("failed to allocate hosted artwork bitmap")
-        }
-        host.cacheDisplay(in: host.bounds, to: bitmap)
-        guard let png = bitmap.representation(using: .png, properties: [:]) else {
-            preconditionFailure("hosted artwork PNG render unavailable")
-        }
-        try png.write(to: URL(fileURLWithPath: directory + "/" + name + ".png"))
-        return bitmap
-    }
-
     static func materiallyDiffers(_ lhs: NSBitmapImageRep, _ rhs: NSBitmapImageRep) -> Bool {
         guard lhs.pixelsWide == rhs.pixelsWide, lhs.pixelsHigh == rhs.pixelsHigh else { return false }
         for y in stride(from: 4, to: lhs.pixelsHigh - 4, by: 4) {
@@ -129,67 +70,8 @@ enum UIScreenshotSeamsRenderTests {
             .background(Theme.Palette.canvas)
     }
 
-    static func syntheticArtwork() -> CGImage {
-        let space = CGColorSpaceCreateDeviceRGB()
-        let context = CGContext(data: nil, width: 256, height: 256, bitsPerComponent: 8, bytesPerRow: 0,
-                                space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        let gradient = CGGradient(colorsSpace: space,
-                                  colors: [CGColor(red: 0.9, green: 0.2, blue: 0.1, alpha: 1),
-                                           CGColor(red: 0.05, green: 0.2, blue: 0.8, alpha: 1)] as CFArray,
-                                  locations: [0, 1])!
-        context.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0), end: CGPoint(x: 256, y: 256), options: [])
-        return context.makeImage()!
-    }
-
     static func main() throws {
         let directory = CommandLine.arguments[1]
-        let chrome = CinemaNavigationArtworkPresentation()
-        chrome.updateDetailHero(minY: 0, navigationHeight: 80)
-        precondition(chrome.detailHeroOpacity == 1, "origin keeps the navigation crop fully visible")
-        chrome.updateDetailHero(minY: -40, navigationHeight: 80)
-        precondition(chrome.detailHeroOpacity == 0.5, "the real chrome presentation fades with the detail hero edge")
-        chrome.updateDetailHero(minY: -80, navigationHeight: 80)
-        precondition(chrome.detailHeroOpacity == 0, "the copied crop is clear once the hero edge leaves the nav row")
-        chrome.updateDetailHero(minY: -120, navigationHeight: 80)
-        precondition(chrome.detailHeroOpacity == 0, "continued scrolling cannot restore a stale artwork strip")
-        chrome.artwork = CinemaNavigationArtwork(owner: "detail", identity: "fixture", image: syntheticArtwork(),
-                                                 height: 320, contentMode: .fill, panEpoch: nil, reduceMotion: true)
-        chrome.updateDetailHero(minY: 0, navigationHeight: 80)
-        precondition(chrome.detailHeroOpacity == 1, "rendered origin fixture resets to the fully visible crop")
-        let navigationOrigin = try renderHostedArtwork(
-            CinemaNavigationArtworkBackground(presentation: chrome, reduceTransparency: false, highContrast: false),
-            expectedArtwork: chrome.artwork!.image,
-            directory: directory, name: "detail-navigation-origin")
-        chrome.updateDetailHero(minY: -40, navigationHeight: 80)
-        precondition(chrome.detailHeroOpacity == 0.5, "rendered midpoint fixture uses the half-opacity state")
-        let navigationMidScroll = try renderHostedArtwork(
-            CinemaNavigationArtworkBackground(presentation: chrome, reduceTransparency: false, highContrast: false),
-            expectedArtwork: chrome.artwork!.image,
-            directory: directory, name: "detail-navigation-mid-scroll")
-        chrome.updateDetailHero(minY: -80, navigationHeight: 80)
-        precondition(chrome.detailHeroOpacity == 0, "rendered cleared fixture uses the zero-opacity state")
-        let navigationPastHero = try renderHostedArtwork(
-            CinemaNavigationArtworkBackground(presentation: chrome, reduceTransparency: false, highContrast: false),
-            expectedArtwork: chrome.artwork!.image,
-            directory: directory, name: "detail-navigation-past-hero")
-        let sampleX = navigationOrigin.pixelsWide / 2
-        let sampleY = navigationOrigin.pixelsHigh / 2
-        let originPixel = color(navigationOrigin, x: sampleX, y: sampleY)
-        let midpointPixel = color(navigationMidScroll, x: sampleX, y: sampleY)
-        let clearedPixel = color(navigationPastHero, x: sampleX, y: sampleY)
-        precondition(materiallyDiffers(navigationOrigin, navigationPastHero),
-                     "the origin composition contains artwork that the cleared state removes")
-        precondition(close(midpointPixel.redComponent,
-                           to: (originPixel.redComponent + clearedPixel.redComponent) / 2)
-                     && close(midpointPixel.greenComponent,
-                              to: (originPixel.greenComponent + clearedPixel.greenComponent) / 2)
-                     && close(midpointPixel.blueComponent,
-                              to: (originPixel.blueComponent + clearedPixel.blueComponent) / 2),
-                     "a known artwork pixel follows the expected 50-percent blend toward the clear-state canvas")
-        precondition(materiallyDiffers(navigationOrigin, navigationMidScroll)
-                     && materiallyDiffers(navigationMidScroll, navigationPastHero),
-                     "the real fixed-navigation artwork composition renders the scroll fade at origin, midpoint and clear state")
-
         let card = CinemaEpisodeRailCard(video: CoreVideo(), isWatched: false, progress: 0.2,
                                          cardWidth: 320, artwork: AnyView(Color.clear.frame(height: 160)),
                                          trailingStatus: AnyView(EmptyView()))
@@ -250,6 +132,6 @@ enum UIScreenshotSeamsRenderTests {
             directory: directory, name: "source-row-accessible")
         precondition(materiallyDiffers(sourceTinted, sourceAccessible),
                      "the real source-row ButtonStyle paints profile tint and honors its opaque accessibility fallback")
-        print("UIScreenshotSeamsRenderTests: production detail fade, tinted episode card, glass fallbacks and source-row ButtonStyle rendered")
+        print("UIScreenshotSeamsRenderTests: tinted episode card, glass fallbacks and source-row ButtonStyle rendered")
     }
 }

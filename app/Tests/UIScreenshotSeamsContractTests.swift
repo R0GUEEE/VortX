@@ -9,8 +9,8 @@ enum UIScreenshotSeamsContractTests {
         let root = try String(contentsOfFile: "app/SourcesiOS/iOSRootView.swift", encoding: .utf8)
         let detail = try String(contentsOfFile: "app/SourcesiOS/iOSDetailView.swift", encoding: .utf8)
         let featured = try String(contentsOfFile: "app/SourcesiOS/FeaturedHeroView.swift", encoding: .utf8)
-        let rootChrome = root.components(separatedBy: "private struct CinemaNavigationArtworkBackground: View {")[1]
-            .components(separatedBy: "/// The Apple TV visual hierarchy adapted")[0]
+        let topBar = root.components(separatedBy: "private var cinematicTopBar: some View {")[1]
+            .components(separatedBy: "private var horizontalTabBar: some View {")[0]
         let home = root.components(separatedBy: "private var homeNavigation: some View {")[1]
             .components(separatedBy: "private var homeHistoryObservers")[0]
         let whitespaceFreeHome = String(home.filter { !$0.isWhitespace })
@@ -88,8 +88,8 @@ enum UIScreenshotSeamsContractTests {
                      && detail.contains("LazyVStack(spacing: Theme.Space.sm)"),
                      "large source sets stay lazy and incrementally windowed")
         precondition(root.contains("heroFrame.frame(in: .named(CinemaDetailHeroScrollOffsetKey.coordinateSpace)).minY")
-                     && detail.contains(".frame(height: CinemaArtworkGeometry.expandedHeight(band: height, navigation: navigationArtworkInset))")
-                     && detail.contains(".offset(y: -navigationArtworkInset)"),
+                     && detail.contains(".frame(height: CinemaArtworkGeometry.expandedHeight(band: height, navigation: confined ? 0 : navigationArtworkInset))")
+                     && detail.contains(".offset(y: confined ? 0 : -navigationArtworkInset)"),
                      "the real detail hero reports its scroll edge while preserving the shared origin crop")
         precondition(detail.components(separatedBy: ".cinemaHeroScrollOffsetTracking(enabled: navigationArtworkInset > 0)").count - 1 == 4
                      && scrollTracking.contains("if enabled") && scrollTracking.contains("GeometryReader")
@@ -101,11 +101,9 @@ enum UIScreenshotSeamsContractTests {
                      "Home's real moving hero reports through its owning scroll view only when the top artwork copy exists")
         precondition(owningHeroScrollHasNamedSpace(library) && owningHeroScrollHasNamedSpace(discover),
                      "Library and Discover heroes report through the same actual owning scroll views")
-        precondition(root.contains("@State private var navigationArtwork = CinemaNavigationArtworkPresentation()")
-                     && root.contains("navigationArtwork.updateDetailHero(minY: minY, navigationHeight: navigationHeight)")
-                     && rootChrome.contains("@ObservedObject var presentation")
-                     && rootChrome.contains("Theme.Palette.canvas.opacity(1 - presentation.detailHeroOpacity)"),
-                     "detail scroll fade redraws only the navigation artwork leaf, not root-owned SwiftUI state")
+        precondition(!root.contains("CinemaNavigationArtworkBackground") && !topBar.contains("Theme.Palette.canvas")
+                     && root.components(separatedBy: "CinemaNavigationShell {").count == 3,
+                     "Mac and wide-iPad top bars float over scrolling content with no opaque backdrop")
 
         print("UI screenshot seam contracts passed")
     }

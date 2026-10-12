@@ -135,7 +135,7 @@ enum CinemaNavigationArtworkTests {
         }
 
         for navigation in [80, 104] {
-            let shell = CinemaNavigationReservedShell {
+            let shell = CinemaNavigationShell {
                 Color.red.frame(height: CGFloat(navigation))
             } content: {
                 VStack(spacing: 0) {
@@ -149,14 +149,14 @@ enum CinemaNavigationArtworkTests {
             renderer.scale = 1
             let bitmap = NSBitmapImageRep(cgImage: renderer.cgImage!)
             expect(pixel(bitmap, x: 195, y: navigation - 1).redComponent > 0.9,
-                   "actual production shell retains the full reserved navigation row")
+                   "actual production shell keeps the full navigation bar above the first control")
             expect(pixel(bitmap, x: 195, y: navigation).greenComponent > 0.8
                 && pixel(bitmap, x: 195, y: navigation + 43).greenComponent > 0.8,
                    "actual 44-point first control begins beneath navigation, without a clipped hit frame")
             expect(pixel(bitmap, x: 195, y: 843).blueComponent > 0.9,
                    "actual content viewport reaches the bottom after the navigation reservation")
             try bitmap.representation(using: .png, properties: [:])!
-                .write(to: URL(fileURLWithPath: directory + "/reserved-shell-\(navigation).png"))
+                .write(to: URL(fileURLWithPath: directory + "/navigation-shell-\(navigation).png"))
         }
 
         let epoch = CACurrentMediaTime() - 4
@@ -186,10 +186,10 @@ enum CinemaNavigationArtworkTests {
         let detail = try String(contentsOfFile: root + "/app/SourcesiOS/iOSDetailView.swift", encoding: .utf8)
         let featured = try String(contentsOfFile: root + "/app/SourcesiOS/FeaturedHeroView.swift", encoding: .utf8)
         let helper = try String(contentsOfFile: root + "/app/SourcesiOS/CinemaNavigationArtwork.swift", encoding: .utf8)
-        expect(rootSource.components(separatedBy: "CinemaNavigationReservedShell {").count == 3,
-               "actual Mac and wide-iPad shells both use the rendered reserved-control layout")
+        expect(rootSource.components(separatedBy: "CinemaNavigationShell {").count == 3,
+               "actual Mac and wide-iPad shells both use the rendered floating-navigation layout")
         expect(rootSource.contains("if topNavigation {")
-            && rootSource.contains("measuredTabContent.frame(maxWidth: .infinity, maxHeight: .infinity)\n                        bottomTabBarRow"),
+            && rootSource.contains("CinemaCompactNavigationShell {\n                        measuredTabContent\n                    } navigation: {\n                        bottomTabBarRow"),
                "phone/narrow iPad retain their existing bottom-navigation control viewport")
         expect(rootSource.contains("artwork?.owner == navigationArtworkOwner ? artwork : nil")
             && rootSource.components(separatedBy: "navigationArtwork.clear()").count == 3,
