@@ -3414,9 +3414,14 @@ struct iOSDetailView: View {
         // ref with zero network and primes+plays the embedded torrent instantly instead of blocking.
         let ref: DebridPlaybackRef?
         if stream.isUsenet {
+            let started = ProcessInfo.processInfo.systemUptime
+            DiagnosticsLog.log("usenet", "explicit play begin surface=movie \(UsenetPlaybackDiagnostics.routes(stream))")
             let result = await DebridCoordinator.shared.resolveExplicitUsenetPlayback(for: stream)
+            DiagnosticsLog.log("usenet", "explicit play surface=movie \(UsenetPlaybackDiagnostics.outcome(result, startedAt: started))")
             if let quickWatchScope {
-                guard quickWatchScopeIsCurrent(quickWatchScope) else { return }
+                guard quickWatchScopeIsCurrent(quickWatchScope) else {
+                    DiagnosticsLog.log("usenet", "explicit play surface=movie dropped reason=page_changed"); return
+                }
             }
             switch result {
             case .ready(let resolved): ref = resolved
@@ -5486,14 +5491,24 @@ struct iOSEpisodeStreams: View {
             return
         }
         guard !preparing,
-              episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
+              episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else {
+            if stream.isUsenet {
+                DiagnosticsLog.log("usenet", "explicit play surface=episode ignored reason=\(preparing ? "already_preparing" : "page_changed")")
+            }
+            return
+        }
         preparing = true; defer { preparing = false }
         let ep = debridHint(for: target)
         let ref: DebridPlaybackRef?
         let isTorrent: Bool
         if explicit, stream.isUsenet {
+            let started = ProcessInfo.processInfo.systemUptime
+            DiagnosticsLog.log("usenet", "explicit play begin surface=episode \(UsenetPlaybackDiagnostics.routes(stream))")
             let result = await DebridCoordinator.shared.resolveExplicitUsenetPlayback(for: stream, episode: ep)
-            guard episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
+            DiagnosticsLog.log("usenet", "explicit play surface=episode \(UsenetPlaybackDiagnostics.outcome(result, startedAt: started))")
+            guard episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else {
+                DiagnosticsLog.log("usenet", "explicit play surface=episode dropped reason=page_changed"); return
+            }
             switch result {
             case .ready(let resolved):
                 ref = resolved

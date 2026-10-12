@@ -6569,6 +6569,9 @@ struct PlayerScreen: View {
             appliedAutoTracks = true
             autoSelectTracks()
         }
+        // Language codes only: which audio the loaded file offers and which one playback selected.
+        let loadedAudio = coordinator.player?.tracks(ofType: "audio") ?? []
+        DiagnosticsLog.log("binge", "audio inventory=\(loadedAudio.map { $0.lang.isEmpty ? "?" : $0.lang }) selected=\(loadedAudio.first(where: { $0.selected })?.lang ?? "-") desired=\(seriesStickyKey.flatMap { SeriesSourceSticky.currentSnapshot(for: $0).audioLanguage } ?? "-")")
         // Re-read the selected audio after automatic selection; subtitle rows never enter this path.
         if let selected = coordinator.player?.tracks(ofType: "audio").first(where: { $0.selected && $0.isSelectable }),
            pendingAutomaticAudioLanguage == nil || TrackSelector.matches(selected.lang, pendingAutomaticAudioLanguage ?? "") {
@@ -7656,6 +7659,9 @@ struct PlayerScreen: View {
             preparedEpisodeSourceOwner = sourceOwner
             preparedEpisodeChoice = choice
             DiagnosticsLog.log("binge", "next prepare ready target=\(VXProbeRedaction.identityToken(nextID)) host=\(result.url.host ?? "-") generation=\(generation)")
+            DiagnosticsLog.log("binge", "next prepare pick " + BingePickDiagnostics.describe(
+                result.stream, resolvedURL: result.url, season: result.meta.season, episode: result.meta.episode,
+                desiredAudio: choice?.audioLanguage, chosenBingeGroup: choice?.bingeGroup))
         }
     }
 
