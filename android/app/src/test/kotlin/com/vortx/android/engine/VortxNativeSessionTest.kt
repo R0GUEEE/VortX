@@ -128,6 +128,35 @@ class VortxNativeSessionTest {
         }
     }
 
+    @Test fun `rejected legacy reconciliation is held while the native merge commits`() {
+        val runtime = Runtime(); val store = Store()
+        val merge = JSONObject().put("type", "merge_native_sync").put("document", JSONObject())
+        fun reconcile(tag: String) = JSONObject().put("type", NativeLegacyReconciliationPolicy.ACTION)
+            .put("material", JSONObject().put("fixture", tag))
+        open(runtime, store).use { session ->
+            assertEquals(null, session.heldLegacyReconciliation)
+            // The fixture kernel rejects reconcile_legacy_sync like a real unclocked legacy delta.
+            session.dispatch(listOf(merge, reconcile("rejected"), JSONObject().put("type", "switch_profile").put("id", "guest")))
+            assertEquals("guest", session.read().state.getString("activeProfileId"))
+            assertEquals("unclassified", session.heldLegacyReconciliation)
+            assertTrue("held material must not become the retained baseline",
+                JSONObject(requireNotNull(store.value)).isNull("legacyImportMaterial"))
+            val committed = store.value
+            assertTrue(runCatching { session.dispatch(listOf(reconcile("a"), reconcile("b"))) }.isFailure)
+            assertTrue(runCatching { session.dispatch(listOf(merge, JSONObject().put("type", "unsupported"))) }.isFailure)
+            assertEquals(committed, store.value)
+        }
+    }
+
+    @Test fun `legacy rejection codes keep kernel phrases and drop anything else`() {
+        assertEquals("legacy_membership_descriptor/addition_lacks_newer_install_clock", NativeLegacyReconciliationPolicy.rejectionCode(
+            JSONObject().put("ok", false).put("error", "legacy membership descriptor/addition lacks newer install clock").toString()))
+        assertEquals("unclassified", NativeLegacyReconciliationPolicy.rejectionCode(
+            JSONObject().put("ok", false).put("error", "invalid type: string \"tt1234\", expected u64").toString()))
+        assertEquals("unclassified", NativeLegacyReconciliationPolicy.rejectionCode("{\"ok\":false}"))
+        assertEquals("unclassified", NativeLegacyReconciliationPolicy.rejectionCode("not json"))
+    }
+
     @Test fun `failed durable writes dispatches and readback never publish candidate`() {
         val runtime = Runtime(); val store = Store()
         open(runtime, store).use { session ->

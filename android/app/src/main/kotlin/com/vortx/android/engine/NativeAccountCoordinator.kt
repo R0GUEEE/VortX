@@ -556,6 +556,7 @@ internal class NativeAccountCoordinator(
                         remoteHostPreferences = remoteHost, baselineHostProfiles = baselineHost, verifyCandidate = verifySources,
                         beforeCommit = { operationJob?.ensureActive(); check(migrationCurrent()) { "Native migration changed before commit" } },
                         legacyWatchlists = watchlists.profiles)
+                    reportLegacyReconciliation(old.session, stage = "sync")
                     true
                 }) { "Native account changed" } }
             } }
@@ -599,6 +600,7 @@ internal class NativeAccountCoordinator(
                     runCatching { restorePreflight(account, preflight, isCurrent) }
                 throw error
             }
+        reportLegacyReconciliation(candidate, stage = "restore")
         try { websiteEvents.forEach { event -> candidate.applyWebsiteProfileEdit(event) } }
         catch (error: Throwable) { candidate.close(); throw error }
         try { candidate.owned(candidate.read().owner) {
@@ -612,6 +614,13 @@ internal class NativeAccountCoordinator(
         try { checkpoints.remember(scope) }
         catch (error: Throwable) { candidate.close(); throw error }
         return publish(account, candidate, isCurrent)
+    }
+
+    /** A held old-format delta is reported, never fatal: native sync keeps landing (Apple 0.5.0 Beta 6). */
+    private fun reportLegacyReconciliation(session: VortxNativeSession, stage: String) {
+        session.heldLegacyReconciliation?.let { reason ->
+            android.util.Log.i("VortXNative", "legacy_reconcile result=held stage=$stage reason=$reason")
+        }
     }
 
     private fun recoverPreflightSources(account: SessionOwnerSnapshot.Account, retained: NativeMigrationPreflight): List<NativeOwnAccountSource> {

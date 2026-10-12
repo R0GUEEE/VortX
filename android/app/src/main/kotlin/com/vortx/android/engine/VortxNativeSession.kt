@@ -283,6 +283,9 @@ internal class VortxNativeSession private constructor(
         fun close() = bridges.forEach { it.close() }
     }
     private val slots = mutableMapOf<String, Slot>()
+    /** The kernel's reason the latest offered legacy delta was held; null once one is accepted. */
+    @Volatile var heldLegacyReconciliation: String? = null
+        private set
     private var revision = nextRevision.incrementAndGet()
     private var closed = false
     private var checkpointUncertain = false
@@ -331,8 +334,13 @@ internal class VortxNativeSession private constructor(
                 check(JSONObject(runtime.dispatch(JSONObject().put("type", "bind_sync_scope").put("scope", scope.accountID).toString())).getBoolean("ok")) {
                     "Native sync artifact required"
                 }
+                var heldBootstrap: JSONObject? = null
+                var heldBootstrapReason: String? = null
                 for (action in bootstrapActions) {
-                    check(JSONObject(runtime.dispatch(action.toString())).getBoolean("ok")) { "Native account bootstrap rejected" }
+                    val result = runtime.dispatch(action.toString())
+                    if (JSONObject(result).optBoolean("ok")) continue
+                    check(NativeLegacyReconciliationPolicy.holdable(action) && heldBootstrap == null) { "Native account bootstrap rejected" }
+                    heldBootstrap = action; heldBootstrapReason = NativeLegacyReconciliationPolicy.rejectionCode(result)
                 }
                 val old = stored?.let(::JSONObject)
                 val storedProfiles = old?.optJSONObject("hostProfilePreferences")
@@ -357,8 +365,9 @@ internal class VortxNativeSession private constructor(
                     JSONObject(runtime.stateJson()).getJSONObject("roster").getJSONObject("profiles"))
                 NativeHostPreferences.validateProjectedProfiles(hostProfiles)
                 // Preserve exact typed source clocks beside the receipt, never the credential-bearing cloud document.
+                // A held material was rejected: never adopt it as the retained baseline.
                 val legacyMaterial = old?.optJSONObject("legacyImportMaterial")
-                    ?: bootstrapActions.firstOrNull { it.getString("type") in setOf("import_legacy_sync", "reconcile_legacy_sync") }?.getJSONObject("material")
+                    ?: bootstrapActions.firstOrNull { it !== heldBootstrap && it.getString("type") in setOf("import_legacy_sync", "reconcile_legacy_sync") }?.getJSONObject("material")
                 val archive = initialHostArchive ?: old?.optJSONObject("hostDocument")?.let {
                     JSONObject().put("document", it).put("excludedCredentialPaths", old.getJSONArray("excludedCredentialPaths"))
                 }
@@ -391,6 +400,7 @@ internal class VortxNativeSession private constructor(
                     legacyMaterial?.let { JSONObject(it.toString()) }, archive?.let { JSONObject(it.toString()) },
                     legacyBootstrap?.let { JSONObject(it.toString()) },
                     JSONObject(pendingWebsiteEdits.toString()), JSONObject(websiteCertificates.toString()), NativeWebsiteAddonEdits.detached(pendingAddonEdits), onMutation, beforeOwnerChange)
+                    .also { it.heldLegacyReconciliation = heldBootstrapReason }
             } catch (error: Throwable) { runtime.close(); throw error }
         }
     }
@@ -590,8 +600,14 @@ internal class VortxNativeSession private constructor(
         val candidate = VortxNativeRuntime.hydrate(bindings, before)
         var installed = false
         try {
+            var heldAction: JSONObject? = null
+            var heldReason: String? = null
             val results = actions.map { action ->
-                candidate.dispatch(action.toString()).also { check(JSONObject(it).getBoolean("ok")) { "Native action rejected" } }
+                candidate.dispatch(action.toString()).also { result ->
+                    if (JSONObject(result).optBoolean("ok")) return@also
+                    check(NativeLegacyReconciliationPolicy.holdable(action) && heldAction == null) { "Native action rejected" }
+                    heldAction = action; heldReason = NativeLegacyReconciliationPolicy.rejectionCode(result)
+                }
             }
             // Verify the requested public projection before installing any part of a batch. A
             // successful action acknowledgement alone is not a watched/replacement receipt.
@@ -616,7 +632,7 @@ internal class VortxNativeSession private constructor(
             preferences = NativeHostPreferences.projectProfiles(hostState, preferences,
                 JSONObject(candidate.stateJson()).getJSONObject("roster").getJSONObject("profiles"))
             NativeHostPreferences.validateProjectedProfiles(preferences)
-            val retained = legacyImportMaterial ?: actions.firstOrNull { it.getString("type") in setOf("import_legacy_sync", "reconcile_legacy_sync") }?.getJSONObject("material")
+            val retained = legacyImportMaterial ?: actions.firstOrNull { it !== heldAction && it.getString("type") in setOf("import_legacy_sync", "reconcile_legacy_sync") }?.getJSONObject("material")
             val archive = hostArchive ?: hostDocumentArchive
             val updated = JSONObject(candidate.stateJson()).put("hostProfilePreferences", preferences).put("hostProfileSyncPending", pendingPreferences).put("legacyImportMaterial", retained)
                 .put("nativeHostPreferenceState", hostState)
@@ -638,6 +654,7 @@ internal class VortxNativeSession private constructor(
             hostProfileSyncPending = pendingPreferences
             nativeHostPreferenceState = hostState
             legacyImportMaterial = retained?.let { JSONObject(it.toString()) }
+            if (actions.any(NativeLegacyReconciliationPolicy::holdable)) heldLegacyReconciliation = heldReason
             hostDocumentArchive = archive?.let { JSONObject(it.toString()) }
             // Any profile/registry mutation invalidates in-flight resources. Progress does not.
             if (hostChanged || profileOrRegistryChanged || state.getString("activeProfileId") != owner.profileID || actions.any {
