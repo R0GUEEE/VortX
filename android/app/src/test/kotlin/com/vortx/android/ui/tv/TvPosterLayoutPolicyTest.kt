@@ -117,6 +117,7 @@ class TvPosterLayoutPolicyTest {
         File("src/main/kotlin/com/vortx/android/ui/tv/$name"),
         File("app/src/main/kotlin/com/vortx/android/ui/tv/$name"),
         File("android/app/src/main/kotlin/com/vortx/android/ui/tv/$name"),
+        File("src/main/kotlin/com/vortx/android/ui/components/$name"),
         File("app/src/main/kotlin/com/vortx/android/ui/components/$name"),
         File("android/app/src/main/kotlin/com/vortx/android/ui/components/$name"),
     ).firstOrNull(File::isFile)?.readText() ?: error("Could not locate $name")
