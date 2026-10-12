@@ -3942,6 +3942,11 @@ struct iOSDetailView: View {
                                 return x + cardWidth > 1 && x < viewportWidth - Theme.Space.md * 2
                             }), index != episodeRailFirstVisible { episodeRailFirstVisible = index }
                         }
+                        // One rail per season: the horizontal offset belongs to the season it was scrolled in.
+                        // Without this the scroll view survived a season switch and kept, say, the far end of
+                        // Season 1 when Season 2 was picked (the one-shot initial position is already spent
+                        // for a season visited before, so nothing re-positioned it).
+                        .id("episode-rail-\(season)")
                         HStack(spacing: Theme.Space.sm) {
                             episodePageButton(forward: false, count: visibleEpisodes.count, pageSize: pageSize) {
                                 pageEpisodes(forward: false, episodes: visibleEpisodes, pageSize: pageSize, proxy: railProxy)
@@ -3985,7 +3990,10 @@ struct iOSDetailView: View {
                 publishSeriesWatchRollup()
             }
             .onChange(of: watched) { _ in publishSeriesWatchRollup() }   // a mark flips the show-level badge (#143)
-            .onChange(of: season) { _ in didApplySeason = true }
+            .onChange(of: season) { _ in
+                didApplySeason = true
+                episodeRailFirstVisible = 0   // the fresh season rail starts at its first episode
+            }
             .onDisappear { manualWatchedAction.cancel() }
             .onChange(of: episodeRailScope) { _ in manualWatchedAction.cancel() }
         }

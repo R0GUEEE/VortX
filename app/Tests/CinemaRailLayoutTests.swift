@@ -27,6 +27,9 @@ enum CinemaRailLayoutTests {
                      "Hero scrolls away so a full episode card can be seen")
         precondition(detail.contains("episodeList(viewportWidth: geo.size.width)"))
         precondition(detail.contains("ScrollView(.horizontal, showsIndicators: true)"))
+        precondition(detail.contains(".id(\"episode-rail-\\(season)\")"),
+                     "Each season gets its own rail, so a season switch never inherits the old scroll offset")
+        precondition(detail.contains("episodeRailFirstVisible = 0   // the fresh season rail starts at its first episode"))
         precondition(detail.contains("episodePageButton(forward: false") && detail.contains("episodePageButton(forward: true"))
         precondition(detail.contains("Actions for \\(episodeCoordinate(v))") && detail.contains("Mark as Unwatched"))
         let quickView = try source("app/SourcesiOS/CinemaPresentation.swift")
