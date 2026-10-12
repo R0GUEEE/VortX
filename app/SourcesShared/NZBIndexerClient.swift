@@ -24,7 +24,7 @@ enum NZBIndexerClient {
     enum Failure: Error, Equatable { case invalidRequest, transport, tooLarge, malformed, api(code: Int) }
 
     static func requestURL(endpoint: URL, apiKey: String, search: Search, fallback: Bool = false) -> URL? {
-        guard case .success = NZBIndexerEndpointPolicy.validate(endpoint), !apiKey.isEmpty,
+        guard case .success(let endpoint) = NZBIndexerEndpointPolicy.validate(endpoint), !apiKey.isEmpty,
               !search.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               search.title.utf8.count <= 512 else { return nil }
         if search.isSeries {

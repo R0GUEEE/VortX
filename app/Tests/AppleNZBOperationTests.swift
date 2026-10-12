@@ -219,6 +219,29 @@ extension UsenetNodeClient {
               && (routedBody["episode"] as? [String: Int]) == ["season": 0, "episode": 1],
               "actual local resolver forwards selection and retains native lease")
         routed.nativeLease?.close()
+        #if !NZB_OPERATION_BASELINE
+        let mappedBefore = try await creates().count
+        let mapped = try await UsenetLocalResolver.resolveRouted(
+            nzbURLs: ["https://fixture.invalid/mapped"], servers: ["nntps://fixture:one@one.invalid:563/2"],
+            selection: .init(fileIdx: 3, fileMustInclude: "/Naruto - 088/i", episode: .init(season: 2, episode: 53)),
+            ownerIsCurrent: { true })!
+        let mappedCreates = Array(try await creates().dropFirst(mappedBefore))
+        check(mappedCreates.count == 2 && mappedCreates[0]["episode"] != nil
+              && mappedCreates[1]["episode"] == nil && mappedCreates[1]["fileIdx"] == nil
+              && mappedCreates[1]["fileMustInclude"] as? String == "/Naruto - 088/i" && mapped.nativeLease != nil,
+              "strict episode mismatch retries once with only the add-on's file pattern")
+        mapped.nativeLease?.close()
+        let silentBefore = try await creates().count
+        do {
+            _ = try await UsenetLocalResolver.resolveRouted(
+                nzbURLs: ["https://fixture.invalid/mapped"], servers: ["nntps://fixture:one@one.invalid:563/2"],
+                selection: .init(episode: .init(season: 2, episode: 53)), ownerIsCurrent: { true })
+            check(false, "without an add-on pattern an episode mismatch is not retried")
+        } catch {
+            check(try await creates().count - silentBefore == 1,
+                  "without an add-on pattern an episode mismatch is not retried")
+        }
+        #endif
         let coordinator = CoordinatorFixture()
         let stream = FixtureStream(usenetURLs: ["https://fixture.invalid/ready"],
                                    usenetServers: ["nntps://fixture:one@one.invalid:563/2"],
@@ -280,6 +303,26 @@ extension UsenetNodeClient {
         let cloudAfterNormalFallback = await FixtureCloudResolver.shared.calls
         check(ordinaryFallback?.usenetRoute == .torBoxCloud && cloudAfterNormalFallback == cloudAfterRetirement + 1,
               "actual live-owner local failure preserves configured cloud fallback")
+        let fallbackAllowedCreate = await FixtureCloudResolver.shared.lastAllowCreate
+        check(fallbackAllowedCreate == true, "without own providers the cloud fallback may start a download")
+        let ownProviders = CoordinatorFixture(savedServers: [
+            .init(name: "Fixture", host: "saved.invalid", port: 563, username: "fixture", password: "synthetic",
+                  maxConnections: 2, useSSL: true)
+        ])
+        let ownProvidersResult = await ownProviders.resolvedPlaybackRef(for: failureStream)
+        let ownProvidersAllowedCreate = await FixtureCloudResolver.shared.lastAllowCreate
+        check(ownProvidersResult == nil && ownProvidersAllowedCreate == false,
+              "with own providers a failed local play never starts a new cloud download")
+        let ownExplicit = await ownProviders.resolveExplicitUsenetPlayback(for: failureStream)
+        if case .failed(let message) = ownExplicit {
+            check(message == UsenetFailureMessage.forLocalReason("http_503_resource_limit"),
+                  "explicit failure explains the provider route's actual reason")
+        } else { check(false, "explicit failure explains the provider route's actual reason") }
+        check(UsenetFailureMessage.forLocalReason("http_504_provider_timeout")?.contains("in time") == true
+              && UsenetFailureMessage.forLocalReason("selection_unmatched")?.contains("episode") == true
+              && UsenetFailureMessage.forLocalReason("http_502_provider_unavailable")?.contains("couldn't fetch") == true
+              && UsenetFailureMessage.forLocalReason("cancelled") == nil,
+              "failure messages map only the engine's fixed reason codes")
 
         await FixtureCloudResolver.shared.setExistingJob(true)
         let localBeforeCloudRetry = try await creates().count

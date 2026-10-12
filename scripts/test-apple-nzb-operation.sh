@@ -37,6 +37,7 @@ else
       'func recordBreakerFailure(_ error: Error, provider: String, sourceID: String, phase: ProviderCircuitBreaker.Phase) async {}' \
       'func currentAuthorityCapture() -> CredentialScopeRegistry.Capture? { CredentialScopeRegistry.shared.capture() }' \
       'var latestCredentialRevision: UInt64 { 0 }' \
+      'var lastLocalUsenetFailure: [String: String] = [:]' \
       'func isCurrent(_ capture: CredentialScopeRegistry.Capture, revision: UInt64) -> Bool { CredentialScopeRegistry.shared.isCurrent(capture) }' \
       'func runProvider<T: Sendable>(capture: CredentialScopeRegistry.Capture, revision: UInt64, operation: @Sendable () async throws -> T) async throws -> T { do { return try await operation() } catch { await failureGate?.wait(); throw error } }'
     if [[ -n $warm_baseline ]]; then

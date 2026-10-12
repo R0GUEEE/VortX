@@ -14,6 +14,17 @@ import Foundation
         let seriesURL = try require(NZBIndexerClient.requestURL(endpoint: endpoint, apiKey: "key", search: series))
         let sq = URLComponents(url: seriesURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
         check(sq.first(where: { $0.name == "t" })?.value == "tvsearch" && sq.first(where: { $0.name == "season" })?.value == "2" && sq.first(where: { $0.name == "ep" })?.value == "7", "series coordinates")
+        for (typed, expected) in [("drunkenslug.com", "https://drunkenslug.com/api"),
+                                  ("https://ninjacentral.co.za", "https://ninjacentral.co.za/api"),
+                                  ("https://ninjacentral.co.za/", "https://ninjacentral.co.za/api"),
+                                  ("https://api.nzbgeek.info/api", "https://api.nzbgeek.info/api"),
+                                  ("https://indexer.example/newznab/api", "https://indexer.example/newznab/api")] {
+            check((try? NZBIndexerEndpointPolicy.validate(typed).get())?.absoluteString == expected,
+                  "indexer address \(typed) resolves to its Newznab API")
+        }
+        check((try? NZBIndexerEndpointPolicy.validate("http://drunkenslug.com").get()) == nil, "cleartext indexer stays rejected")
+        let bare = try require(NZBIndexerClient.requestURL(endpoint: URL(string: "https://drunkenslug.com")!, apiKey: "key", search: series))
+        check(URLComponents(url: bare, resolvingAgainstBaseURL: false)?.path == "/api", "a saved bare site address queries /api")
         let fallback = try require(NZBIndexerClient.requestURL(endpoint: endpoint, apiKey: "key", search: series, fallback: true))
         check(URLComponents(url: fallback, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "t" })?.value == "search", "generic search fallback")
         let valid = Data("<rss><channel><item><title>Movie.2026.1080p</title><enclosure url='https://index.example/get/1' length='42'/></item><item><title>bad</title><enclosure url='file:///tmp/x'/></item></channel></rss>".utf8)

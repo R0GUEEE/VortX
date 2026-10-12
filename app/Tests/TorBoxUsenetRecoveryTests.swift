@@ -225,8 +225,10 @@ final class TorBoxFixtureProtocol: URLProtocol, @unchecked Sendable {
         for name in ["Show.S02E34E35.mkv", "Show.S02E34-35.mkv", "Show.S02E34 and E35.mkv",
                      "Show.2x34x35.mkv", "Show.S02E34.S02E34.mkv", "Show.S02E34000.mkv",
                      "Show.Season 2 Episode 33.mkv"] {
-            try await selectorCase("explicit selector cannot admit ambiguous/wrong episode: \(name)",
-                                   selector: "/Show/i", selected: nil,
+            // Strict catalogue numbers miss, so the add-on's unique pick is its own episode mapping
+            // (the Stremio `fileMustInclude` contract an anime pack relies on).
+            try await selectorCase("unique add-on selector is trusted when catalogue numbers disagree: \(name)",
+                                   selector: "/Show/i", selected: 9,
                                    videos: [.init(id: 9, name: name, size: 2000)], session: session,
                                    episode: .init(season: 2, episode: 34))
         }
@@ -248,13 +250,13 @@ final class TorBoxFixtureProtocol: URLProtocol, @unchecked Sendable {
                                videos: [.init(id: 9, name: "Show.S02E01-E40/Show.S02E34.mkv", size: 2000,
                                               shortName: "Show.S02E34.mkv")], session: session,
                                episode: .init(season: 2, episode: 34))
-        try await selectorCase("matching folder cannot conceal wrong episode basename",
-                               selector: "/Show/i", selected: nil,
+        try await selectorCase("unique add-on selector is trusted over a disagreeing basename",
+                               selector: "/Show/i", selected: 9,
                                videos: [.init(id: 9, name: "Show.S02E34/Show.S02E33.mkv", size: 2000,
                                               shortName: "Show.S02E33.mkv")], session: session,
                                episode: .init(season: 2, episode: 34))
-        try await selectorCase("contradictory provider basenames fail closed",
-                               selector: "/Show/i", selected: nil,
+        try await selectorCase("unique add-on selector is trusted over contradictory provider basenames",
+                               selector: "/Show/i", selected: 9,
                                videos: [.init(id: 9, name: "Show.S02E34.mkv", size: 2000,
                                               shortName: "Show.S02E33.mkv")], session: session,
                                episode: .init(season: 2, episode: 34))
@@ -262,10 +264,17 @@ final class TorBoxFixtureProtocol: URLProtocol, @unchecked Sendable {
     }
 
     static func conflictingEpisodeCase(session: URLSession) async throws {
-        try await selectorCase("selector cannot substitute S02E33 for requested S02E34",
-                               selector: "/S02E33/i", selected: nil, videos: [
+        // An anime pack numbers episodes differently from the catalogue: the add-on maps catalogue
+        // S02E34 to the file it names, and that unique pick is followed once strict numbers miss.
+        try await selectorCase("unique add-on selector supplies its own episode mapping",
+                               selector: "/S02E33/i", selected: 7, videos: [
                                 .init(id: 7, name: "Show.S02E33.mkv", size: 3000),
                                 .init(id: 9, name: "Show.S02E34.mkv", size: 2000)
+                               ], session: session, episode: .init(season: 2, episode: 34))
+        try await selectorCase("broad add-on selector naming several videos stays fail-closed",
+                               selector: "/Show/i", selected: nil, videos: [
+                                .init(id: 7, name: "Show.S02E33.mkv", size: 3000),
+                                .init(id: 9, name: "Show.S02E35.mkv", size: 2000)
                                ], session: session, episode: .init(season: 2, episode: 34))
     }
 

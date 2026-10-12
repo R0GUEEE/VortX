@@ -5,7 +5,17 @@ enum UsenetNodeClient {
     enum ClientError: Error, Equatable {
         case createFailed(Int), badResponse, unsafeEndpoint, nativeUnavailable, unsupportedArchive, invalidSelector
         case selectionUnmatched, nativeRejected
+        /// A native refusal whose body carried one of the engine's fixed reason codes (never free text).
+        case nativeFailed(Int, String)
     }
+
+    /// The native engine's fixed failure vocabulary. Only these exact codes are ever surfaced; any other
+    /// body text is dropped, because a provider response could echo an NZB URL or credentials.
+    static let nativeReasonCodes: Set<String> = [
+        "invalid_request", "unsupported_archive_or_encoding", "article_integrity_failed", "provider_timeout",
+        "session_closed", "resource_limit", "provider_unavailable", "selection_unmatched", "selection_ambiguous",
+        "selection_unsupported", "invalid_selector", "operation_cancelled", "operation_reused",
+    ]
 
     /// Only fixed reason labels/numeric codes may reach diagnostics. Error descriptions and provider
     /// response bodies can contain an NZB URL or NNTP credentials.
@@ -21,6 +31,7 @@ enum UsenetNodeClient {
             case .invalidSelector: return "invalid_selector"
             case .selectionUnmatched: return "selection_unmatched"
             case .nativeRejected: return "native_rejected"
+            case .nativeFailed(let status, let reason): return "http_\(status)_\(reason)"
             }
         }
         if let failure = error as? URLError { return "network_\(failure.code.rawValue)" }
@@ -37,6 +48,17 @@ enum UsenetNodeClient {
         var fileIdx: Int? = nil
         var fileMustInclude: String? = nil
         var episode: Episode? = nil
+
+        /// The second, add-on-trusting attempt after a strict selection matched nothing: only the add-on's
+        /// own `fileMustInclude`, without VortX's season/episode numbers or a `fileIdx` whose order may be the
+        /// add-on's rather than the engine's. nil when the add-on gave no pattern (there is nothing to trust).
+        /// The engine still refuses a pattern that matches more than one file, so this cannot pick a random one.
+        var addonPatternOnly: Selection? {
+            guard let pattern = fileMustInclude,
+                  !pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  episode != nil || fileIdx != nil else { return nil }
+            return Selection(fileIdx: nil, fileMustInclude: pattern, episode: nil)
+        }
 
         fileprivate var isValid: Bool {
             (fileIdx.map { (0..<131_072).contains($0) } ?? true)
@@ -263,10 +285,19 @@ enum UsenetNodeClient {
             switch object?["error"] as? String {
             case "selection_unmatched": throw ClientError.selectionUnmatched
             case "unsupported_archive", "unsupported_archive_or_encoding": throw ClientError.unsupportedArchive
+            case let reason? where nativeReasonCodes.contains(reason): throw ClientError.nativeFailed(code, reason)
             default: throw ClientError.nativeRejected
             }
         }
-        guard (200...299).contains(code) else { throw ClientError.createFailed(code) }
+        guard (200...299).contains(code) else {
+            // Keep the engine's fixed reason (e.g. provider_unavailable vs provider_timeout) so a failed
+            // play is diagnosable; the status alone hid whether the NZB download or the provider failed.
+            if lease != nil, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let reason = object["error"] as? String, nativeReasonCodes.contains(reason) {
+                throw ClientError.nativeFailed(code, reason)
+            }
+            throw ClientError.createFailed(code)
+        }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let key = object["key"] as? String, !key.isEmpty else { throw ClientError.badResponse }
         // A Node key is one opaque value, never additional query parameters or a fragment.
@@ -278,5 +309,28 @@ enum UsenetNodeClient {
             throw ClientError.badResponse
         }
         return CreatedStream(url: streamURL, lease: lease)
+    }
+}
+
+/// What to tell the user when an NZB could not be played through their own providers, chosen only from
+/// the engine's fixed reason codes (never provider text). nil keeps the generic message.
+enum UsenetFailureMessage {
+    static func forLocalReason(_ reason: String) -> String? {
+        if reason.contains("provider_timeout") || reason.hasPrefix("http_504") || reason == "network_-1001" {
+            return "Your usenet providers didn't finish opening this release in time. Try again, or pick a release split into fewer parts."
+        }
+        if reason.contains("selection_") {
+            return "This NZB doesn't contain this episode in a way VortX can identify. Try a single-episode release."
+        }
+        if reason.contains("unsupported_archive") {
+            return "This release is packed in a way on-device playback can't read (compressed or encrypted). Try another release."
+        }
+        if reason.contains("provider_unavailable") || reason.contains("article_integrity") || reason.hasPrefix("http_502") {
+            return "Your usenet providers couldn't fetch this release. It may have been removed or be incomplete. Try another release."
+        }
+        if reason.contains("resource_limit") || reason.hasPrefix("http_503") {
+            return "This release is too large to open on this device right now. Try another release."
+        }
+        return nil
     }
 }

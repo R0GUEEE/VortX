@@ -616,6 +616,7 @@ actor TorBoxUsenetResolver {
     /// `knownHash` is the source's authoritative NZB md5 when the emitter had one (TorBox search results
     /// carry it); the md5-of-the-link fallback only matches when TorBox derived its key the same way.
     func resolve(nzbUrl: String, knownHash: String? = nil, fileMustInclude: String?, fileIdx: Int?, episode: DebridEpisode?,
+                 allowCreate: Bool = true,
                  ownerIsCurrent: @escaping @Sendable () async -> Bool = { true }) async throws -> URL {
         try Task.checkCancellation()
         // Pure local validation cannot retire another caller's healthy pending cloud job.
@@ -624,7 +625,8 @@ actor TorBoxUsenetResolver {
         let key = Self.jobKey(nzbURL: nzbUrl, knownHash: knownHash)
         do {
             return try await resolveJob(nzbURL: nzbUrl, key: key, selector: selector,
-                                        fileIdx: fileIdx, episode: episode, ownerIsCurrent: ownerIsCurrent)
+                                        fileIdx: fileIdx, episode: episode, allowCreate: allowCreate,
+                                        ownerIsCurrent: ownerIsCurrent)
         } catch {
             // A real status/auth/selection failure must not leave a stale "still preparing" message.
             // Cancellation at the outer deadline retains a last-known pending job for same-ID Retry.
@@ -636,11 +638,13 @@ actor TorBoxUsenetResolver {
     }
 
     private func resolveJob(nzbURL: String, key: String, selector: NSRegularExpression?, fileIdx: Int?,
-                            episode: DebridEpisode?, ownerIsCurrent: @escaping @Sendable () async -> Bool) async throws -> URL {
+                            episode: DebridEpisode?, allowCreate: Bool,
+                            ownerIsCurrent: @escaping @Sendable () async -> Bool) async throws -> URL {
         let started = Date()
         // 1. Adopt an existing job before creating one. Concurrent callers serialize only this step;
         // each caller keeps its own cancellation and file selector while polling the shared provider ID.
-        let existing = try await ensureJob(nzbURL: nzbURL, key: key, ownerIsCurrent: ownerIsCurrent)
+        let existing = try await ensureJob(nzbURL: nzbURL, key: key, allowCreate: allowCreate,
+                                           ownerIsCurrent: ownerIsCurrent)
         // 2. Poll the SAME ID, including on Retry after the first playback budget elapsed.
         let id: Int
         let files: [DebridFile]
@@ -668,7 +672,7 @@ actor TorBoxUsenetResolver {
         guard !Task.isCancelled, await ownerIsCurrent(), !Task.isCancelled else { throw CancellationError() }
     }
 
-    private func ensureJob(nzbURL: String, key: String,
+    private func ensureJob(nzbURL: String, key: String, allowCreate: Bool,
                            ownerIsCurrent: @escaping @Sendable () async -> Bool) async throws -> Item? {
         while true {
             try await validateOwner(ownerIsCurrent)
@@ -694,6 +698,12 @@ actor TorBoxUsenetResolver {
             return item
         }
         try await validateOwner(ownerIsCurrent)
+        // A user with their own NNTP providers plays NZBs through them; a tap never starts another TorBox
+        // download behind their back (an existing or already-finished TorBox job above is still used).
+        guard allowCreate else {
+            DebridProbe.log("usenet-cloud", "no existing job; new download withheld (own providers configured)")
+            throw DebridError.notCached
+        }
         guard let request = TorBoxUsenetWire.createRequest(base: Self.base, apiKey: apiKey, nzbURL: nzbURL) else {
             throw DebridError.providerError("Invalid Usenet create request")
         }
@@ -753,14 +763,19 @@ actor TorBoxUsenetResolver {
     private func pickUsenetFile(_ files: [DebridFile], selector: NSRegularExpression?,
                                 fileIdx: Int?, episode: DebridEpisode?) -> DebridFile? {
         if let selector {
-            let matched = files.filter { f in
-                guard f.isVideo, usenetEpisodeMatches(f, episode: episode) else { return false }
-                // Providers may include a containing folder only in name, or expose just short_name.
-                return [f.name, f.shortName].contains { name in
+            // Providers may include a containing folder only in name, or expose just short_name.
+            let named = files.filter { f in
+                f.isVideo && [f.name, f.shortName].contains { name in
                     !name.isEmpty && selector.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil
                 }
             }
-            return DebridResolve.pickFile(matched, episode: episode)
+            let matched = named.filter { usenetEpisodeMatches($0, episode: episode) }
+            if let strict = DebridResolve.pickFile(matched, episode: episode) { return strict }
+            // Strict found nothing: follow the add-on's own episode mapping when its pattern names exactly
+            // one video, the Stremio contract for `fileMustInclude`. Anime packs number episodes differently
+            // from the catalogue (catalogue S2 E53 can be a file named S04E36), and the add-on maps them.
+            // A pattern naming several videos stays fail-closed rather than guessing.
+            return named.count == 1 ? named[0] : nil
         }
         return DebridResolve.pickFile(files, episode: episode)
     }
@@ -1302,6 +1317,9 @@ actor DebridCoordinator {
     /// backend among the four services). Separate from `resolvers` because usenet resolves off an nzb link,
     /// not the infohash/magnet the `DebridResolving` protocol takes. nil = no TorBox key = usenet inert.
     private var torboxUsenet: TorBoxUsenetResolver?
+    /// The last on-device NNTP failure reason per NZB, so an explicit play can say what actually went
+    /// wrong (provider timeout, episode not found in the release, NZB unavailable) instead of a generic error.
+    private var lastLocalUsenetFailure: [String: String] = [:]
 
     /// Whether the resolvers have been built at least once (from `reload(snapshot:)` or the lazy warm). A no-key
     /// user leaves `resolvers` empty, so `resolvers.isEmpty` alone cannot tell "never warmed" from "warmed,
@@ -1620,6 +1638,7 @@ actor DebridCoordinator {
     /// `.noKey` when no TorBox key is configured, so the bounded resolve below collapses it to `nil`.
     /// `knownHash` = the stream's authoritative NZB md5 when its emitter carried one (nil otherwise).
     func resolveUsenet(nzbUrl: String, knownHash: String? = nil, fileMustInclude: String?, fileIdx: Int?, episode: DebridEpisode?,
+                       allowCreate: Bool = true,
                        expectedCapture: CredentialScopeRegistry.Capture, expectedRevision: UInt64,
                        inheritedNativeOwner: UsenetLocalResolver.NativeOwner? = nil) async throws -> URL {
         try await inheritedNativeOwner?.validate()
@@ -1643,7 +1662,7 @@ actor DebridCoordinator {
                 try await inheritedNativeOwner?.validate()
                 return try await usenet.resolve(
                     nzbUrl: nzbUrl, knownHash: knownHash, fileMustInclude: fileMustInclude,
-                    fileIdx: fileIdx, episode: episode,
+                    fileIdx: fileIdx, episode: episode, allowCreate: allowCreate,
                     ownerIsCurrent: {
                         guard await self.isCurrent(expectedCapture, revision: expectedRevision) else { return false }
                         guard let inheritedNativeOwner else { return true }
@@ -1744,6 +1763,10 @@ extension DebridCoordinator {
             if waiting, !Task.isCancelled, isCurrent(capture, revision: revision) {
                 return .failed("TorBox is still preparing this NZB. Select this source again to check the same download without starting it over.")
             }
+        }
+        if let nzb = stream.usenetURLs.first, let reason = lastLocalUsenetFailure[nzb],
+           let message = UsenetFailureMessage.forLocalReason(reason) {
+            return .failed(message)
         }
         if StremioServer.nativeTransportSelected, !remoteAvailable {
             return .failed("This NZB could not be started with the configured providers. Native playback supports raw video, stored RAR and COPY 7z archives. Compressed, encrypted or repair-required sources need a supported TorBox route or another source.")
@@ -1882,6 +1905,9 @@ extension DebridCoordinator {
             let resolverAtCapture = torboxUsenet
             let resumingCloudJob = await resolverAtCapture?.hasJob(nzbURL: nzb, knownHash: stream.usenetKnownHash) == true
             guard !Task.isCancelled, isCurrent(usenetCapture, revision: usenetRevision) else { return nil }
+            // With their own providers configured, a play never starts a new TorBox download; an existing
+            // or already-finished TorBox job for this NZB is still used. TorBox-only users are unchanged.
+            var allowCloudCreate = true
             if resumingCloudJob, nativeOwner.requiresNativeAuthority { nativeFallbackOwner = nativeOwner }
             // BUILT-IN NNTP (full targets only): when the user configured their OWN usenet providers, resolve
             // the nzb on device through the embedded server's dormant NNTP engine (no debrid). Preferred over
@@ -1896,6 +1922,7 @@ extension DebridCoordinator {
             // any await: the resolver routes through all of them and never reads the account/Keychain again
             // inside the network awaits below.
             let usenetSavedServers = UsenetProviderStore.loadEnabledServers(ownerCapture: usenetCapture)
+            allowCloudCreate = usenetSavedServers.isEmpty || torBoxHasItCached
             if !torBoxHasItCached, !resumingCloudJob, (!stream.usenetServers.isEmpty || !usenetSavedServers.isEmpty) {
                 nativeFallbackOwner = nativeOwner.requiresNativeAuthority ? nativeOwner : nil
                 do {
@@ -1929,7 +1956,11 @@ extension DebridCoordinator {
                     DebridProbe.log("usenet-local", "cancelled")
                     return nil
                 } catch {
-                    DebridProbe.log("usenet-local", "unavailable reason=\(DebridProbe.usenetFailure(error))")
+                    let reason: String
+                    if case UsenetLocalResolver.ResolveError.attemptsFailed(let last) = error { reason = last }
+                    else { reason = DebridProbe.usenetFailure(error) }
+                    lastLocalUsenetFailure[nzb] = reason
+                    DebridProbe.log("usenet-local", "unavailable reason=\(reason)")
                     if let nativeFallbackOwner, !(await nativeFallbackOwner.isCurrent()) { return nil }
                     guard !Task.isCancelled, isCurrent(usenetCapture, revision: usenetRevision),
                           (error as? DebridError) != .sessionChanged else { return nil }
@@ -1958,6 +1989,7 @@ extension DebridCoordinator {
             let mustInclude = stream.fileMustInclude
             let fileIdx = stream.fileIdx
             let knownHash = stream.usenetKnownHash
+            let allowCreate = allowCloudCreate
             let fallbackOwner = nativeFallbackOwner
             let started = Date()
             let result = await withTaskGroup(of: DebridPlaybackRef?.self) { group in
@@ -1965,7 +1997,7 @@ extension DebridCoordinator {
                     do {
                         let url = try await DebridCoordinator.shared.resolveUsenet(
                             nzbUrl: nzb, knownHash: knownHash, fileMustInclude: mustInclude,
-                            fileIdx: fileIdx, episode: selectionEpisode,
+                            fileIdx: fileIdx, episode: selectionEpisode, allowCreate: allowCreate,
                             expectedCapture: usenetCapture, expectedRevision: usenetRevision,
                             inheritedNativeOwner: fallbackOwner
                         )
