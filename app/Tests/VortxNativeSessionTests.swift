@@ -574,26 +574,31 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
                             type: "series", poster: nil, watched: present, profileID: "owner", expectedAccountGeneration: epoch)
                     }
                 }
-                let original = facade.stateData("native_state")!
+                // Compare decoded values, never encoder bytes: JSONEncoder does not keep key order stable
+                // across encodes of the same value, so equal states could serialize differently.
+                func nativeState() -> VortxJSON? {
+                    facade.stateData("native_state").flatMap { try? JSONDecoder().decode(VortxJSON.self, from: $0) }
+                }
+                let original = nativeState()!
                 store.blockNextWrite()
                 let completion = MutationCounter()
                 let mutation = Task { try await mutate(true); completion.increment() }
                 await withCheckedContinuation { done in DispatchQueue.global().async {
                     precondition(store.entered.wait(timeout: .now() + 5) == .success); done.resume()
                 } }
-                check(completion.value == 0 && accepted.value == 0 && facade.stateData("native_state") == original)
+                check(completion.value == 0 && accepted.value == 0 && nativeState() == original)
                 let settled = MutationCounter()
                 let settlement = Task { await facade.settleNativeMutations(); settled.increment() }
                 await Task.yield()
                 check(settled.value == 0)
                 store.release.signal(); try await mutation.value; await settlement.value
                 check(completion.value == 1 && accepted.value == 1 && settled.value == 1)
-                let acknowledged = facade.stateData("native_state")!
+                let acknowledged = nativeState()!
                 let checkpointBefore = try store.read(scope: scope)!
                 store.failWrites(afterInstall: afterInstall)
                 do { try await mutate(false); check(false) } catch VortxNativeError.checkpointUncertain {}
                 check(!facade.isAvailable && facade.requiresCheckpointReopen)
-                check(facade.stateData("native_state") == acknowledged && facade.profileSnapshot() != nil)
+                check(nativeState() == acknowledged && facade.profileSnapshot() != nil)
                 check(accepted.value == 1)
                 let authoritative = try store.read(scope: scope)!
                 check((authoritative != checkpointBefore) == afterInstall)

@@ -197,7 +197,8 @@ check(nativePush.contains("await prepareNativeLegacyMaterial(doc, capture: captu
                 && nativePush.contains("hasDirtySettings: (try? nativeGlobalEdits()) == nil")
                 && nativePush.contains("doc[\"nativeHostPreferences\"]")
                 && nativePush.contains("orderIntent != nil || pendingAddonOrderIntent != nil")
-                && nativePush.contains("return DerivedSyncDoc(document: doc, baseRevision: baseRevision)\n#else"),
+                && nativePush.contains("return DerivedSyncDoc(document: doc, baseRevision: baseRevision, credentialCapture: capture,\n"
+                    + "                              sourceIsCurrent: sourceIsCurrent, nativeDirtySettings: exportedDirtySettings)\n#else"),
               "native export checks the legacy receipt and returns unchanged sibling carriers without legacy mirror rewrites")
 
 check(bridge.contains("private let publicationEpochLock = NSLock()")
