@@ -80,6 +80,10 @@ internal object NativeHostPreferences {
             clock(entry.get("clock")); actor(entry.getString("actor"))
             val value = entry.get("value")
             if (watchlist) NativeWatchlistCodec.validate(field, value)
+            if (field.startsWith(com.vortx.android.foryou.ForYouSync.PREFIX)) {
+                require(profile) { "For You is profile-scoped" }
+                com.vortx.android.foryou.ForYouSync.validate(field, value)
+            }
             if (value == JSONObject.NULL) continue
             if (profile) when (field) {
                 "avatar", "email" -> require(value is String) { "Invalid host string preference" }

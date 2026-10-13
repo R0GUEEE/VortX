@@ -137,6 +137,7 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
     }
     private val nativeProfiles: NativeProfileAccess by lazy { NativeProfileAccess { nativeAccounts.session() } }
     private val nativeWatchlist by lazy { com.vortx.android.engine.NativeWatchlistAccess(nativeAccounts) }
+    private val nativeForYou by lazy { com.vortx.android.engine.NativeForYouAccess(nativeAccounts) }
     private val nativeStreamingAuth by lazy { com.vortx.android.engine.NativeStreamingAuthRepository(nativeAccounts, applicationScope) }
     private val nativeRepository: NativeCatalogRepository by lazy { NativeCatalogRepository(AndroidNativePlaybackResolver(this), nativeAccounts.changes.map { Unit },
         { check(syncManager?.signOut() == true) { "Account sign-out could not be stored securely" } },
@@ -185,6 +186,7 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
             .onFailure { Log.w(TAG, "Profile store init failed; profiles stay at defaults", it) }
         if (BuildConfig.NATIVE_ENGINE_ENABLED) {
             com.vortx.android.library.WatchlistStore.shared(this).installNativeGateway(nativeWatchlist) { BuildConfig.NATIVE_ENGINE_ENABLED }
+            com.vortx.android.foryou.ForYouStore.shared(this).installNativeGateway(nativeForYou)
         }
         // Bootstrap the RemoteConfig snapshot (baked defaults, signed config.vortx.tv fetch with ETag/304).
         // Loads the last-good cached config synchronously, then refreshes once in the background. Fail-soft:
@@ -370,6 +372,8 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
             }
         syncManager = manager
         if (BuildConfig.NATIVE_ENGINE_ENABLED) manager.attachNativeGateway(nativeAccounts)
+        // For You switches between the account's synced fields and the signed-out local copy on sign-in.
+        applicationScope.launch { manager.account.collect { com.vortx.android.foryou.ForYouStore.shared(this@VortXApplication).reload() } }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             /// Count of currently-started activities. Touched only from the main thread (every
             /// ActivityLifecycleCallbacks callback is delivered on the main looper), so a plain Int is safe.
