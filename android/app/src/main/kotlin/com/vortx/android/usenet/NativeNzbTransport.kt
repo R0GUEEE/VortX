@@ -41,11 +41,14 @@ internal class NativeNzbTransport(
     private val serverBase: suspend () -> String?,
     client: OkHttpClient = OkHttpClient.Builder()
         .proxy(Proxy.NO_PROXY).followRedirects(false).followSslRedirects(false)
-        .connectTimeout(4, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
-        .callTimeout(24, TimeUnit.SECONDS).build(),
+        // Just above the engine's 30 s preparation window, so its typed timeout arrives instead of a cut-off.
+        .connectTimeout(4, TimeUnit.SECONDS).readTimeout(35, TimeUnit.SECONDS)
+        .callTimeout(40, TimeUnit.SECONDS).build(),
 ) {
     private val client = client.newBuilder().proxy(Proxy.NO_PROXY).followRedirects(false).followSslRedirects(false).build()
     class Unavailable : IllegalStateException("Native NZB transport is unavailable")
+    /** The engine opened the NZB but no file matched the selection (Rust `selection_unmatched`). */
+    class SelectionUnmatched : IllegalStateException("No NZB file matched the selection")
 
     data class Selection(val fileIdx: Int? = null, val fileMustInclude: String? = null,
         val season: Int? = null, val episode: Int? = null) {
@@ -60,6 +63,16 @@ internal class NativeNzbTransport(
             return value
         }
         override fun toString(): String = "Selection(<NZB media constraints>)"
+
+        /**
+         * The second, add-on-trusting attempt after a strict selection matched nothing: only the add-on's own
+         * `fileMustInclude`, without VortX's season/episode or a `fileIdx` whose order may be the add-on's.
+         * Anime packs number episodes differently from the catalogue and the add-on maps them. Null when the
+         * add-on gave no pattern. The engine still refuses a pattern matching more than one file.
+         */
+        val addonPatternOnly: Selection?
+            get() = fileMustInclude?.takeIf { it.isNotBlank() && (season != null || fileIdx != null) }
+                ?.let { Selection(fileMustInclude = it) }
     }
 
     suspend fun create(
@@ -89,6 +102,8 @@ internal class NativeNzbTransport(
                     payload.put("operationId", owned.id)
                     val response = request(Request.Builder().url("$base/nzb/create")
                         .post(payload.toString().toRequestBody("application/json".toMediaType())).build(), timeoutMs)
+                    if (response.first == 422 && runCatching { JSONObject(response.second).optString("error") }
+                            .getOrNull() == "selection_unmatched") throw SelectionUnmatched()
                     if (response.first !in 200..299) throw Unavailable()
                     val key = try { JSONObject(response.second).opt("key") as? String } catch (_: Exception) { null }
                     // Rust keys are opaque random lowercase hex. Never accept another URL or path from the response.
@@ -105,6 +120,9 @@ internal class NativeNzbTransport(
         } catch (cancel: CancellationException) {
             operation?.close()
             throw cancel
+        } catch (unmatched: SelectionUnmatched) {
+            operation?.close()
+            throw unmatched
         } catch (_: Exception) {
             operation?.close()
             // No provider URL, credential JSON, response body, or underlying exception escapes diagnostics.

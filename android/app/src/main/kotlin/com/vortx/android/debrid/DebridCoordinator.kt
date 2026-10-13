@@ -381,12 +381,21 @@ internal class DebridCoordinator(
                 torBoxConfigured = keys.isConfigured(DebridService.TOR_BOX, owner),
                 isCurrent = current,
                 local = { urls, providers ->
-                    nativeNzbTransport.create(urls, providers, timeoutMs = 24_000,
-                        selection = NativeNzbTransport.Selection(candidate.fileIdx, candidate.fileMustInclude, episode?.season, episode?.episode),
-                        playbackIsCurrent = playbackCurrent,
-                        isCurrent = current)
+                    val strict = NativeNzbTransport.Selection(candidate.fileIdx, candidate.fileMustInclude, episode?.season, episode?.episode)
+                    try {
+                        nativeNzbTransport.create(urls, providers, timeoutMs = 35_000, selection = strict,
+                            playbackIsCurrent = playbackCurrent, isCurrent = current)
+                    } catch (unmatched: NativeNzbTransport.SelectionUnmatched) {
+                        // Our episode numbers matched no file: follow the add-on's own file pattern instead.
+                        val addonOnly = strict.addonPatternOnly ?: throw NativeNzbTransport.Unavailable()
+                        nativeNzbTransport.create(urls, providers, timeoutMs = 35_000, selection = addonOnly,
+                            playbackIsCurrent = playbackCurrent, isCurrent = current)
+                    }
                 },
-                torBox = { url -> resolver.resolveUsenet(url, candidate.usenetKnownHash, candidate.fileMustInclude, candidate.fileIdx, episode, owner) },
+                torBox = { url, allowCreate ->
+                    resolver.resolveUsenet(url, candidate.usenetKnownHash, candidate.fileMustInclude, candidate.fileIdx,
+                        episode, owner, allowCreate = allowCreate)
+                },
             ) ?: return null
             if (!current()) {
                 result.lease.close()

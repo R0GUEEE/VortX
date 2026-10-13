@@ -86,6 +86,34 @@ class NativeNzbTransportTest {
         }
     }
 
+    @Test fun `selection mismatch is typed so the add-on pattern can be retried, and retires its operation`() = runBlocking {
+        Fixture().use { fixture ->
+            val canceled = CountDownLatch(1)
+            fixture.handle = { exchange ->
+                when {
+                    exchange.requestURI.path == "/nzb/capabilities" -> exchange.reply(200, CAPABILITIES)
+                    exchange.requestURI.path == "/nzb/create" -> exchange.reply(422, """{"error":"selection_unmatched"}""")
+                    exchange.requestURI.path.endsWith("/cancel") -> { exchange.reply(204); canceled.countDown() }
+                    else -> error("Unexpected route")
+                }
+            }
+            try {
+                fixture.transport().create(mirrors, servers, 3_000, NativeNzbTransport.Selection(0, "/x/", 2, 53)) { true }
+                fail("Unmatched selection accepted")
+            } catch (_: NativeNzbTransport.SelectionUnmatched) { }
+            assertTrue(canceled.await(2, TimeUnit.SECONDS))
+            fixture.handle = { exchange ->
+                when (exchange.requestURI.path) {
+                    "/nzb/capabilities" -> exchange.reply(200, CAPABILITIES)
+                    "/nzb/create" -> exchange.reply(422, """{"error":"selection_ambiguous"}""")
+                    else -> exchange.reply(204)
+                }
+            }
+            try { fixture.transport().create(mirrors, servers, 3_000) { true }; fail("Ambiguous selection accepted") }
+            catch (_: NativeNzbTransport.Unavailable) { }
+        }
+    }
+
     @Test fun `unsupported artifact sends no credentials and redirects are never followed`() = runBlocking {
         Fixture().use { redirected -> Fixture().use { fixture ->
             var leaked = false
@@ -177,7 +205,7 @@ class NativeNzbTransportTest {
                     attempts++
                     if (attempts == 1) transport.create(urls, providers, 500) { true }
                     else { assertEquals(saved, providers); NativeNzbPlayback("saved", AutoCloseable {}) }
-                }, torBox = { error("No cloud") })
+                }, torBox = { _, _ -> error("No cloud") })
             assertEquals("saved", result?.url); assertEquals(2, attempts)
             withTimeout(2_000) { canceled.await() }
             release.countDown(); result?.lease?.close()

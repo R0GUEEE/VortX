@@ -15,9 +15,10 @@ internal object NativeNzbRouting {
     suspend fun resolve(
         mirrors: List<String>, addonServers: List<String>, savedServers: List<String>,
         confirmedCached: Set<String>?, torBoxConfigured: Boolean,
-        timeoutMs: Long = 60_000, isCurrent: () -> Boolean,
+        timeoutMs: Long = 110_000, isCurrent: () -> Boolean,
         local: suspend (List<String>, List<String>) -> NativeNzbPlayback,
-        torBox: suspend (String) -> String?,
+        /** The cloud leg; `allowCreate` false means reuse an existing TorBox job only, never start a download. */
+        torBox: suspend (url: String, allowCreate: Boolean) -> String?,
     ): NativeNzbPlayback? {
         var retained: NativeNzbPlayback? = null
         var transferred = false
@@ -37,7 +38,7 @@ internal object NativeNzbRouting {
                         // A positively cached TorBox mirror is an intentional cloud selection; do not start NNTP.
                         val cached = urls.firstOrNull { confirmedCached?.contains(it) == true }
                         if (cached != null && torBoxConfigured) {
-                            val result = torBox(cached)
+                            val result = torBox(cached, true)
                             current()
                             return@async result?.let { NativeNzbPlayback(it, AutoCloseable {}, isLocal = false) }
                         }
@@ -53,7 +54,9 @@ internal object NativeNzbRouting {
                         }
                         current()
                         if (torBoxConfigured && (confirmedCached == null || cached != null)) {
-                            val result = torBox(cached ?: urls.first())
+                            // With their own providers saved, a play never starts a new TorBox download; an
+                            // existing or finished TorBox job for this NZB is still used.
+                            val result = torBox(cached ?: urls.first(), saved.isEmpty())
                             current()
                             return@async result?.let { NativeNzbPlayback(it, AutoCloseable {}, isLocal = false) }
                         }
