@@ -1,5 +1,6 @@
 package com.vortx.android.usenet
 
+import com.vortx.android.diagnostics.DiagnosticsLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.Dispatchers
@@ -47,6 +48,12 @@ internal class NativeNzbTransport(
 ) {
     private val client = client.newBuilder().proxy(Proxy.NO_PROXY).followRedirects(false).followSslRedirects(false).build()
     class Unavailable : IllegalStateException("Native NZB transport is unavailable")
+
+    /** Record why the on-device route failed (an enumerated reason only), then fail it. */
+    private fun unavailable(reason: String): Unavailable {
+        DiagnosticsLog.log("usenet", "native_create result=failed reason=$reason")
+        return Unavailable()
+    }
     /** The engine opened the NZB but no file matched the selection (Rust `selection_unmatched`). */
     class SelectionUnmatched : IllegalStateException("No NZB file matched the selection")
 
@@ -93,21 +100,28 @@ internal class NativeNzbTransport(
             return withTimeout(timeoutMs) {
                 withContext(Dispatchers.IO) {
                     checkCurrent(admission)
-                    val base = localBase(serverBase() ?: throw Unavailable())
+                    val base = localBase(serverBase() ?: throw unavailable("no_server"))
                     checkCurrent(admission)
                     val capability = request(Request.Builder().url("$base/nzb/capabilities").get().build(), 4_000)
-                    if (capability.first != 200 || !acceptsCapabilities(capability.second)) throw Unavailable()
+                    if (capability.first != 200 || !acceptsCapabilities(capability.second)) {
+                        throw unavailable("capabilities_${capability.first}")
+                    }
                     checkCurrent(admission)
                     val owned = Operation(base, UUID.randomUUID().toString(), playbackIsCurrent ?: isCurrent).also { operation = it }
                     payload.put("operationId", owned.id)
                     val response = request(Request.Builder().url("$base/nzb/create")
                         .post(payload.toString().toRequestBody("application/json".toMediaType())).build(), timeoutMs)
-                    if (response.first == 422 && runCatching { JSONObject(response.second).optString("error") }
-                            .getOrNull() == "selection_unmatched") throw SelectionUnmatched()
-                    if (response.first !in 200..299) throw Unavailable()
+                    val engineError = runCatching { JSONObject(response.second).optString("error") }.getOrNull().orEmpty()
+                    if (response.first == 422 && engineError == "selection_unmatched") {
+                        DiagnosticsLog.log("usenet", "native_create result=selection_unmatched servers=${providers.size}")
+                        throw SelectionUnmatched()
+                    }
+                    // The engine's error is an enumerated code (never a body, URL or credential).
+                    if (response.first !in 200..299) throw unavailable("create_${response.first}_${engineError.take(48).ifEmpty { "none" }}")
                     val key = try { JSONObject(response.second).opt("key") as? String } catch (_: Exception) { null }
                     // Rust keys are opaque random lowercase hex. Never accept another URL or path from the response.
-                    if (key == null || !key.matches(Regex("[a-f0-9]{32}"))) throw Unavailable()
+                    if (key == null || !key.matches(Regex("[a-f0-9]{32}"))) throw unavailable("invalid_key")
+                    DiagnosticsLog.log("usenet", "native_create result=ready servers=${providers.size} mirrors=${urls.size}")
                     checkCurrent(admission)
                     NativeNzbPlayback("$base/nzb/stream?key=$key", owned)
                 }
@@ -116,17 +130,20 @@ internal class NativeNzbTransport(
             operation?.close()
             // Our own attempt deadline is a route failure; a canceled caller/owner must stay terminal.
             currentCoroutineContext().ensureActive()
-            throw Unavailable()
+            throw unavailable("timeout_${timeoutMs / 1000}s")
         } catch (cancel: CancellationException) {
             operation?.close()
             throw cancel
         } catch (unmatched: SelectionUnmatched) {
             operation?.close()
             throw unmatched
-        } catch (_: Exception) {
+        } catch (error: Exception) {
             operation?.close()
-            // No provider URL, credential JSON, response body, or underlying exception escapes diagnostics.
-            throw Unavailable()
+            // No provider URL, credential JSON, response body, or underlying exception escapes diagnostics:
+            // the line names only the failure's class.
+            // Always a fresh, causeless Unavailable: a rethrown one can carry a recovered copy as its cause.
+            if (error is Unavailable) throw Unavailable()
+            throw unavailable("error_${error.javaClass.simpleName}")
         }
     }
 

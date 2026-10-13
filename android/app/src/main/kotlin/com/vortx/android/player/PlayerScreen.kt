@@ -67,6 +67,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.util.UnstableApi
 import com.vortx.android.VortXApplication
+import com.vortx.android.diagnostics.DiagnosticsLog
 import com.vortx.android.ui.theme.VortXTheme
 import com.vortx.android.cast.CastButton
 import com.vortx.android.cast.CastEligibility
@@ -1051,6 +1052,18 @@ fun PlayerScreen(
     val effectiveError = playerState.hasError || stallError || runtimeMismatch || knownAudioMismatch
     LaunchedEffect(playerState.hasEnded, effectiveError) {
         playbackIntent.setSourceTerminal(playerState.hasEnded || effectiveError)
+    }
+    // Which failure class ended this source, for the diagnostic log (no title, URL or source name).
+    LaunchedEffect(playbackSessionKey, effectiveError) {
+        if (!effectiveError) return@LaunchedEffect
+        val reason = when {
+            playerState.hasError -> "engine_error"
+            stallError -> "stall"
+            runtimeMismatch -> "runtime_mismatch"
+            else -> "audio_mismatch"
+        }
+        DiagnosticsLog.log("playback", "source_failed reason=$reason engine=${engine?.javaClass?.simpleName ?: "none"} " +
+            "position_s=${playerState.positionMs / 1000} local=$isLocalSession")
     }
 
     // STILL WATCHING idle guard: a single long-lived poll re-checks the deadline; when the session looks

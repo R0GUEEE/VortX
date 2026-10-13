@@ -1,5 +1,6 @@
 package com.vortx.android.sync
 
+import com.vortx.android.diagnostics.DiagnosticsLog
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
@@ -2935,6 +2936,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
                     } else {
                         val editGeneration = pendingState.captureEditGeneration(attempt, runningJob) ?: return@runPendingSyncRetryLoop false
                         val synced = syncUp(lease)
+                        DiagnosticsLog.log("sync", "upload result=${if (synced) "accepted" else "failed"}")
                         if (synced) pendingState.acknowledgeUpload(attempt, runningJob, editGeneration)
                         acceptedWithNewEdits = synced
                         synced &&

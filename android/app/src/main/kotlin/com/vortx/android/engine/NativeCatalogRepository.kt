@@ -1,5 +1,6 @@
 package com.vortx.android.engine
 
+import com.vortx.android.diagnostics.DiagnosticsLog
 import com.vortx.android.data.*
 import com.vortx.android.model.*
 import java.net.URI
@@ -728,6 +729,7 @@ internal class NativeCatalogRepository(
         .put("item", JSONObject().put("kind", "standard").put("id", item.id).put("type", item.type.id).put("name", item.name).put("poster", item.poster))
     override suspend fun addToLibrary(item: MetaItem) = attempt { val session = session(); val read = session.read(); session.dispatch(listOf(addAction(item, read)), read.owner); Unit }
     override suspend fun removeFromLibrary(id: String) = attempt {
+        DiagnosticsLog.log("library", "action=remove_saved surface=library")
         val session = session(); val read = session.read(); val item = savedItems(read).filter { it.id == id }.single()
         session.dispatch(listOf(action("remove_library_item").put("profileId", read.owner.profileID).put("key", "${item.type.id}:$id")), read.owner); Unit
     }
@@ -735,6 +737,7 @@ internal class NativeCatalogRepository(
         addToLibrary(MetaItem(id, type, name, poster)).getOrThrow(); peekMeta(type, id) ?: meta(type, id).getOrThrow()
     }
     override suspend fun removeFromLibrary(type: MediaType, id: String): Result<MetaDetail> = attempt {
+        DiagnosticsLog.log("library", "action=remove_saved surface=detail")
         val session = session(); val read = session.read()
         session.dispatch(listOf(action("remove_library_item").put("profileId", read.owner.profileID).put("key", "${type.id}:$id")), read.owner)
         peekMeta(type, id) ?: meta(type, id).getOrThrow()
@@ -744,6 +747,7 @@ internal class NativeCatalogRepository(
         check(savedItems(read).none { it.id == id && it.type != type }) { "Ambiguous native watch media identity" }
     }
     override suspend fun removeFromContinueWatching(target: ContinueWatchingDismissal) = attempt {
+        DiagnosticsLog.log("library", "action=dismiss_continue_watching surface=menu")
         val session = session(); val read = session.read(); check(owner(read.owner) == target.owner)
         requireWatchIdentity(read, target.type, target.id)
         session.dispatch(listOf(action("remove_from_continue_watching").put("metaId", target.id)), read.owner); Unit

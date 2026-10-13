@@ -172,6 +172,8 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
         // only bounded IPC input, so do not initialize any process-wide repositories, encrypted stores,
         // filesystem caches, or network clients in that process.
         if (isCommunityJsBrokerProcess()) return
+        // Durable, scrubbed diagnostics (always-on breadcrumb + the opt-in exportable log). Main process only.
+        com.vortx.android.diagnostics.DiagnosticsLog.install(this)
         // Fail closed until the encrypted session store has produced a definitive account or sign-out.
         // This process-wide binding precedes every lazy repository, resolver, and settings consumer.
         DebridKeys.bindAccountOwnerSource { DebridAccountOwnerState.UnknownOrUnavailable }

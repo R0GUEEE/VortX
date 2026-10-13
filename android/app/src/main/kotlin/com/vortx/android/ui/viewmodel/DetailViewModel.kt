@@ -1,5 +1,6 @@
 package com.vortx.android.ui.viewmodel
 
+import com.vortx.android.diagnostics.DiagnosticsLog
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -1113,6 +1114,10 @@ class DetailViewModel(
                             )
                         }
                         if (!autoPickIntent.accepts(autoPickLease)) return@collect
+                        DiagnosticsLog.log("binge", "next episode pick=${if (pick != null) "found" else "none"} " +
+                            "resolution=${pick?.let(StreamRanking::knownResolution) ?: "-"} floor=${sticky?.resolution ?: "-"} " +
+                            "floor_met=${pick?.let { StreamRanking.meetsQualityFloor(it, sticky?.resolution) } ?: "-"} " +
+                            "auto_advance=${hint != null}")
                         when {
                             pick != null -> playAutomatically(pick, preserveAudioIntent = hint != null)
                             hint != null || episodeBudget != null -> _playback.value = Playback.Failed("No playable source for this episode.")

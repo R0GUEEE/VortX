@@ -1,5 +1,6 @@
 package com.vortx.android.debrid
 
+import com.vortx.android.diagnostics.DiagnosticsLog
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -176,9 +177,11 @@ internal class DebridResolver(private val keys: DebridKeys) {
             throw cancel
         } catch (error: DebridException) {
             Log.d(TAG, "debrid resolve failed for ${chosen.displayName}: ${error.message}")
+            DiagnosticsLog.log("debrid", "resolve result=failed service=${chosen.displayName} reason=${error.javaClass.simpleName}")
             null
         } catch (error: Exception) {
             Log.d(TAG, "debrid resolve error for ${chosen.displayName}", error)
+            DiagnosticsLog.log("debrid", "resolve result=error service=${chosen.displayName} reason=${error.javaClass.simpleName}")
             null
         }
     }

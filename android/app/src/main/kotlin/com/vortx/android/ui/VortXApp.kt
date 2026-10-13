@@ -127,6 +127,7 @@ import com.vortx.android.ui.screens.AddonsScreen
 import com.vortx.android.ui.screens.AppearanceScreen
 import com.vortx.android.stats.WatchStatsScreen
 import com.vortx.android.ui.screens.BackupRestoreScreen
+import com.vortx.android.ui.screens.DiagnosticsSettingsScreen
 import com.vortx.android.ui.screens.CustomizeHomeScreen
 import com.vortx.android.ui.components.Chip
 import com.vortx.android.ui.screens.CinemaQuickViewScreen
@@ -462,6 +463,7 @@ fun VortXApp(
         var showLiveTv by remember { mutableStateOf(false) }
         var showLibraryTransfer by remember { mutableStateOf(false) }
         var showBackup by remember { mutableStateOf(false) }
+        var showDiagnostics by remember { mutableStateOf(false) }
         var showProfiles by remember { mutableStateOf(false) }
         var showAppearance by remember { mutableStateOf(false) }
         var showCustomizeHome by remember { mutableStateOf(false) }
@@ -523,6 +525,7 @@ fun VortXApp(
             showLiveTv = false
             showLibraryTransfer = false
             showBackup = false
+            showDiagnostics = false
             showProfiles = false
             showAppearance = false
             showCustomizeHome = false
@@ -1359,6 +1362,13 @@ fun VortXApp(
             return@VortXTheme
         }
 
+        if (showDiagnostics) {
+            // Settings > Diagnostics: the Diagnostic logging toggle and the scrubbed log share (DiagnosticsLog).
+            BackHandler { showDiagnostics = false }
+            DiagnosticsSettingsScreen(onBack = { showDiagnostics = false })
+            return@VortXTheme
+        }
+
         quickViewItem?.let { item ->
             BackHandler { quickViewItem = null }
             androidx.compose.ui.window.Dialog(
@@ -1718,6 +1728,7 @@ fun VortXApp(
                     onWatchStatsClick = { showWatchStats = true },
                     onWhatsNewClick = { showWhatsNew = true },
                     settingsScrollState = settingsScrollState,
+                    onDiagnosticsClick = { showDiagnostics = true },
                     debridServicesFocusRequester = debridServicesFocusRequester,
                     modifier = content,
                     onOpenGallery = { showGallery = true },

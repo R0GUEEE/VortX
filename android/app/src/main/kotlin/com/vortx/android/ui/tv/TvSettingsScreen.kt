@@ -887,14 +887,14 @@ fun TvSettingsScreen(
                 }
             }
 
-            if (show("about", "diagnostics", "version", "what's new", "whats new", "update")) item {
+            if (show("about", "diagnostics", "logging", "log", "version", "what's new", "whats new", "update")) item {
                 TvSettingsSection("About") {
                     // The passive "update available" banner (sideloaded, no store channel). Renders nothing
                     // when up to date or dismissed; focusing + selecting it opens the install channel.
                     UpdateAvailableBanner()
                     TvSettingsNavigationRow(
                         label = "Diagnostics",
-                        detail = "App, device, and engine info for support.",
+                        detail = "Diagnostic logging, log export, and device info for support.",
                         onClick = { route = TvSettingsRoute.DIAGNOSTICS },
                     )
                     TvSettingsNavigationRow(

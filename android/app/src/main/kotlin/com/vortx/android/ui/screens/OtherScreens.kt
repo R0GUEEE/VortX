@@ -1,5 +1,6 @@
 package com.vortx.android.ui.screens
 
+import com.vortx.android.diagnostics.DiagnosticsLog
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -618,6 +619,7 @@ fun SettingsScreen(
     onWatchStatsClick: () -> Unit,
     onWhatsNewClick: () -> Unit,
     settingsScrollState: ScrollState,
+    onDiagnosticsClick: (() -> Unit)? = null,
     debridServicesFocusRequester: FocusRequester,
     modifier: Modifier = Modifier,
     onOpenGallery: (() -> Unit)? = null,
@@ -745,6 +747,9 @@ fun SettingsScreen(
         // (com.vortx.android.stats). It reads the engine buckets (owner) or the private overlay (shared
         // profile) per the history boundary and never writes any watched state.
         SettingRow(VortXIcons.checkmarkCircle, "Watch Stats", "Your year in review", onClick = onWatchStatsClick)
+        onDiagnosticsClick?.let {
+            SettingRow(VortXIcons.download, "Diagnostics", if (DiagnosticsLog.probeEnabled) "Logging on" else "Logging off", onClick = it)
+        }
         SettingRow(
             VortXIcons.checkmarkCircle,
             "What's New",
