@@ -79,6 +79,16 @@ struct ProfilePickerView: View {
     @StateObject private var artwork = ProfilePickerArtwork.shared
     #if VORTX_NATIVE_DATA_ENGINE
     @ObservedObject private var nativeSync = VortXSyncManager.shared
+
+    /// The device log spans every profile's activity. With a PIN-protected profile here, export waits until
+    /// a profile is unlocked (Settings has it), unless profiles failed to load, the stuck case it exists for.
+    private var exportAllowedBeforeProfile: Bool {
+        if profileAction.errorMessage != nil { return true }
+        #if VORTX_NATIVE_DATA_ENGINE
+        if nativeSync.accountRestoreState == .failed { return true }
+        #endif
+        return !store.profiles.contains { $0.pin != nil }
+    }
     #endif
 
     init(core: CoreBridge = .shared) { self.core = core }
@@ -164,11 +174,13 @@ struct ProfilePickerView: View {
                     .accessibilityHidden(pinTarget != nil)
                     // Outside the disabled picker: a stuck profile/restore must not block its own log.
                     .safeAreaInset(edge: .bottom) {
-                        DiagnosticLogExportButton()
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 12)
-                            .disabled(pinTarget != nil)
-                            .accessibilityHidden(pinTarget != nil)
+                        if exportAllowedBeforeProfile {
+                            DiagnosticLogExportButton()
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 12)
+                                .disabled(pinTarget != nil)
+                                .accessibilityHidden(pinTarget != nil)
+                        }
                     }
                 }
             }

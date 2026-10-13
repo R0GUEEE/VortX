@@ -45,6 +45,10 @@ const inset = member(picker, '.safeAreaInset(edge: .bottom)');
 assert(inset.includes('DiagnosticLogExportButton()') && !inset.includes('profileAction.isRunning'));
 assert(picker.indexOf('.safeAreaInset(edge: .bottom)') > picker.indexOf('.disabled(pinTarget != nil || profileAction.isRunning)'));
 assert(inset.includes('.disabled(pinTarget != nil)') && inset.includes('.accessibilityHidden(pinTarget != nil)'));
+// A PIN-protected profile keeps the whole-device log behind a profile unlock, except when loading failed.
+assert(inset.includes('if exportAllowedBeforeProfile'));
+const gate = member(picker, 'private var exportAllowedBeforeProfile: Bool');
+assert(gate.includes('$0.pin != nil') && gate.includes('profileAction.errorMessage != nil') && gate.includes('accountRestoreState == .failed'));
 for (const path of paths.slice(3)) assert(sources[path].includes('DiagnosticLogExportButton()'), `${path} missing export`);
 for (const path of ['app/SourcesTV/LoginView.swift', 'app/SourcesTV/BackupImportView.swift']) {
   const scroll = member(sources[path], 'ScrollView');

@@ -1046,7 +1046,13 @@ final class VortXSyncManager: ObservableObject {
             else { slot = "vortx.native.streaming.unavailable." + profile.id.uuidString }
             guard slot != ProfileStore.primaryTokenAccount else { throw VortxNativeError.invalidSnapshot }
             guard case .value(let token) = Keychain.confirmedString(slot), !token.isEmpty else {
-                guard preferredSources[profile.id.uuidString] != nil else { throw VortxNativeError.unavailable }
+                guard preferredSources[profile.id.uuidString] != nil else {
+                    // Name this exact failure (issue #262): the whole restore stops here when a profile linked to
+                    // its own Stremio account has no credential on this device and no earlier source copy.
+                    DiagnosticsLog.log("native-profiles", "legacy_prepare result=failed reason=own_account_credential_missing "
+                        + "profile=\(VXProbeRedaction.identityToken(profile.id.uuidString)) first_import=\(validatedSync == nil)")
+                    throw VortxNativeError.unavailable
+                }
                 unavailable.append(profile.id); return nil
             }
             return Captured(profileID: profile.id, slot: slot, token: token, generation: VortxNativeOwnAccountProducer.capture(slot: slot),
@@ -1090,7 +1096,10 @@ final class VortXSyncManager: ObservableObject {
                 let slice = try VortxNativeOwnAccountProducer.overlay(document: sourceDocument, profileID: disposition.profileID)
                 pendingOverlays[disposition.profileID.uuidString] = try VortxNativeOwnAccountProducer.pendingRecord(disposition: disposition,
                     verifiedUID: uid, overlay: slice, attributed: hasAttribution(disposition.profileID), previous: pendingOverlays[disposition.profileID.uuidString])
-            case .missingRetainedSource: throw VortxNativeError.unavailable
+            case .missingRetainedSource:
+                DiagnosticsLog.log("native-profiles", "legacy_prepare result=failed reason=own_account_source_missing "
+                    + "profile=\(VXProbeRedaction.identityToken(disposition.profileID.uuidString))")
+                throw VortxNativeError.unavailable
             }
         }
         for source in sources {
