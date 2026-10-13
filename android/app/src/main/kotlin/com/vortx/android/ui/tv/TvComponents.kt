@@ -1,5 +1,6 @@
 package com.vortx.android.ui.tv
 
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -393,6 +394,8 @@ fun TvFilterChip(
     modifier: Modifier = Modifier,
     stateDescription: String? = null,
     enabled: Boolean = true,
+    /** Optional leading glyph (the Trailer chip's clapperboard, as on Apple TV). */
+    leadingIcon: ImageVector? = null,
 ) {
     val colors = VortXTheme.colors
     val accessibilityStateDescription = stateDescription
@@ -418,13 +421,19 @@ fun TvFilterChip(
             ),
         ),
     ) {
-        Text(
-            text = label,
-            style = VortXTheme.type.label,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        Row(
             modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
-        )
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            leadingIcon?.let { Icon(it, contentDescription = null, modifier = Modifier.size(20.dp)) }
+            Text(
+                text = label,
+                style = VortXTheme.type.label,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
