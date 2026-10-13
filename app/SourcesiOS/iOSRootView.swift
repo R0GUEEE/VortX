@@ -1149,6 +1149,11 @@ struct iOSHomeView: View {
     @StateObject private var mediaServerRails = MediaServerCatalogsModel()   // "Recently added" on connected Plex/Jellyfin/Emby servers (dormant with none)
     @StateObject private var releaseCalendar = ReleaseCalendarModel()   // "Upcoming Episodes" from the series library (next 45 days)
     @StateObject private var curated = CuratedCollectionsModel()   // editorial Cinemeta-backed rails (B3)
+    @StateObject private var forYouRows = ForYouRowsModel()   // For You interest rows + smart collections pinned to Home
+    @ObservedObject private var forYou = ForYouStore.shared   // the profile's interests and smart collections (synced)
+    @State private var interestsPresentation: iOSForYouInterestsPresentation?
+    /// Profiles already offered the interests picker this session, so dismissing the sheet is "not now".
+    @State private var interestsOffered: Set<UUID> = []
     @AppStorage("vortx.home.showCuratedRails") private var showCuratedRails = true   // owner-toggleable: hide the built-in editorial rails
     @ObservedObject private var collectionsHub = CollectionsHubModel.shared   // Collections hub (shared singleton)
     @ObservedObject private var imported = ImportedCatalogs.shared   // user-imported list catalogs, rendered as Home rows
@@ -1306,6 +1311,10 @@ struct iOSHomeView: View {
         // nav model); the rest are skipped, exactly as before, just now honoring order + hidden.
         for section in railPrefs.arrange(HomeRail.iOSDefaultOrder) where !railPrefs.isHidden(section) {
             switch section {
+            case .forYou:
+                if forYouEnabled { for row in forYouRows.interestRows { rails.append((row.title, row.items.map(\.id))) } }
+            case .smartCollections:
+                for row in forYouRows.collectionRows { rails.append((row.title, row.items.map(\.id))) }
             case .topPicks:
                 if !topPicks.items.isEmpty { rails.append((String(localized: "Top Picks for you"), topPicks.items.map(\.id))) }
             case .addonCatalogs:
@@ -1783,6 +1792,27 @@ struct iOSHomeView: View {
     }
 
     var body: some View {
+        homeForYouObservers
+    }
+
+    /// For You and smart collections follow the profile's synced choices; the interests picker is
+    /// offered once per profile the first time its choices are known and still undecided.
+    private var homeForYouObservers: some View {
+        homeCoreBody
+        .onChange(of: forYou.interests) { _ in refreshForYou() }
+        .onChange(of: forYou.collections) { _ in refreshForYou() }
+        .onChange(of: forYou.ready) { _ in refreshForYou() }
+        .onChange(of: forYou.profileID) { _ in refreshForYou() }
+        .onChange(of: isActive) { _ in offerInterestsIfNeeded() }
+        .sheet(item: $interestsPresentation) { presentation in
+            ForYouInterestsView(initial: forYou.interests, firstRun: presentation.firstRun) {
+                interestsPresentation = nil
+            }
+            .environmentObject(theme)
+        }
+    }
+
+    private var homeCoreBody: some View {
         homeAccountObservers
         // Editorial-rails toggle: build them when turned on, drop them when turned off (the "extra
         // catalogs I can't remove from Home" report). The render + hero pool are gated on the same flag.
@@ -1829,6 +1859,10 @@ struct iOSHomeView: View {
     @ViewBuilder
     private func homeSection(_ section: HomeRail) -> some View {
         switch section {
+        case .forYou:
+            forYouHomeRails
+        case .smartCollections:
+            smartCollectionHomeRails
         case .collectionsHub:
             // Collections hub (Discover cards, Streaming-service tiles, Genre tiles). Each tile pushes a
             // sub-catalog browse grid. Needs a TMDB key; hidden without one.
@@ -1860,6 +1894,60 @@ struct iOSHomeView: View {
 
     // Solve each rail's mapping and conditional layout separately. The section dispatcher remains
     // statically typed; splitting its expression avoids a Release compiler timeout on native macOS.
+    /// Rows built from the profile's stated interests, each labelled with its reason. Never on a kids
+    /// profile, and never before this profile's saved choices are known on this device.
+    @ViewBuilder
+    private var forYouHomeRails: some View {
+        if forYouEnabled {
+            if !forYouRows.interestRows.isEmpty {
+                iOSForYouHeader(onTune: { interestsPresentation = iOSForYouInterestsPresentation(firstRun: false) })
+                ForEach(forYouRows.interestRows) { row in
+                    homeRail(PosterRail(title: row.title, eyebrow: row.eyebrow, items: row.items.map(forYouRailItem),
+                                        onTap: handleTap, showWatchedBadges: true))
+                }
+            } else if forYou.interests?.isEmpty ?? true {
+                iOSForYouInvite(onTune: { interestsPresentation = iOSForYouInterestsPresentation(firstRun: false) })
+            }
+        }
+    }
+
+    /// The profile's own rule-built collections that are pinned to Home.
+    @ViewBuilder
+    private var smartCollectionHomeRails: some View {
+        ForEach(forYouRows.collectionRows) { row in
+            homeRail(PosterRail(title: row.title, eyebrow: row.eyebrow, items: row.items.map(forYouRailItem),
+                                onTap: handleTap, showWatchedBadges: true))
+        }
+    }
+
+    private func forYouRailItem(_ preview: MetaPreview) -> RailItem {
+        RailItem(id: preview.id, type: preview.type, name: preview.name, poster: preview.poster, progress: 0)
+    }
+
+    private var forYouEnabled: Bool {
+        forYou.ready && forYou.profileID == profiles.activeID && profiles.active?.isKids != true
+    }
+
+    /// Refetches only when the profile, interests or pinned rules change; library and Continue Watching
+    /// changes just re-filter the rows already fetched.
+    private func refreshForYou() {
+        let library = core.usesNativeProfileState || profiles.activeUsesEngineHistory
+            ? (core.library?.catalog ?? []) : profiles.libraryItems
+        let owned = Set((localContinueWatchingItems + library)
+            .filter { !$0.id.isEmpty && $0.removed != true && $0.temp != true }.map(\.id))
+        forYouRows.refresh(profileID: profiles.activeID, interests: forYou.interests, collections: forYou.collections,
+                           owned: owned, watched: WatchedIndex.shared.ids, enabled: forYouEnabled)
+        offerInterestsIfNeeded()
+    }
+
+    private func offerInterestsIfNeeded() {
+        guard isActive, interestsPresentation == nil, player == nil, !showSignIn, !showCustomizeHome, forYouEnabled,
+              let profile = profiles.activeID, forYou.interests?.decided != true,
+              !interestsOffered.contains(profile) else { return }
+        interestsOffered.insert(profile)
+        interestsPresentation = iOSForYouInterestsPresentation(firstRun: true)
+    }
+
     @ViewBuilder
     private var topPicksHomeRail: some View {
         // Local recommendations seeded from this profile's recent watch history (#0.3.9). Hidden when
@@ -2089,6 +2177,7 @@ struct iOSHomeView: View {
     /// Recompute the "Top Picks for you" rail from the profile-aware Continue Watching + library.
     /// The model no-ops when the seed set is unchanged, so this is cheap to call on every re-emit.
     private func refreshTopPicks() {
+        refreshForYou()
         // These independently owned rails do not require the engine-history recommendation receipt.
         // Keep their throttled refreshes live even while personalized history admission is settling.
         traktRails.refresh()
@@ -2435,6 +2524,7 @@ struct iOSLibraryView: View {
         case downloads
         case queue        // the download-queue manager (reorder / pause / concurrency), pushed from Downloads
         case watchlist
+        case smartCollections
     }
 
     #if !os(tvOS)
@@ -2533,6 +2623,13 @@ struct iOSLibraryView: View {
                         iOSLibraryHubCard(title: "Watchlist", subtitle: "Titles bookmarked to watch later", systemImage: "bookmark.fill")
                     }
                     .buttonStyle(.plain)
+                    if profiles.active?.isKids != true {
+                        NavigationLink(value: LibraryRoute.smartCollections) {
+                            iOSLibraryHubCard(title: "Smart collections", subtitle: "Rows built from genres, people, years and ratings",
+                                              systemImage: "line.3.horizontal.decrease.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                    }
                     Button {
                         segment = .all
                         activeFilters = [.watched]
@@ -2622,6 +2719,7 @@ struct iOSLibraryView: View {
                 case .downloads: iOSDownloadsScreen()
                 case .queue: DownloadQueueView()
                 case .watchlist: CinemaWatchlist(onOpen: handleTap, onWatch: watchFromQuickView)
+                case .smartCollections: iOSSmartCollectionsView(onOpen: handleTap)
                 }
             }
             .iOSPlayerCover($downloadPlayer, account: account, core: core)
@@ -5612,7 +5710,8 @@ private struct PosterRailBody: View {
 
 /// Live rail wrapper. The only watched-index subscription remains here, so normal catalog reactivity is
 /// unchanged while the fixture can render the same body with a static watched set.
-private struct PosterRail: View {
+/// Internal so the smart collections screen (iOSSmartCollectionsView.swift) shows the same rail.
+struct PosterRail: View {
     let title: String
     var eyebrow: String? = nil
     let items: [RailItem]
