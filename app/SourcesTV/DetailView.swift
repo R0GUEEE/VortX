@@ -4568,20 +4568,53 @@ private struct TVDetailActionRow<Content: View>: View {
 /// across Continue Watching, catalog, and Library entrances.
 struct LibraryChip: View {
     @EnvironmentObject private var core: CoreBridge
+    @StateObject private var libraryAction = ProfileMutationPresentation()
 
     var body: some View {
         let saved = core.detailInLibrary
+        // The button stays the root view so the caller's focus wrapper keeps attaching to it.
         Button {
+            #if VORTX_NATIVE_DATA_ENGINE
+            // The acknowledged native path, as on iPhone and iPad: the change is saved first, then mirrored
+            // to Trakt/SIMKL watchlists, and only while this profile and title still own the gesture.
+            let target = PlaybackMutationTarget.capture(core: core)
+            let profileID = ProfileStore.shared.activeID
+            let meta = core.metaDetails?.meta
+            let isCurrent = {
+                ProfileStore.shared.activeID == profileID && target.stillOwnsCurrentContext(core: core)
+                    && core.metaDetails?.meta?.id == meta?.id && core.metaDetails?.meta?.type == meta?.type
+            }
+            libraryAction.start(operation: {
+                guard isCurrent(), let meta else { return false }
+                do {
+                    try await core.setNativeLibraryMembership(
+                        id: meta.id, type: meta.type, name: meta.name, poster: meta.poster,
+                        present: !saved, target: target)
+                    return isCurrent()
+                } catch { return false }
+            }, failureMessage: {
+                isCurrent() ? "Couldn't update Library. Please try again."
+                            : "Profile or title changed. Please try again."
+            })
+            #else
             if saved {
                 core.removeDetailFromLibrary()   // removes from library + mirrors to external watchlists
             } else {
                 core.addDetailToLibrary()
             }
+            #endif
         } label: {
-            Label(saved ? "In Library" : "Add to Library",
-                  systemImage: saved ? "bookmark.fill" : "bookmark")
+            if libraryAction.errorMessage != nil {
+                Label("Library: try again", systemImage: "exclamationmark.circle")
+            } else {
+                Label(saved ? "In Library" : "Add to Library",
+                      systemImage: saved ? "bookmark.fill" : "bookmark")
+            }
         }
         .buttonStyle(ChipButtonStyle(selected: saved))
+        .disabled(libraryAction.isRunning)
+        .accessibilityHint(libraryAction.errorMessage ?? "")
+        .onDisappear { libraryAction.cancel() }
     }
 }
 
