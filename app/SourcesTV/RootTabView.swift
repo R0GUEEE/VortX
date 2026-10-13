@@ -136,7 +136,7 @@ final class PlayerPresenter: ObservableObject {
 struct RootView: View {
     @EnvironmentObject private var presenter: PlayerPresenter
     @EnvironmentObject private var profiles: ProfileStore
-    @EnvironmentObject private var core: CoreBridge   // tear down the engine Player on a genuine player exit
+    private var core: CoreBridge { CoreBridge.shared }   // actions only; not observed, so engine events do not re-render it
     @ObservedObject private var router = DeepLinkRouter.shared   // parked `vortx://` destination (Top Shelf taps)
     @State private var splashDone = false
 
@@ -351,15 +351,20 @@ struct RootTabView: View {
         )
     }
 
+    /// Only the selected tab, and none while the player covers the shell, follows engine events live.
+    private func engineVisible(_ tag: Int) -> Bool { selection == tag && presenter.request == nil }
+
     var body: some View {
         TabView(selection: selectionBinding) {
             HomeView(isActive: selection == 0).id(resetTokens[0])
+                .environment(\.engineObservationActive, engineVisible(0))
                 .tabItem { Label("Home", systemImage: "house.fill") }.tag(0)
             // Discover / Live / Library / Search are the hideable tabs (#117): each drops out of the
             // TabView entirely when its Settings > Tab bar toggle hides it, and the matching .onChange
             // below heals the selection to Home so the TabView never points at a missing tag.
             if !hideDiscoverTab {
                 DiscoverView().id(resetTokens[1])
+                    .environment(\.engineObservationActive, engineVisible(1))
                     .tabItem { Label("Discover", systemImage: "safari.fill") }.tag(1)
             }
             // Live TV sits after Discover. Tags 0-5 were already taken (Search uses 4, Add-ons 3),
@@ -367,19 +372,24 @@ struct RootTabView: View {
             // below stays in bounds against the resized 7-slot array.
             if !hideLiveTab {
                 LiveView().id(resetTokens[6])
+                    .environment(\.engineObservationActive, engineVisible(6))
                     .tabItem { Label("Live", systemImage: "dot.radiowaves.left.and.right") }.tag(6)
             }
             if !hideLibraryTab {
                 LibraryView().id(resetTokens[2])
+                    .environment(\.engineObservationActive, engineVisible(2))
                     .tabItem { Label("Library", systemImage: "books.vertical.fill") }.tag(2)
             }
             if !hideSearchTab {
                 NavigationStack { SearchView() }.id(resetTokens[4])
+                    .environment(\.engineObservationActive, engineVisible(4))
                     .tabItem { Label("Search", systemImage: "magnifyingglass") }.tag(4)
             }
             AddonsView().id(resetTokens[3])
+                .environment(\.engineObservationActive, engineVisible(3))
                 .tabItem { Label("Add-ons", systemImage: "puzzlepiece.extension.fill") }.tag(3)
             SettingsView().id(resetTokens[5])
+                .environment(\.engineObservationActive, engineVisible(5))
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }.tag(5)
         }
         .tint(theme.accent)

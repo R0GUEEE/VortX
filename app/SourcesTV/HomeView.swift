@@ -5,7 +5,12 @@ import SwiftUI
 struct HomeView: View {
     var isActive: Bool = true
     @Environment(\.scenePhase) private var scenePhase
-    @EnvironmentObject private var core: CoreBridge
+    /// The engine bridge, observed through `engineGate` only while Home is on screen: a pushed detail page
+    /// streaming sources, the player, or another tab no longer re-evaluate Home underneath.
+    private var core: CoreBridge { CoreBridge.shared }
+    @StateObject private var engineGate = EngineChangeGate()
+    @State private var homeContentVisible = true
+    private var engineOpen: Bool { isActive && homeContentVisible && presenter.request == nil }
     @EnvironmentObject private var theme: ThemeManager
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected
@@ -135,6 +140,9 @@ struct HomeView: View {
                                          enabled: autoplayTrailers && RemoteConfig.snapshot.isFeatureOn("trailers", default: true)
                                             && !reduceMotion && presenter.request == nil)
                 }
+                // Leaves the hierarchy when a detail page is pushed over Home (or the tab is hidden).
+                .onAppear { homeContentVisible = true }
+                .onDisappear { homeContentVisible = false }
                 // The rails live in a bottom strip. The focus engine centers focused rows inside
                 // THIS viewport, so they are geometrically incapable of riding up over the hero.
                 ScrollView {
@@ -288,6 +296,8 @@ struct HomeView: View {
     /// picker is offered once per profile the first time its choices are known and still undecided.
     private var homeForYouHandlers: some View {
         homeChangeHandlers
+        .onAppear { engineGate.setOpen(engineOpen, announce: false) }
+        .onChange(of: engineOpen) { open in engineGate.setOpen(open, announce: true) }
         .onChange(of: forYou.interests) { _ in refreshForYou() }
         .onChange(of: forYou.collections) { _ in refreshForYou() }
         .onChange(of: forYou.ready) { _ in refreshForYou() }
@@ -812,7 +822,7 @@ struct CoreContinueWatchingRow: View {
     @EnvironmentObject private var theme: ThemeManager   // observe so the rail's cards repaint on a theme change
     @EnvironmentObject private var presenter: PlayerPresenter
     @EnvironmentObject private var profiles: ProfileStore
-    @EnvironmentObject private var core: CoreBridge
+    private var core: CoreBridge { CoreBridge.shared }   // actions only; not observed, so engine events do not re-render it
     @State private var detailTarget: CWDetailTarget?
     @State private var unavailableContinueWatching: String?
     @State private var resumeHoardTask: Task<Void, Never>?
@@ -1124,7 +1134,7 @@ struct CoreCatalogRowView: View {
     let row: CoreBoardRow
     var focusModel: FocusedItemModel? = nil
     @EnvironmentObject private var theme: ThemeManager
-    @EnvironmentObject private var core: CoreBridge   // for per-row horizontal pagination (#95)
+    private var core: CoreBridge { CoreBridge.shared }   // actions only; not observed, so engine events do not re-render it
     // Watched check + dim on catalog covers (#111): one shared per-profile id set, O(1) per card.
     @ObservedObject private var watchedIndex = WatchedIndex.shared
 
@@ -1166,7 +1176,7 @@ struct CoreCatalogWallSection: View {
     let row: CoreBoardRow
     var focusModel: FocusedItemModel? = nil
     @EnvironmentObject private var theme: ThemeManager
-    @EnvironmentObject private var core: CoreBridge   // for per-catalog pagination (#95), same as the rail
+    private var core: CoreBridge { CoreBridge.shared }   // actions only; not observed, so engine events do not re-render it
     @ObservedObject private var catalogPrefs = CatalogPreferences.shared
     @ObservedObject private var apiKeys = ApiKeys.shared
 

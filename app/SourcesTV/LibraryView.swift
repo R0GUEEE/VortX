@@ -68,7 +68,7 @@ private enum LibrarySmartFilter: String, CaseIterable, Identifiable {
 /// Library, driven by the **stremio-core** engine (`LibraryWithFilters`): the user's saved titles with
 /// type + sort filters. Auto-refreshes as the library changes (add/remove/mark watched), no reload.
 struct LibraryView: View {
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // observed only while this tab is on screen (EngineObservation.swift)
     @EnvironmentObject private var theme: ThemeManager
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected

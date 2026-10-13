@@ -29,7 +29,7 @@ private enum TVSearchResultGroup: String, CaseIterable {
 
 /// Search across every installed addon, on the engine (CatalogsWithExtra with a search extra).
 struct SearchView: View {
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // observed only while this tab is on screen (EngineObservation.swift)
     @EnvironmentObject private var theme: ThemeManager
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected

@@ -3,7 +3,7 @@ import SwiftUI
 /// Discover, driven by the **stremio-core** engine (`CatalogWithFilters`): pick a type, catalog, and
 /// genre, see the full grid. Each chip carries the engine's own `request`, dispatched back on tap.
 struct DiscoverView: View {
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // observed only while this tab is on screen (EngineObservation.swift)
     @EnvironmentObject private var theme: ThemeManager
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected

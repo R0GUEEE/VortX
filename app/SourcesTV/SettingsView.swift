@@ -12,7 +12,7 @@ struct SettingsView: View {
     // SERVE read. The Singularity toggle gates on THIS, not the Stremio `account` -- a Stremio-only sign-in
     // mints no token, so the toggle must require the VortX sign-in that the helper text already names.
     @EnvironmentObject private var vortxSync: VortXSyncManager
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // observed only while this tab is on screen (EngineObservation.swift)
     @EnvironmentObject private var theme: ThemeManager
     @ObservedObject private var updates = UpdateChecker.shared
     @FocusState private var updateCheckFocused: Bool

@@ -12,7 +12,7 @@ import SwiftUI
 /// Empty state: when no installed add-on exposes a live catalog there are no live rows, so the screen
 /// nudges the user to the Add-ons tab rather than showing a blank surface.
 struct LiveView: View {
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // observed only while this tab is on screen (EngineObservation.swift)
     @EnvironmentObject private var theme: ThemeManager
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected

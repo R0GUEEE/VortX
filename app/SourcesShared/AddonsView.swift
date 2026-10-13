@@ -164,7 +164,7 @@ private struct AddonPanelScrollContainer<Content: View>: View {
 struct AddonsView: View {
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks add-on management even with no Stremio account connected
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // observed only while this tab is on screen (EngineObservation.swift)
     @EnvironmentObject private var theme: ThemeManager
     @EnvironmentObject private var profiles: ProfileStore
     #if !os(tvOS)
