@@ -1445,7 +1445,7 @@ class DetailViewModel(
             // profile switch leaves the previous preference untouched.
             if (nextPlayback is Playback.Ready && stickyWrite != null) {
                 invalidateWarmNextSource()
-                sourceSticky.record(stickyWrite, source.addon, source.bingeGroup)
+                sourceSticky.record(stickyWrite, source.addon, source.bingeGroup, StreamRanking.knownResolution(source))
             }
         }
     }
@@ -1495,7 +1495,7 @@ class DetailViewModel(
                     // published next-episode warm must not override that choice (phone or TV).
                     invalidateWarmNextSource()
                     lastPlayedSource = source
-                    stickyWrite?.let { sourceSticky.record(it, source.addon, source.bingeGroup) }
+                    stickyWrite?.let { sourceSticky.record(it, source.addon, source.bingeGroup, StreamRanking.knownResolution(source)) }
                 },
             )
         }

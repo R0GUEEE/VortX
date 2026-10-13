@@ -107,7 +107,7 @@ class TvBingePreloadContractTest {
         val commit = resolver.substringAfter("commitAccepted = {")
         assertTrue(commit.contains("invalidateWarmNextSource()"))
         assertTrue(commit.indexOf("invalidateWarmNextSource()") < commit.indexOf("lastPlayedSource = source"))
-        assertTrue(commit.contains("sourceSticky.record(it, source.addon, source.bingeGroup)"))
+        assertTrue(commit.contains("sourceSticky.record(it, source.addon, source.bingeGroup, StreamRanking.knownResolution(source))"))
     }
 
     @Test

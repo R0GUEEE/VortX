@@ -89,7 +89,9 @@ class DirectLinkDisplayGroupsTest {
         val staleLeaseClosed = play.indexOf("result.getOrNull()?.playbackLease?.close()")
         val published = play.indexOf("publishPlaybackResolve(resolveLease, nextPlayback)")
         val readyGate = play.indexOf("if (nextPlayback is Playback.Ready && stickyWrite != null)")
-        val persisted = play.indexOf("sourceSticky.record(stickyWrite, source.addon, source.bingeGroup)")
+        val persisted = play.indexOf(
+            "sourceSticky.record(stickyWrite, source.addon, source.bingeGroup, StreamRanking.knownResolution(source))",
+        )
 
         assertTrue(accepted >= 0)
         assertTrue(staleLeaseClosed > accepted)
