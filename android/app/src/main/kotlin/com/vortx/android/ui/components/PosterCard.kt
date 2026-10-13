@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.MenuDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -279,8 +281,12 @@ internal fun PosterQuickActionMenu(
                     )
                 }
                 onRemoveFromContinueWatching?.let { remove ->
+                    // Destructive, so it sits behind a separator in the danger colour, as on Apple. It dismisses
+                    // the title from Continue Watching only; the saved Library entry and history stay.
+                    if (onDetails != null) HorizontalDivider(color = VortXTheme.colors.hairline)
                     DropdownMenuItem(
                         text = { Text("Remove from Continue Watching") },
+                        colors = MenuDefaults.itemColors(textColor = VortXTheme.colors.danger),
                         onClick = {
                             onDismiss()
                             remove()
