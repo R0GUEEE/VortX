@@ -42,7 +42,9 @@ private enum DiagnosticsLog { static func log(_ category: String, _ message: Str
         guard isCurrent(capture) else { throw VortxNativeError.superseded }
         stored = try state.encoded()
     }
-    func requestSyncSoon() { requests += 1 }
+    /// Production `requestSyncSoon(progressOnly:)` shape; a provider commit is never progress-only.
+    var progressOnlyRequests = 0
+    func requestSyncSoon(progressOnly: Bool = false) { requests += 1; if progressOnly { progressOnlyRequests += 1 } }
     func hasPendingAccountDocApply(for capture: CredentialScopeRegistry.Capture) -> Bool { false }
     func rememberNativeBackup(capture: CredentialScopeRegistry.Capture) -> Bool { true }
     func persistLastSyncedVersion() {}
@@ -145,6 +147,8 @@ private enum DiagnosticsLog { static func log(_ category: String, _ message: Str
         let clearHarness = try ProviderHarness(cleared)
         let clearKeys = try clearHarness.apply(stale)
         expect(clearHarness.nativeDurablePushPending && clearKeys["tmdb"] == nil, "acknowledged provider clear also repairs rollback without resurrection")
+        expect(clearHarness.requests > 0 && clearHarness.progressOnlyRequests == 0,
+               "a provider repair wakes an ordinary upload, never the playback-progress window")
         let invalid = try ProviderHarness(warm)
         do {
             _ = try invalid.apply(["nativeProviderCredentials": try wire(old), "apiKeys": ["tmdb": "different-from-register"]])

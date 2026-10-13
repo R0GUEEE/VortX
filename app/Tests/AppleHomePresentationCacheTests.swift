@@ -22,6 +22,10 @@ enum HomeCacheCounters {
 @main
 struct AppleHomePresentationCacheTests {
     static var checks = 0
+    /// One instant for every fixture item. Stamping each item with `Date()` let a 1000-item build
+    /// cross a second boundary, so later items ranked as more recent and pushed watch-0009 out of the
+    /// 100-card window at random (reproduced by forcing the boundary at index 500).
+    static let watchedAt = ISO8601DateFormatter().string(from: Date())
     static func expect(_ value: @autoclosure () -> Bool, _ label: String) {
         precondition(value(), label)
         checks += 1
@@ -30,7 +34,7 @@ struct AppleHomePresentationCacheTests {
         CoreCWItem(id: String(format: "watch-%04d", index), type: "movie", name: "Watch \(index)",
             poster: poster ?? "https://fixture.invalid/watch/\(index)",
             state: CoreLibState(timeOffset: offset, duration: 100_000, videoId: nil,
-                lastWatched: ISO8601DateFormatter().string(from: Date())))
+                lastWatched: watchedAt))
     }
     static func main() {
         let core = CoreBridge.shared

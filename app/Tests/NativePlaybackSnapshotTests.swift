@@ -43,6 +43,8 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     private let session = FixtureSession()
     private var values: [String: VortxJSON]
     private var closed = false
+    // Production stored state read by the extracted `isAvailable`; same default as the facade.
+    private var checkpointReopenRequired = false
     private var pendingProfileTransitions = 0
     private var accountEpoch = UUID()
     private var watchlistProfileGeneration = UUID()
