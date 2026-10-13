@@ -189,7 +189,13 @@ class DirectLinkDisplayGroupsTest {
         val routeRetirement = bracedBlock(viewModel, viewModel.indexOf("fun abandonPlaybackRoute()"))
         assertTrue(routeRetirement.content.contains("pendingAutoPick = false"))
         assertTrue(routeRetirement.content.contains("pendingAdvanceHint = null"))
-        assertTrue(routeRetirement.content.contains("invalidateWarmNextSource()"))
+        // Leaving playback discards the warm next-episode source, directly or through the audio-intent reset.
+        val audioReset = methodBody(viewModel, "private fun resetPlaybackAudioIntent", "/** Rank-only refresh")
+        assertTrue(
+            routeRetirement.content.contains("invalidateWarmNextSource()") ||
+                (routeRetirement.content.contains("resetPlaybackAudioIntent()") &&
+                    audioReset.contains("invalidateWarmNextSource()")),
+        )
         assertTrue(routeRetirement.content.contains("abandonPlaybackResolve()"))
         assertTrue(routeRetirement.content.contains("_playback.value = Playback.Idle"))
 

@@ -180,9 +180,10 @@ class VortXSessionOwnerTransitionContractTest {
         val openConnection = transport.indexOf("URL(BASE + path).openConnection()")
         val attach = transport.indexOf("callPermit.attachCancellation(opened::disconnect)")
         val outputStream = transport.indexOf("outputStream.use")
-        assertTrue(transport.lastIndexOf("if (!callPermit.isCurrent())", openConnection) >= 0)
+        // The permit check may also require the witnessed backup candidate (`|| !candidateCurrent()`).
+        assertTrue(transport.lastIndexOf("if (!callPermit.isCurrent()", openConnection) >= 0)
         assertTrue(attach > openConnection)
-        assertTrue(transport.lastIndexOf("if (!callPermit.isCurrent())", outputStream) > attach)
+        assertTrue(transport.lastIndexOf("if (!callPermit.isCurrent()", outputStream) > attach)
         assertTrue(transport.contains("callPermit.close()"))
         assertTrue(transport.contains("Once the request body is accepted"))
     }
