@@ -5,10 +5,20 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.runtime.produceState
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -483,6 +493,11 @@ fun DetailScreen(
         beginPlayback { viewModel.playBest() }
     }
 
+    // Tablet (and any wide window): season posters and a grid of episode cards, the approved detail design.
+    // A phone keeps the season chips and the swipeable episode rail.
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp
+    val wideDetail = screenWidthDp >= 600
+    val episodeColumns = ((screenWidthDp - 40 + 16) / (260 + 16)).coerceAtLeast(1)
     Box(modifier.fillMaxSize().background(VortXTheme.colors.canvas)) {
         when (val m = metaState) {
             // A non-`tt` catalog id that neither an add-on nor the one-shot recovery could resolve sits in
@@ -627,6 +642,7 @@ fun DetailScreen(
                     item {
                         SeasonSelector(
                             detail = m.data,
+                            wide = wideDetail,
                             selectedSeason = selectedSeason ?: m.data.videos.first().season,
                             onSelectSeason = viewModel::selectSeason,
                             onMarkSeasonWatched = viewModel::setSeasonWatched,
@@ -636,7 +652,65 @@ fun DetailScreen(
                     val episodes = m.data.videos
                         .filter { it.season == (selectedSeason ?: m.data.videos.first().season) }
                         .sortedBy { it.episode }
-                    item {
+                    val seasonForEpisodes = selectedSeason ?: m.data.videos.first().season
+                    // One episode card, shared by the phone rail and the tablet grid.
+                    val episodeCard: @Composable (Episode, Modifier) -> Unit = { episode, cardModifier ->
+                        val episodeFocus = remember(episode.id) { FocusRequester() }
+                        LaunchedEffect(episode.id, episodeFocus) {
+                            episodeFocusRequesters[episode.id] = episodeFocus
+                        }
+                        val currentForSources = episode.id == selectedEpisodeId
+                        val watched = episode.id in m.data.watchedVideoIds
+                        // A veiled row's first tap reveals only; it never writes watched state or
+                        // enters the source path before the viewer has chosen to see the spoiler.
+                        val veiled = spoilerVeiled(spoilerSafe, watched, episode.id in revealedEpisodeIds)
+                        CinemaEpisodeCard(
+                            code = if (episode.season > 0) "S${episode.season} · E${episode.episode}" else "Episode ${episode.episode}",
+                            title = episode.title,
+                            overview = if (veiled) "Tap to reveal" else episode.overview,
+                            airDate = episode.released?.take(10),
+                            watched = watched,
+                            progress = episodeProgress(episode, m.data),
+                            onClick = {
+                                restoreEpisodeFocusId = episode.id
+                                if (veiled) {
+                                    revealedEpisodeIds = revealedEpisodeIds + episode.id
+                                } else {
+                                    if (viewModel.autoPickEnabled) sourcesOpen = true
+                                    viewModel.selectEpisode(episode.id)
+                                }
+                            },
+                            onToggleWatched = { viewModel.setVideoWatched(episode, episode.id !in m.data.watchedVideoIds) },
+                            runtime = m.data.runtime,
+                            quality = if (currentForSources) {
+                                (streamsState as? UiState.Success<List<StreamGroup>>)?.data
+                                    ?.let(StreamRanking::tiers)?.filter { it != "Others" }?.joinToString(" / ")
+                            } else null,
+                            focusRequester = episodeFocus,
+                            thumb = { EpisodeThumb(episode, veiled = veiled, fallbackUrls = listOf(m.data.background, m.data.poster)) },
+                            modifier = cardModifier.then(
+                                if (currentForSources) {
+                                    Modifier.border(BorderStroke(1.dp, VortXTheme.colors.accent), VortXShapes.card)
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                        )
+                    }
+                    if (wideDetail) {
+                        // Tablet: the whole season as rows of cards, read top to bottom with the page.
+                        items(episodes.chunked(episodeColumns), key = { row -> "episode-row-" + row.first().id }) { row ->
+                            Row(
+                                modifier = Modifier.padding(horizontal = VortXTheme.spacing.edge),
+                                horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.md),
+                            ) {
+                                row.forEach { episode -> episodeCard(episode, Modifier.weight(1f)) }
+                                repeat(episodeColumns - row.size) { Spacer(Modifier.weight(1f)) }
+                            }
+                        }
+                    } else {
+                    // One rail per season (keyed), so switching season never inherits the old scroll offset.
+                    item(key = "episode-rail-$seasonForEpisodes") {
                         // The phone/touch episode surface is intentionally a cinematic rail, not a long
                         // flat list. Selection and source routing remain the existing per-episode owner.
                         val episodeRowState = rememberLazyListState()
@@ -667,51 +741,10 @@ fun DetailScreen(
                             horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.md),
                         ) {
                             items(episodes, key = { it.id }) { episode ->
-                                val episodeFocus = remember(episode.id) { FocusRequester() }
-                                LaunchedEffect(episode.id, episodeFocus) {
-                                    episodeFocusRequesters[episode.id] = episodeFocus
-                                }
-                                val currentForSources = episode.id == selectedEpisodeId
-                                val watched = episode.id in m.data.watchedVideoIds
-                                // A veiled row's first tap reveals only; it never writes watched state or
-                                // enters the source path before the viewer has chosen to see the spoiler.
-                                val veiled = spoilerVeiled(spoilerSafe, watched, episode.id in revealedEpisodeIds)
-                                CinemaEpisodeCard(
-                                    code = if (episode.season > 0) "S${episode.season} · E${episode.episode}" else "Episode ${episode.episode}",
-                                    title = episode.title,
-                                    overview = if (veiled) "Tap to reveal" else episode.overview,
-                                    airDate = episode.released?.take(10),
-                                    watched = watched,
-                                    progress = episodeProgress(episode, m.data),
-                                    onClick = {
-                                        restoreEpisodeFocusId = episode.id
-                                        if (veiled) {
-                                            revealedEpisodeIds = revealedEpisodeIds + episode.id
-                                        } else {
-                                            if (viewModel.autoPickEnabled) sourcesOpen = true
-                                            viewModel.selectEpisode(episode.id)
-                                        }
-                                    },
-                                    onToggleWatched = { viewModel.setVideoWatched(episode, episode.id !in m.data.watchedVideoIds) },
-                                    runtime = m.data.runtime,
-                                    quality = if (currentForSources) {
-                                        (streamsState as? UiState.Success<List<StreamGroup>>)?.data
-                                            ?.let(StreamRanking::tiers)?.filter { it != "Others" }?.joinToString(" / ")
-                                    } else null,
-                                    focusRequester = episodeFocus,
-                                    thumb = { EpisodeThumb(episode, veiled = veiled, fallbackUrls = listOf(m.data.background, m.data.poster)) },
-                                    modifier = Modifier
-                                        .width(304.dp)
-                                        .then(
-                                            if (currentForSources) {
-                                                Modifier.border(BorderStroke(1.dp, VortXTheme.colors.accent), VortXShapes.card)
-                                            } else {
-                                                Modifier
-                                            },
-                                        ),
-                                )
+                                episodeCard(episode, Modifier.width(304.dp))
                             }
                         }
+                    }
                     }
                 }
                 com.vortx.android.model.MediaRelation.visible(
@@ -809,6 +842,22 @@ private fun mergeSimilar(
 /// The terminal "Details unavailable" page (DET meta recovery): a non-`tt` catalog id nothing could resolve.
 /// Centered in the viewport with the standard margins and the shared primary button, so Try Again ([onRetry],
 /// wired to [DetailViewModel.retryMeta]) reads as part of this surface. Mirrors Apple's `metaUnavailableScreen`.
+/// The tablet Trailer action beside Play: glass, clapperboard icon, the same height as Play.
+@Composable
+private fun TrailerHeroButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .vortxGlass(shape = VortXShapes.control, fillAlpha = VortXGlass.pillFillAlpha, shadow = VortXGlass.Shadow.pill)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 24.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(VortXIcons.clapperboard, contentDescription = null, tint = VortXTheme.colors.textPrimary, modifier = Modifier.size(20.dp))
+        Text(text = "Trailer", style = VortXTheme.type.label.copy(fontWeight = FontWeight.Bold, color = VortXTheme.colors.textPrimary))
+    }
+}
+
 @Composable
 private fun DetailUnavailable(onRetry: () -> Unit, modifier: Modifier = Modifier) {
     Column(
@@ -1132,13 +1181,22 @@ private fun ActionsCluster(
         modifier = Modifier.padding(horizontal = VortXTheme.spacing.edge),
         verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm),
     ) {
-        PrimaryButton(
-            text = watchLabel,
-            onClick = onWatch,
-            enabled = watchEnabled,
-            loading = resolving,
-            leadingIcon = if (!resolving) VortXIcons.playFill else null,
-        )
+        // Tablet: Trailer sits beside Play at the same height (the approved detail design); a phone keeps
+        // Play on its own and Trailer in the chip row.
+        val trailerBesidePlay = hasTrailer && LocalConfiguration.current.screenWidthDp >= 600
+        Row(
+            modifier = Modifier.height(IntrinsicSize.Min),
+            horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm),
+        ) {
+            PrimaryButton(
+                text = watchLabel,
+                onClick = onWatch,
+                enabled = watchEnabled,
+                loading = resolving,
+                leadingIcon = if (!resolving) VortXIcons.playFill else null,
+            )
+            if (trailerBesidePlay) TrailerHeroButton(onClick = onTrailer, modifier = Modifier.fillMaxHeight())
+        }
         // Keep Watch in its own full-width CTA row.  Secondary controls use a wrapping flow so a narrow
         // phone never compresses labels into a clipped horizontal strip or creates a second scroll surface.
         FlowRow(
@@ -1185,11 +1243,11 @@ private fun ActionsCluster(
             }
             // Trailer: free 1080p from the user's own IP via the client resolver (worker fallback on a miss).
             // Shown only when the meta carries a YouTube trailer id. Plays through the shared player pipeline.
-            if (hasTrailer) {
+            if (hasTrailer && !trailerBesidePlay) {
                 Chip(
                     label = "Trailer",
                     selected = false,
-                    leadingIcon = VortXIcons.playRectangle,
+                    leadingIcon = VortXIcons.clapperboard,
                     onClick = onTrailer,
                 )
             }
@@ -1615,6 +1673,7 @@ private val WATCH_PROVIDER_PLATE = Color(0xFFF3F0EA)
 @Composable
 private fun SeasonSelector(
     detail: MetaDetail,
+    wide: Boolean,
     selectedSeason: Int,
     onSelectSeason: (Int) -> Unit,
     onMarkSeasonWatched: (Int, Boolean) -> Unit,
@@ -1631,6 +1690,10 @@ private fun SeasonSelector(
                 text = "$episodeCount episode${if (episodeCount == 1) "" else "s"}",
                 style = VortXTheme.type.sectionTitle,
             )
+        }
+        if (wide) {
+            SeasonPosterStrip(detail, seasons, selectedSeason, onSelectSeason, onMarkSeasonWatched, onMarkSeriesWatched)
+            return@Column
         }
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm),
@@ -1671,6 +1734,128 @@ private fun SeasonSelector(
                 }
             }
         }
+    }
+}
+
+/// Tablet season selector: each season as its own poster (the series poster stands in, numbered, where TMDB
+/// has none), the current one ringed in the accent and a check on a fully watched season. Long-press keeps
+/// the watched menu the phone's season chips carry. Mirrors Apple `seasonPosterStrip` on iPad and Mac.
+@Composable
+private fun SeasonPosterStrip(
+    detail: MetaDetail,
+    seasons: List<Int>,
+    selectedSeason: Int,
+    onSelectSeason: (Int) -> Unit,
+    onMarkSeasonWatched: (Int, Boolean) -> Unit,
+    onMarkSeriesWatched: (Boolean) -> Unit,
+) {
+    val posters by produceState(emptyMap<Int, String>(), detail.id) {
+        value = runCatching { TMDBPersonClient.seasonPosters(detail.id) }.getOrDefault(emptyMap())
+    }
+    var menuSeason by remember { mutableStateOf<Int?>(null) }
+    LazyRow(
+        horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.md),
+        contentPadding = PaddingValues(horizontal = VortXTheme.spacing.edge, vertical = VortXTheme.spacing.xs),
+    ) {
+        items(seasons, key = { it }) { season ->
+            val episodes = detail.videos.filter { it.season == season }
+            Box {
+                SeasonPosterTile(
+                    label = seasonLabel(season),
+                    badge = if (season == 0) "SP" else "$season",
+                    poster = posters[season],
+                    fallback = detail.poster,
+                    selected = season == selectedSeason,
+                    complete = episodes.isNotEmpty() && episodes.all { it.id in detail.watchedVideoIds },
+                    onClick = { onSelectSeason(season) },
+                    onLongClick = { menuSeason = season },
+                )
+                SeasonMenu(
+                    expanded = menuSeason == season,
+                    onDismiss = { menuSeason = null },
+                    seasonLabel = seasonLabel(season),
+                    onMarkSeasonWatched = { onMarkSeasonWatched(season, it) },
+                    onMarkSeriesWatched = onMarkSeriesWatched,
+                )
+            }
+        }
+    }
+}
+
+private val SEASON_POSTER_WIDTH = 88.dp
+
+@Composable
+private fun SeasonPosterTile(
+    label: String,
+    badge: String,
+    poster: String?,
+    fallback: String?,
+    selected: Boolean,
+    complete: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    val colors = VortXTheme.colors
+    Column(
+        modifier = Modifier
+            .width(SEASON_POSTER_WIDTH)
+            .combinedClickable(role = Role.Button, onClick = onClick, onLongClick = onLongClick)
+            .semantics { this.selected = selected },
+        verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.xs),
+    ) {
+        Box(
+            modifier = Modifier
+                .width(SEASON_POSTER_WIDTH)
+                .aspectRatio(2f / 3f)
+                .graphicsLayer { alpha = if (selected) 1f else 0.72f }
+                .clip(VortXShapes.chip)
+                .border(
+                    BorderStroke(if (selected) 2.5.dp else 1.dp, if (selected) colors.accent else colors.textPrimary.copy(alpha = 0.08f)),
+                    VortXShapes.chip,
+                )
+                .background(colors.hairline),
+        ) {
+            AsyncImage(
+                model = poster ?: fallback,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            // The series poster is standing in: name the season on the art so the tiles differ.
+            if (poster == null) {
+                Text(
+                    text = badge,
+                    style = VortXTheme.type.sectionTitle,
+                    fontWeight = FontWeight.Black,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f))))
+                        .padding(VortXTheme.spacing.sm),
+                )
+            }
+            if (complete) {
+                Icon(
+                    imageVector = VortXIcons.checkmarkCircle,
+                    contentDescription = null,
+                    tint = colors.accent,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(20.dp)
+                        .background(Color.White, CircleShape),
+                )
+            }
+        }
+        Text(
+            text = label,
+            style = VortXTheme.type.label,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) colors.textPrimary else colors.textSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

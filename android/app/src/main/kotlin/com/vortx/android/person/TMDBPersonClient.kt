@@ -188,6 +188,27 @@ object TMDBPersonClient {
             .map { it.item }
     }
 
+    /// Season poster art for a series keyed by season number (0 = Specials), from `/tv/{id}`. Accepts a `tt` id
+    /// (resolved through `/find`) or `tmdb:<id>`; anything else, a miss or an error gives an empty map and the
+    /// season selector falls back to the series poster. Mirrors Apple `TMDBClient.seasonPosters(metaID:)`.
+    suspend fun seasonPosters(metaId: String): Map<Int, String> {
+        val tvId = when {
+            metaId.startsWith("tmdb:") -> metaId.removePrefix("tmdb:").toIntOrNull()
+            metaId.startsWith("tt") -> getJson("/find/$metaId?external_source=imdb_id")
+                ?.optJSONArray("tv_results")?.optJSONObject(0)?.optInt("id", 0)?.takeIf { it > 0 }
+            else -> null
+        } ?: return emptyMap()
+        val seasons = getJson("/tv/$tvId")?.optJSONArray("seasons") ?: return emptyMap()
+        val posters = HashMap<Int, String>()
+        for (i in 0 until seasons.length()) {
+            val season = seasons.optJSONObject(i) ?: continue
+            val number = season.optInt("season_number", -1).takeIf { it >= 0 } ?: continue
+            val path = season.optStringOrNull("poster_path") ?: continue
+            posters[number] = "$IMAGE_BASE/w342$path"
+        }
+        return posters
+    }
+
     /// Resolve a filmography card's catalog id to an IMDb `tt` id before opening its detail, ported from
     /// `TMDBClient.imdbID(forCatalogID:type:)`. A `tt` id passes straight through; a `tmdb:<n>` id is
     /// resolved via `/external_ids` (the hub type guess can be wrong, so try the guessed media then the
