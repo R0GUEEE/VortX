@@ -10,9 +10,8 @@ import SwiftUI
 ///
 ///  - An EMPTY account is already seeded from this device by reconcileAfterSignIn (.seededFromDevice), so
 ///    the backup is done the moment sign-in lands; we just confirm success.
-///  - An account that ALREADY holds data shows the SAME three-way conflict SyncSettingsView presents
-///    (SyncSettingsView.swift ~:43-45), but the primary/default button is "Keep this device"
-///    (pushThisDevice()), because the user came here to SAVE this Apple TV's data.
+///  - An account that ALREADY holds data offers native merge/restore. Only legacy builds may
+///    offer a whole-device override; native export deliberately rejects that operation.
 ///
 /// The QR carries only a ~100-150 byte pairing URL (the short code plus this TV's ephemeral public key);
 /// the ~1MB backup doc rides HTTPS through VortXSyncManager's sync doc, never through the QR.
@@ -91,6 +90,7 @@ struct BackupExportView: View {
         .onAppear { start() }
         .onDisappear { poller?.cancel() }
         .alert("This account already has data", isPresented: $showConflict) {
+            #if !VORTX_NATIVE_DATA_ENGINE
             // The SAME three-way choice SyncSettingsView offers (mergeBoth / useAccountData / pushThisDevice),
             // but the BACKUP default is "Keep this device": the user came here to SAVE this Apple TV's data,
             // so pushThisDevice() is the primary button. None of the three can silently drop a profile
@@ -99,10 +99,15 @@ struct BackupExportView: View {
             // positively READ, so this is the user's informed choice to overwrite it and the one push allowed
             // past the #145 restore gate.
             Button("Keep this device") { resolve { await $0.keepThisDeviceOverridingAccount() ? .completed : .failed } }
+            #endif
             Button("Merge both (keep all profiles)") { resolve { await $0.mergeBoth() ? .completed : .failed } }
             Button("Use account's data") { resolve { await $0.useAccountData() } }
         } message: {
+            #if VORTX_NATIVE_DATA_ENGINE
+            Text("This VortX account already holds synced data. Merge both to keep every profile, or restore the account's data. Native backups do not overwrite an account with a legacy device snapshot.")
+            #else
             Text("This VortX account already holds synced data. Keep this device to save this Apple TV's data over it, merge both to keep every profile, or use the account's data instead.")
+            #endif
         }
     }
 

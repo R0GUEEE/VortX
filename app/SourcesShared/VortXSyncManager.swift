@@ -5237,6 +5237,12 @@ final class VortXSyncManager: ObservableObject {
     /// device's state IS the account's state, so subsequent automatic pushes are no longer at risk of the #145
     /// blind overwrite. Never wire this to an automatic path.
     @discardableResult func keepThisDeviceOverridingAccount() async -> Bool {
+        #if VORTX_NATIVE_DATA_ENGINE
+        // An unsupported legacy override must not stamp restore acknowledgement or persist an
+        // add-on-order intent that would poison subsequent native uploads, even across restart.
+        // Existing intents are not silently erased: explicit account restore owns that choice.
+        return false
+        #else
         withRemoteApplySuppressed {
             hasAppliedAccountDoc = true
             if let id = account?.id {
@@ -5244,6 +5250,7 @@ final class VortXSyncManager: ObservableObject {
             }
         }
         return await syncUp(afterUserChoseThisDevice: true)
+        #endif
     }
 
     /// Push this device's state when the app BACKGROUNDS, with a real time budget. A bare

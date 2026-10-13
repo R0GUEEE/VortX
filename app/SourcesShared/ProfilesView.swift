@@ -162,6 +162,14 @@ struct ProfilePickerView: View {
                     }
                     .disabled(pinTarget != nil || profileAction.isRunning)
                     .accessibilityHidden(pinTarget != nil)
+                    // Outside the disabled picker: a stuck profile/restore must not block its own log.
+                    .safeAreaInset(edge: .bottom) {
+                        DiagnosticLogExportButton()
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 12)
+                            .disabled(pinTarget != nil)
+                            .accessibilityHidden(pinTarget != nil)
+                    }
                 }
             }
 

@@ -54,6 +54,7 @@ struct iOSSignInView: View {
                         surface
                         secondaryActions
                         footnote
+                        DiagnosticLogExportButton()
                     }
                     .frame(maxWidth: .infinity)
                     .padding(Theme.Space.lg)
@@ -86,20 +87,10 @@ struct iOSSignInView: View {
         // (signIn / signInWithAuthKey) already load add-ons + set the email, so reloadForActiveProfile()
         // is redundant here, and it was the second `isSignedIn = true` write that armed the loop.
         .onChange(of: account.isSignedIn) { signedIn in
-            guard signedIn, !didHandleSignIn else { return }
-            didHandleSignIn = true
-            core.signedInWithLegacyAuthKey()
-            // Account-owns-everything snapshot-on-import: once the engine has finished pulling this
-            // Stremio account's add-ons, snapshot the full descriptor set into the VortX account doc so
-            // the account OWNS them (and they hydrate later even with no live Stremio session). We AWAIT the
-            // engine's PullAddonsFromAPI settling (awaitAddonsHydrated) instead of a fixed delay: a fixed
-            // delay snapshotted a slow host mid-pull, capturing only SOME add-ons (the partial-import bug).
-            // No-op (never-zero guarded) if the engine is still empty or the VortX account is unreachable.
-            Task { @MainActor in
-                await core.awaitAddonsHydrated()
-                await VortXSyncManager.shared.snapshotOwnedFromEngine()
-            }
-            dismiss()
+            handleStremioSignIn(signedIn: signedIn)
+        }
+        .onChange(of: account.credentialBoundaryGeneration) { _ in
+            handleStremioSignIn(signedIn: account.isSignedIn)
         }
         // VortX typed-path success: SyncSettingsView signs the VortX account in and adopt() has already
         // hydrated add-ons + library (the app-root onChange re-runs the degraded-engine check), so here we
@@ -109,6 +100,18 @@ struct iOSSignInView: View {
         .onChange(of: vortxSync.isSignedIn) { signedIn in
             if signedIn && showVortXEmail { dismiss() }
         }
+    }
+
+    private func handleStremioSignIn(signedIn: Bool) {
+        guard signedIn, account.signInError == nil, !didHandleSignIn else { return }
+        didHandleSignIn = true
+        core.signedInWithLegacyAuthKey()
+        // Await actual add-on hydration, not a fixed delay, before the never-zero import snapshot.
+        Task { @MainActor in
+            await core.awaitAddonsHydrated()
+            await VortXSyncManager.shared.snapshotOwnedFromEngine()
+        }
+        dismiss()
     }
 
     // MARK: Brand
