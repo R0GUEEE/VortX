@@ -45,6 +45,8 @@ internal class NativeNzbTransport(
         // Just above the engine's 30 s preparation window, so its typed timeout arrives instead of a cut-off.
         .connectTimeout(4, TimeUnit.SECONDS).readTimeout(35, TimeUnit.SECONDS)
         .callTimeout(40, TimeUnit.SECONDS).build(),
+    /** How much of a release the engine may download ahead to disk (null: leave the engine default). */
+    private val diskAllowance: () -> Long? = { null },
 ) {
     private val client = client.newBuilder().proxy(Proxy.NO_PROXY).followRedirects(false).followSslRedirects(false).build()
     class Unavailable : IllegalStateException("Native NZB transport is unavailable")
@@ -106,6 +108,7 @@ internal class NativeNzbTransport(
                     if (capability.first != 200 || !acceptsCapabilities(capability.second)) {
                         throw unavailable("capabilities_${capability.first}")
                     }
+                    if (advertisesDiskPreload(capability.second)) diskAllowance()?.let { postDiskAllowance(base, it) }
                     checkCurrent(admission)
                     val owned = Operation(base, UUID.randomUUID().toString(), playbackIsCurrent ?: isCurrent).also { operation = it }
                     payload.put("operationId", owned.id)
@@ -184,6 +187,18 @@ internal class NativeNzbTransport(
         override fun toString(): String = "NativeNzbOperation(<local lease>)"
     }
 
+    /** Best-effort: a failure only leaves the engine on its previous (or default) allowance. */
+    private suspend fun postDiskAllowance(base: String, bytes: Long) {
+        runCatching {
+            request(
+                Request.Builder().url("$base/settings")
+                    .post(JSONObject().put("nzbDiskCacheBytes", bytes).toString().toRequestBody("application/json".toMediaType()))
+                    .build(),
+                2_000,
+            )
+        }.onSuccess { DiagnosticsLog.log("usenet", "disk_allowance mib=${bytes / (1024 * 1024)}") }
+    }
+
     private suspend fun request(request: Request, timeoutMs: Long): Pair<Int, String> {
         val call = client.newCall(request)
         call.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -219,6 +234,9 @@ internal class NativeNzbTransport(
                 uri.rawPath !in listOf("", "/") || uri.rawAuthority != "127.0.0.1:${uri.port}") throw Unavailable()
             return "http://127.0.0.1:${uri.port}"
         }
+
+        fun advertisesDiskPreload(raw: String): Boolean =
+            runCatching { JSONObject(raw).optBoolean("diskPreload", false) }.getOrDefault(false)
 
         fun acceptsCapabilities(raw: String): Boolean = runCatching {
             val value = JSONObject(raw)

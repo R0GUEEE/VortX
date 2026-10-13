@@ -67,7 +67,7 @@ internal class DebridCoordinator(
     private val nativeNzbTransport by lazy { nzbTransport ?: NativeNzbTransport(serverBase = {
         val context = appContext ?: throw NativeNzbTransport.Unavailable()
         VortxServer.awaitStartIfNeeded(context)
-    }) }
+    }, diskAllowance = { appContext?.let(com.vortx.android.usenet.UsenetDiskAllowance::current) }) }
     /// Convenience: build the resolver + key store from the app context (the assembly/play layer already
     /// owns a [DebridResolver]; prefer sharing that via the primary constructor when possible).
     constructor(context: Context) : this(

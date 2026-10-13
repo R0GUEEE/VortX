@@ -86,6 +86,43 @@ class NativeNzbTransportTest {
         }
     }
 
+    @Test fun `the streaming cache allowance reaches an engine that downloads ahead to disk`() = runBlocking {
+        Fixture().use { fixture ->
+            val settings = CopyOnWriteArrayList<JSONObject>()
+            var advertise = true
+            fixture.handle = { exchange ->
+                when {
+                    exchange.requestURI.path == "/nzb/capabilities" ->
+                        exchange.reply(200, if (advertise) JSONObject(CAPABILITIES).put("diskPreload", true).toString() else CAPABILITIES)
+                    exchange.requestURI.path == "/settings" -> {
+                        settings += JSONObject(exchange.requestBody.bufferedReader().readText())
+                        exchange.reply(200, "{}")
+                    }
+                    exchange.requestURI.path == "/nzb/create" -> exchange.reply(200, """{"key":"${"a".repeat(32)}"}""")
+                    exchange.requestURI.path.endsWith("/cancel") -> exchange.reply(204)
+                    else -> error("Unexpected route")
+                }
+            }
+            fixture.transportWithDisk({ 21_474_836_480L }).create(mirrors, servers, 3_000) { true }.lease.close()
+            assertEquals(21_474_836_480L, settings.single().getLong("nzbDiskCacheBytes"))
+            // An untouched setting sends nothing (the engine keeps its default), and so does an older engine.
+            fixture.transportWithDisk({ null }).create(mirrors, servers, 3_000) { true }.lease.close()
+            advertise = false
+            fixture.transportWithDisk({ 0L }).create(mirrors, servers, 3_000) { true }.lease.close()
+            assertEquals(1, settings.size)
+        }
+    }
+
+    @Test fun `streaming cache choices map to a usenet disk allowance`() {
+        val gib = 1024L * 1024 * 1024
+        assertEquals(null, UsenetDiskAllowance.bytes(null, 100 * gib))
+        assertEquals(0L, UsenetDiskAllowance.bytes(0L, 100 * gib))
+        assertEquals(50 * gib, UsenetDiskAllowance.bytes(-1L, 100 * gib))
+        assertEquals(20 * gib, UsenetDiskAllowance.bytes(20 * gib, 100 * gib))
+        assertEquals(50 * gib, UsenetDiskAllowance.bytes(80 * gib, 100 * gib))
+        assertEquals(2 * gib, UsenetDiskAllowance.bytes(-1L, null))
+    }
+
     @Test fun `selection mismatch is typed so the add-on pattern can be retried, and retires its operation`() = runBlocking {
         Fixture().use { fixture ->
             val canceled = CountDownLatch(1)
@@ -408,6 +445,7 @@ class NativeNzbTransportTest {
             }
         }
         fun transport(serverBase: suspend () -> String? = { base }) = NativeNzbTransport(serverBase, client)
+        fun transportWithDisk(diskAllowance: () -> Long?) = NativeNzbTransport({ base }, client, diskAllowance)
         override fun close() {
             server.close(); sockets.forEach { runCatching { it.close() } }; workers.shutdownNow()
             client.dispatcher.executorService.shutdownNow(); client.connectionPool.evictAll()
