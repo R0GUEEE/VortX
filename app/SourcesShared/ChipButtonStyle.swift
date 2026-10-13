@@ -57,7 +57,7 @@ private struct VortXButtonBody<S: InsettableShape>: View {
     let focusScale: CGFloat
     let configuration: ButtonStyleConfiguration
     @Environment(\.isFocused) private var focused: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ReducedMotion private var reduceMotion
 
     var body: some View {
         let styled = configuration.label
@@ -127,7 +127,7 @@ struct ChipButtonStyle: ButtonStyle {
         let focusMargin: CGFloat
         let configuration: ButtonStyleConfiguration
         @Environment(\.isFocused) private var focused: Bool
-        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @ReducedMotion private var reduceMotion
         @ObservedObject private var theme = ThemeManager.shared
 
         var body: some View {

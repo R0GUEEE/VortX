@@ -78,6 +78,10 @@ struct SettingsView: View {
     @AppStorage(PlaybackSettings.Key.customMpvOptions) private var customMpvOptions = ""
     @AppStorage(VXProbe.defaultsKey) private var probeLogging = false   // gated diagnostic logging + heartbeat
     @AppStorage(PerformanceMode.overrideKey) private var perfMode = "auto"
+    @AppStorage(VisualEffects.backdropKey) private var effectsBackdrop = VisualEffects.auto
+    @AppStorage(VisualEffects.glassKey) private var effectsGlass = VisualEffects.auto
+    @AppStorage(VisualEffects.motionKey) private var effectsMotion = VisualEffects.auto
+    @AppStorage(VisualEffects.artworkKey) private var effectsArtwork = VisualEffects.auto
     @AppStorage(AudioOutputMode.key) private var audioOutput = AudioOutputMode.auto.rawValue
     @AppStorage(PlaybackSettings.Key.videoUpscaling) private var videoUpscaling = PlaybackSettings.videoUpscaling.rawValue
     // Streaming/seek cache budget, raw byte count (0 = Off, -1 = Unlimited). Int-typed @AppStorage; Int
@@ -1067,7 +1071,23 @@ struct SettingsView: View {
                 .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
 
             choiceRow(String(localized: "Performance"), [("auto", "Auto"), ("full", "Full"), ("reduced", "Reduced")], selection: $perfMode)
-            Text("Auto keeps the full experience on capable Apple TVs and switches to a lighter one on older models like the Apple TV HD. Reduced trims animations and shrinks playback buffers so the remote stays responsive on weak hardware. Restart the app after changing this.")
+            Text("Auto keeps the full experience on capable Apple TVs and switches to a lighter one on older models like the Apple TV HD. Reduced shrinks playback buffers and sets the effects below to their light options so the remote stays responsive on weak hardware. Restart the app after changing this.")
+                .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
+
+            // Effects and performance: each one Auto (follows Performance) or an explicit choice. Applies
+            // as you move around; nothing here needs a restart. Kept on this Apple TV only.
+            choiceRow(String(localized: "Focus backdrop"), [("auto", "Auto"), ("animated", "Animated"), ("still", "Still"), ("off", "Off")],
+                      selection: $effectsBackdrop)
+            Text("The art of the title you focus fills the screen. Still swaps it without a fade; Off keeps a plain background and only the details change.")
+                .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
+            choiceRow(String(localized: "Glass and blur"), [("auto", "Auto"), ("on", "On"), ("off", "Off")], selection: $effectsGlass)
+            Text("Off draws solid surfaces instead of translucent glass and blurred artwork, which is much lighter to render.")
+                .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
+            choiceRow(String(localized: "Animations"), [("auto", "Auto"), ("on", "On"), ("off", "Off")], selection: $effectsMotion)
+            Text("Off removes fades, focus and layout animations, and autoplaying hero trailers.")
+                .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
+            choiceRow(String(localized: "Artwork"), [("auto", "Auto"), ("full", "Full quality"), ("hd", "HD")], selection: $effectsArtwork)
+            Text("HD caps backdrops at 1080p on a 4K TV, so each one loads faster and uses less memory.")
                 .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
         }
         .confirmationDialog("Apply language?", isPresented: $showLangRestart, titleVisibility: .visible) {

@@ -67,7 +67,7 @@ struct ProfilePickerView: View {
     @EnvironmentObject private var theme: ThemeManager
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ReducedMotion private var reduceMotion
 
     @State private var pinTarget: UserProfile?
     @State private var pinIsForEditing = false
@@ -367,7 +367,7 @@ private struct ProfilePickerMovie: Identifiable, Hashable {
 /// The identity transition then cross-fades the two layers without a blank frame on a rotation tick.
 private struct ProfilePickerBackdrop: View {
     let movie: ProfilePickerMovie?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ReducedMotion private var reduceMotion
     @State private var image: VXPosterImage?
     @State private var imageKey = ""
 
@@ -714,7 +714,7 @@ private struct ProfilePickerButtonContent: View {
     let configuration: ButtonStyleConfiguration
     let outline: Bool
     @Environment(\.isFocused) private var focused
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ReducedMotion private var reduceMotion
 
     var body: some View {
         configuration.label

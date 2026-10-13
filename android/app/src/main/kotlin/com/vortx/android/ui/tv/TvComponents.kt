@@ -326,8 +326,12 @@ fun TvBackdrop(url: String?, seed: String, modifier: Modifier = Modifier, fallba
         urls = listOf(url) + fallbackUrls,
         contentDescription = null,
         modifier = modifier.background(backdropBrush(seed, VortXTheme.colors)),
+        // Settings > Effects and performance > Artwork HD: decode at most 1080p even on a 4K TV.
+        maxDecodePx = if (com.vortx.android.ui.prefs.currentVisualEffects().hdArtworkOnly) HD_LONG_EDGE_PX else null,
     )
 }
+
+private const val HD_LONG_EDGE_PX = 1_920
 
 /// A deterministic two-stop gradient hued around the live accent, seeded by a string so an art-less hero
 /// stays in the current theme family. Mirrors the placeholder idea in

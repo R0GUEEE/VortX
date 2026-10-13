@@ -64,7 +64,7 @@ fs.writeFileSync(path.join(out, 'profile-controls-extraction.json'), JSON.string
 },null,2)+'\n');
 process.stdout.write(`Prepared only: ${out}\nCompile serially after root grants compiler slot with ProductionControls.swift, current GlassStyle.swift, current ChipButtonStyle.swift, and ProfileGlassControlRenderingTests.swift.\n`);
 
-const args=['swiftc','-j','2','-Onone','-parse-as-library',path.join(out,'ProductionControls.swift'),path.join(repo,'app/SourcesShared/GlassStyle.swift'),path.join(repo,'app/SourcesShared/ChipButtonStyle.swift'),path.join(repo,'app/Tests/ProfileGlassControlRenderingTests.swift'),'-o',path.join(out,'fixture')];
+const args=['swiftc','-j','2','-Onone','-parse-as-library',path.join(out,'ProductionControls.swift'),path.join(repo,'app/SourcesShared/GlassStyle.swift'),path.join(repo,'app/SourcesShared/ChipButtonStyle.swift'),path.join(repo,'app/SourcesShared/VisualEffects.swift'),path.join(repo,'app/SourcesShared/ReducedMotion.swift'),path.join(repo,'app/Tests/ProfileGlassControlRenderingTests.swift'),'-o',path.join(out,'fixture')];
 const built=cp.spawnSync('xcrun',args,{encoding:'utf8'});fs.writeFileSync(path.join(out,'compiler.log'),(built.stdout??'')+(built.stderr??''));
 if(built.status!==0){process.stderr.write(built.stderr??'');process.exit(1);}
 const run=cp.spawnSync(path.join(out,'fixture'),[repo,out],{encoding:'utf8'});fs.writeFileSync(path.join(out,'runtime.log'),(run.stdout??'')+(run.stderr??''));

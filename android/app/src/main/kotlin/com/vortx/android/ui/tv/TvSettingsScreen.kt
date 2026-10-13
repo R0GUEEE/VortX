@@ -68,6 +68,7 @@ import com.vortx.android.debrid.DebridKeys
 import com.vortx.android.skip.SkipConfig
 import com.vortx.android.sync.VortXSyncManager
 import com.vortx.android.ui.prefs.TabBarPrefs
+import com.vortx.android.ui.prefs.VisualEffects
 import com.vortx.android.ui.screens.AccountContent
 import com.vortx.android.ui.screens.AppearanceScreen
 import com.vortx.android.ui.screens.HomeDiscoverSettingsScreen
@@ -877,6 +878,36 @@ fun TvSettingsScreen(
                 }
             }
 
+            if (show("effects", "performance", "animation", "glass", "blur", "backdrop", "artwork", "smoothness")) item {
+                // Each one Auto (follows Performance) or an explicit choice; applies as you move around.
+                TvSettingsSection("Effects and performance") {
+                    TvEffectChoice(
+                        title = "Focus backdrop",
+                        detail = "The art of the title you focus fills the screen. Still swaps it without a fade; Off keeps a plain background and only the details change.",
+                        key = VisualEffects.KEY_BACKDROP,
+                        options = listOf("auto" to "Auto", "animated" to "Animated", "still" to "Still", "off" to "Off"),
+                    )
+                    TvEffectChoice(
+                        title = "Glass and blur",
+                        detail = "Off draws solid surfaces instead of translucent glass, which is much lighter to render.",
+                        key = VisualEffects.KEY_GLASS,
+                        options = listOf("auto" to "Auto", "on" to "On", "off" to "Off"),
+                    )
+                    TvEffectChoice(
+                        title = "Animations",
+                        detail = "Off removes fades, the slow backdrop pan and autoplaying hero trailers.",
+                        key = VisualEffects.KEY_MOTION,
+                        options = listOf("auto" to "Auto", "on" to "On", "off" to "Off"),
+                    )
+                    TvEffectChoice(
+                        title = "Artwork",
+                        detail = "HD caps backdrops at 1080p on a 4K TV, so each one loads faster and uses less memory.",
+                        key = VisualEffects.KEY_ARTWORK,
+                        options = listOf("auto" to "Auto", "full" to "Full quality", "hd" to "HD"),
+                    )
+                }
+            }
+
             if (show("backup", "restore", "back up", "export", "import", "sync", "qr", "code")) item {
                 TvSettingsSection("Backup & Restore") {
                     TvSettingsNavigationRow(
@@ -1014,6 +1045,27 @@ private fun TvSettingsSection(title: String, content: @Composable () -> Unit) {
 /// One focusable radio option, the tv-Surface 10-foot analogue of the phone `OptionRow`. The [RadioButton]
 /// is a pure indicator (onClick = null); the whole row is the target, so the D-pad selects it in one press
 /// and a focus ring makes the target unambiguous from the couch. Carries the store's own [detail] copy.
+/// One Effects and performance control: its name and what it does, then a radio row per choice, written
+/// straight to the device-local effects store.
+@Composable
+private fun TvEffectChoice(title: String, detail: String, key: String, options: List<Pair<String, String>>) {
+    val context = LocalContext.current.applicationContext
+    var stored by remember(key) { mutableStateOf(VisualEffects.stored(context, key)) }
+    Column(
+        modifier = Modifier.padding(start = VortXTheme.spacing.xs, top = VortXTheme.spacing.sm),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(title, style = VortXTheme.type.cardTitle.copy(color = VortXTheme.colors.textPrimary))
+        Text(detail, style = VortXTheme.type.label.copy(color = VortXTheme.colors.textSecondary))
+    }
+    options.forEach { (value, label) ->
+        TvOptionRow(label = label, detail = null, selected = stored == value) {
+            stored = value
+            VisualEffects.set(context, key, value)
+        }
+    }
+}
+
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun TvOptionRow(label: String, detail: String?, selected: Boolean, onClick: () -> Unit) {

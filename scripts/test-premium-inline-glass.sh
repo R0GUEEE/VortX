@@ -45,7 +45,7 @@ for mode in oled warm; do
     glass_flags=()
     if [[ "$mode" == warm ]]; then glass_flags=(-D WARM_GLASS_FIXTURE); fi
     xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
-        "${glass_flags[@]}" "$glass_dir/ProductionInlineGlass.swift" app/SourcesShared/GlassStyle.swift \
+        "${glass_flags[@]}" "$glass_dir/ProductionInlineGlass.swift" app/SourcesShared/GlassStyle.swift app/SourcesShared/VisualEffects.swift \
         app/Tests/PremiumInlineGlassTests.swift -o "$glass_dir/fixture-$mode"
     "$glass_dir/fixture-$mode" "$PWD" "$glass_dir" "$mode" | tee "$glass_dir/fixture-$mode.log"
 done

@@ -193,7 +193,7 @@ private struct CardFocusContent: View {
     let configuration: ButtonStyleConfiguration
     let scale: CGFloat
     @Environment(\.isFocused) private var focused
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ReducedMotion private var reduceMotion
     @EnvironmentObject private var theme: ThemeManager   // observe so a theme change repaints this style
     #if os(macOS)
     @State private var isHovered = false   // Mac has no focus engine for cards; pointer hover drives the same lift
@@ -237,7 +237,7 @@ struct PrimaryActionStyle: ButtonStyle {
 private struct PrimaryActionContent: View {
     let configuration: ButtonStyleConfiguration
     @Environment(\.isFocused) private var focused
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ReducedMotion private var reduceMotion
     @EnvironmentObject private var theme: ThemeManager   // observe so a theme change repaints this style
     #if os(macOS)
     @State private var isHovered = false   // Mac drives the same brighten/scale/glow from pointer hover
@@ -282,7 +282,7 @@ struct RowFocusStyle: ButtonStyle {
 private struct RowFocusContent: View {
     let configuration: ButtonStyleConfiguration
     @Environment(\.isFocused) private var focused
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ReducedMotion private var reduceMotion
     @EnvironmentObject private var theme: ThemeManager   // observe so a theme change repaints this style
     #if os(macOS)
     @State private var isHovered = false   // Mac drives the same fill/ring/lift from pointer hover
@@ -370,7 +370,7 @@ struct CircleIconButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { Content(configuration: configuration) }
     private struct Content: View {
         let configuration: ButtonStyleConfiguration
-        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @ReducedMotion private var reduceMotion
         #if os(macOS)
         @State private var isHovered = false
         #endif
@@ -399,7 +399,7 @@ struct HeroPlayButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { Content(configuration: configuration) }
     private struct Content: View {
         let configuration: ButtonStyleConfiguration
-        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @ReducedMotion private var reduceMotion
         @EnvironmentObject private var theme: ThemeManager
         #if os(macOS)
         @State private var isHovered = false

@@ -58,7 +58,7 @@ ${components}
 NODE
 
 xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
-  "$receipt/ProductionUIScreenshotSeams.swift" app/SourcesShared/GlassStyle.swift \
+  "$receipt/ProductionUIScreenshotSeams.swift" app/SourcesShared/GlassStyle.swift app/SourcesShared/VisualEffects.swift \
   app/Tests/UIScreenshotSeamsRenderTests.swift -o "$receipt/ui-screenshot-seams-render"
 "$receipt/ui-screenshot-seams-render" "$receipt"
 printf '%s\n' "Retained inert render receipt: $receipt"

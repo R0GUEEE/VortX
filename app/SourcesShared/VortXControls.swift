@@ -36,7 +36,7 @@ struct VortXSlider: View {
     var range: ClosedRange<Double> = 0...1
     var onEditingChanged: (Bool) -> Void = { _ in }
     @State private var dragging = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ReducedMotion private var reduceMotion
 
     private var span: Double { max(range.upperBound - range.lowerBound, .ulpOfOne) }
     private var fraction: Double { min(max((value - range.lowerBound) / span, 0), 1) }

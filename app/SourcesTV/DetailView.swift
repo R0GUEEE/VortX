@@ -46,7 +46,7 @@ struct DetailView: View {
 
     // #44 in-hero trailer gating, the SAME keys iOS uses: the "Autoplay trailers" setting + reduce-motion.
     @AppStorage("stremiox.autoplayTrailers") private var autoplayTrailers = true
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ReducedMotion private var reduceMotion
 
     @State private var similarItems: [MetaPreview] = []
     /// Franchise/collection this movie belongs to (TMDB belongs_to_collection -> parts, in release order),
@@ -2548,7 +2548,7 @@ struct CoreEpisodeStreams: View {
     @EnvironmentObject private var theme: ThemeManager
     @EnvironmentObject private var profiles: ProfileStore   // per-profile engine-history gate (activeUsesEngineHistory)
     @EnvironmentObject private var presenter: PlayerPresenter   // observe the player closing (binge-advance refresh)
-    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @ReducedMotion private var accessibilityReduceMotion
 
     // The episode this page currently SHOWS. Seeded from the pushed `video`, but re-pointed on player dismissal
     // when continuous play advanced past it: this page stays mounted behind the player (no onAppear re-fires), so
@@ -2782,7 +2782,8 @@ struct FullBleedBackdrop: View {
             for: .tvOS,
             displayLongEdge: Int(max(bounds.width, bounds.height))
         )
-        return allowsUltraHD ? requested : min(requested, HeroArtworkQualityPolicy.fullHDLongEdge)
+        // Settings > Effects and performance can cap hero art at 1080p even on a 4K display.
+        return allowsUltraHD && !VisualEffects.hdArtworkOnly ? requested : min(requested, HeroArtworkQualityPolicy.fullHDLongEdge)
     }
 
     private var artworkCandidates: [String] {

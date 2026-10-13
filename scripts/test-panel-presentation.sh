@@ -67,7 +67,7 @@ ${settingsTypography}
 NODE
 
 xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
-    "$fixture_dir/ProductionPanelPresentation.swift" app/SourcesShared/GlassStyle.swift \
+    "$fixture_dir/ProductionPanelPresentation.swift" app/SourcesShared/GlassStyle.swift app/SourcesShared/VisualEffects.swift \
     app/Tests/PanelPresentationTests.swift -o "$fixture_dir/panel-presentation"
 "$fixture_dir/panel-presentation" "$PWD/$fixture_dir"
 printf '%s\n' "Retained panel presentation receipt: $fixture_dir"

@@ -410,7 +410,7 @@ struct TVPlayerView: View {
 
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var core: CoreBridge
-    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @ReducedMotion private var accessibilityReduceMotion
     /// Episode-scoped auxiliary contributors owned by the player's preload generation. They are separate from
     /// the covered detail page so preparing E2 never mutates the E1 rows behind the player.
     @StateObject private var preloadTorboxSearch = TorBoxSearchSource()

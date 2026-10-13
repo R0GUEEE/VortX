@@ -203,8 +203,9 @@ enum VortXGlass {
                                               glassTint: Color? = nil,
                                               interactive: Bool = false,
                                               hugsTightly: Bool = false) -> some View {
-        if reduceTransparency {
-            // No blur when transparency is reduced: an opaque warm surface keeps the chrome legible.
+        if reduceTransparency || !VisualEffects.glassEnabled {
+            // No blur when transparency is reduced, or glass is switched off in Settings > Effects and
+            // performance: an opaque warm surface keeps the chrome legible and skips the live blur.
             shape.fill(Theme.Palette.surface1)
         } else if hugsTightly {
             // Tight small circular controls (transport / hero discs): NEVER Apple glassEffect. Its ambient

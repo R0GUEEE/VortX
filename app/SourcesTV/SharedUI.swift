@@ -463,6 +463,11 @@ struct BrowseHeroBackdrop<TrailerLayer: View>: View {
     /// while the clip played.
     var trailer: () -> TrailerLayer
     @EnvironmentObject private var theme: ThemeManager
+    /// Settings > Effects and performance: animated, still or no focus art.
+    @AppStorage(VisualEffects.backdropKey) private var backdropChoice = VisualEffects.auto
+    private var backdropMode: VisualEffects.Backdrop {
+        VisualEffects.backdrop(stored: backdropChoice, reduced: PerformanceMode.reduced)
+    }
     /// The focused title's clean TMDB clearlogo (textless PNG), resolved by id like the landscape cards.
     /// nil until it resolves (or when TMDB has none / no key) - the title then falls back to styled text.
     @State private var heroLogo: UIImage?
@@ -483,9 +488,11 @@ struct BrowseHeroBackdrop<TrailerLayer: View>: View {
         ZStack(alignment: .topLeading) {
             Theme.Palette.canvas.ignoresSafeArea()
             if let hero = model.hero {
-                FullBleedBackdrop(url: hero.backdrop, allowsUltraHD: hero.allowsUltraHD ?? false)
-                    .id(hero.id)
-                    .transition(.opacity)
+                if backdropMode != .off {
+                    FullBleedBackdrop(url: hero.backdrop, allowsUltraHD: hero.allowsUltraHD ?? false)
+                        .id(hero.id)
+                        .transition(.opacity)
+                }
                 // The muted trailer clip sits OVER the still backdrop but UNDER the details, so a
                 // resolved clip becomes the moving background while the logo / meta / synopsis stay on
                 // top (the fallback still art keeps the same z-order, so the hero never blanks).
@@ -499,7 +506,7 @@ struct BrowseHeroBackdrop<TrailerLayer: View>: View {
                 }
             }
         }
-        .animation(.easeOut(duration: 0.35), value: model.hero?.id)
+        .animation(backdropMode == .animated ? .easeOut(duration: 0.35) : nil, value: model.hero?.id)
         .animation(.easeOut(duration: 0.25), value: model.detailsVisible)
         // Resolve the focused title's clearlogo by id (TMDB, same source as the landscape cards) so the
         // hero shows the logo in place of the serif title text, matching the iOS/Mac hero. Re-runs per hero.
@@ -605,10 +612,18 @@ struct LandscapeArt: View {
                     Image(uiImage: image).resizable().aspectRatio(contentMode: .fill)
                         .overlay { titleLayer }
                 } else {
-                    Image(uiImage: image).resizable().aspectRatio(contentMode: .fill)
-                        .blur(radius: 26).opacity(0.55)
-                        .overlay(Color.black.opacity(0.35))
-                        .overlay(Image(uiImage: image).resizable().aspectRatio(contentMode: .fit))
+                    // A blurred copy of the poster fills the 16:9 frame; with glass and blur off the
+                    // frame is a plain dark fill instead, sparing one blur per card.
+                    Group {
+                        if VisualEffects.glassEnabled {
+                            Image(uiImage: image).resizable().aspectRatio(contentMode: .fill)
+                                .blur(radius: 26).opacity(0.55)
+                        } else {
+                            Theme.Palette.surface2
+                        }
+                    }
+                    .overlay(Color.black.opacity(0.35))
+                    .overlay(Image(uiImage: image).resizable().aspectRatio(contentMode: .fit))
                 }
             } else if failed {
                 Theme.Palette.surface2.overlay(

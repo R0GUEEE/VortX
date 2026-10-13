@@ -118,6 +118,8 @@ struct VortXTVApp: App {
             .environmentObject(ProfileStore.shared)
             .environmentObject(VortXSyncManager.shared)
             .preferredColorScheme(.dark)
+            // Settings > Effects and performance > Animations, read once here for every view below.
+            .visualEffectsRoot()
             // The app's own `vortx://` scheme. Its only minter today is the Top Shelf extension handing
             // back a tap from the tvOS Home screen; the router parks the destination and RootView
             // presents it, so a link that arrives during the splash / profile picker still lands.
