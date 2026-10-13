@@ -156,13 +156,13 @@ final class CoreBridge: ObservableObject {
         try await facade.setLibraryMembership(id: id, type: type, name: name, poster: poster, present: present,
                                               profileID: profile.uuidString, expectedAccountGeneration: epoch)
         guard nativePlaybackBinding(target)?.0 === facade else { throw VortxNativeError.superseded }
-        // Preserve the detail Library removal's provider mirror, but only after the native
-        // checkpoint acknowledged it and while this exact owner/profile still owns the gesture.
-        if !present {
-            ScrobbleCoordinator.shared.removedFromLibrary(
-                PlaybackMeta(libraryId: id, videoId: id, type: type, name: name,
-                             poster: poster, season: nil, episode: nil))
-        }
+        // Mirror both directions only after the native checkpoint acknowledged persistence,
+        // and while the exact owner/profile still owns this gesture. The coordinator keeps
+        // its owner-profile, provider-session and opt-in gates; a failed/stale write sends nothing.
+        let meta = PlaybackMeta(libraryId: id, videoId: id, type: type, name: name,
+                                poster: poster, season: nil, episode: nil)
+        if present { ScrobbleCoordinator.shared.addedToLibrary(meta) }
+        else { ScrobbleCoordinator.shared.removedFromLibrary(meta) }
     }
     @MainActor
     func markNativeVideoWatched(_ video: CoreVideo, _ isWatched: Bool,
