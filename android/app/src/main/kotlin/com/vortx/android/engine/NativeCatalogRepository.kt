@@ -975,7 +975,10 @@ internal class NativeCatalogRepository(
                 if (playing !== current) return@owned
                 session.dispatch(listOf(action("report_progress").put("metaId", current.context.contentId).put("videoId", current.context.videoId)
                     .put("name", current.context.title).put("positionMs", positionMs).put("durationMs", durationMs)
-                    .put("metadata", JSONObject().put("type", current.context.type).put("poster", current.context.poster))), current.owner)
+                    .put("metadata", JSONObject().put("type", current.context.type).put("poster", current.context.poster))), current.owner,
+                    // A periodic tick: its account upload may wait for playback to go quiet. The final report at
+                    // the end of playback stays an ordinary edit, so a finish reaches other devices promptly.
+                    progressOnly = true)
             }
         }
     }

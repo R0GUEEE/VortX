@@ -34,6 +34,8 @@ internal class NativeAccountCoordinator(
     private val watchedProducer: NativeWatchedMigrationProducer = NativeWatchedMigrationProducer(),
     private val captureOwnAccountAdmission: (SessionOwnerSnapshot.Account) -> (((() -> Boolean) -> Boolean)?) = { null },
     private val onAuthorityChanged: () -> Unit = {},
+    /** A committed playback-progress report; defaults to the ordinary mutation callback. */
+    private val onProgressMutation: (SessionOwnerSnapshot.Account) -> Unit = onMutation,
 ) : NativeAccountGateway {
     private data class Mounted(val account: SessionOwnerSnapshot.Account, val session: VortxNativeSession)
     private val mounted = AtomicReference<Mounted?>()
@@ -293,7 +295,8 @@ internal class NativeAccountCoordinator(
         val ownerName = state.getJSONObject("roster").getJSONObject("profiles").getJSONObject(scope.ownerProfileID).getString("name")
         val resources = transport()
         val candidate = try { VortxNativeSession.open(scope, ownerName, bindings, checkpoints, resources,
-            onMutation = { onMutation(account) }, beforeOwnerChange = onAuthorityChanged) { isCurrent() && accountCurrent(account) } }
+            onMutation = { onMutation(account) }, beforeOwnerChange = onAuthorityChanged,
+            onProgressMutation = { onProgressMutation(account) }) { isCurrent() && accountCurrent(account) } }
             catch (error: Throwable) { (resources as? AutoCloseable)?.close(); throw error }
         try { withAccountAdmission(account, isCurrent) { checkpoints.remember(scope) } }
         catch (error: Throwable) { candidate.close(); throw error }
@@ -591,7 +594,8 @@ internal class NativeAccountCoordinator(
             VortxNativeSession.open(scope, owner.name, bindings, checkpoints, resources,
             bootstrapActions = syncActions, initialHostProfiles = hostProfiles, initialHostArchive = archive,
             initialHostPreferences = remoteHost, initialLegacyWatchlists = watchlists.profiles,
-            verifyCandidate = verifySources, onMutation = { onMutation(account) }, beforeOwnerChange = onAuthorityChanged) { isCurrent() && accountCurrent(account) } } } }
+            verifyCandidate = verifySources, onMutation = { onMutation(account) }, beforeOwnerChange = onAuthorityChanged,
+            onProgressMutation = { onProgressMutation(account) }) { isCurrent() && accountCurrent(account) } } } }
             catch (error: Throwable) {
                 (resources as? AutoCloseable)?.close()
                 // Cancellation did not consume the durable setup source. Restore its setup-only

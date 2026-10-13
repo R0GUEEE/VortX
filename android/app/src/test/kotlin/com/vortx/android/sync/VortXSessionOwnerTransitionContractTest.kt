@@ -221,7 +221,7 @@ class VortXSessionOwnerTransitionContractTest {
             .substringAfter("fun requestSyncSoon()")
             .substringBefore("/** Catch-up PULL entry point")
 
-        val mark = requestSync.indexOf("pendingState.recordEdit(owner, proposedAttempt)")
+        val mark = requestSync.indexOf("pendingState.recordEdit(owner, proposedAttempt, progressOnly, uploadClockMs())")
         val createJob = requestSync.indexOf("scope.launch(start = CoroutineStart.LAZY)")
         val retry = requestSync.indexOf("runPendingSyncRetryLoop(")
         val push = requestSync.indexOf("val synced = syncUp(lease)")
@@ -235,6 +235,10 @@ class VortXSessionOwnerTransitionContractTest {
         assertTrue(push < complete)
         assertTrue(requestSync.contains("pendingState.owns(attempt, runningJob)"))
         assertTrue(requestSync.contains("maxDelayMs = SYNC_RETRY_MAX_MS"))
+        // Waits go through the upload window, and an accepted upload acknowledges it before completion.
+        assertTrue(requestSync.contains("waitForUploadWindow(attempt, runningJob, retryDelayMs.takeIf { it > SYNC_DEBOUNCE_MS })"))
+        val acknowledge = requestSync.indexOf("if (synced) pendingState.acknowledgeUpload(attempt, runningJob, editGeneration)")
+        assertTrue(push < acknowledge && acknowledge < complete)
     }
 
     @Test

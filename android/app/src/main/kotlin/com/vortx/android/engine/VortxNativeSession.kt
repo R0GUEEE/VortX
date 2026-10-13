@@ -276,6 +276,8 @@ internal class VortxNativeSession private constructor(
     private var websiteAddonEditPending: JSONObject,
     private val onMutation: () -> Unit,
     private val beforeOwnerChange: () -> Unit,
+    /** A committed playback-progress report: the account upload may wait for playback to go quiet. */
+    private val onProgressMutation: () -> Unit = onMutation,
 ) : AutoCloseable {
     private data class Slot(val ticket: UUID, val owner: VortxNativeOwner,
                             val bridges: MutableList<VortxResourceBridge> = mutableListOf(),
@@ -301,7 +303,8 @@ internal class VortxNativeSession private constructor(
                  initialHostPreferences: JSONObject? = null,
                  initialLegacyWatchlists: Map<String, List<com.vortx.android.library.WatchlistEntry>> = emptyMap(),
                  verifyCandidate: ((VortxNativeRuntime) -> Unit)? = null,
-                 onMutation: () -> Unit = {}, beforeOwnerChange: () -> Unit = {}, isAccountCurrent: () -> Boolean = { true }): VortxNativeSession {
+                 onMutation: () -> Unit = {}, beforeOwnerChange: () -> Unit = {},
+                 onProgressMutation: () -> Unit = onMutation, isAccountCurrent: () -> Boolean = { true }): VortxNativeSession {
             check(isAccountCurrent()) { "Native account changed" }
             scope.rejectCredentials(initialHostProfiles)
             scope.rejectCredentials(initialHostArchive)
@@ -399,7 +402,8 @@ internal class VortxNativeSession private constructor(
                 return VortxNativeSession(scope, bindings, store, transport, runtime, isAccountCurrent, JSONObject(hostProfiles.toString()), hostPending, hostState,
                     legacyMaterial?.let { JSONObject(it.toString()) }, archive?.let { JSONObject(it.toString()) },
                     legacyBootstrap?.let { JSONObject(it.toString()) },
-                    JSONObject(pendingWebsiteEdits.toString()), JSONObject(websiteCertificates.toString()), NativeWebsiteAddonEdits.detached(pendingAddonEdits), onMutation, beforeOwnerChange)
+                    JSONObject(pendingWebsiteEdits.toString()), JSONObject(websiteCertificates.toString()), NativeWebsiteAddonEdits.detached(pendingAddonEdits), onMutation, beforeOwnerChange,
+                    onProgressMutation = onProgressMutation)
                     .also { it.heldLegacyReconciliation = heldBootstrapReason }
             } catch (error: Throwable) { runtime.close(); throw error }
         }
@@ -592,7 +596,8 @@ internal class VortxNativeSession private constructor(
                               baselineHostProfiles: JSONObject? = null,
                               verifyCandidate: ((VortxNativeRuntime) -> Unit)? = null,
                               beforeCommit: () -> Unit = {}, profileFieldChanges: JSONObject? = null,
-                              legacyWatchlists: Map<String, List<com.vortx.android.library.WatchlistEntry>> = emptyMap()): List<String> = owned(owner) {
+                              legacyWatchlists: Map<String, List<com.vortx.android.library.WatchlistEntry>> = emptyMap(),
+                              progressOnly: Boolean = false): List<String> = owned(owner) {
         actions.forEach(scope::rejectCredentials)
         scope.rejectCredentials(hostProfiles)
         scope.rejectCredentials(hostArchive)
@@ -661,7 +666,7 @@ internal class VortxNativeSession private constructor(
                     it.getString("type") in setOf("patch_profile", "delete_profile", "install_addon", "remove_addon", "reorder_addons")
                 }) invalidate()
             changes.value += 1
-            if (notifyMutation) onMutation()
+            if (notifyMutation) { if (progressOnly) onProgressMutation() else onMutation() }
             results
         } finally { if (!installed) candidate.close() }
     }

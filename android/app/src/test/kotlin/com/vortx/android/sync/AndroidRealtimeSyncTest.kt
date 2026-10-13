@@ -129,10 +129,15 @@ class AndroidRealtimeSyncTest {
             manager.installSessionRestoreTestSeam(manager.currentSession())
             manager.installNativeGatewayTestSeam(gateway, providers)
             manager.installRealtimeTestSeam(realtime)
+            manager.uploadClockMs = { scheduler.currentTime }
         }
         fun edit(name: String) {
             gateway.carrier.getJSONObject("facts").put(name, true)
             manager.onLocalNativeMutation(SessionOwnerSnapshot.Account(account.id, 1))
+        }
+        fun progress(name: String) {
+            gateway.carrier.getJSONObject("facts").put(name, true)
+            manager.onLocalNativeMutation(SessionOwnerSnapshot.Account(account.id, 1), progressOnly = true)
         }
         fun enableConditionalTransport() {
             manager.installConditionalTransportTestSeam { method, _, body, token, tag ->
@@ -283,6 +288,43 @@ class AndroidRealtimeSyncTest {
             assertTrue(f.cloud.getJSONObject("nativeSync").getJSONObject("facts").getBoolean("during-put"))
             assertFalse(f.dirty())
             assertEquals("preserved", f.cloud.getString("foreign"))
+        } finally { f.close() }
+    }
+
+    @Test fun `playback progress uploads once playback goes quiet, not every few seconds`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            for (tick in 0 until 6) { f.progress("tick-$tick"); runCurrent(); advanceTimeBy(5_000) }
+            assertEquals(0, f.puts) // thirty seconds of playback, no upload yet
+            assertTrue(f.dirty())   // the pending intent is durable all the while
+            advanceTimeBy(9_000); runCurrent()
+            assertEquals(0, f.puts)
+            advanceTimeBy(1_100); runCurrent() // fifteen quiet seconds after the last report
+            assertEquals(1, f.puts)
+            assertTrue(f.cloud.getJSONObject("nativeSync").getJSONObject("facts").getBoolean("tick-5"))
+            assertFalse(f.dirty())
+        } finally { f.close() }
+    }
+
+    @Test fun `continuous playback still uploads within a minute`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            var tick = 0
+            while (testScheduler.currentTime < 59_000) { f.progress("tick-${tick++}"); runCurrent(); advanceTimeBy(5_000) }
+            runCurrent(); advanceTimeBy(1_200); runCurrent()
+            assertEquals(1, f.puts)
+        } finally { f.close() }
+    }
+
+    @Test fun `a real edit during playback is not held behind the progress window`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            f.progress("tick"); runCurrent(); advanceTimeBy(5_000)
+            f.edit("renamed-profile"); runCurrent()
+            advanceTimeBy(2_501); runCurrent()
+            assertEquals(1, f.puts)
+            assertTrue(f.cloud.getJSONObject("nativeSync").getJSONObject("facts").getBoolean("renamed-profile"))
+            assertFalse(f.dirty())
         } finally { f.close() }
     }
 

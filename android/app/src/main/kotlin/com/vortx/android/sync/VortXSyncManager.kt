@@ -20,6 +20,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -523,6 +525,10 @@ internal class PendingSyncAttempt internal constructor(
     @Volatile
     internal var job: Job? = null
     internal var editGeneration = 1L
+    /** Guarded by [DurablePendingSyncState]'s lock, like [editGeneration]. */
+    internal val window = ProgressUploadWindow()
+    /** Wakes a worker that is only sitting out a playback-progress window when a real edit arrives. */
+    internal val urgentWake = Channel<Unit>(Channel.CONFLATED)
 }
 
 internal data class PendingSyncClaim(
@@ -554,6 +560,8 @@ internal class DurablePendingSyncState(
     fun recordEdit(
         nextOwner: PendingSyncOwner,
         nextAttempt: PendingSyncAttempt,
+        progressOnly: Boolean = false,
+        nowMs: Long = System.nanoTime() / 1_000_000L,
     ): PendingSyncClaim = synchronized(lock) {
         // Synchronous durable write precedes creation and start of the debounce coroutine.
         truthByAccount[nextOwner.accountId] = if (writeMarker(nextOwner.accountId, true)) {
@@ -567,14 +575,42 @@ internal class DurablePendingSyncState(
         if (owner == nextOwner && current?.job?.let { !it.isCancelled && !it.isCompleted } == true) {
             check(current.editGeneration < Long.MAX_VALUE) { "Pending edit generation exhausted" }
             current.editGeneration++
-            // A continuing stream of progress events must not postpone the first upload forever.
-            // Do not cancel a PUT either: its exact snapshot will be acknowledged independently.
+            current.window.record(current.editGeneration, progressOnly, nowMs)
+            // A continuing stream of edits must not postpone the first upload forever, and a real edit
+            // must not wait behind a playback-progress window. Do not cancel a PUT either: its exact
+            // snapshot will be acknowledged independently.
+            if (!progressOnly) current.urgentWake.trySend(Unit)
             return@synchronized PendingSyncClaim(blockPull = true)
         }
         val replaced = attempt?.job
         owner = nextOwner
         attempt = nextAttempt
+        nextAttempt.window.record(nextAttempt.editGeneration, progressOnly, nowMs)
         PendingSyncClaim(blockPull = true, attemptToStart = nextAttempt, replacedJob = replaced)
+    }
+
+    /** The wait before this attempt's next upload; null once it no longer owns the pending state. */
+    fun uploadWait(
+        expectedAttempt: PendingSyncAttempt,
+        job: Job,
+        nowMs: Long,
+        urgentDelayMs: Long,
+        failureBackoffMs: Long?,
+    ): UploadWait? = synchronized(lock) {
+        if (owner == expectedAttempt.owner && attempt === expectedAttempt && expectedAttempt.job === job) {
+            expectedAttempt.window.nextDelayMs(nowMs, urgentDelayMs, failureBackoffMs)
+        } else {
+            null
+        }
+    }
+
+    /** An accepted upload covered edits up to [uploadedGeneration]; later progress opens a fresh window. */
+    fun acknowledgeUpload(expectedAttempt: PendingSyncAttempt, job: Job, uploadedGeneration: Long) {
+        synchronized(lock) {
+            if (owner == expectedAttempt.owner && attempt === expectedAttempt && expectedAttempt.job === job) {
+                expectedAttempt.window.acknowledge(uploadedGeneration, expectedAttempt.editGeneration)
+            }
+        }
     }
 
     fun claimRestored(
@@ -1714,9 +1750,10 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     fun onLocalOwnerLibraryChanged() = requestSyncSoon()
 
     /** Origin must be captured by the mounted native transaction, not after an async queue hop. */
-    internal fun onLocalNativeMutation(origin: SessionOwnerSnapshot.Account) {
+    /** [progressOnly]: a periodic playback-progress report, whose upload may wait for playback to go quiet. */
+    internal fun onLocalNativeMutation(origin: SessionOwnerSnapshot.Account, progressOnly: Boolean = false) {
         val lease = captureSyncLease()?.takeIf { it.accountId == origin.id && it.ownerEpoch == origin.generation } ?: return
-        armPendingSync(lease, recordEdit = true)
+        armPendingSync(lease, recordEdit = true, progressOnly = progressOnly)
     }
 
     private fun resolveStore(): ProfileStore? = profileStore ?: ProfileStore.sharedOrNull()
@@ -2861,12 +2898,13 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     private fun armPendingSync(
         lease: SyncSessionLease,
         recordEdit: Boolean,
+        progressOnly: Boolean = false,
     ): Boolean {
         if (!isSyncLeaseCurrent(lease)) return false
         val owner = pendingOwner(lease)
         val proposedAttempt = PendingSyncAttempt(owner)
         val claim = if (recordEdit) {
-            pendingState.recordEdit(owner, proposedAttempt)
+            pendingState.recordEdit(owner, proposedAttempt, progressOnly, uploadClockMs())
         } else {
             pendingState.claimRestored(owner, proposedAttempt)
         }
@@ -2887,13 +2925,17 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
                         !requiresUpgrade(lease) &&
                         pendingState.owns(attempt, runningJob)
                 },
-                wait = { delay(it) },
+                // The loop's delay is the ordinary debounce until an upload fails, then its backoff.
+                wait = { retryDelayMs ->
+                    waitForUploadWindow(attempt, runningJob, retryDelayMs.takeIf { it > SYNC_DEBOUNCE_MS })
+                },
                 attempt = {
                     if (!pendingState.ensureMarker(attempt, runningJob)) {
                         false
                     } else {
                         val editGeneration = pendingState.captureEditGeneration(attempt, runningJob) ?: return@runPendingSyncRetryLoop false
                         val synced = syncUp(lease)
+                        if (synced) pendingState.acknowledgeUpload(attempt, runningJob, editGeneration)
                         acceptedWithNewEdits = synced
                         synced &&
                             pendingState.completeAccepted(
@@ -2919,6 +2961,26 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         job.start()
         return claim.blockPull
     }
+
+    /**
+     * Sleep until [attempt] may upload: the ordinary cadence (or [failureBackoffMs]) for real edits, or until
+     * playback goes quiet for progress-only work. A real edit wakes a worker sitting out a progress window,
+     * and newer progress moves a quiet window later, so the wait is recomputed after each wake.
+     */
+    private suspend fun waitForUploadWindow(attempt: PendingSyncAttempt, job: Job, failureBackoffMs: Long?) {
+        while (true) {
+            val wait = pendingState.uploadWait(attempt, job, uploadClockMs(), SYNC_DEBOUNCE_MS, failureBackoffMs) ?: return
+            if (!wait.progressWindow) {
+                delay(wait.delayMs)
+                return
+            }
+            if (wait.delayMs <= PROGRESS_WINDOW_SLACK_MS) return
+            withTimeoutOrNull(wait.delayMs) { attempt.urgentWake.receive() }
+        }
+    }
+
+    /** Monotonic clock for upload windows; tests point it at the virtual scheduler. */
+    internal var uploadClockMs: () -> Long = { System.nanoTime() / 1_000_000L }
 
     /** Catch-up PULL entry point (manual "Sync now"); [startRealtime] is the foreground entry point. */
     fun syncDownSoon() {
@@ -3409,6 +3471,8 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
 
         /** Debounce for the coalesced auto-push (Apple `requestSyncSoon`: 2.5s). */
         private const val SYNC_DEBOUNCE_MS = 2_500L
+        /** A progress window this close to due is treated as due rather than slept again. */
+        private const val PROGRESS_WINDOW_SLACK_MS = 50L
 
         /** Cap for failed pending-push retries; the delay doubles from [SYNC_DEBOUNCE_MS]. */
         private const val SYNC_RETRY_MAX_MS = 60_000L
