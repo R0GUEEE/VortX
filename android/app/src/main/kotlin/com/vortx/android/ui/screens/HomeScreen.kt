@@ -1,6 +1,15 @@
 package com.vortx.android.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -306,13 +315,15 @@ private fun PhoneHeroHeader(
     // A nonblank URL is not proof the logo rendered. Persist failure only for this URL: composition drops
     // the broken AsyncImage, showing the accessible type/title fallback without retrying it each frame.
     var failedLogoUrl by remember(logoUrl) { mutableStateOf<String?>(null) }
-    val choose: (Boolean) -> Unit = { forward ->
+    val show: (Int) -> Unit = { target ->
         interactionHeld = true
-        val next = PhoneHeroPolicy.nextIndex(index, candidates.size, forward)
-        selectedIndex = next.toLong()
-        selectedIdentity = PhoneHeroPolicy.identity(candidates[next])
+        selectedIndex = target.toLong()
+        selectedIdentity = PhoneHeroPolicy.identity(candidates[target])
         generation += 1
     }
+    val choose: (Boolean) -> Unit = { forward -> show(PhoneHeroPolicy.nextIndex(index, candidates.size, forward)) }
+    val currentChoose by rememberUpdatedState(choose)
+    val swipeThresholdPx = with(LocalDensity.current) { PhoneHeroPolicy.SWIPE_DISTANCE_DP.dp.toPx() }
     val colors = VortXTheme.colors
     // The featured title's real artwork, drawn from the SAME catalog data the rails use: prefer the
     // wide featured backdrop ([MetaItem.background], what browse pages lead with and what the engine's
@@ -338,6 +349,29 @@ private fun PhoneHeroHeader(
             // AFTER this one, appeared to render "behind" it -- the device-round "Obsession" overlap
             // finding. Clipping plus the title's own line/overflow limit below are the two guards.
             .clipToBounds()
+            // Swipe the billboard to page it, as on Apple. A horizontal detector only engages once the
+            // drag is clearly sideways, so a vertical scroll that starts on the hero still scrolls Home.
+            .then(
+                if (candidates.size > 1) {
+                    Modifier.pointerInput(swipeThresholdPx) {
+                        var travel = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { travel = 0f },
+                            onDragEnd = {
+                                when (PhoneHeroPolicy.swipeStep(travel, swipeThresholdPx)) {
+                                    1 -> currentChoose(true)
+                                    -1 -> currentChoose(false)
+                                }
+                            },
+                        ) { change, dragAmount ->
+                            change.consume()
+                            travel += dragAmount
+                        }
+                    }
+                } else {
+                    Modifier
+                },
+            )
             // Tap the billboard to open the featured title, the same action a poster tap performs.
             .clickable { onItem(item) }
             // Placeholder fill for when there is no artwork yet; hidden behind the image when there is.
@@ -417,13 +451,22 @@ private fun PhoneHeroHeader(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.padding(top = VortXTheme.spacing.sm),
                 ) {
-                    TextButton(onClick = { choose(false) }) { Text("Previous") }
-                    Text(
-                        text = candidates.indices.joinToString(" ") { if (it == index) "●" else "○" },
-                        style = VortXTheme.type.label.copy(color = colors.textSecondary),
-                        modifier = Modifier.padding(horizontal = VortXTheme.spacing.xs),
-                    )
-                    TextButton(onClick = { choose(true) }) { Text("Next") }
+                    // Pager dots: the current title is the accent capsule, and each dot jumps to its title.
+                    // The vertical padding gives the 6dp dot a usable touch target without changing its look.
+                    candidates.indices.forEach { i ->
+                        val active = i == index
+                        Box(
+                            modifier = Modifier
+                                .clickable(role = Role.Button) { if (!active) show(i) }
+                                .semantics {
+                                    contentDescription = "Featured title ${i + 1} of ${candidates.size}"
+                                    this.selected = active
+                                }
+                                .padding(horizontal = 3.dp, vertical = 10.dp)
+                                .size(width = if (active) 18.dp else 6.dp, height = 6.dp)
+                                .background(if (active) colors.accent else colors.textPrimary.copy(alpha = 0.28f), CircleShape),
+                        )
+                    }
                     if (interactionHeld) {
                         TextButton(onClick = { interactionHeld = false }) { Text("Resume") }
                     }
