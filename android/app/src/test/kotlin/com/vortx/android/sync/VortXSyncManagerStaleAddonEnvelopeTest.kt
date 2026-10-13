@@ -17,17 +17,22 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class VortXSyncManagerStaleAddonEnvelopeTest {
     private val managers = mutableListOf<VortXSyncManager>()
+    /** These drive the legacy add-on/library publication gateways; the native engine publishes its own
+     * carrier and never reaches them. Run with -Pvortx.nativeEngine=false -Pvortx.nativeResourceHost=false. */
+    private fun legacyRouteOnly() = Assume.assumeFalse("legacy publication route", com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED)
     private fun newManager(context: Context) = VortXSyncManager(context).also { managers.add(it) }
     @org.junit.After fun cleanupManagers() = runBlocking {
         managers.forEach { it.cancelSyncTestWork() }
         managers.clear()
     }
     @Test fun `B account publishes only authenticated configured addons until explicit import`() = runBlocking {
+        legacyRouteOnly()
         Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             for (uid in listOf(null, "shared")) {
@@ -160,6 +165,7 @@ class VortXSyncManagerStaleAddonEnvelopeTest {
 
     @Test
     fun `encrypted B sync with shared or null native owner never adopts resident A history implicitly`() = runBlocking {
+        legacyRouteOnly()
         Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             for (uid in listOf(null, "shared-native")) {
@@ -242,6 +248,7 @@ class VortXSyncManagerStaleAddonEnvelopeTest {
     }
 
     @Test fun `encrypted manager carries manual intents and unsaved progress without membership or deletion`() = runBlocking {
+        legacyRouteOnly()
         Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             val context = MemoryContext()
@@ -372,6 +379,7 @@ class VortXSyncManagerStaleAddonEnvelopeTest {
 
     @Test
     fun `real account switch isolates tombstones and sync upload preserves opaque peer entries`() = runBlocking {
+        legacyRouteOnly()
         Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             for (removeTypedRow in listOf(false, true)) {
@@ -446,6 +454,7 @@ class VortXSyncManagerStaleAddonEnvelopeTest {
 
     @Test
     fun `public manager restores existing history and never advances a failed or expired receipt`() = runBlocking {
+        legacyRouteOnly()
         Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             for (mode in listOf("success", "unsavedHistory", "savedHistory", "sparseApple", "conditionalOwned", "conditionalCold", "conditionalUnknown", "conditionalChanged", "tombstoneOnly", "readded", "metadataReadd", "metadataOlderProgress", "metadataStaleReadd", "null", "wrongUid", "afterRead", "beforeDispatch", "afterResponse")) {
@@ -611,6 +620,7 @@ class VortXSyncManagerStaleAddonEnvelopeTest {
 
     @Test
     fun `public sync up cannot publish a native snapshot returned after same uid account replacement`() = runBlocking {
+        legacyRouteOnly()
         Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             val context = MemoryContext()
@@ -808,6 +818,7 @@ class VortXSyncManagerStaleAddonEnvelopeTest {
 
     @Test
     fun `public sync down folds only add-on tombstones from an authenticated older envelope`() = runBlocking {
+        legacyRouteOnly()
         val main = UnconfinedTestDispatcher()
         Dispatchers.setMain(main)
         try {

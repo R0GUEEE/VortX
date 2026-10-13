@@ -33,7 +33,7 @@ class VortXSyncManagerBackupRevisionTest {
     private val owner = UserProfile(id = UserProfile.OWNER_ID, name = "Baseline", avatar = "star", isOwner = true)
     private val principal = SessionOwnerSnapshot.Account(account.id, 1)
     private fun bindings(): VortxRuntimeBindings {
-        check(com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED)
+        org.junit.Assume.assumeTrue("native sync route", com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED)
         System.load(requireNotNull(System.getenv("VORTX_JNI_LIBRARY")))
         return object : VortxRuntimeBindings {
             override fun create(ownerId: String, ownerName: String) = VortxCore.nativeInitRuntime(JSONObject().put("ownerId", ownerId).put("ownerName", ownerName).toString())
@@ -103,6 +103,10 @@ class VortXSyncManagerBackupRevisionTest {
             manager.installSessionRestoreTestSeam(manager.currentSession())
             manager.installNativeGatewayTestSeam(local, providers)
             assertTrue(peer.applyDocument(principal, initial()) { true })
+            // The account already carries the first native publication, so mounting it leaves no
+            // republish owning the pending state; each scenario's own edit is the only upload intent.
+            val published = requireNotNull(peer.exportDocument(principal))
+            cloud = initial().put("nativeSync", published.nativeSync).put("nativeHostPreferences", published.hostPreferences)
             assertTrue(manager.syncDown(true))
         }
         fun peerWins() {
@@ -304,12 +308,19 @@ class VortXSyncManagerBackupRevisionTest {
         val fixture = Fixture()
         try {
             fixture.start(); fixture.localEdit()
+            val oldSession = fixture.local.session()
+            val oldRead = oldSession.read()
+            assertTrue(oldRead.state.getJSONObject("nativeHostPreferenceState").getBoolean("pending"))
             fixture.injected = { fixture.manager.replaceSyncSessionTestSeam(
                 VortXSyncManager.Session("replacement-fixture-token", account, key)) }
             assertFalse(fixture.manager.syncUp())
             assertEquals(listOf(40L), fixture.bases)
             assertEquals(40L, fixture.manager.lastAppliedVersion())
-            assertTrue(fixture.local.session().read().state.getJSONObject("nativeHostPreferenceState").getBoolean("pending"))
+            // Reauthentication retires the mount: it can neither be read nor acknowledge the pending
+            // intent, which stays in the durable checkpoint for the new lease's own mount.
+            assertTrue(runCatching { oldSession.read() }.isFailure)
+            val checkpoint = JSONObject(requireNotNull(fixture.disk.read(oldRead.owner.scope)))
+            assertTrue(checkpoint.getJSONObject("nativeHostPreferenceState").getBoolean("pending"))
         } finally { fixture.cleanup(); Dispatchers.resetMain() }
     }
 
