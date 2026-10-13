@@ -458,6 +458,7 @@ fun TvPersonOverlay(seed: PersonSeed, onOpenTitle: (MetaItem) -> Unit, onBack: (
             seed = seed,
             onBack = onBack,
             onOpenTitle = onOpenTitle,
+            showWebLinks = false, // TV has no browser
         )
     }
 }

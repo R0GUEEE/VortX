@@ -141,13 +141,16 @@ object TMDBPersonClient {
             placeOfBirth = obj.optStringOrNull("place_of_birth"),
             profileUrl = obj.optStringOrNull("profile_path")?.let { "$IMAGE_BASE/w342$it" },
             knownForDepartment = obj.optStringOrNull("known_for_department"),
+            imdbId = obj.optStringOrNull("imdb_id"),
+            birthdayIso = obj.optStringOrNull("birthday"),
+            deathdayIso = obj.optStringOrNull("deathday"),
         )
     }
 
     /// A person's filmography via `/person/{id}/combined_credits`, mapped onto the same [MetaItem] cards
     /// the hub rails use (id = "tmdb:<id>", type from `media_type`, poster from `poster_path`). Ported
     /// from `TMDBClient.personCredits(id:)`: deduped by id, entries with no poster or title dropped,
-    /// sorted most-popular first then newest. [] on a non-positive id or any error.
+    /// sorted newest first (undated last), then by popularity. [] on a non-positive id or any error.
     suspend fun personCredits(id: Int): List<MetaItem> {
         if (id <= 0) return emptyList()
         val obj = getJson("/person/$id/combined_credits") ?: return emptyList()
@@ -172,13 +175,16 @@ object TMDBPersonClient {
                     name = name,
                     poster = "$IMAGE_BASE/w342$posterPath",
                     year = date.take(4).takeIf { it.length == 4 },
+                    // The 16:9 backdrop for a landscape Poster Style.
+                    background = entry.optStringOrNull("backdrop_path")?.let { "$IMAGE_BASE/w780$it" },
                 ),
                 popularity = entry.optDouble("popularity", 0.0),
                 date = date,
             )
         }
+        // Newest first (undated last), then the more popular, matching Apple's filmography order.
         return ranked
-            .sortedWith(compareByDescending<Ranked> { it.popularity }.thenByDescending { it.date })
+            .sortedWith(compareBy<Ranked> { it.date.isEmpty() }.thenByDescending { it.date }.thenByDescending { it.popularity })
             .map { it.item }
     }
 
