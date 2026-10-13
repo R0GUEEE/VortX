@@ -137,6 +137,7 @@ import com.vortx.android.ui.theme.VortXIcons
 import com.vortx.android.ui.theme.VortXShapes
 import com.vortx.android.ui.theme.VortXTheme
 import com.vortx.android.ui.theme.vortxGlass
+import com.vortx.android.ui.theme.vortxGlassChip
 import com.vortx.android.ui.theme.vortxGlassToast
 import com.vortx.android.ui.viewmodel.DetailViewModel
 import com.vortx.android.ui.viewmodel.DetailNavigationFence
@@ -1859,6 +1860,87 @@ private fun SeasonPosterTile(
     }
 }
 
+/// Add-on names as the source navigation: two-line accent tabs ("All" first, then each add-on in the incoming
+/// order) with ‹ › buttons that step the row three names at a time, since a mouse or a keyboard cannot swipe
+/// it the way a finger or trackpad can. Mirrors Apple `sourceAddonTabs`.
+@Composable
+private fun SourceAddonStrip(
+    entries: List<Pair<String?, Int>>,
+    selected: String?,
+    onSelect: (String?) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val selectedIndex = entries.indexOfFirst { it.first == selected }.coerceAtLeast(0)
+    LaunchedEffect(selectedIndex) {
+        val visible = listState.layoutInfo.visibleItemsInfo
+        if (visible.none { it.index == selectedIndex }) listState.animateScrollToItem(selectedIndex)
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.xs),
+    ) {
+        SourceAddonStepButton(forward = false, enabled = listState.canScrollBackward) {
+            scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex - ADDON_STRIP_STEP).coerceAtLeast(0)) }
+        }
+        LazyRow(
+            state = listState,
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm),
+        ) {
+            items(entries, key = { it.first ?: "\u0000all" }) { (addon, count) ->
+                SourceAddonTab(title = addon ?: "All", count = count, selected = addon == selected) { onSelect(addon) }
+            }
+        }
+        SourceAddonStepButton(forward = true, enabled = listState.canScrollForward) {
+            scope.launch {
+                listState.animateScrollToItem((listState.firstVisibleItemIndex + ADDON_STRIP_STEP).coerceAtMost(entries.lastIndex))
+            }
+        }
+    }
+}
+
+/// How many add-on names one ‹ › press moves the strip by.
+private const val ADDON_STRIP_STEP = 3
+
+@Composable
+private fun SourceAddonTab(title: String, count: Int, selected: Boolean, onClick: () -> Unit) {
+    val colors = VortXTheme.colors
+    val tone = if (selected) colors.accent else colors.textSecondary
+    val sources = "$count source${if (count == 1) "" else "s"}"
+    Column(
+        modifier = Modifier
+            .widthIn(min = 104.dp)
+            .vortxGlassChip(selected = selected)
+            .then(if (selected) Modifier.border(BorderStroke(1.5.dp, colors.accent), VortXShapes.chip) else Modifier)
+            .clickable(role = Role.Button, onClickLabel = "Show $title sources", onClick = onClick)
+            .semantics { this.selected = selected }
+            .padding(horizontal = VortXTheme.spacing.md, vertical = VortXTheme.spacing.sm),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(text = title.uppercase(), style = VortXTheme.type.eyebrow, color = tone, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(text = sources, style = VortXTheme.type.eyebrow, color = tone, maxLines = 1)
+    }
+}
+
+@Composable
+private fun SourceAddonStepButton(forward: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val colors = VortXTheme.colors
+    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(44.dp)) {
+        Box(
+            modifier = Modifier.size(34.dp).vortxGlassChip(selected = false),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (forward) VortXIcons.chevronRight else VortXIcons.chevronLeft,
+                contentDescription = if (forward) "Scroll add-ons forward" else "Scroll add-ons back",
+                tint = if (enabled) colors.accent else colors.textTertiary,
+            )
+        }
+    }
+}
+
 /// Sentinel for the trailing "…" chip's own menu instance (distinct from any real season number).
 private const val MENU_ALL_SEASONS = Int.MIN_VALUE
 
@@ -2015,30 +2097,20 @@ private fun SourcesSection(
                     )
                 }
                 if (total > 0) {
-                    // Per-add-on filter chips ("All (N)" + one per group), only when there is more than one
-                    // add-on to filter between (Apple's `filterBar`, shown for groups.count > 1).
+                    // The add-on strip ("All" + one per group), only when there is more than one add-on to
+                    // filter between (Apple's `sourceAddonTabs`, shown for groups.count > 1).
                     if (groups.size > 1) {
-                        Row(
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.xs),
-                        ) {
-                            Chip(
-                                label = "All ($total)",
-                                selected = effectiveSourceFilter == null,
-                                onClick = { sourceFilter = null },
-                            )
-                            groups.forEach { group ->
-                                Chip(
-                                    label = "${group.addon} (${group.streams.size})",
-                                    selected = effectiveSourceFilter == group.addon,
-                                    onClick = {
-                                        collapsed = collapsed - group.addon
-                                        sourceFilter = group.addon
-                                        sourceJumpRevision += 1
-                                    },
-                                )
-                            }
-                        }
+                        SourceAddonStrip(
+                            entries = listOf<Pair<String?, Int>>(null to total) + groups.map { it.addon to it.streams.size },
+                            selected = effectiveSourceFilter,
+                            onSelect = { addon ->
+                                if (addon != null) {
+                                    collapsed = collapsed - addon
+                                    sourceJumpRevision += 1
+                                }
+                                sourceFilter = addon
+                            },
+                        )
                     }
                     // Sort (Best/Size/Seeders) + the two-level Quality menu + Copy all links, on one scrolling row.
                     Row(
