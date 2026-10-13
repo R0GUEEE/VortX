@@ -254,13 +254,12 @@ struct SmartCollectionRules: Codable, Equatable, Sendable {
 /// (known field name, object or null, bounded size). Content is read with `try?`: a value this version
 /// cannot decode just shows nothing, it never stops the account from syncing.
 enum ForYouSync {
-    static let prefix = "forYou."
-    static let maxBytes = 16_384
+    static let prefix = VortxNativeHostPreferences.forYouPrefix
+    static let maxBytes = VortxNativeHostPreferences.forYouMaxBytes
 
+    /// The host preference validator itself, so a local write is held to exactly what a peer accepts.
     static func validate(_ field: String, value: VortxJSON) throws {
-        guard field == ForYouInterests.field || isCollectionField(field) else { throw VortxNativeError.invalidSnapshot }
-        if value == .null { return }
-        guard case .object = value, try JSONEncoder().encode(value).count <= maxBytes else { throw VortxNativeError.invalidSnapshot }
+        try VortxNativeHostPreferences.validateForYouField(field, value: value)
     }
 
     /// `forYou.collection.<lowercase uuid>`.

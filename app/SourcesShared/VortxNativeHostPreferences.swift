@@ -166,7 +166,7 @@ struct VortxNativeHostPreferences: Sendable {
     }
     private static func validateField(_ name: String, value: VortxJSON, global: Bool) throws {
         if !global, name.hasPrefix(VortxNativeWatchlist.prefix) { try VortxNativeWatchlist.validate(name, value: value) }
-        if !global, name.hasPrefix(ForYouSync.prefix) { try ForYouSync.validate(name, value: value) }
+        if !global, name.hasPrefix(forYouPrefix) { try validateForYouField(name, value: value) }
         let normalized = name.lowercased()
         guard !name.isEmpty, !Set(kernelFields.map { $0.lowercased() }).contains(normalized),
               !Set(reservedGlobals.map { $0.lowercased() }).contains(normalized),
@@ -190,6 +190,22 @@ struct VortxNativeHostPreferences: Sendable {
         let archive = try VortxNativeBootstrapArchive.encode(document: bytes)
         let parsed = try JSONDecoder().decode(VortxJSON.self, from: archive)
         guard parsed["excludedCredentialPaths"] == .array([]) else { throw VortxNativeError.invalidSnapshot }
+    }
+    /// The For You namespace: `forYou.interests` and `forYou.collection.<lowercase uuid>` (see
+    /// `ForYouSync`). Every received host document is validated register by register and one failure
+    /// rejects the whole document, so this checks structure only (known name, object or null, bounded
+    /// size); content is decoded leniently where it is read, so a newer app's value can never stop sync.
+    static let forYouPrefix = "forYou."
+    static let forYouMaxBytes = 16_384
+    static func validateForYouField(_ name: String, value: VortxJSON) throws {
+        let collectionPrefix = forYouPrefix + "collection."
+        let isCollection = name.hasPrefix(collectionPrefix) && {
+            let id = String(name.dropFirst(collectionPrefix.count))
+            return UUID(uuidString: id)?.uuidString.lowercased() == id
+        }()
+        guard name == forYouPrefix + "interests" || isCollection else { throw VortxNativeError.invalidSnapshot }
+        if value == .null { return }
+        guard case .object = value, try JSONEncoder().encode(value).count <= forYouMaxBytes else { throw VortxNativeError.invalidSnapshot }
     }
     private static func maximum(_ document: Document) -> UInt64 {
         (document.globals.fields.values.map(\.clock) + document.profiles.values.flatMap { $0.fields.values.map(\.clock) }).max() ?? 0

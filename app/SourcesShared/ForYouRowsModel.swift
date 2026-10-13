@@ -124,3 +124,33 @@ final class ForYouRowsModel: ObservableObject {
         if collectionRows != collection { collectionRows = collection }
     }
 }
+
+/// Titles for every smart collection on the Library screen (pinned or not), fetched one collection at
+/// a time and cached by rules, so renaming or pinning never refetches.
+@MainActor
+final class SmartCollectionTitlesModel: ObservableObject {
+    @Published private(set) var titles: [String: [MetaPreview]] = [:]
+    @Published private(set) var loading: Set<String> = []
+    private var cache: [String: [MetaPreview]] = [:]
+    private var task: Task<Void, Never>?
+
+    func load(_ collections: [SmartCollection]) {
+        task?.cancel()
+        let keyed = collections.map { (id: $0.id, key: String(describing: $0.rules), rules: $0.rules) }
+        var known: [String: [MetaPreview]] = [:]
+        for entry in keyed { if let cached = cache[entry.key] { known[entry.id] = cached } }
+        titles = known
+        let missing = keyed.filter { cache[$0.key] == nil }
+        loading = Set(missing.map(\.id))
+        guard !missing.isEmpty else { return }
+        task = Task { [weak self] in
+            for entry in missing {
+                let items = await ForYouRowsModel.titles(for: entry.rules)
+                guard !Task.isCancelled, let self else { return }
+                if !items.isEmpty { self.cache[entry.key] = items }
+                self.titles[entry.id] = items
+                self.loading.remove(entry.id)
+            }
+        }
+    }
+}

@@ -562,7 +562,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     /// the edit lands only for the profile and account generation it was captured on, and the
     /// continuation resumes after the durable commit, not on admission.
     func setForYouField(_ field: String, value: VortxJSON, expected: WatchlistBinding) async throws {
-        try ForYouSync.validate(field, value: value)
+        try VortxNativeHostPreferences.validateForYouField(field, value: value)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             lock.lock(); defer { lock.unlock() }
             guard watchlistBinding == expected else { continuation.resume(throwing: VortxNativeError.superseded); return }

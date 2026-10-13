@@ -101,10 +101,19 @@ struct LibraryView: View {
                         Color.clear.frame(height: 0).scrollToTopAnchor()   // re-select Library tab -> scroll here
                         Text("Library").screenTitleStyle().padding(.horizontal, Theme.Space.screenEdge)
                         // Watchlist is the profile's watch-later ledger, separate from saved Library titles.
-                        NavigationLink { TVWatchlistView() } label: {
-                            Label("Watchlist", systemImage: "star")
+                        // Smart collections are the profile's own rule-built rows (synced like the watchlist).
+                        HStack(spacing: Theme.Space.sm) {
+                            NavigationLink { TVWatchlistView() } label: {
+                                Label("Watchlist", systemImage: "star")
+                            }
+                            .buttonStyle(ChipButtonStyle(selected: false))
+                            if profiles.active?.isKids != true {
+                                NavigationLink { TVSmartCollectionsView() } label: {
+                                    Label("Smart collections", systemImage: "line.3.horizontal.decrease.circle")
+                                }
+                                .buttonStyle(ChipButtonStyle(selected: false))
+                            }
                         }
-                        .buttonStyle(ChipButtonStyle(selected: false))
                         .padding(.horizontal, Theme.Space.screenEdge)
                         // Offline downloads (#30): a section ABOVE the saved-titles grid, shown only when at
                         // least one download exists. Plays from the local file with pause/resume/delete +

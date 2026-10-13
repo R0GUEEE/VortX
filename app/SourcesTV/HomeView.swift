@@ -18,6 +18,11 @@ struct HomeView: View {
     @StateObject private var simklRails = SIMKLRailsModel()   // SIMKL plan-to-watch as a client-side rail (dormant with empty creds)
     @StateObject private var mediaServerRails = MediaServerCatalogsModel()   // "Recently added" on connected Plex/Jellyfin/Emby servers (dormant with none)
     @StateObject private var releaseCalendar = ReleaseCalendarModel()   // "Upcoming Episodes" from the series library (next 45 days)
+    @StateObject private var forYouRows = ForYouRowsModel()   // For You interest rows + smart collections pinned to Home
+    @ObservedObject private var forYou = ForYouStore.shared   // the profile's interests and smart collections (synced)
+    @State private var interestsPresentation: ForYouInterestsPresentation?
+    /// Profiles already offered the interests picker this session, so dismissing it with Menu is "not now".
+    @State private var interestsOffered: Set<UUID> = []
     @ObservedObject private var collectionsHub = CollectionsHubModel.shared   // Collections hub (shared singleton): Discover cards + Streaming-service tiles + Genre tiles
     @ObservedObject private var imported = ImportedCatalogs.shared   // user-imported list catalogs, rendered as Home rows
     @ObservedObject private var railPrefs = HomeRailPreferences.shared   // user's Home row order + hidden set (Continue Watching stays pinned first)
@@ -92,7 +97,7 @@ struct HomeView: View {
     }
 
     var body: some View {
-        homeChangeHandlers
+        homeForYouHandlers
     }
 
     /// The Home shell: the hero backdrop, the rail strip, and the header overlay. Split out of
@@ -284,9 +289,50 @@ struct HomeView: View {
         .onReceive(NotificationCenter.default.publisher(for: LibraryAutoAdd.watchlistChangedNote)) { _ in refreshReleaseCalendar() }
     }
 
+    /// Third pass: For You and smart collections follow the profile's synced choices, and the interests
+    /// picker is offered once per profile the first time its choices are known and still undecided.
+    private var homeForYouHandlers: some View {
+        homeChangeHandlers
+        .onChange(of: forYou.interests) { _ in refreshForYou() }
+        .onChange(of: forYou.collections) { _ in refreshForYou() }
+        .onChange(of: forYou.ready) { _ in refreshForYou() }
+        .onChange(of: forYou.profileID) { _ in refreshForYou() }
+        .onChange(of: isActive) { _ in offerInterestsIfNeeded() }
+        .onChange(of: presenter.request == nil) { _ in offerInterestsIfNeeded() }
+        .fullScreenCover(item: $interestsPresentation) { presentation in
+            ForYouInterestsView(initial: forYou.interests, firstRun: presentation.firstRun) {
+                interestsPresentation = nil
+            }
+            .environmentObject(theme)
+        }
+    }
+
+    private var forYouEnabled: Bool {
+        forYou.ready && forYou.profileID == profiles.activeID && profiles.active?.isKids != true
+    }
+
+    /// Refetches only when the profile, interests or pinned rules change; library and Continue Watching
+    /// changes just re-filter the rows already fetched.
+    private func refreshForYou() {
+        let owned = Set((continueWatching + libraryItems)
+            .filter { !$0.id.isEmpty && $0.removed != true && $0.temp != true }.map(\.id))
+        forYouRows.refresh(profileID: profiles.activeID, interests: forYou.interests, collections: forYou.collections,
+                           owned: owned, watched: WatchedIndex.shared.ids, enabled: forYouEnabled)
+        offerInterestsIfNeeded()
+    }
+
+    private func offerInterestsIfNeeded() {
+        guard isActive, interestsPresentation == nil, presenter.request == nil, forYouEnabled,
+              let profile = profiles.activeID, forYou.interests?.decided != true,
+              !interestsOffered.contains(profile) else { return }
+        interestsOffered.insert(profile)
+        interestsPresentation = ForYouInterestsPresentation(firstRun: true)
+    }
+
     /// Recompute the "Top Picks for you" rail from the profile-aware Continue Watching + library.
     /// The model no-ops when the seed set is unchanged, so this is cheap to call on every re-emit.
     private func refreshTopPicks() {
+        refreshForYou()
         // These independently owned rails do not require the engine-history recommendation receipt.
         // Keep their throttled refreshes live even while personalized history admission is settling.
         traktRails.refresh()
@@ -398,6 +444,19 @@ struct HomeView: View {
     @ViewBuilder
     private func homeSection(_ section: HomeRail) -> some View {
         switch section {
+        case .forYou:
+            // Rows built from the profile's stated interests, each labelled with its reason. Never on a
+            // kids profile, and never before this profile's saved choices are known on this device.
+            if forYouEnabled {
+                ForYouHomeSectionTV(rows: forYouRows.interestRows, showInvite: forYou.interests?.isEmpty ?? true,
+                                    focusModel: focusModel,
+                                    onTune: { interestsPresentation = ForYouInterestsPresentation(firstRun: false) })
+            }
+        case .smartCollections:
+            // The profile's own rule-built collections that are pinned to Home.
+            ForEach(forYouRows.collectionRows) { row in
+                ExternalWatchlistRow(eyebrow: row.eyebrow, title: row.title, items: row.items, focusModel: focusModel)
+            }
         case .collectionsHub:
             // Collections hub (Discover cards, Streaming-service tiles, Genre tiles). Each tile opens a
             // sub-catalog browse grid. Needs a TMDB key; hidden without one.

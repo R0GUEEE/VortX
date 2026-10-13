@@ -141,5 +141,22 @@ expect(ForYouQuery.collectionSource(future, now: fixedNow) == .discover(
     movie: nil, tv: "sort_by=popularity.desc&vote_count.gte=50&first_air_date.lte=2026-10-13"),
     "an end year in the future is clamped to today")
 
+// MARK: Home section order: a new section lands where it ships, even in a customized layout.
+
+let tv = HomeRail.tvDefaultOrder
+expect(HomeRailPreferences.arrange(saved: [], defaults: tv) == tv, "an un-customized Home keeps the shipped order")
+expect(tv.prefix(2) == [.forYou, .smartCollections], "For You and smart collections sit under Continue Watching")
+let customized = ["addonCatalogs", "collectionsHub", "topPicks", "laterRail"]
+let arranged = HomeRailPreferences.arrange(saved: customized, defaults: tv)
+expect(Array(arranged.prefix(5)) == [.forYou, .smartCollections, .addonCatalogs, .collectionsHub, .topPicks],
+       "new sections with no saved predecessor go to the top, saved ones keep their order")
+expect(arranged.firstIndex(of: .becauseYouWatched) == arranged.firstIndex(of: .topPicks)! + 1,
+       "a missing section follows its nearest default predecessor")
+expect(Set(arranged) == Set(tv) && arranged.count == tv.count, "every default section appears exactly once, unknown ones dropped")
+expect(HomeRailPreferences.arrange(saved: ["topPicks", "topPicks"], defaults: tv).filter { $0 == .topPicks }.count == 1,
+       "a duplicated saved section appears once")
+expect(HomeRailPreferences.arrange(saved: ["editorialCollections", "topPicks"], defaults: tv).contains(.editorialCollections) == false,
+       "a section another platform has is dropped here")
+
 print("for-you model: \(checks) checks, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
