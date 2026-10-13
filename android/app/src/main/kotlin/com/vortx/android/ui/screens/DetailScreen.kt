@@ -1438,7 +1438,7 @@ internal fun toggledDetailCredits(expanded: Boolean): Boolean = !expanded
 /// The horizontal full-cast rail: one [CastTile] per member, scrolling edge-to-edge (its own leading/
 /// trailing inset rather than a padded parent) so tiles slide under the screen edge like the hub rails.
 @Composable
-private fun CastRail(members: List<CastMember>, onPersonTap: (PersonSeed) -> Unit) {
+internal fun CastRail(members: List<CastMember>, onPersonTap: (PersonSeed) -> Unit) {
     LazyRow(
         horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm),
         contentPadding = PaddingValues(horizontal = VortXTheme.spacing.edge),

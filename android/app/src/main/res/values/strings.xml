@@ -188,6 +188,7 @@
 
     <!-- Collections Hub. These strings are shared by the phone and TV presentations. -->
     <string name="collections_title">Collections</string>
+    <string name="search_people_title">People</string>
     <string name="collections_group_discover">Discover</string>
     <string name="collections_group_streaming">Streaming</string>
     <string name="collections_streaming_loading">Loading streaming services...</string>

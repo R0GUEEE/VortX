@@ -10,10 +10,12 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.text.DateFormat
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -207,6 +209,36 @@ object TMDBPersonClient {
             posters[number] = "$IMAGE_BASE/w342$path"
         }
         return posters
+    }
+
+    /// People whose name matches [query], via /3/search/person through the keyless edge, most popular first,
+    /// ported from Apple `TMDBClient.searchPeople`. Only people with a photo or a known-for credit are kept
+    /// (bare name collisions are noise). Each is a [CastMember] whose `character` line carries the department
+    /// TMDB best knows them for, so the cast tiles render a result unchanged. Fail-soft: empty.
+    suspend fun searchPeople(query: String, limit: Int = 20): List<CastMember> {
+        val trimmed = query.trim()
+        if (trimmed.length < 2) return emptyList()
+        val encoded = URLEncoder.encode(trimmed, "UTF-8").replace("+", "%20")
+        val results = getJson("/search/person?query=$encoded&include_adult=false")
+            ?.optJSONArray("results") ?: return emptyList()
+        return peopleResults(results, limit)
+    }
+
+    /// The /search/person `results` array as ranked people: a real id and name, a photo or a known-for
+    /// credit, most popular first, at most [limit].
+    internal fun peopleResults(results: JSONArray, limit: Int): List<CastMember> {
+        val ranked = ArrayList<Pair<CastMember, Double>>()
+        for (i in 0 until results.length()) {
+            val entry = results.optJSONObject(i) ?: continue
+            val id = entry.optInt("id", 0).takeIf { it > 0 } ?: continue
+            val name = entry.optStringOrNull("name") ?: continue
+            val profile = entry.optStringOrNull("profile_path")?.let { "$IMAGE_BASE/w185$it" }
+            val knownFor = entry.optJSONArray("known_for")?.length() ?: 0
+            if (profile == null && knownFor == 0) continue
+            val person = CastMember(id, name, entry.optStringOrNull("known_for_department"), profile)
+            ranked += person to entry.optDouble("popularity", 0.0)
+        }
+        return ranked.sortedByDescending { it.second }.take(limit).map { it.first }
     }
 
     /// Resolve a filmography card's catalog id to an IMDb `tt` id before opening its detail, ported from

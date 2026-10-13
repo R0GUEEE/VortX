@@ -354,7 +354,7 @@ fun TvCastCreditsSection(
 /// id); a name-only entry is a plain, non-focusable tile with nothing to look up.
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun TvCastTile(member: CastMember, onTap: (() -> Unit)?) {
+internal fun TvCastTile(member: CastMember, onTap: (() -> Unit)?) {
     val colors = VortXTheme.colors
     val body: @Composable () -> Unit = {
         Column(
