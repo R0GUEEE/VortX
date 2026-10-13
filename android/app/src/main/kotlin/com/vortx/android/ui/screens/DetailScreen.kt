@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.DropdownMenu
@@ -1889,7 +1890,8 @@ private fun SourceAddonStrip(
             modifier = Modifier.weight(1f),
             horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm),
         ) {
-            items(entries, key = { it.first ?: "\u0000all" }) { (addon, count) ->
+            // Positional keys: entries are unique by name, and no add-on can pick a name that collides with All.
+            itemsIndexed(entries, key = { index, _ -> index }) { _, (addon, count) ->
                 SourceAddonTab(title = addon ?: "All", count = count, selected = addon == selected) { onSelect(addon) }
             }
         }
@@ -2101,7 +2103,10 @@ private fun SourcesSection(
                     // filter between (Apple's `sourceAddonTabs`, shown for groups.count > 1).
                     if (groups.size > 1) {
                         SourceAddonStrip(
-                            entries = listOf<Pair<String?, Int>>(null to total) + groups.map { it.addon to it.streams.size },
+                            // A label repeated across transports is one tab (the filter is by name), counted once.
+                            entries = listOf<Pair<String?, Int>>(null to total) + groups
+                                .groupBy { it.addon }
+                                .map { (addon, same) -> addon to same.sumOf { it.streams.size } },
                             selected = effectiveSourceFilter,
                             onSelect = { addon ->
                                 if (addon != null) {
