@@ -143,6 +143,7 @@ struct VortXTVApp: App {
                 @unknown default: break
                 }
                 if phase == .active {
+                    InfuseReturnCoordinator.applyReturned()   // a position Infuse reported before VortX was ready
                     UpdateChecker.shared.checkIfStale()
                     // RemoteConfig had NO foreground pull: `refreshIfForegroundDue` existed with zero call
                     // sites anywhere in the repo, so the only refreshes were the cold-launch fetch and the

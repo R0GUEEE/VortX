@@ -1,10 +1,13 @@
 package com.vortx.android.player
 
+import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.Build
 import android.view.Display
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -358,6 +361,13 @@ fun PlayerChrome(
     // chrome untouched. [trackPrefs] mirrors the persisted value so the sheets show the current pick and a
     // change round-trips to disk immediately.
     val context = LocalContext.current
+    // The other player reports where the viewer stopped; seek there so this session saves it (on the next
+    // progress tick or when the player closes) and resume picks up from it.
+    val externalPlayer = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        @Suppress("DEPRECATION")
+        PlayerHandoff.returnedPositionMs(result.resultCode == Activity.RESULT_OK, { key -> result.data?.extras?.get(key) },
+            state.durationMs)?.let(onSeek)
+    }
     val trackStore = remember(context) {
         TrackPreferencesStore(context.applicationContext, PerformanceMode.isConstrainedDevice(context))
     }
@@ -1241,7 +1251,10 @@ fun PlayerChrome(
                         label = "Open in another player",
                         selected = false,
                         detail = "Hand off to an installed video app",
-                        onPick = { PlayerHandoff.openInExternalPlayer(context, playable) },
+                        onPick = {
+                            if (!state.isPaused) onTogglePause()
+                            PlayerHandoff.openInExternalPlayerForResult(context, playable, state.positionMs) { externalPlayer.launch(it) }
+                        },
                     ),
                 ),
                 emberAccent = emberAccent,

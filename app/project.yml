@@ -233,6 +233,9 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
         INFOPLIST_FILE: Resources/Info-iOS.plist
         INFOPLIST_KEY_CFBundleDisplayName: VortX
+        # The app's own URL scheme (Resources/Info-iOS.plist CFBundleURLTypes). This web-host target can
+        # sit beside VortXiOSNative on one device, so it takes its own scheme rather than sharing "vortx".
+        VORTX_URL_SCHEME: vortx-web
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
         INFOPLIST_KEY_UIStatusBarStyle: UIStatusBarStyleLightContent
@@ -353,6 +356,9 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
         INFOPLIST_FILE: Resources/Info-iOS.plist
         INFOPLIST_KEY_CFBundleDisplayName: VortX
+        # The app's own URL scheme (Resources/Info-iOS.plist CFBundleURLTypes): Infuse's x-success
+        # callback brings the viewer's stopping point back through it.
+        VORTX_URL_SCHEME: vortx
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
         INFOPLIST_KEY_UIStatusBarStyle: UIStatusBarStyleLightContent
@@ -500,6 +506,8 @@ targets:
         # macOS the same way it does on iOS/tvOS. Mac was the only target shipping default ATS (issue #58).
         INFOPLIST_FILE: Resources/Info-macOS.plist
         INFOPLIST_KEY_CFBundleDisplayName: VortX
+        # The app's own URL scheme (Resources/Info-macOS.plist CFBundleURLTypes), for Infuse's callback.
+        VORTX_URL_SCHEME: vortx
         # Name the product "VortX" (not the target name "VortXMac") so the .app, the executable, and
         # the generated CFBundleName all read "VortX": the menu bar, Dock, Finder, and the installed
         # app all show "VortX". The bundle id (com.stremiox.mac) and the Xcode target/scheme name stay

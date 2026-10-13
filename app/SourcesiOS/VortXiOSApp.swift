@@ -127,6 +127,8 @@ struct VortXiOSApp: App {
                 // ScenePhase's initial value does not necessarily emit a change on cold launch. Starting here
                 // closes that gap; UpdateChecker makes repeated root/scene calls idempotent and single-flight.
                 .onAppear { UpdateChecker.shared.startMonitoring() }
+                // Infuse reporting where the viewer stopped (its x-success callback to vortx://).
+                .onOpenURL { _ = InfuseReturnCoordinator.handle($0) }
                 .onChange(of: scenePhase) { phase in   // iOS 16 single-parameter form
                     // Termination evidence: keep the receipt's last-known phase current so the next
                     // launch can distinguish a backgrounded jetsam kill from a foreground kill.
@@ -138,6 +140,7 @@ struct VortXiOSApp: App {
                     }
                     if phase == .active {
                         UpdateChecker.shared.startMonitoring()
+                        InfuseReturnCoordinator.applyReturned()   // a position Infuse reported before VortX was ready
                         // RemoteConfig had NO foreground pull: `refreshIfForegroundDue` existed with zero
                         // call sites anywhere in the repo, so the only refreshes were the cold-launch fetch
                         // and the 6-hourly periodic Task, whose sleep does not advance while the process is
