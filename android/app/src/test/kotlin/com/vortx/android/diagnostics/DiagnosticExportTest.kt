@@ -61,6 +61,28 @@ class DiagnosticExportTest {
         } finally { server.stop() }
     }
 
+    @Test fun `a client trickling bytes cannot hold the link past its request deadline`() {
+        val server = DiagnosticExportServer(body = { "scrubbed body" }, bindAddress = { InetAddress.getLoopbackAddress() },
+            requestDeadlineMs = 500)
+        val url = requireNotNull(server.start())
+        val port = url.substringAfter("127.0.0.1:").substringBefore("/").toInt()
+        java.net.Socket(InetAddress.getLoopbackAddress(), port).use { slow ->
+            val out = slow.getOutputStream()
+            val trickle = Thread {
+                runCatching { repeat(20) { out.write('G'.code); out.flush(); Thread.sleep(100) } }
+            }.apply { start() }
+            try {
+                val started = System.nanoTime()
+                val ok = get(url, timeoutMs = 5_000)
+                assertEquals(200, ok.first)
+                assertTrue((System.nanoTime() - started) / 1_000_000 < 3_000)
+            } finally {
+                trickle.join(3_000)
+                server.stop()
+            }
+        }
+    }
+
     @Test fun `each start mints a fresh capability`() {
         val server = DiagnosticExportServer(body = { "b" }, bindAddress = { InetAddress.getLoopbackAddress() })
         try {
@@ -80,10 +102,10 @@ class DiagnosticExportTest {
         assertFalse(xml.contains("<files-path") || xml.contains("<external") || xml.contains("<root-path"))
     }
 
-    private fun get(url: String): Pair<Int, String> {
+    private fun get(url: String, timeoutMs: Int = 2_000): Pair<Int, String> {
         val connection = URL(url).openConnection() as HttpURLConnection
-        connection.connectTimeout = 2_000
-        connection.readTimeout = 2_000
+        connection.connectTimeout = timeoutMs
+        connection.readTimeout = timeoutMs
         return try {
             val code = connection.responseCode
             code to (if (code == 200) connection.inputStream.bufferedReader().readText() else "")

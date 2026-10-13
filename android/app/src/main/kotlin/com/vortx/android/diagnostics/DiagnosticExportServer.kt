@@ -20,8 +20,10 @@ internal class DiagnosticExportServer(
     private val body: () -> String,
     private val windowMs: Long = WINDOW_MS,
     private val bindAddress: () -> InetAddress? = ::lanIPv4,
+    private val requestDeadlineMs: Long = REQUEST_DEADLINE_MS,
 ) {
     @Volatile private var server: ServerSocket? = null
+    @Volatile private var active: Socket? = null
     @Volatile private var served = false
 
     /** Start serving and return the URL to show as a QR, or null when this device has no LAN address. */
@@ -40,7 +42,9 @@ internal class DiagnosticExportServer(
     @Synchronized
     fun stop() {
         runCatching { server?.close() }
+        runCatching { active?.close() }
         server = null
+        active = null
     }
 
     /** True once the export was downloaded (the capability is spent). */
@@ -52,7 +56,14 @@ internal class DiagnosticExportServer(
             while (!socket.isClosed && !served && System.currentTimeMillis() < deadline) {
                 socket.soTimeout = (deadline - System.currentTimeMillis()).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
                 val client = try { socket.accept() } catch (_: SocketTimeoutException) { break }
-                client.use { if (handle(it, path)) served = true }
+                active = client
+                try {
+                    client.use { if (handle(it, path, minOf(deadline, System.currentTimeMillis() + requestDeadlineMs))) served = true }
+                } catch (_: IOException) {
+                    // A slow, broken or hostile client loses only its own request; keep serving the window.
+                } finally {
+                    active = null
+                }
             }
         } catch (_: IOException) {
             // Closed by stop() or the network went away: the window simply ends.
@@ -61,10 +72,12 @@ internal class DiagnosticExportServer(
         }
     }
 
-    /** Answer one request; true only when the capability path was served the export. */
-    private fun handle(client: Socket, path: String): Boolean {
-        client.soTimeout = HEADER_DEADLINE_MS
-        val requestLine = runCatching { readRequestLine(client) }.getOrNull()
+    /**
+     * Answer one request; true only when the capability path was served the export. [requestDeadline] bounds
+     * the WHOLE request, not each read, so a client trickling one byte at a time cannot hold the server.
+     */
+    private fun handle(client: Socket, path: String, requestDeadline: Long): Boolean {
+        val requestLine = runCatching { readRequestLine(client, requestDeadline) }.getOrNull()
         val parts = requestLine?.split(' ')
         val matches = parts != null && parts.size >= 2 && parts[0] == "GET" && parts[1] == path
         val output = client.getOutputStream()
@@ -87,12 +100,15 @@ internal class DiagnosticExportServer(
     }
 
     /** The request line only, bounded; the headers are drained up to the blank line and ignored. */
-    private fun readRequestLine(client: Socket): String? {
+    private fun readRequestLine(client: Socket, requestDeadline: Long): String? {
         val input = client.getInputStream()
         val line = StringBuilder()
         var requestLine: String? = null
         var total = 0
         while (total < MAX_REQUEST_BYTES) {
+            val remaining = requestDeadline - System.currentTimeMillis()
+            if (remaining <= 0) throw SocketTimeoutException("Request deadline passed")
+            client.soTimeout = remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             val next = input.read()
             if (next < 0) break
             total++
@@ -114,7 +130,8 @@ internal class DiagnosticExportServer(
 
     internal companion object {
         const val WINDOW_MS = 10 * 60_000L
-        private const val HEADER_DEADLINE_MS = 15_000
+        /** One request, start to finish, the same 15 s Apple TV gives a client to send its header. */
+        const val REQUEST_DEADLINE_MS = 15_000L
         private const val MAX_REQUEST_BYTES = 8 * 1024
 
         /** The device's LAN IPv4 (Wi-Fi or Ethernet), never loopback; null when not on a local network. */
