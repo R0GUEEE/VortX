@@ -74,6 +74,19 @@ extension UsenetNodeClient {
             if value { passed += 1; print("PASS " + name) }
             else { failed += 1; print("FAIL " + name) }
         }
+        #if !NZB_OPERATION_BASELINE
+        let gib: Int64 = 1024 * 1024 * 1024
+        check(UsenetDiskAllowance.bytes(stored: nil, freeDisk: 100 * gib) == nil,
+              "an untouched Streaming cache leaves the engine's own usenet disk default")
+        check(UsenetDiskAllowance.bytes(stored: 0, freeDisk: 100 * gib) == 0, "Off turns the usenet disk download off")
+        check(UsenetDiskAllowance.bytes(stored: -1, freeDisk: 100 * gib) == 50 * gib,
+              "Unlimited allows half of free space, enough for a whole film")
+        check(UsenetDiskAllowance.bytes(stored: 20 * gib, freeDisk: 100 * gib) == 20 * gib, "a chosen size is used as is")
+        check(UsenetDiskAllowance.bytes(stored: 80 * gib, freeDisk: 100 * gib) == 50 * gib,
+              "a chosen size never exceeds half of free space")
+        check(UsenetDiskAllowance.bytes(stored: -1, freeDisk: nil) == 2 * gib,
+              "unknown free space falls back to 2 GB")
+        #endif
         let selected = try await create(selection: .init(fileIdx: 0, fileMustInclude: "/S01E02/i", episode: .init(season: 1, episode: 2)))
         let first = try await creates().last!
         let id = selected.lease!.id

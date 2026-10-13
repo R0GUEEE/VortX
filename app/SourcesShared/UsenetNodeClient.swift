@@ -185,6 +185,8 @@ enum UsenetNodeClient {
         let operationCancellation: Bool?
         let operationIdFormat: String?
         let selection: NativeSelection?
+        /// The engine can download a release ahead of playback to disk (see `UsenetDiskAllowance`).
+        let diskPreload: Bool?
         struct NativeSelection: Decodable {
             let fileIdx: Bool
             let fileMustInclude: Bool
@@ -237,6 +239,11 @@ enum UsenetNodeClient {
             guard acceptsNativeCapabilities(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0,
                                             body: capabilities) else { throw ClientError.nativeUnavailable }
             try Task.checkCancellation()
+            if (try? JSONDecoder().decode(NativeCapabilities.self, from: capabilities))?.diskPreload == true,
+               let allowance = UsenetDiskAllowance.current() {
+                await postDiskAllowance(origin: origin, bytes: allowance, session: session)
+                try Task.checkCancellation()
+            }
         }
         let lease = requiresNativeCapabilities
             ? OperationLease(origin: origin, session: session, ownerIsCurrent: ownerIsCurrent) : nil
@@ -252,6 +259,18 @@ enum UsenetNodeClient {
             lease?.close()
             throw error
         }
+    }
+
+    /// Tell the engine how much of a release it may download ahead to disk. Best-effort: a failure only
+    /// leaves the engine on its previous (or default) allowance.
+    private static func postDiskAllowance(origin: URL, bytes: Int64, session: URLSession) async {
+        guard let payload = try? JSONSerialization.data(withJSONObject: ["nzbDiskCacheBytes": bytes]) else { return }
+        var request = URLRequest(url: origin.appendingPathComponent("settings"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = payload
+        request.timeoutInterval = 2
+        _ = try? await session.data(for: request, delegate: NoRedirects())
     }
 
     private static func postCreate(origin: URL, nzbURLs: [String], servers: [String], session: URLSession,
@@ -330,6 +349,45 @@ enum UsenetFailureMessage {
         }
         if reason.contains("resource_limit") || reason.hasPrefix("http_503") {
             return "This release is too large to open on this device right now. Try another release."
+        }
+        return nil
+    }
+}
+
+/// How much of a usenet release the engine may download ahead of playback to disk, from the Streaming
+/// cache setting (the player's own key, with its never-more-than-half-of-free-space safety). nil when the
+/// setting was never touched, so the engine keeps its own 2 GB default; 0 when the viewer chose Off;
+/// Unlimited is half of the free space, enough for a whole film on most devices.
+enum UsenetDiskAllowance {
+    static let settingKey = "stremiox.diskCacheBytes"
+    static let unlimitedSentinel: Int64 = -1
+    private static let unknownFreeSpaceCeiling: Int64 = 2 * 1024 * 1024 * 1024
+
+    static func bytes(stored: Int64?, freeDisk: Int64?) -> Int64? {
+        guard let stored else { return nil }
+        if stored == 0 { return 0 }
+        let ceiling = freeDisk.map { max(0, $0 / 2) } ?? unknownFreeSpaceCeiling
+        return stored == unlimitedSentinel ? ceiling : min(max(stored, 0), ceiling)
+    }
+
+    static func current() -> Int64? {
+        let stored = (UserDefaults.standard.object(forKey: settingKey) as? NSNumber)?.int64Value
+        return bytes(stored: stored, freeDisk: freeDiskBytes())
+    }
+
+    private static func freeDiskBytes() -> Int64? {
+        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        #if !os(tvOS)
+        if let values = try? caches.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+           let important = values.volumeAvailableCapacityForImportantUsage {
+            return Int64(important)
+        }
+        #endif
+        if let attributes = try? FileManager.default.attributesOfFileSystem(forPath: caches.path),
+           let free = attributes[.systemFreeSize] as? NSNumber {
+            return free.int64Value
         }
         return nil
     }
