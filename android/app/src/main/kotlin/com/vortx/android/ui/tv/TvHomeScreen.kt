@@ -207,8 +207,12 @@ private fun TvHomeContent(
     var hasReceivedFocus by remember(contentOwnerGeneration, catalogLayout) { mutableStateOf(false) }
     // Remote CW is already privately enriched behind its immutable source receipt; never send it into
     // the generic identity-only hero cache (including same-title source/account replacements).
-    val heroItems = com.vortx.android.home.continueWatchingHeroCatalogs(visibleCatalogs).flatMap { it.items }
-    val focusedItem = focusState.focusedItem()
+    val heroItems = remember(visibleCatalogs) {
+        com.vortx.android.home.continueWatchingHeroCatalogs(visibleCatalogs).flatMap { it.items }
+    }
+    // The hero follows focus once it settles (Apple's 150 ms), so holding the D-pad across a rail no longer
+    // starts a backdrop crossfade and a full-screen artwork load for every card it passes.
+    val focusedItem = rememberSettledHeroFocus(focusState.focusedItem(), contentOwnerGeneration, catalogLayout)
     val heroItem = heroItems.firstOrNull { focusedItem != null && it.type == focusedItem.type && it.id == focusedItem.id &&
         it.continueWatchingPermit == focusedItem.continueWatchingPermit } ?: heroItems.firstOrNull()
 
@@ -727,6 +731,20 @@ internal fun tvHomeHeroSelection(
         item = selected,
     )
 }
+
+/// [item] once focus has rested on it for [HERO_SETTLE_MS]; the first focus lands at once. Keyed on the
+/// content owner and layout like the focus state itself, so a replaced owner never sees the old hero.
+@Composable
+private fun rememberSettledHeroFocus(item: MetaItem?, ownerGeneration: Any?, layout: Any?): MetaItem? {
+    val settled = remember(ownerGeneration, layout) { mutableStateOf(item) }
+    LaunchedEffect(item, ownerGeneration, layout) {
+        if (settled.value != null) delay(HERO_SETTLE_MS)
+        settled.value = item
+    }
+    return settled.value
+}
+
+private const val HERO_SETTLE_MS = 150L
 
 internal fun TvHomeFocusState.focusedItem(): MetaItem? {
     val key = focused ?: return null

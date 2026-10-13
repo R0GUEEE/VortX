@@ -427,14 +427,28 @@ final class LocalizedMetadataStore: ObservableObject {
         entries = decoded
     }
 
+    /// Persist the entries, coalesced and off the main actor. While a grid streams in, a flush lands every
+    /// ~120 ms, and each one used to JSON-encode up to 4,000 entries and rewrite the file on the main thread,
+    /// right where focus moves and scrolling are handled. A lost write only means a later re-fetch.
     private func saveDiskCache() {
-        // Cap the persisted set so the cache never grows without bound across sessions.
-        let capped = entries.count > Self.diskCacheCap
-            ? Dictionary(uniqueKeysWithValues: entries.prefix(Self.diskCacheCap).map { ($0.key, $0.value) })
-            : entries
-        guard let url = cacheURL, let data = try? JSONEncoder().encode(capped) else { return }
-        try? data.write(to: url, options: .atomic)
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.saveDelayNanoseconds)
+            guard !Task.isCancelled, let self, let url = self.cacheURL else { return }
+            // Cap the persisted set so the cache never grows without bound across sessions.
+            let entries = self.entries
+            let capped = entries.count > Self.diskCacheCap
+                ? Dictionary(uniqueKeysWithValues: entries.prefix(Self.diskCacheCap).map { ($0.key, $0.value) })
+                : entries
+            await Task.detached(priority: .utility) {
+                guard let data = try? JSONEncoder().encode(capped) else { return }
+                try? data.write(to: url, options: .atomic)
+            }.value
+        }
     }
+
+    private var saveTask: Task<Void, Never>?
+    private static let saveDelayNanoseconds: UInt64 = 1_500_000_000
 
     private static let diskCacheCap = 4000
 }

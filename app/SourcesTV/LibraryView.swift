@@ -73,7 +73,8 @@ struct LibraryView: View {
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected
     @EnvironmentObject private var profiles: ProfileStore   // gate the Library on the active profile's own history
-    @StateObject private var focusModel = FocusedItemModel()
+    @StateObject private var focusOwner = FocusedItemOwner()   // owned, not observed: focus re-renders only the hero
+    private var focusModel: FocusedItemModel { focusOwner.model }
     @ObservedObject private var catalogPrefs = CatalogPreferences.shared
     @ObservedObject private var apiKeys = ApiKeys.shared
     @ObservedObject private var downloads = DownloadStore.shared   // offline downloads section (#30)

@@ -11,7 +11,9 @@ struct HomeView: View {
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected
     @EnvironmentObject private var profiles: ProfileStore
     @EnvironmentObject private var presenter: PlayerPresenter   // gates the ambient hero trailer off while the player is up
-    @StateObject private var focusModel = FocusedItemModel()
+    @StateObject private var focusModels = HomeFocusModels()   // owned, not observed: focus re-renders only the hero layers
+    private var focusModel: FocusedItemModel { focusModels.focus }
+    private var heroTrailer: HomeHeroTrailerModel { focusModels.trailer }
     @StateObject private var topPicks = TopPicksModel()   // local recommendations from this profile's history
     @StateObject private var becauseYouWatched = BecauseYouWatchedModel()   // "Because you watched <title>" rail, seeded from recent watches
     @StateObject private var traktRails = TraktRailsModel()   // Trakt watchlist as a client-side rail (dormant with empty creds)
@@ -30,7 +32,6 @@ struct HomeView: View {
     @AppStorage(ContinueWatchingPreferences.sourceKey) private var continueWatchingSource = "local"
     @AppStorage(ContinueWatchingPreferences.windowKey) private var continueWatchingWindow = "20"
     @State private var traktContinueWatchingRevision = 0
-    @StateObject private var heroTrailer = HomeHeroTrailerModel()   // #44: focus-settled muted hero trailer
     @AppStorage("stremiox.autoplayTrailers") private var autoplayTrailers = true
     @ObservedObject private var catalogPrefs = CatalogPreferences.shared   // #105: rails vs poster-wall Home layout
     @ReducedMotion private var reduceMotion
@@ -130,12 +131,9 @@ struct HomeView: View {
                     // decoding its looping 1080p trailer under the whole movie (micro stutter + audio crackle
                     // on every stream). Unmounting tears it down the moment the player presents; it remounts
                     // fresh on close.
-                    if autoplayTrailers, RemoteConfig.snapshot.isFeatureOn("trailers", default: true),
-                       !reduceMotion, presenter.request == nil, let url = heroTrailer.url {
-                        TVInHeroTrailerView(url: url)
-                            .ignoresSafeArea()
-                            .allowsHitTesting(false)
-                    }
+                    HomeHeroTrailerLayer(model: heroTrailer,
+                                         enabled: autoplayTrailers && RemoteConfig.snapshot.isFeatureOn("trailers", default: true)
+                                            && !reduceMotion && presenter.request == nil)
                 }
                 // The rails live in a bottom strip. The focus engine centers focused rows inside
                 // THIS viewport, so they are geometrically incapable of riding up over the hero.
@@ -278,9 +276,6 @@ struct HomeView: View {
         // for that replacement; CoreBridge rotates its settled binding before a history receipt is accepted.
         .onReceive(account.$credentialBoundaryGeneration) { _ in refreshTopPicks() }
         .onChange(of: core.addons.count) { configureMetaSources(); refreshReleaseCalendar() }
-        // Drive the focus-settled hero trailer (#44): every hero change re-arms the 3s debounce and tears
-        // down the current trailer, so scrolling catalog-to-catalog never loads a clip.
-        .onChange(of: focusModel.hero?.id) { heroTrailer.focusChanged(to: focusModel.hero) }
         // Trakt disconnect: drop the watchlist rail immediately rather than waiting for the refresh window.
         .onReceive(NotificationCenter.default.publisher(for: TraktRailsModel.disconnectedNote)) { _ in traktRails.clear() }
         // SIMKL disconnect: same contract as Trakt above, drop the plan-to-watch rail now.
@@ -586,6 +581,34 @@ struct HomeView: View {
 /// Trailer button plays; `StremioServer.trailerResolverBase` picks the in-process route on full builds and
 /// the public `trailer.vortx.tv/yt` resolver on Lite, so Lite plays hero trailers too). The retired R2
 /// `/clip` snippet is gone (owner directive). A resolve miss 404s into the player's still-backdrop fallback.
+/// Home's focus-driven models, owned without HomeView observing them. A focus move re-renders only the
+/// hero backdrop and the trailer layer, which observe these themselves, never the rails below.
+@MainActor final class HomeFocusModels: ObservableObject {
+    let focus = FocusedItemModel()
+    let trailer = HomeHeroTrailerModel()
+
+    init() {
+        // Drive the focus-settled hero trailer (#44): every hero change re-arms the 3s debounce and tears
+        // down the current trailer, so scrolling catalog-to-catalog never loads a clip.
+        focus.onHeroIDChange = { [weak trailer] hero in trailer?.focusChanged(to: hero) }
+    }
+}
+
+/// The hero's ambient trailer, observing the trailer model itself so a resolved or cleared clip re-renders
+/// only this layer.
+private struct HomeHeroTrailerLayer: View {
+    @ObservedObject var model: HomeHeroTrailerModel
+    let enabled: Bool
+
+    var body: some View {
+        if enabled, let url = model.url {
+            TVInHeroTrailerView(url: url)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+        }
+    }
+}
+
 @MainActor final class HomeHeroTrailerModel: ObservableObject {
     /// The settled item's resolved trailer URL, or nil while debouncing / when no trailer exists. Mounting
     /// `TVInHeroTrailerView` on this means clearing it tears the libmpv layer down at once.

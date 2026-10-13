@@ -8,7 +8,8 @@ struct DiscoverView: View {
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected
     @AppStorage(TabBarPrefs.hideLive) private var hideLiveTab = false   // also hide Live types from the Discover type filter (#117 per-tab key)
-    @StateObject private var focusModel = FocusedItemModel()
+    @StateObject private var focusOwner = FocusedItemOwner()   // owned, not observed: focus re-renders only the hero
+    private var focusModel: FocusedItemModel { focusOwner.model }
     @ObservedObject private var catalogPrefs = CatalogPreferences.shared
     @ObservedObject private var apiKeys = ApiKeys.shared
     @ObservedObject private var collectionsHub = CollectionsHubModel.shared

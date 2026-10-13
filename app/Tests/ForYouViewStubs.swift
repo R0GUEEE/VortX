@@ -103,6 +103,7 @@ final class CoreBridge: ObservableObject {
 
 #if os(tvOS)
 final class FocusedItemModel: ObservableObject {}
+final class FocusedItemOwner: ObservableObject { let model = FocusedItemModel() }
 enum PosterMenu { case none, catalog }
 struct PosterCard: View {
     let title: String

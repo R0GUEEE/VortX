@@ -135,6 +135,13 @@ enum PosterMenu { case none, continueWatching, catalog, library }
 
 // MARK: - Focused hero (the browse pages' living backdrop)
 
+/// Owns a page's `FocusedItemModel` without making the page observe it. Focus moves then re-render only
+/// the hero backdrop, which observes the model itself, instead of re-evaluating every rail and card on the
+/// page each time focus settles: on an Apple TV HD that full-page pass is what made the remote lag.
+@MainActor final class FocusedItemOwner: ObservableObject {
+    let model = FocusedItemModel()
+}
+
 /// What the browse pages show behind the rails for the title under focus.
 struct FocusedHero: Codable, Equatable, Hashable, Identifiable {
     let id: String
@@ -195,7 +202,12 @@ extension CoreCWItem {
 /// so tvOS focus is never dropped. Heroes without a synopsis (library entries) are enriched from
 /// Cinemeta in the background, once per title per session.
 @MainActor final class FocusedItemModel: ObservableObject {
-    @Published private(set) var hero: FocusedHero?
+    @Published private(set) var hero: FocusedHero? {
+        didSet { if oldValue?.id != hero?.id { onHeroIDChange?(hero) } }
+    }
+    /// Called when focus settles on a different title (or leaves the rails), for work that follows the
+    /// hero without the page itself observing this model.
+    var onHeroIDChange: ((FocusedHero?) -> Void)?
     /// The text block shows only while focus is in the page's TOP row; deeper rows keep just the
     /// backdrop art, so the details can never collide with content that scrolled up.
     @Published private(set) var detailsVisible = true

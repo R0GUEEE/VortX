@@ -14,7 +14,8 @@ struct TVSmartCollectionsView: View {
     @ObservedObject private var store = ForYouStore.shared
     @ObservedObject private var watchedIndex = WatchedIndex.shared
     @StateObject private var titles = SmartCollectionTitlesModel()
-    @StateObject private var focusModel = FocusedItemModel()
+    @StateObject private var focusOwner = FocusedItemOwner()   // owned, not observed: focus re-renders only the hero
+    private var focusModel: FocusedItemModel { focusOwner.model }
     @State private var editing: SmartCollectionEditing?
 
     var body: some View {

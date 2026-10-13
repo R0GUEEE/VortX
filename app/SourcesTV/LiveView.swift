@@ -16,7 +16,8 @@ struct LiveView: View {
     @EnvironmentObject private var theme: ThemeManager
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected
-    @StateObject private var focusModel = FocusedItemModel()
+    @StateObject private var focusOwner = FocusedItemOwner()   // owned, not observed: focus re-renders only the hero
+    private var focusModel: FocusedItemModel { focusOwner.model }
 
     var body: some View {
         NavigationStack {
