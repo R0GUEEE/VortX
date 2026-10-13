@@ -222,7 +222,12 @@ struct AddonsView: View {
                         if core.addons.isEmpty {
                             hint("No add-ons yet. Paste an add-on's manifest URL above to install one.")
                         } else {
-                            NavigationLink { CatalogManagerView() } label: {
+                            NavigationLink {
+                                CatalogManagerView()
+                                #if os(macOS)
+                                .macBackAffordance()
+                                #endif
+                            } label: {
                                 HStack(spacing: Theme.Space.md) {
                                     Label("Customize catalogs", systemImage: "slider.horizontal.3")
                                         .font(Theme.Typography.cardTitle)
@@ -359,7 +364,12 @@ struct AddonsView: View {
     }
 
     private var discoverLink: some View {
-        NavigationLink { AddonStoreView() } label: {
+        NavigationLink {
+            AddonStoreView()
+            #if os(macOS)
+            .macBackAffordance()
+            #endif
+        } label: {
             HStack(spacing: Theme.Space.md) {
                 Label("Discover add-ons", systemImage: "sparkles.rectangle.stack")
                     .font(Theme.Typography.cardTitle)

@@ -18,6 +18,13 @@ enum CinemaRailLayoutTests {
                 }
             }
         }
+        for viewport: CGFloat in [600, 768, 1024, 1180, 1440, 1980, 2560] {
+            let grid = CinemaRailLayout.episodeGrid(viewport: viewport, inset: 20, spacing: 20)
+            let row = CGFloat(grid.columns) * grid.cardWidth + CGFloat(grid.columns - 1) * 20
+            precondition(abs(row - (viewport - 40)) < 0.01, "Grid rows fill the width exactly")
+            precondition(grid.columns == 1 || grid.cardWidth >= 260, "Cards never shrink below the readable minimum")
+            precondition(grid.cardWidth < 260 * 2 + 20, "Another column is added before a card doubles")
+        }
         func source(_ path: String) throws -> String { try String(contentsOfFile: path, encoding: .utf8) }
         let detail = try source("app/SourcesiOS/iOSDetailView.swift")
         let mac = detail.components(separatedBy: "private func macDetailBody(")[1]

@@ -20,15 +20,13 @@ enum UIScreenshotSeamsContractTests {
             .components(separatedBy: "struct iOSDiscoverFilterPanel: View {")[0]
         let tabs = detail.components(separatedBy: "private var sourceAddonTabs: some View {")[1]
             .components(separatedBy: "@ViewBuilder\n    private func sourceAddonTab")[0]
-        let chip = detail.components(separatedBy: "private struct AddonFilterChip: View {")[1]
-            .components(separatedBy: "/// Add-on names are the primary Cinema source navigation")[0]
         let sourceLabel = detail.components(separatedBy: "struct iOSStreamLabel: View {")[1]
             .components(separatedBy: "@ViewBuilder private func badge")[0]
         let episodeCard = detail.components(separatedBy: "struct CinemaEpisodeRailCard: View {")[1]
             .components(separatedBy: "// MARK: - Per-episode source list")[0]
         let rowStyle = detail.components(separatedBy: "private struct iOSSourceRowFocusStyle: ButtonStyle {")[1]
             .components(separatedBy: "struct iOSSourceList: View {")[0]
-        let stepButton = tabs.components(separatedBy: "private func sourceAddonStepButton")[1]
+        let stepButton = tabs.components(separatedBy: "private func sourceAddonScrollButton")[1]
             .components(separatedBy: "@ViewBuilder")[0]
 
         precondition(whitespaceFreeHome.contains("homeFeaturedHero.scrollToTopAnchor()"),
@@ -38,9 +36,12 @@ enum UIScreenshotSeamsContractTests {
         precondition(home.contains("LazyVStack(alignment: .leading, spacing: Theme.Space.lg)"),
                      "normal Home rail spacing remains unchanged")
 
-        precondition(tabs.contains("sourceAddonStepButton(forward: false)")
-                     && tabs.contains("sourceAddonStepButton(forward: true)"),
-                     "both bounded source-tab controls remain present")
+        precondition(tabs.contains("sourceAddonScrollButton(forward: false, proxy: proxy)")
+                     && tabs.contains("sourceAddonScrollButton(forward: true, proxy: proxy)"),
+                     "both bounded source-row scroll controls remain present")
+        precondition(detail.components(separatedBy: "if groups.count > 1 { sourceAddonTabs }").count == 2
+                     && !detail.contains("AddonFilterChip") && !detail.contains("private var filterBar"),
+                     "one accent add-on row, under All sources, replaces the duplicate plain chip row")
         precondition(tabs.contains("ScrollView(.horizontal, showsIndicators: false)"),
                      "trackpad and swipe scrolling remain available")
         precondition(tabs.contains("ScrollViewReader { proxy in")
@@ -53,17 +54,14 @@ enum UIScreenshotSeamsContractTests {
                      && tabs.contains("proxy.scrollTo(sourceAddonTabAnchor(addon), anchor: .center)")
                      && tabs.contains("withAnimation(reduceMotion ? nil : Theme.Motion.state)"),
                      "selecting an offscreen source tab reveals it while honoring Reduce Motion")
-        precondition(tabs.contains("selectSourceAddon(next == 0 ? nil : groups[next - 1].addon)"),
-                     "tab stepping uses the existing All-first group order and selection path")
+        precondition(stepButton.contains("proxy.scrollTo(next == 0 ? SourceAddonTabAnchor.all : .addon(groups[next - 1].id), anchor: .leading)")
+                     && !stepButton.contains("selectSourceAddon"),
+                     "arrows scroll the All-first row for a mouse without changing the selection")
         precondition(tabs.contains(".disabled(disabled)"),
                      "previous and next controls expose disabled bounds")
-        precondition(stepButton.contains(".frame(width: 28, height: 28)")
+        precondition(stepButton.contains(".frame(width: 34, height: 34)")
                      && stepButton.contains(".frame(width: 44, height: 44)"),
                      "source arrows remain visually compact inside a 44-point hit area")
-        precondition(chip.contains(".vortxGlassChip(selected: selected)"),
-                     "selected filters use the shared muted tinted-glass chip treatment")
-        precondition(!chip.contains("Capsule().fill(selected ? Theme.Palette.accent"),
-                     "selected filters do not become a solid accent slab")
         precondition(sourceLabel.contains("let flavors = compactLabels")
                      && sourceLabel.contains("let size = compactLabels ? StreamRanking.sizeText(stream) : nil"),
                      "hidden compact-only flavor and size labels are not parsed for every visible source row")

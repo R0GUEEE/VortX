@@ -774,7 +774,7 @@ struct iOSSettingsView: View {
                         Label("Sync now", systemImage: "arrow.triangle.2.circlepath")
                     }
                 } else {
-                    NavigationLink("Sign in / Create account") { SyncSettingsView() }
+                    PushLink("Sign in / Create account") { SyncSettingsView() }
                         .font(.subheadline.weight(.semibold))
                 }
                 Button {
@@ -812,17 +812,17 @@ struct iOSSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            NavigationLink("VortX account & sync") { SyncSettingsView() }
+            PushLink("VortX account & sync") { SyncSettingsView() }
             // Optional imports and services that enrich VortX (Stremio, Trakt, SIMKL, Nuvio).
-            NavigationLink("Integrations") { IntegrationsSettingsView() }
-            NavigationLink("Import from Stremio") { StremioImportView() }
-            NavigationLink("Metadata (TMDB, MDBList, fanart)") { MetadataKeysView() }
-            NavigationLink("Debrid services") { DebridKeysView() }
-            NavigationLink("Usenet provider") { UsenetProviderView() }
-            NavigationLink("NZB indexers") { NZBIndexerSettingsView() }
-            NavigationLink("Poster artwork (ERDB, ratings)") { XRDBSettingsView() }
-            NavigationLink("Live TV (IPTV playlists)") { IPTVSettingsView() }
-            NavigationLink("Media servers (Plex, Jellyfin, Emby)") { MediaServersSettingsView() }
+            PushLink("Integrations") { IntegrationsSettingsView() }
+            PushLink("Import from Stremio") { StremioImportView() }
+            PushLink("Metadata (TMDB, MDBList, fanart)") { MetadataKeysView() }
+            PushLink("Debrid services") { DebridKeysView() }
+            PushLink("Usenet provider") { UsenetProviderView() }
+            PushLink("NZB indexers") { NZBIndexerSettingsView() }
+            PushLink("Poster artwork (ERDB, ratings)") { XRDBSettingsView() }
+            PushLink("Live TV (IPTV playlists)") { IPTVSettingsView() }
+            PushLink("Media servers (Plex, Jellyfin, Emby)") { MediaServersSettingsView() }
         }
     }
 
@@ -932,8 +932,8 @@ struct iOSSettingsView: View {
                 Text("SkipDB").tag("skipdb")
                 Text("Both").tag("both")
             }
-            NavigationLink("Skip database key") { SkipKeysView() }
-            NavigationLink("Seek bar style") { SeekBarStylePicker() }
+            PushLink("Skip database key") { SkipKeysView() }
+            PushLink("Seek bar style") { SeekBarStylePicker() }
             Toggle("Community scrub previews", isOn: $communityTrickplay)
                 .tint(Theme.Palette.accent)
             Text("Share and reuse scrub-preview thumbnails across the community, so previews appear instantly without each device regenerating them. Only the generated thumbnails are shared, never any account data.")
@@ -1416,7 +1416,7 @@ struct iOSSettingsView: View {
                 Text(StremioServer.base)
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
-                NavigationLink {
+                PushLink {
                     ServerConfigView { Task { serverOnline = await StremioServer.isOnline() } }
                 } label: {
                     Label("Configure server", systemImage: "server.rack")
@@ -1427,7 +1427,7 @@ struct iOSSettingsView: View {
                 // file. Surfacing it lets a user whose server dies on-device read/share the exact cause
                 // (the sim can't reproduce it). iOS/iPad only: this is the in-process NodeServer.
                 if !StremioServer.isCustom {
-                    NavigationLink {
+                    PushLink {
                         ServerLogView()
                     } label: {
                         Label("Server log", systemImage: "doc.text.magnifyingglass")
@@ -1476,7 +1476,7 @@ struct iOSSettingsView: View {
             #if os(iOS) || os(macOS)
             // EXTERNAL ENGINE MODE, client side. Keep this beside the server rows because people
             // looking for a Mac that serves this device will look under Streaming Server first.
-            NavigationLink("Use a Mac as the engine") { ExternalEngineSettingsView() }
+            PushLink("Use a Mac as the engine") { ExternalEngineSettingsView() }
             Text("Let a Mac on your network unpack and prepare the stream for this device. Off until you pair one.")
                 .font(.caption).foregroundStyle(.secondary)
             #endif
@@ -1909,10 +1909,10 @@ struct iOSSettingsView: View {
                 Text("Twice daily").tag("twiceDaily")
                 Text("4x daily").tag("fourTimesDaily")
             }
-            NavigationLink("Streaming services") { iOSReorderServicesView() }
-            NavigationLink("Discover & region") { iOSDiscoverSettingsView() }
+            PushLink("Streaming services") { iOSReorderServicesView() }
+            PushLink("Discover & region") { iOSDiscoverSettingsView() }
             // The full "Upcoming" calendar (next air / release dates of library + watchlisted titles).
-            NavigationLink("Upcoming") { iOSUpcomingScreen() }
+            PushLink("Upcoming") { iOSUpcomingScreen() }
             // Fold Search into Discover (one combined surface with a search field above the browse) so the
             // tab bar is less cluttered on mobile. Default OFF, fully reversible; Search returns as its own tab.
             Toggle("Combine Discover & Search", isOn: $mergeDiscoverSearch)
@@ -1924,7 +1924,7 @@ struct iOSSettingsView: View {
                                                       set: { spoilerSafe = $0; spoilerBlur = $0 }))
             // Poster appearance (width / corner radius / landscape art / labels) lives on its own screen
             // with a live preview. The old inline "Cinematic landscape cards" toggle moved there.
-            NavigationLink("Poster style") { iOSPosterStyleView() }
+            PushLink("Poster style") { iOSPosterStyleView() }
             // Surface the hide-labels toggle here too so it is discoverable without opening Poster style.
             // It applies across every poster rail (Discover, Home, Continue Watching, More Like This) since
             // they all render through the shared PosterCardiOS which reads this same preference.
@@ -1937,11 +1937,11 @@ struct iOSSettingsView: View {
                     Text(accent.label).tag(accent.id)
                 }
             }
-            Picker("Background", selection: $theme.oled) {
-                Text("Warm").tag(false)
-                Text("OLED Black").tag(true)
+            // Chips instead of the system segmented control, whose grey selection ignores the accent.
+            LabeledContent("Background") {
+                VortXSegmented(options: [.init(value: false, title: "Warm"), .init(value: true, title: "OLED Black")],
+                               selection: $theme.oled)
             }
-            .pickerStyle(.segmented)
 
             Picker("Dolby Vision / HDR", selection: $hdrToneMapMode) {
                 Text("Auto").tag("auto")
@@ -1957,12 +1957,11 @@ struct iOSSettingsView: View {
                 Text("App text size  ·  \(Int((theme.textScale * 100).rounded()))%")
             }
 
-            Picker("Performance", selection: $perfMode) {
-                Text("Auto").tag("auto")
-                Text("Full").tag("full")
-                Text("Reduced").tag("reduced")
+            LabeledContent("Performance") {
+                VortXSegmented(options: [.init(value: "auto", title: "Auto"), .init(value: "full", title: "Full"),
+                                         .init(value: "reduced", title: "Reduced")],
+                               selection: $perfMode)
             }
-            .pickerStyle(.segmented)
         } header: {
             Text("Appearance")
         } footer: {
@@ -2230,12 +2229,12 @@ struct iOSSettingsView: View {
             manualUpdateResult
             LabeledContent("Version", value: appVersion)
             LabeledContent("Player", value: String(localized: "libmpv · MPVKit"))
-            NavigationLink {
+            PushLink {
                 WhatsNewView()
             } label: {
                 Label("What's New", systemImage: "sparkles")
             }
-            NavigationLink {
+            PushLink {
                 WatchStatsView()
             } label: {
                 Label("Watch Stats", systemImage: "chart.bar.xaxis")

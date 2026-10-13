@@ -1032,6 +1032,7 @@ struct iOSDetailView: View {
         #if os(macOS)
         .navigationDestination(for: PersonTarget.self) { t in
             PersonView(personID: t.id, name: t.name, profileURL: t.profileURL)
+                .macBackAffordance()
         }
         #endif
     }
@@ -1279,17 +1280,61 @@ struct iOSDetailView: View {
         return yt
     }
 
-    /// A standalone Trailer chip, shown whenever the meta carries a trailer (direct stream or a YouTube
-    /// link). Used in both the movie Watch row and the series hero.
+    /// Any trailer source resolves: the engine meta's own trailer OR the Cinemeta/TMDB fallback id
+    /// (resolvedTrailerID), so a title whose engine meta carries no trailer still gets one.
+    private var hasTrailer: Bool {
+        guard let m = meta else { return false }
+        return TrailerRequest.from(meta: m) != nil || resolvedTrailerID?.isEmpty == false
+    }
+
+    /// iPad and Mac lay the detail page out wide: Trailer beside Play as a full-height hero action, season
+    /// posters, and the episodes as a grid. A phone keeps Play full width, Trailer in the chip row, season
+    /// chips and the swipeable episode rail.
+    private var wideDetailLayout: Bool {
+        #if os(macOS)
+        return true
+        #elseif os(iOS)
+        return horizontalSizeClass == .regular
+        #else
+        return false
+        #endif
+    }
+
+    /// The chip-row Trailer (phone). Stands down where the hero Trailer sits beside Play, so it never
+    /// shows twice.
     @ViewBuilder private var trailerButton: some View {
-        // Show when ANY trailer source resolves: the engine meta's own trailer OR the Cinemeta/TMDB
-        // fallback id (resolvedTrailerID), so a title whose engine meta carries no trailer still gets one.
-        if let m = meta, TrailerRequest.from(meta: m) != nil || resolvedTrailerID?.isEmpty == false {
+        if hasTrailer, !wideDetailLayout {
             Button { playTrailer() } label: {
-                Label("Trailer", systemImage: "play.rectangle.fill")
+                Label("Trailer", systemImage: "movieclapper")
             }
             .buttonStyle(ChipButtonStyle())
         }
+    }
+
+    /// The primary hero row: the Play CTA, with the Trailer beside it on iPad / Mac. The HStack is always
+    /// present so Play keeps its identity when the trailer id resolves a moment after the page opens. The
+    /// vertical fixedSize + maxHeight pair makes Trailer exactly as tall as Play, including Play's two-line
+    /// state (the selected source's spec line).
+    private func heroPrimaryRow<CTA: View>(@ViewBuilder _ cta: () -> CTA) -> some View {
+        HStack(spacing: Theme.Space.sm) {
+            cta().frame(maxWidth: heroCtaMaxWidth, alignment: .leading)
+            if hasTrailer, wideDetailLayout {
+                Button { playTrailer() } label: {
+                    Label("Trailer", systemImage: "movieclapper")
+                        .font(Theme.Typography.cardTitle.weight(.semibold))
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, Theme.Space.lg)
+                        .padding(.vertical, Theme.Space.md)
+                        .frame(maxHeight: .infinity)
+                        .vortxGlass(in: RoundedRectangle(cornerRadius: Theme.Radius.hero, style: .continuous))
+                }
+                .vortxCardButton(radius: Theme.Radius.hero)
+                .accessibilityHint("Plays the trailer")
+                .transition(.opacity)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// A6: surface the "no trailer right now" case (no full YouTube trailer AND no /clip) as a small
@@ -2210,26 +2255,28 @@ struct iOSDetailView: View {
             // Full-width primary episode CTA on its own line (matches the movie Play button), with the
             // resume stripe just beneath it.
             if let m = meta, let primary {
+                // Same per-platform CTA cap as the movie Play button (#6): comfortable on Mac, wide on touch.
                 VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                    NavigationLink {
-                        iOSEpisodeStreams(meta: m, video: primary.video, season: primary.video.season ?? 1,
-                              seasonEpisodes: sortedEpisodes(m.videos ?? []),
-                              initialStartAtSeconds: primaryResumeSeconds,
-                              initialTraktSessionID: initialTraktSessionID,
-                              initialContinueWatchingIntent: initialContinueWatchingIntent)
-                    } label: {
-                        Label(primaryEpisodeLabel(primary.video, isResume: primary.isResume,
-                                                  resumeSeconds: primaryResumeSeconds),
-                              systemImage: "play.fill")
+                    heroPrimaryRow {
+                        NavigationLink {
+                            iOSEpisodeStreams(meta: m, video: primary.video, season: primary.video.season ?? 1,
+                                  seasonEpisodes: sortedEpisodes(m.videos ?? []),
+                                  initialStartAtSeconds: primaryResumeSeconds,
+                                  initialTraktSessionID: initialTraktSessionID,
+                                  initialContinueWatchingIntent: initialContinueWatchingIntent)
+                        } label: {
+                            Label(primaryEpisodeLabel(primary.video, isResume: primary.isResume,
+                                                      resumeSeconds: primaryResumeSeconds),
+                                  systemImage: "play.fill")
+                        }
+                        .buttonStyle(HeroPlayButtonStyle())
                     }
-                    .buttonStyle(HeroPlayButtonStyle())
+                    // The resume stripe sits under Play only, so the Trailer beside it stays Play's height.
                     if primary.isResume, primaryProgress > 0.01 {
                         iOSProgressStripe(value: primaryProgress)
                             .frame(maxWidth: heroCtaMaxWidth)
                     }
                 }
-                // Same per-platform CTA cap as the movie Play button (#6): comfortable on Mac, wide on touch.
-                .frame(maxWidth: heroCtaMaxWidth, alignment: .leading)
             }
             // Secondary actions wrap beneath. FlowLayout keeps each chip at its natural width and drops
             // overflow onto the next line under the hero's hard width cap (prevents "Tr / ail / er" slivers).
@@ -2437,31 +2484,32 @@ struct iOSDetailView: View {
             // The primary CTA is a big, high-contrast rounded Play button on its own line, the
             // cinematic-media-app hero action, no longer one small chip lost in a wrapping row.
             // Width-capped per platform (heroCtaMaxWidth) so it doesn't span the whole Mac window (#6).
-            Button {
-                Task { await playMovie() }
-            } label: {
-                HStack(spacing: Theme.Space.sm) {
-                    // Spin while resolving (preparing) AND while still waiting on add-ons, so the gated
-                    // "Finding best… X/Y" state reads as busy, matching the source-list control bar.
-                    if preparing || movieLoadingSources { ProgressView().tint(Theme.Palette.onAccent) }
-                    else { Image(systemName: "play.fill") }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(movieLabel)
-                        // #11: the selected source's spec line rides inside the CTA (resolution ·
-                        // DV/HDR · flavor · size), so one glance says WHAT Play will play.
-                        if movieReady, let s = movieBest, let detail = primarySourceDetail(s) {
-                            Text(detail)
-                                .font(Theme.Typography.label)
-                                .foregroundStyle(Theme.Palette.onAccent.opacity(0.82))
-                                .lineLimit(1).truncationMode(.tail)
+            heroPrimaryRow {
+                Button {
+                    Task { await playMovie() }
+                } label: {
+                    HStack(spacing: Theme.Space.sm) {
+                        // Spin while resolving (preparing) AND while still waiting on add-ons, so the gated
+                        // "Finding best… X/Y" state reads as busy, matching the source-list control bar.
+                        if preparing || movieLoadingSources { ProgressView().tint(Theme.Palette.onAccent) }
+                        else { Image(systemName: "play.fill") }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(movieLabel)
+                            // #11: the selected source's spec line rides inside the CTA (resolution ·
+                            // DV/HDR · flavor · size), so one glance says WHAT Play will play.
+                            if movieReady, let s = movieBest, let detail = primarySourceDetail(s) {
+                                Text(detail)
+                                    .font(Theme.Typography.label)
+                                    .foregroundStyle(Theme.Palette.onAccent.opacity(0.82))
+                                    .lineLimit(1).truncationMode(.tail)
+                            }
                         }
                     }
                 }
+                .buttonStyle(HeroPlayButtonStyle())
+                .disabled(!movieReady || preparing)
+                .opacity(movieReady || preparing ? 1 : 0.55)
             }
-            .buttonStyle(HeroPlayButtonStyle())
-            .disabled(!movieReady || preparing)
-            .opacity(movieReady || preparing ? 1 : 0.55)
-            .frame(maxWidth: heroCtaMaxWidth, alignment: .leading)
 
             // D10: a secondary "Play from start" beside the primary "Resume · 1:03", shown only when a saved
             // resume position exists. Plays the SAME best stream from 0:00 without clearing the stored resume
@@ -3777,6 +3825,8 @@ struct iOSDetailView: View {
     /// get a card just under the viewport so the next episode peeks into the rail; regular iPad layouts
     /// get a wider card without making the horizontal focus path needlessly long.
     @State private var episodeRailFirstVisible = 0
+    /// TMDB season poster art for the wide season selector, keyed by season number.
+    @State private var seasonPosters: [Int: String] = [:]
     @State private var episodeRailInitialPosition = EpisodeRailInitialPositionPolicy()
     @StateObject private var manualWatchedAction = ProfileMutationPresentation()
 
@@ -3846,25 +3896,19 @@ struct iOSDetailView: View {
                                 .fixedSize()
                         }
                         #endif
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: Theme.Space.sm) {
-                                ForEach(seasons, id: \.self) { s in
-                                    Button { season = s } label: { Text(seasonLabel(s)) }
-                                        .buttonStyle(ChipButtonStyle(selected: season == s))
-                                        .contextMenu {
-                                            seasonWatchedMenu(s)
-                                            #if !os(tvOS)
-                                            // #119: download ANY season straight from its chip, without
-                                            // first switching the visible season.
-                                            Divider()
-                                            Button { startBatchDownload(episodesInSeason(s)) } label: {
-                                                Label("Download \(seasonLabel(s))", systemImage: "arrow.down.circle")
-                                            }
-                                            #endif
-                                        }
+                        if wideDetailLayout {
+                            seasonPosterStrip(seasons, watched: watched)
+                        } else {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: Theme.Space.sm) {
+                                    ForEach(seasons, id: \.self) { s in
+                                        Button { season = s } label: { Text(seasonLabel(s)) }
+                                            .buttonStyle(ChipButtonStyle(selected: season == s))
+                                            .contextMenu { seasonContextMenu(s) }
+                                    }
                                 }
+                                .padding(.vertical, Theme.Space.xs)
                             }
-                            .padding(.vertical, Theme.Space.xs)
                         }
                     }
                 }
@@ -3895,90 +3939,91 @@ struct iOSDetailView: View {
                     }
                     .accessibilityHidden(true)
 
-                // Keep the episode rail horizontal so one large cinematic card owns the reader's attention.
-                // LazyHStack still bounds thumbnail construction for long seasons; the parent detail scroll
-                // remains vertical, so this rail does not create a competing cross-axis focus path.
-                ScrollViewReader { railProxy in
-                    VStack(spacing: Theme.Space.sm) {
-                        ScrollView(.horizontal, showsIndicators: true) {
-                            LazyHStack(alignment: .top, spacing: Theme.Space.md) {
-                                ForEach(visibleEpisodes, id: \.id) { v in
-                                    episodeRow(v, isWatched: watched.contains(v.id), progress: episodeProgress(v),
-                                               cardWidth: cardWidth)
-                                        .overlay(alignment: .topTrailing) {
-                                            if !selectingEpisodes {
-                                                Menu {
-                                                    episodeActions(v, isWatched: watched.contains(v.id))
-                                                } label: {
-                                                    Image(systemName: "ellipsis")
-                                                        .font(.system(size: 18, weight: .semibold))
-                                                        .frame(width: 44, height: 44)
-                                                        .vortxGlassDisc()
+                // Mac / iPad: the whole season as a grid of the same cards, read top to bottom with the page.
+                if wideDetailLayout {
+                    episodeGrid(visibleEpisodes, watched: watched, viewportWidth: viewportWidth)
+                } else {
+                    // Phone: keep the episode rail horizontal so one large cinematic card owns the reader's attention.
+                    // LazyHStack still bounds thumbnail construction for long seasons; the parent detail scroll
+                    // remains vertical, so this rail does not create a competing cross-axis focus path.
+                    ScrollViewReader { railProxy in
+                        VStack(spacing: Theme.Space.sm) {
+                            ScrollView(.horizontal, showsIndicators: true) {
+                                LazyHStack(alignment: .top, spacing: Theme.Space.md) {
+                                    ForEach(visibleEpisodes, id: \.id) { v in
+                                        episodeRow(v, isWatched: watched.contains(v.id), progress: episodeProgress(v),
+                                                   cardWidth: cardWidth)
+                                            .overlay(alignment: .topTrailing) {
+                                                episodeActionsOverlay(v, isWatched: watched.contains(v.id))
+                                            }
+                                            .id(v.id)
+                                            .background {
+                                                GeometryReader { cardGeo in
+                                                    Color.clear.preference(key: EpisodeRailPositions.self,
+                                                        value: [v.id: cardGeo.frame(in: .named("cinema-episode-rail")).minX])
                                                 }
-                                                .buttonStyle(.plain)
-                                                .padding(Theme.Space.sm)
-                                                .accessibilityLabel("Actions for \(episodeCoordinate(v))")
                                             }
-                                        }
-                                        .id(v.id)
-                                        .background {
-                                            GeometryReader { cardGeo in
-                                                Color.clear.preference(key: EpisodeRailPositions.self,
-                                                    value: [v.id: cardGeo.frame(in: .named("cinema-episode-rail")).minX])
-                                            }
-                                        }
+                                    }
+                                }
+                                .padding(.vertical, Theme.Space.xs)
+                            }
+                            .coordinateSpace(name: "cinema-episode-rail")
+                            .simultaneousGesture(DragGesture(minimumDistance: 4).onChanged { value in
+                                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                                episodeRailInitialPosition.userInteracted(scope: episodeRailScope, season: season)
+                            })
+                            .onPreferenceChange(EpisodeRailPositions.self) { positions in
+                                if let index = visibleEpisodes.firstIndex(where: {
+                                    guard let x = positions[$0.id] else { return false }
+                                    return x + cardWidth > 1 && x < viewportWidth - Theme.Space.md * 2
+                                }), index != episodeRailFirstVisible { episodeRailFirstVisible = index }
+                            }
+                            // One rail per season: the horizontal offset belongs to the season it was scrolled in.
+                            // Without this the scroll view survived a season switch and kept, say, the far end of
+                            // Season 1 when Season 2 was picked (the one-shot initial position is already spent
+                            // for a season visited before, so nothing re-positioned it).
+                            .id("episode-rail-\(season)")
+                            HStack(spacing: Theme.Space.sm) {
+                                episodePageButton(forward: false, count: visibleEpisodes.count, pageSize: pageSize) {
+                                    pageEpisodes(forward: false, episodes: visibleEpisodes, pageSize: pageSize, proxy: railProxy)
+                                }
+                                Spacer(minLength: 0)
+                                Text(visibleEpisodes.isEmpty ? "No episodes" : "\(min(episodeRailFirstVisible + 1, visibleEpisodes.count))–\(min(episodeRailFirstVisible + pageSize, visibleEpisodes.count)) of \(visibleEpisodes.count)")
+                                    .font(Theme.Typography.label)
+                                    .foregroundStyle(Theme.Palette.textSecondary)
+                                    .accessibilityLabel("Visible episodes")
+                                Spacer(minLength: 0)
+                                episodePageButton(forward: true, count: visibleEpisodes.count, pageSize: pageSize) {
+                                    pageEpisodes(forward: true, episodes: visibleEpisodes, pageSize: pageSize, proxy: railProxy)
                                 }
                             }
-                            .padding(.vertical, Theme.Space.xs)
                         }
-                        .coordinateSpace(name: "cinema-episode-rail")
-                        .simultaneousGesture(DragGesture(minimumDistance: 4).onChanged { value in
-                            guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                            episodeRailInitialPosition.userInteracted(scope: episodeRailScope, season: season)
-                        })
-                        .onPreferenceChange(EpisodeRailPositions.self) { positions in
-                            if let index = visibleEpisodes.firstIndex(where: {
-                                guard let x = positions[$0.id] else { return false }
-                                return x + cardWidth > 1 && x < viewportWidth - Theme.Space.md * 2
-                            }), index != episodeRailFirstVisible { episodeRailFirstVisible = index }
-                        }
-                        // One rail per season: the horizontal offset belongs to the season it was scrolled in.
-                        // Without this the scroll view survived a season switch and kept, say, the far end of
-                        // Season 1 when Season 2 was picked (the one-shot initial position is already spent
-                        // for a season visited before, so nothing re-positioned it).
-                        .id("episode-rail-\(season)")
-                        HStack(spacing: Theme.Space.sm) {
-                            episodePageButton(forward: false, count: visibleEpisodes.count, pageSize: pageSize) {
-                                pageEpisodes(forward: false, episodes: visibleEpisodes, pageSize: pageSize, proxy: railProxy)
-                            }
-                            Spacer(minLength: 0)
-                            Text(visibleEpisodes.isEmpty ? "No episodes" : "\(min(episodeRailFirstVisible + 1, visibleEpisodes.count))–\(min(episodeRailFirstVisible + pageSize, visibleEpisodes.count)) of \(visibleEpisodes.count)")
-                                .font(Theme.Typography.label)
-                                .foregroundStyle(Theme.Palette.textSecondary)
-                                .accessibilityLabel("Visible episodes")
-                            Spacer(minLength: 0)
-                            episodePageButton(forward: true, count: visibleEpisodes.count, pageSize: pageSize) {
-                                pageEpisodes(forward: true, episodes: visibleEpisodes, pageSize: pageSize, proxy: railProxy)
-                            }
+                        .task(id: focusRequest) {
+                            // Allow the lazy rail to lay out before its initial scroll. Cancellation and
+                            // the one-shot policy prevent a late history update from stealing the position.
+                            await Task.yield()
+                            guard !Task.isCancelled, season == focusRequest.season,
+                                  episodeRailScope == focusRequest.scope,
+                                  let index = episodeRailInitialPosition.claim(
+                                    scope: focusRequest.scope, season: focusRequest.season, ids: focusRequest.ids,
+                                    watched: focusRequest.watched, ready: focusRequest.ready) else { return }
+                            episodeRailFirstVisible = index
+                            railProxy.scrollTo(focusRequest.ids[index], anchor: .leading)
                         }
                     }
-                    .task(id: focusRequest) {
-                        // Allow the lazy rail to lay out before its initial scroll. Cancellation and
-                        // the one-shot policy prevent a late history update from stealing the position.
-                        await Task.yield()
-                        guard !Task.isCancelled, season == focusRequest.season,
-                              episodeRailScope == focusRequest.scope,
-                              let index = episodeRailInitialPosition.claim(
-                                scope: focusRequest.scope, season: focusRequest.season, ids: focusRequest.ids,
-                                watched: focusRequest.watched, ready: focusRequest.ready) else { return }
-                        episodeRailFirstVisible = index
-                        railProxy.scrollTo(focusRequest.ids[index], anchor: .leading)
-                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Episodes")
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel("Episodes")
             }
             .padding(.horizontal, Theme.Space.md)
+            // Season poster art for the wide selector; the series poster stands in until (or unless) it lands.
+            .task(id: wideDetailLayout ? meta?.id : nil) {
+                seasonPosters = [:]
+                guard wideDetailLayout, let id = meta?.id else { return }
+                let posters = await TMDBClient.seasonPosters(metaID: id)
+                guard !Task.isCancelled, meta?.id == id else { return }
+                seasonPosters = posters
+            }
             // Initial season = the season you were LAST watching (Continue Watching), else first-unwatched,
             // else the first non-special, else 1, matching the tvOS rule. Re-applies when a large series'
             // episode metadata changes after the list first appears, including same-count season/release
@@ -3997,6 +4042,128 @@ struct iOSDetailView: View {
             .onDisappear { manualWatchedAction.cancel() }
             .onChange(of: episodeRailScope) { _ in manualWatchedAction.cancel() }
         }
+    }
+
+    /// The per-card actions disc (mark watched, download, ...), shared by the phone rail and the wide grid.
+    @ViewBuilder private func episodeActionsOverlay(_ v: CoreVideo, isWatched: Bool) -> some View {
+        if !selectingEpisodes {
+            Menu {
+                episodeActions(v, isWatched: isWatched)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .vortxGlassDisc()
+            }
+            .buttonStyle(.plain)
+            .padding(Theme.Space.sm)
+            .accessibilityLabel("Actions for \(episodeCoordinate(v))")
+        }
+    }
+
+    /// Mac / iPad: the season's episodes as a grid of the same cinematic cards the phone rail scrolls through,
+    /// so a whole season reads at a glance and the page's own vertical scroll replaces horizontal paging.
+    private func episodeGrid(_ episodes: [CoreVideo], watched: Set<String>, viewportWidth: CGFloat) -> some View {
+        let grid = CinemaRailLayout.episodeGrid(viewport: viewportWidth, inset: Theme.Space.md,
+                                                spacing: Theme.Space.md)
+        let columns = Array(repeating: GridItem(.fixed(grid.cardWidth), spacing: Theme.Space.md, alignment: .top),
+                            count: grid.columns)
+        return LazyVGrid(columns: columns, alignment: .leading, spacing: Theme.Space.lg) {
+            ForEach(episodes, id: \.id) { v in
+                episodeRow(v, isWatched: watched.contains(v.id), progress: episodeProgress(v),
+                           cardWidth: grid.cardWidth)
+                    .overlay(alignment: .topTrailing) {
+                        episodeActionsOverlay(v, isWatched: watched.contains(v.id))
+                    }
+                    .id(v.id)
+            }
+        }
+        .padding(.vertical, Theme.Space.xs)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Episodes")
+    }
+
+    #if os(macOS)
+    private static let seasonPosterWidth: CGFloat = 96
+    #else
+    private static let seasonPosterWidth: CGFloat = 88
+    #endif
+
+    /// Mac / iPad season selector: each season as its own poster (the series poster stands in where TMDB has
+    /// none), the current one ringed in ember and a check on a fully watched season. Right-click / long-press
+    /// keeps the watched + download menu the phone's season chips carry.
+    private func seasonPosterStrip(_ seasons: [Int], watched: Set<String>) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: Theme.Space.md) {
+                ForEach(seasons, id: \.self) { s in
+                    Button { season = s } label: {
+                        seasonPosterTile(s, selected: season == s, watched: watched)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(seasonLabel(s))
+                    .accessibilityAddTraits(season == s ? .isSelected : [])
+                    .contextMenu { seasonContextMenu(s) }
+                }
+            }
+            .padding(.vertical, Theme.Space.xs)
+        }
+    }
+
+    private func seasonPosterTile(_ s: Int, selected: Bool, watched: Set<String>) -> some View {
+        let width = Self.seasonPosterWidth
+        let shape = RoundedRectangle(cornerRadius: Theme.Radius.chip, style: .continuous)
+        let episodes = episodesInSeason(s)
+        let complete = !episodes.isEmpty && episodes.allSatisfy { watched.contains($0.id) }
+        return VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            iOSEpisodeThumbImage(url: seasonPosters[s], fallbackURLs: [meta?.poster])
+                .frame(width: width, height: width * 1.5)
+                .overlay(alignment: .bottomLeading) {
+                    // The series poster is standing in: name the season on the art so the tiles differ.
+                    if seasonPosters[s] == nil {
+                        Text(s == 0 ? "SP" : "\(s)")
+                            .font(Theme.Typography.sectionTitle.weight(.heavy))
+                            .foregroundStyle(.white)
+                            .padding(Theme.Space.sm)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(LinearGradient(colors: [.clear, .black.opacity(0.75)],
+                                                       startPoint: .top, endPoint: .bottom))
+                    }
+                }
+                .clipShape(shape)
+                .overlay(shape.strokeBorder(selected ? Theme.Palette.accent : Theme.Palette.textPrimary.opacity(0.08),
+                                            lineWidth: selected ? 2.5 : 1))
+                .overlay(alignment: .topTrailing) {
+                    if complete {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, Theme.Palette.accent)
+                            .padding(6)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .opacity(selected ? 1 : 0.72)
+                .shadow(color: selected ? Theme.Palette.accent.opacity(0.35) : .clear, radius: 12, y: 4)
+            Text(seasonLabel(s))
+                .font(Theme.Typography.label.weight(selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Theme.Palette.textPrimary : Theme.Palette.textSecondary)
+                .lineLimit(1)
+        }
+        .frame(width: width, alignment: .leading)
+        .contentShape(Rectangle())
+        .animation(reduceMotion ? nil : Theme.Motion.state, value: selected)
+    }
+
+    /// Season watched + download menu, on the phone's season chips and the wide season posters alike.
+    @ViewBuilder private func seasonContextMenu(_ s: Int) -> some View {
+        seasonWatchedMenu(s)
+        #if !os(tvOS)
+        // #119: download ANY season straight from its selector, without first switching the visible season.
+        Divider()
+        Button { startBatchDownload(episodesInSeason(s)) } label: {
+            Label("Download \(seasonLabel(s))", systemImage: "arrow.down.circle")
+        }
+        #endif
     }
 
     private func episodePageButton(forward: Bool, count: Int, pageSize: Int,
@@ -6601,6 +6768,8 @@ struct iOSSourceList: View {
 
     @State private var sourceFilter: String? = nil      // nil = all add-ons
     @State private var selectedSourceAddon: String? = nil
+    /// The tab (All = 0) the add-on row's ‹ › buttons last scrolled to the leading edge.
+    @State private var addonStripStart = 0
     @State private var showAllSources = false           // the full ranked list is revealed on demand
     // Render only the top N ranked rows across the expanded groups; a popular title returns 4000+ sources and
     // reassigning row identity ~4x/sec starved diffing. "Show more" grows the window by a step. Ranking +
@@ -6821,7 +6990,6 @@ struct iOSSourceList: View {
                 // Singularity renders INLINE ONLY: its merged group flows through the ranked list like
                 // any add-on, sortable with the user's sort (owner decision; the old pinned duplicate
                 // section above the list was removed on both platforms).
-                if groups.count > 1 { sourceAddonTabs }
                 if showsPrimaryControls { controlBar }
                 if loading && progress.total > 0 {
                     Text("Still finding more · \(progress.loaded)/\(progress.total) add-ons")
@@ -6830,7 +6998,7 @@ struct iOSSourceList: View {
                 // Reveal the grouped list on demand (All-sources toggle) OR always when the control bar is
                 // hidden; otherwise the movie rail would be empty, since the toggle lives in that bar.
                 if showAllSources || !showsPrimaryControls {
-                    if groups.count > 1 { filterBar }
+                    if groups.count > 1 { sourceAddonTabs }
                     sortBar
                     groupedList
                     unresolvedFooter
@@ -6979,43 +7147,14 @@ struct iOSSourceList: View {
 
     // MARK: Per-add-on filter chips
 
-    /// Source selection must be unmistakable against both bright heroes and dark source lists.
-    /// Own the selected fill/checkmark here rather than relying on a subtle generic glass tint.
-    private struct AddonFilterChip: View {
-        let title: String
-        let selected: Bool
-        let action: () -> Void
-
-        var body: some View {
-            Button(action: action) {
-                HStack(spacing: 7) {
-                    if selected { Image(systemName: "checkmark") }
-                    Text(title).lineLimit(1)
-                }
-                .font(Theme.Typography.label.weight(.semibold))
-                .foregroundStyle(selected ? Theme.Palette.accent : Theme.Palette.textSecondary)
-                .padding(.horizontal, 14)
-                .frame(minHeight: 44)
-                .vortxGlassChip(selected: selected)
-                .overlay {
-                    Capsule().strokeBorder(Theme.Palette.accent.opacity(selected ? 0.55 : 0.12),
-                                          lineWidth: selected ? 1.25 : 0.75)
-                }
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(title)
-            .accessibilityAddTraits(selected ? [.isSelected] : [])
-        }
-    }
-
-    /// Add-on names are the primary Cinema source navigation. Selecting one narrows the same grouped list
-    /// already used by the legacy filter chips, so the chosen add-on becomes the first visible card without
-    /// introducing a second scroll container or changing any stream identity / ranking semantics.
+    /// Add-on names are the primary Cinema source navigation, shown once, under All sources, in the accent
+    /// tab style. Selecting one narrows the same grouped list, so the chosen add-on becomes the first visible
+    /// card without a second scroll container or any change to stream identity / ranking. The ‹ › buttons
+    /// scroll the row a few names at a time, since a mouse cannot swipe it the way a trackpad can.
     private var sourceAddonTabs: some View {
-        HStack(spacing: Theme.Space.xs) {
-            sourceAddonStepButton(forward: false)
-            ScrollViewReader { proxy in
+        ScrollViewReader { proxy in
+            HStack(spacing: Theme.Space.xs) {
+                sourceAddonScrollButton(forward: false, proxy: proxy)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: Theme.Space.sm) {
                         sourceAddonTab(title: "All", count: streamCount, selected: selectedSourceAddon == nil) {
@@ -7040,9 +7179,9 @@ struct iOSSourceList: View {
                         proxy.scrollTo(sourceAddonTabAnchor(addon), anchor: .center)
                     }
                 }
+                .accessibilityLabel("Source add-ons")
+                sourceAddonScrollButton(forward: true, proxy: proxy)
             }
-            .accessibilityLabel("Source add-ons")
-            sourceAddonStepButton(forward: true)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Source add-ons, selection \(sourceAddonSelectionIndex + 1) of \(groups.count + 1)")
@@ -7064,26 +7203,31 @@ struct iOSSourceList: View {
         return .addon(group.id)
     }
 
-    private func sourceAddonStepButton(forward: Bool) -> some View {
-        let index = sourceAddonSelectionIndex
+    /// How many add-on names one ‹ › press moves the row by.
+    private static let addonStripStep = 3
+
+    private func sourceAddonScrollButton(forward: Bool, proxy: ScrollViewProxy) -> some View {
         let lastIndex = groups.count // All plus N groups gives valid indices 0...N.
-        let disabled = forward ? index >= lastIndex : index == 0
+        let start = min(addonStripStart, lastIndex)
+        let disabled = forward ? start >= lastIndex : start == 0
         return Button {
-            let next = index + (forward ? 1 : -1)
-            guard next >= 0, next <= lastIndex else { return }
-            selectSourceAddon(next == 0 ? nil : groups[next - 1].addon)
+            let next = min(lastIndex, max(0, start + (forward ? Self.addonStripStep : -Self.addonStripStep)))
+            addonStripStart = next
+            withAnimation(reduceMotion ? nil : Theme.Motion.state) {
+                proxy.scrollTo(next == 0 ? SourceAddonTabAnchor.all : .addon(groups[next - 1].id), anchor: .leading)
+            }
         } label: {
             Image(systemName: forward ? "chevron.right" : "chevron.left")
-                .font(.system(size: 12, weight: .semibold))
-                .frame(width: 28, height: 28)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(disabled ? Theme.Palette.textTertiary : Theme.Palette.accent)
+                .frame(width: 34, height: 34)
                 .vortxGlassChip(selected: false)
                 .frame(width: 44, height: 44)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(disabled)
-        .accessibilityLabel(forward ? "Next source add-on" : "Previous source add-on")
-        .accessibilityHint(disabled ? "No more source add-ons in that direction" : "Selects the adjacent source add-on")
+        .accessibilityLabel(forward ? "Scroll add-ons forward" : "Scroll add-ons back")
     }
 
     @ViewBuilder
@@ -7135,23 +7279,6 @@ struct iOSSourceList: View {
         DispatchQueue.main.async { jumpToSource?(anchor) }
     }
 
-    private var filterBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: Theme.Space.sm) {
-                AddonFilterChip(title: "All (\(streamCount))", selected: sourceFilter == nil) {
-                    selectSourceAddon(nil)
-                }
-                ForEach(groups) { group in
-                    AddonFilterChip(title: "\(group.addon) (\(group.streams.count))",
-                                    selected: sourceFilter == group.addon) {
-                        selectSourceAddon(group.addon)
-                    }
-                }
-            }
-            .padding(.vertical, Theme.Space.xs)
-        }
-    }
-
     // MARK: Sort control (Best · Size · Seeders)
 
     /// A compact segmented control to reorder the rows inside every add-on section. Best is our ranking;
@@ -7163,11 +7290,9 @@ struct iOSSourceList: View {
                 Text("Sort")
                     .font(Theme.Typography.label)
                     .foregroundStyle(Theme.Palette.textTertiary)
-                Picker("Sort sources", selection: $sortMode) {
-                    ForEach(SourceSort.allCases) { mode in Text(mode.rawValue).tag(mode) }
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
+                VortXSegmented(options: SourceSort.allCases.map { .init(value: $0, title: LocalizedStringKey($0.rawValue)) },
+                               selection: $sortMode)
+                    .accessibilityLabel("Sort sources")
                 Spacer(minLength: 0)
             }
             .padding(.vertical, Theme.Space.xs)

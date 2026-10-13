@@ -1580,7 +1580,7 @@ struct DetailView: View {
             Button {
                 Task { @MainActor in await playFullTrailerInApp(m) }
             } label: {
-                Label("Trailer", systemImage: "film")
+                Label("Trailer", systemImage: "movieclapper")
             }
             .buttonStyle(ChipButtonStyle())
             // #95 SECONDARY action (long-press): hand the trailer straight to the YouTube app. The
@@ -1880,6 +1880,11 @@ struct CoreSeasonedEpisodes: View {
     @State private var episodes: [CoreVideo] = []
     @State private var episodeIDs: [String] = []
     @State private var eligibleEpisodeIDs: Set<String> = []
+    /// TMDB season poster art for the season selector, keyed by season number (0 = Specials).
+    @State private var seasonPosters: [Int: String] = [:]
+    /// The episode grid's column count; the first row owns the Up escape to the season posters.
+    static let episodeColumns = 4
+    private static let seasonPosterWidth: CGFloat = 150
     private var detailTarget: LibraryWatchedMutationPolicy.DetailTarget {
         .init(id: meta.id, type: meta.type)
     }
@@ -2008,10 +2013,12 @@ struct CoreSeasonedEpisodes: View {
             if !seasons.isEmpty {
                 ScrollViewReader { chips in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: Theme.Space.sm) {
+                    HStack(alignment: .center, spacing: Theme.Space.md) {
                         ForEach(seasons, id: \.self) { s in
-                            Button { selectSeason(s) } label: { Text(seasonLabel(s)) }
-                                .buttonStyle(ChipButtonStyle(selected: season == s))
+                            Button { selectSeason(s) } label: { seasonPosterTile(s, selected: season == s) }
+                                .vortxCardButton(radius: Theme.Radius.chip)
+                                .accessibilityLabel(seasonLabel(s))
+                                .accessibilityAddTraits(season == s ? .isSelected : [])
                                 .focused($focusedSeason, equals: s)
                                 .id(s)
                                 .contextMenu {
@@ -2075,14 +2082,17 @@ struct CoreSeasonedEpisodes: View {
             // cap or lazily build). Spacing, padding and per-row focus binding are unchanged; the `.id` is
             // added so a programmatic focus request can scroll its row into existence first.
             ScrollViewReader { rows in
-                LazyVStack(spacing: Theme.Space.sm) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Theme.Space.lg, alignment: .top),
+                                         count: Self.episodeColumns),
+                          alignment: .leading, spacing: Theme.Space.lg) {
                     ForEach(Array(episodes.enumerated()), id: \.element.id) { index, v in
                         let row = episodeRow(v).focused($focusedEpisode, equals: v.id).id(v.id)
-                        if TVDetailEpisodeListFocusPolicy.rowOwnsUpEscape(at: index) {
-                            // The first row is the list's sole upward boundary. Its handler also gives Down
-                            // an explicit second-row target, so registering an Up handler cannot swallow the
-                            // first native downward list movement. Every deeper row has no move-command owner.
-                            row.modifier(DetailMoveCommandHandler(action: episodeMoveHandler()))
+                        if TVDetailEpisodeListFocusPolicy.rowOwnsUpEscape(at: index, columns: Self.episodeColumns) {
+                            // The grid's first row is its sole upward boundary. Each first-row card routes every
+                            // direction explicitly (Up to the season posters, Down to the card below, Left/Right
+                            // along the row), so a registered handler cannot swallow a native move. Every deeper
+                            // card has no move-command owner and keeps tvOS's native grid navigation.
+                            row.modifier(DetailMoveCommandHandler(action: episodeMoveHandler(from: index)))
                         } else {
                             row
                         }
@@ -2124,6 +2134,13 @@ struct CoreSeasonedEpisodes: View {
             }
         }
         .onAppear { applyPreferredSeason() }
+        .task(id: meta.id) {
+            seasonPosters = [:]
+            let id = meta.id
+            let posters = await TMDBClient.seasonPosters(metaID: id)
+            guard !Task.isCancelled, meta.id == id else { return }
+            seasonPosters = posters
+        }
         .task(id: initialPositionRequest) {
             let request = initialPositionRequest
             await Task.yield()
@@ -2267,13 +2284,14 @@ struct CoreSeasonedEpisodes: View {
     /// The only row-level handler belongs to row zero. Its two owned directions have explicit destinations:
     /// Up returns to the selected season chip, while Down seats focus on row one by its stable CoreVideo id. This does
     /// not rely on `onMoveCommand` propagation semantics for the first downward list movement.
-    private func episodeMoveHandler() -> ((MoveCommandDirection) -> Void)? {
+    private func episodeMoveHandler(from index: Int) -> ((MoveCommandDirection) -> Void)? {
         return { direction in
             noteEpisodeInteraction()
             switch TVDetailEpisodeListFocusPolicy.destination(
                 for: direction,
-                fromEpisodeIndex: 0,
-                episodeCount: episodes.count
+                fromEpisodeIndex: index,
+                episodeCount: episodes.count,
+                columns: Self.episodeColumns
             ) {
             case .seasonPicker:
                 guard !seasons.isEmpty else { return }
@@ -2296,7 +2314,8 @@ struct CoreSeasonedEpisodes: View {
             // destination is built eagerly for every row on every body evaluation. ALL seasons → cross-season auto-advance.
             CoreEpisodeStreams(meta: meta, video: v, season: v.season ?? season, episodes: orderedEpisodes)
         } label: {
-            HStack(alignment: .top, spacing: Theme.Space.md) {
+            // A grid card: the still across the full card width, then the number + title, date and synopsis.
+            VStack(alignment: .leading, spacing: Theme.Space.sm) {
                 thumbnail(v, isWatched: isWatched, progress: progress)
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
@@ -2322,9 +2341,9 @@ struct CoreSeasonedEpisodes: View {
                             .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Spacer(minLength: 0)
             }
-            .padding(Theme.Space.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(Theme.Space.sm)
         }
         .buttonStyle(RowFocusStyle())
         .contextMenu {
@@ -2375,7 +2394,8 @@ struct CoreSeasonedEpisodes: View {
         // through PosterImageLoader instead: bounded concurrency, its own big URLCache, and an off-main
         // ImageIO downsample straight to the on-screen size, so only the pixels actually drawn are resident.
         return EpisodeThumbImage(url: v.thumbnail, fallbackURLs: [meta.background, meta.poster])
-        .frame(width: 300, height: 170)
+        .frame(maxWidth: .infinity)
+        .aspectRatio(16 / 9, contentMode: .fit)
         .blur(radius: blurArt ? 20 : 0)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.chip, style: .continuous))
         .overlay {
@@ -2416,6 +2436,48 @@ struct CoreSeasonedEpisodes: View {
         return title.isEmpty ? "Episode \(v.episode ?? 0)" : title
     }
     private func seasonLabel(_ s: Int) -> String { s == 0 ? "Specials" : "Season \(s)" }
+
+    /// One season as its poster (the series poster stands in where TMDB has none, numbered so the tiles
+    /// differ), ringed in ember while selected and checked when every episode in it is watched.
+    private func seasonPosterTile(_ s: Int, selected: Bool) -> some View {
+        let width = Self.seasonPosterWidth
+        let shape = RoundedRectangle(cornerRadius: Theme.Radius.chip, style: .continuous)
+        let inSeason = videos.filter { ($0.season ?? 0) == s }
+        let complete = !inSeason.isEmpty && inSeason.allSatisfy { watched.contains($0.id) }
+        return VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            EpisodeThumbImage(url: seasonPosters[s], fallbackURLs: [meta.poster])
+                .frame(width: width, height: width * 1.5)
+                .overlay(alignment: .bottomLeading) {
+                    if seasonPosters[s] == nil {
+                        Text(s == 0 ? "SP" : "\(s)")
+                            .font(Theme.Typography.sectionTitle.weight(.heavy))
+                            .foregroundStyle(.white)
+                            .padding(Theme.Space.sm)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(LinearGradient(colors: [.clear, .black.opacity(0.75)],
+                                                       startPoint: .top, endPoint: .bottom))
+                    }
+                }
+                .clipShape(shape)
+                .overlay(shape.strokeBorder(selected ? Theme.Palette.accent : Theme.Palette.textPrimary.opacity(0.08),
+                                            lineWidth: selected ? 3 : 1))
+                .overlay(alignment: .topTrailing) {
+                    if complete {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.title3)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, Theme.Palette.accent)
+                            .padding(8)
+                    }
+                }
+                .opacity(selected ? 1 : 0.7)
+            Text(seasonLabel(s))
+                .font(Theme.Typography.label.weight(selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Theme.Palette.textPrimary : Theme.Palette.textSecondary)
+                .lineLimit(1)
+        }
+        .frame(width: width, alignment: .leading)
+    }
 }
 
 /// One episode still, decoded through the shared `PosterImageLoader` (bounded concurrency, dedicated
@@ -4586,7 +4648,8 @@ struct WatchlistChip: View {
 /// character beneath. Wrapped in a focusable, borderless Button so the tvOS focus engine can land on the
 /// rail and travel through it (a bare non-focusable card would block downward scrolling, the same class as
 /// issue #77's non-playable source rows). Focus lifts + brightens the photo, matching the other rails.
-private struct CastMemberCard: View {
+/// One round headshot that opens the Person page: the detail cast row and the People row in Search.
+struct CastMemberCard: View {
     let member: TMDBClient.CastMember
     @FocusState private var focused: Bool
 

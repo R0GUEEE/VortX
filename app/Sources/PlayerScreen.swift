@@ -2108,6 +2108,9 @@ struct PlayerScreen: View {
             // tvOS routes HLS in TVPlayerView, both unchanged.
             mpvBody
         }
+        // Every control in the player (panels, toggles, spinners) carries the chosen accent, however the
+        // player was presented (a cover on iPhone, a window-root overlay on Mac).
+        .tint(Theme.Palette.accent)
         // Ambient-hero gate: the browse UI (and any mounted in-hero trailer clip) stays alive UNDER this
         // fullscreen player, so signal "a player is up" for as long as this screen is mounted - the hero
         // views unmount their looping libmpv clip on it, instead of decoding a 1080p trailer beneath the
@@ -8252,7 +8255,7 @@ struct PlayerScreen: View {
 
     private var bufferingOverlay: some View {
         VStack(spacing: 14) {
-            ProgressView().controlSize(.large).tint(.white)
+            ProgressView().controlSize(.large).tint(Theme.Palette.accent)
             if let status = torrentStatus {   // live peer/byte progress during torrent warm-up
                 Text(status).font(.callout.weight(.medium)).foregroundStyle(.white.opacity(0.9))
             } else if reconnecting {
@@ -8619,6 +8622,14 @@ struct PlayerScreen: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(playerMuted ? "Unmute" : "Mute")
+            #if os(macOS)
+            // The macOS system slider ignores the app's tint and drew this in white; ours carries the accent.
+            VortXSlider(value: Binding(get: { playerMuted ? 0 : playerVolume },
+                                       set: { setPlayerVolume($0) }),
+                        range: 0...100) { editing in if editing { hideTask?.cancel() } else { scheduleHide() } }
+                .frame(width: 92)
+                .accessibilityLabel("Volume")
+            #else
             Slider(value: Binding(get: { playerMuted ? 0 : playerVolume },
                                   set: { setPlayerVolume($0) }),
                    in: 0...100) { editing in if editing { hideTask?.cancel() } else { scheduleHide() } }
@@ -8629,6 +8640,7 @@ struct PlayerScreen: View {
                 .frame(width: 92)
                 #endif
                 .accessibilityLabel("Volume")
+            #endif
         }
     }
 
@@ -9029,7 +9041,7 @@ struct PlayerScreen: View {
                 .skipDBTooltip("Preview: plays 2s before start, jumps to end")
 
                 if skipDBSubmitting {
-                    ProgressView().controlSize(.small).tint(.white).padding(.horizontal, 4)
+                    ProgressView().controlSize(.small).tint(Theme.Palette.accent).padding(.horizontal, 4)
                 } else if skipDBSubmitResult == true {
                     Label("Submitted!", systemImage: "checkmark.circle.fill")
                         .font(.caption.weight(.semibold))

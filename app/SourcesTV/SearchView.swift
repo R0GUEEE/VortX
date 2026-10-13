@@ -41,6 +41,8 @@ struct SearchView: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var searchDebouncePending = false
     @State private var history: [String] = []
+    /// Actors and crew whose name matches the query, opened onto their Person page.
+    @State private var people: [TMDBClient.PersonResult] = []
     @AppStorage(PlaybackSettings.Key.directLinksOnly) private var directLinksOnly = false
 
     var body: some View {
@@ -97,6 +99,16 @@ struct SearchView: View {
             history = SearchHistoryStore.load(profileID: profiles.activeID)
         }
         .onChange(of: query) { _, value in scheduleSearch(value) }
+        // People lookups follow the typing, debounced; a newer query cancels the older one.
+        .task(id: query.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count >= 2 else { people = []; return }
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            let found = await TMDBClient.searchPeople(query: trimmed)
+            guard !Task.isCancelled else { return }
+            people = found
+        }
         .onChange(of: profiles.activeID) { _, id in
             history = SearchHistoryStore.load(profileID: id)
         }
@@ -134,7 +146,7 @@ struct SearchView: View {
     @ViewBuilder private var resultGrid: some View {
         let collections = matchingCollections
         let sections = resultSections(collections: collections)
-        if !hasSearchQuery || sections.isEmpty {
+        if !hasSearchQuery || (sections.isEmpty && people.isEmpty) {
             emptyState
         } else {
             VStack(alignment: .leading, spacing: Theme.Space.xl) {
@@ -142,6 +154,7 @@ struct SearchView: View {
                     resultRow(group: section.group, items: section.items,
                               collections: section.group == .collections ? collections : [])
                 }
+                if !people.isEmpty { peopleRow }
                 if core.searchResults.isEmpty && isWaitingForCurrentQuery {
                     emptyState
                 }
@@ -161,6 +174,26 @@ struct SearchView: View {
         .foregroundStyle(Theme.Palette.textTertiary)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, Theme.Space.xl)
+    }
+
+    /// "People": the cast card the detail page uses, so a focused headshot lifts and opens the same Person page.
+    private var peopleRow: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            Text("People").sectionTitleStyle()
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: Theme.Space.lg) {
+                    ForEach(people) { person in
+                        CastMemberCard(member: .init(id: person.id, name: person.name,
+                                                     character: person.department, profileURL: person.profileURL))
+                            .simultaneousGesture(TapGesture().onEnded { _ in saveToHistory(query) })
+                    }
+                }
+                .padding(.horizontal, Theme.Space.screenEdge)
+                .padding(.vertical, Theme.Space.lg)
+            }
+            .padding(.horizontal, -Theme.Space.screenEdge)
+        }
+        .focusSection()
     }
 
     private func resultRow(group: TVSearchResultGroup, items: [CoreMeta], collections: [HubTarget]) -> some View {

@@ -123,12 +123,12 @@ struct ProfilePickerView: View {
                             }
                             #endif
                             if profileAction.isRunning {
-                                ProgressView("Opening profile…").tint(.white).foregroundStyle(.white)
+                                ProgressView("Opening profile…").tint(Theme.Palette.accent).foregroundStyle(.white)
                             }
                             #if VORTX_NATIVE_DATA_ENGINE
                             if !profileAction.isRunning, nativeSync.isSignedIn {
                                 if nativeSync.accountRestoreState == .restoring {
-                                    ProgressView("Loading your profiles…").tint(.white).foregroundStyle(.white)
+                                    ProgressView("Loading your profiles…").tint(Theme.Palette.accent).foregroundStyle(.white)
                                 } else if nativeSync.accountRestoreState == .failed, profileAction.errorMessage == nil {
                                     Text("Couldn't finish loading your profiles. Tap a profile to try again.")
                                         .font(.callout).foregroundStyle(.white)

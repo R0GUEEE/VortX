@@ -264,6 +264,23 @@ final class FeaturedHeroModel: ObservableObject {
         show(pool[rotationIndex], animated: true)
     }
 
+    /// The user paged the billboard by hand (swipe, trackpad, arrow or dot): step through the pool and hold
+    /// the ambient rotation for the inactivity window like any other interaction. Works under Reduce Motion
+    /// as well, since a page the user asked for is not ambient motion (`show` then swaps without the fade).
+    func step(by delta: Int) {
+        guard pool.count > 1, delta != 0 else { return }
+        rotationIndex = ((rotationIndex + delta) % pool.count + pool.count) % pool.count
+        page = rotationIndex
+        show(pool[rotationIndex], animated: true)
+        noteInteraction()
+    }
+
+    /// Jump straight to a pager dot.
+    func select(page target: Int) {
+        guard pool.indices.contains(target) else { return }
+        step(by: target - rotationIndex)
+    }
+
     /// Stop the timer when the screen disappears (re-armed on the next `seed`).
     func stop() {
         rotationTask?.cancel()

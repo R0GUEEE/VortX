@@ -1185,6 +1185,8 @@ struct TVPlayerView: View {
             }
             if stillWatching { stillWatchingOverlay }
         }
+        // Every control in the player carries the chosen accent, however it was presented.
+        .tint(Theme.Palette.accent)
         .onAppear {
             refreshAutoSkipSettings()
             VXProbeState.shared.setRoute("player")

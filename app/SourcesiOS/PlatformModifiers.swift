@@ -158,6 +158,9 @@ struct MacRootPlayerOverlay: ViewModifier {
                     Color.black.ignoresSafeArea(.all)
                     player
                         .ignoresSafeArea(.all)
+                        // Hoisted beside the app shell, so the shell's accent tint never reached the
+                        // player's panels, toggles and spinners; carry it here.
+                        .tint(Theme.Palette.accent)
                 }
                 .ignoresSafeArea(.all)
                 .background(MacPlayerChromeHider())
@@ -331,6 +334,7 @@ struct MacRootProfileCoverOverlay: ViewModifier {
                 .disabled(host.content != nil)
             if let picker = host.content {
                 picker.ignoresSafeArea(.all)
+                    .tint(Theme.Palette.accent)
             }
         }
     }

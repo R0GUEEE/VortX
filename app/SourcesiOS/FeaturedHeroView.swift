@@ -83,6 +83,9 @@ struct FeaturedHeroView: View {
     /// atmosphere behind the art already carry the title's palette. nil (no art / not computed yet) keeps
     /// today's fixed canvas + gradients exactly, so this is purely additive ambience.
     @State private var heroTint: FeaturedHeroTintSnapshot<Color>?
+    #if os(macOS)
+    @State private var trackpadSwipe = HeroTrackpadSwipe()
+    #endif
 
     private var heroTintKey: FeaturedHeroTintKey {
         .init(id: model.hero?.id, type: model.hero?.type,
@@ -167,6 +170,14 @@ struct FeaturedHeroView: View {
         }
         .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .simultaneousGesture(heroSwipe)
+        #if os(macOS)
+        .overlay(alignment: .bottomTrailing) { pagingArrows }
+        // Two-finger trackpad swipes page the hero while the pointer is over it.
+        .onHover { hovering in trackpadSwipe.setActive(hovering) { model.step(by: $0) } }
+        .onDisappear { trackpadSwipe.setActive(false, onSwipe: nil) }
+        #endif
         // Mac branding now lives ONLY in the persistent top bar (iOSRootView.macTopBar); the old
         // hero-corner wordmark rendered a SECOND logo on every primary screen (owner report).
         // The rare "no trailer available right now" notice (both trailer paths out). A small capsule,
@@ -420,16 +431,59 @@ struct FeaturedHeroView: View {
         if model.pageCount > 1 {
             HStack(spacing: 6) {
                 ForEach(0..<model.pageCount, id: \.self) { i in
-                    Capsule()
-                        .fill(i == model.page ? Theme.Palette.accent : Theme.Palette.textPrimary.opacity(0.28))
-                        .frame(width: i == model.page ? 18 : 6, height: 6)
-                        .animation(reduceMotion ? nil : Theme.Motion.state, value: model.page)
+                    // Each dot jumps straight to its title; the vertical padding gives the 6pt capsule a
+                    // usable hit target without changing how the row looks.
+                    Button { model.select(page: i) } label: {
+                        Capsule()
+                            .fill(i == model.page ? Theme.Palette.accent : Theme.Palette.textPrimary.opacity(0.28))
+                            .frame(width: i == model.page ? 18 : 6, height: 6)
+                            .padding(.vertical, 8)
+                            .contentShape(Rectangle())
+                            .animation(reduceMotion ? nil : Theme.Motion.state, value: model.page)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Featured title \(i + 1) of \(model.pageCount)")
+                    .accessibilityAddTraits(i == model.page ? .isSelected : [])
                 }
             }
-            .padding(.top, Theme.Space.xs)
-            .accessibilityHidden(true)
         }
     }
+
+    /// Touch (and Mac click-drag) paging: a horizontal flick pages the billboard, a vertical one is left to
+    /// the page's scroll view. Simultaneous, so it never steals the vertical scroll that starts on the hero.
+    private var heroSwipe: some Gesture {
+        DragGesture(minimumDistance: 24)
+            .onEnded { value in
+                let dx = value.translation.width
+                let flick = value.predictedEndTranslation.width
+                guard abs(dx) > abs(value.translation.height) * 1.4,
+                      abs(dx) > Self.swipeDistance || abs(flick) > Self.swipeDistance * 2 else { return }
+                model.step(by: dx < 0 ? 1 : -1)
+            }
+    }
+
+    private static let swipeDistance: CGFloat = 56
+
+    #if os(macOS)
+    /// Previous / next for a pointer, bottom-trailing over the art (the content block is leading-aligned,
+    /// so the pair never covers the title or the actions).
+    @ViewBuilder private var pagingArrows: some View {
+        if model.pageCount > 1 {
+            HStack(spacing: Theme.Space.sm) {
+                CircleIconButton(systemName: "chevron.left", diameter: Theme.Control.circleChrome) {
+                    model.step(by: -1)
+                }
+                .accessibilityLabel("Previous featured title")
+                CircleIconButton(systemName: "chevron.right", diameter: Theme.Control.circleChrome) {
+                    model.step(by: 1)
+                }
+                .accessibilityLabel("Next featured title")
+            }
+            .padding(.trailing, Theme.Space.md)
+            .padding(.bottom, Theme.Space.lg)
+        }
+    }
+    #endif
 
     /// The add-on logo when enrichment surfaced one (the editorial signature), else the serif hero
     /// type, mirrors `iOSDetailView.titleOrLogo`.
@@ -577,7 +631,7 @@ struct FeaturedHeroView: View {
                 // The secondary hero action rides VortX's warm liquid-glass material as a floating glass
                 // capsule (redesign mockup), next to the ember-filled primary. Appearance only: the tap
                 // still opens the in-app trailer through the exact same resolve path as before.
-                Label("Trailer", systemImage: "play.rectangle.fill")
+                Label("Trailer", systemImage: "movieclapper")
                     .font(Theme.Typography.label.weight(.semibold))
                     .foregroundStyle(Theme.Palette.textPrimary)
                     .padding(.horizontal, Theme.Space.md)
@@ -953,3 +1007,47 @@ private struct TrailerNativeLaunch: Identifiable {
     /// yt-direct adaptive pair: the separate audio stream mpv mounts alongside a video-only `url`.
     var audioSidecarURL: URL? = nil
 }
+
+#if os(macOS)
+/// Two-finger trackpad swipes page the home hero. The scroll-wheel monitor exists only while the pointer is
+/// over the band (installed on hover, removed on exit / disappear), and it never consumes the event, so
+/// vertical scrolling of the page is untouched. A mouse wheel carries no gesture phase and is ignored.
+@MainActor final class HeroTrackpadSwipe {
+    private var monitor: Any?
+    private var onSwipe: ((Int) -> Void)?
+    private var travel: CGFloat = 0
+    private var fired = false
+    private static let threshold: CGFloat = 60
+
+    func setActive(_ active: Bool, onSwipe: ((Int) -> Void)?) {
+        self.onSwipe = onSwipe
+        if active, monitor == nil {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                MainActor.assumeIsolated { self?.handle(event) }
+                return event
+            }
+        } else if !active, let installed = monitor {
+            NSEvent.removeMonitor(installed)
+            monitor = nil
+            travel = 0
+            fired = false
+        }
+    }
+
+    private func handle(_ event: NSEvent) {
+        if event.phase == .began { travel = 0; fired = false }
+        // Decide on the finger movement only: momentum after lift-off and phaseless mouse wheels never page.
+        guard !event.phase.isEmpty, event.momentumPhase.isEmpty else { return }
+        if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+            // Normalise to the finger's direction whatever the natural-scrolling setting is.
+            travel += event.isDirectionInvertedFromDevice ? event.scrollingDeltaX : -event.scrollingDeltaX
+        }
+        if !fired, abs(travel) > Self.threshold {
+            fired = true
+            // Fingers moving left bring in the next title, like turning a page.
+            onSwipe?(travel < 0 ? 1 : -1)
+        }
+        if event.phase == .ended || event.phase == .cancelled { travel = 0; fired = false }
+    }
+}
+#endif

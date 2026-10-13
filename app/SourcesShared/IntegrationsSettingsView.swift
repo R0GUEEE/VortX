@@ -58,7 +58,12 @@ struct IntegrationsSettingsView: View {
 /// rather than an inline connect/disconnect control, matching the AddonsView "Discover add-ons" link.
 private struct NuvioConnectCard: View {
     var body: some View {
-        NavigationLink { NuvioImportView() } label: {
+        NavigationLink {
+            NuvioImportView()
+            #if os(macOS)
+            .macBackAffordance()
+            #endif
+        } label: {
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
                 HStack(spacing: Theme.Space.sm) {
                     Text("Nuvio").font(Theme.Typography.cardTitle).foregroundStyle(Theme.Palette.textPrimary)
@@ -82,7 +87,12 @@ private struct NuvioConnectCard: View {
 /// a public Letterboxd / MDBList / Trakt list into a native Home row. Styled to match the other cards.
 private struct ListImportConnectCard: View {
     var body: some View {
-        NavigationLink { ListImportView() } label: {
+        NavigationLink {
+            ListImportView()
+            #if os(macOS)
+            .macBackAffordance()
+            #endif
+        } label: {
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
                 HStack(spacing: Theme.Space.sm) {
                     Text("Import a list").font(Theme.Typography.cardTitle).foregroundStyle(Theme.Palette.textPrimary)
@@ -108,7 +118,12 @@ private struct ListImportConnectCard: View {
 private struct TraktMyListsCard: View {
     var body: some View {
         if TraktAuth.isConfigured {
-            NavigationLink { TraktMyListsView() } label: {
+            NavigationLink {
+                TraktMyListsView()
+                #if os(macOS)
+                .macBackAffordance()
+                #endif
+            } label: {
                 VStack(alignment: .leading, spacing: Theme.Space.sm) {
                     HStack(spacing: Theme.Space.sm) {
                         Text("My Trakt lists").font(Theme.Typography.cardTitle).foregroundStyle(Theme.Palette.textPrimary)

@@ -3423,6 +3423,10 @@ struct iOSSearchView: View {
             .navigationDestination(for: HubTarget.self) { target in
                 iOSCategoryBrowse(target: target, path: $path)
             }
+            .navigationDestination(for: PersonRoute.self) { person in
+                PersonView(personID: person.id, name: person.name, profileURL: person.profileURL)
+                    .macBackAffordance()
+            }
             .onAppear {
                 searchPresentation.bind(to: core)
                 searchPresentation.setQuery(query)
@@ -3624,6 +3628,12 @@ struct iOSSearchView: View {
     /// line. Gating at ≥2 chars stops a single-char query showing a misleading "No results".
     @ViewBuilder private var results: some View {
         if hasSearchQuery { CinemaSearchCollections(query: query) { path.append($0) } }
+        if hasSearchQuery {
+            CinemaPeopleResults(query: query) { person in
+                saveToHistory(query)
+                path.append(person)
+            }
+        }
         if !hasSearchQuery {
             ContentUnavailableViewCompat(title: "Search", systemImage: "magnifyingglass",
                 message: "Search across everything your add-ons cover.").frame(minHeight: 360)
@@ -3869,6 +3879,10 @@ struct iOSDiscoverView: View {
             }
             .navigationDestination(for: HubTarget.self) { target in
                 iOSCategoryBrowse(target: target, path: $path)
+            }
+            .navigationDestination(for: PersonRoute.self) { person in
+                PersonView(personID: person.id, name: person.name, profileURL: person.profileURL)
+                    .macBackAffordance()
             }
             .onAppear {
                 searchPresentation.bind(to: core)
@@ -6348,6 +6362,27 @@ extension View {
         #else
         self
         #endif
+    }
+}
+
+/// A push whose destination carries the Mac in-content Back button and Escape / Cmd-[ (the Mac window has
+/// no toolbar back button; the VortX top bar replaces it), so a nested settings page can always be left.
+/// Identical to `NavigationLink` on iPhone / iPad.
+struct PushLink<Label: View, Destination: View>: View {
+    private let destination: Destination
+    private let label: Label
+    init(@ViewBuilder destination: () -> Destination, @ViewBuilder label: () -> Label) {
+        self.destination = destination()
+        self.label = label()
+    }
+    var body: some View {
+        NavigationLink { destination.macBackAffordance() } label: { label }
+    }
+}
+
+extension PushLink where Label == Text {
+    init(_ titleKey: LocalizedStringKey, @ViewBuilder destination: () -> Destination) {
+        self.init(destination: destination) { Text(titleKey) }
     }
 }
 

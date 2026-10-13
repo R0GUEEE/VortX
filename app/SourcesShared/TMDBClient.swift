@@ -1214,6 +1214,17 @@ enum TMDBClient {
         let placeOfBirth: String?
         let profileURL: String?        // w342 headshot, nil when TMDB has none
         let knownForDepartment: String?
+        var imdbID: String? = nil      // "nm…", for the IMDb link
+        var birthdayISO: String? = nil // "yyyy-MM-dd", for the age
+        var deathdayISO: String? = nil
+    }
+
+    /// One filmography entry: the card preview plus its release or first-air date ("yyyy-MM-dd", may be empty).
+    struct PersonCredit: Hashable, Identifiable {
+        let preview: MetaPreview
+        let date: String
+        var id: String { preview.id }
+        var year: String? { date.count >= 4 ? String(date.prefix(4)) : nil }
     }
 
     /// Full person record via /3/person/{id}. `id` is a TMDB person id (the one `CastMember` carries). Nil on
@@ -1228,16 +1239,73 @@ enum TMDBClient {
         let profile = (obj["profile_path"] as? String).map { "https://image.tmdb.org/t/p/w342\($0)" }
         let dept = (obj["known_for_department"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let place = (obj["place_of_birth"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let isoDate: (String) -> String? = { key in (obj[key] as? String).flatMap { $0.isEmpty ? nil : $0 } }
         return PersonDetail(name: name, biography: bio,
                             birthday: prettyDate(obj["birthday"] as? String),
-                            placeOfBirth: place, profileURL: profile, knownForDepartment: dept)
+                            placeOfBirth: place, profileURL: profile, knownForDepartment: dept,
+                            imdbID: isoDate("imdb_id"), birthdayISO: isoDate("birthday"), deathdayISO: isoDate("deathday"))
+    }
+
+    /// A person matched by name in Search: enough to paint the result tile and open the Person page.
+    struct PersonResult: Hashable, Identifiable, Sendable {
+        let id: Int
+        let name: String
+        let profileURL: String?
+        let department: String?
+    }
+
+    /// People whose name matches `query`, via /3/search/person through the keyless edge, most popular first.
+    /// Only people with a photo or a known-for credit are kept (bare name collisions are noise). Fail-soft: [].
+    static func searchPeople(query: String, limit: Int = 20) async -> [PersonResult] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2,
+              let encoded = trimmed.addingPercentEncoding(
+                withAllowedCharacters: CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+=?#"))
+              ) else { return [] }
+        let key = ApiKeys.effectiveTMDBKey()
+        guard let obj = await get("/search/person?query=\(encoded)&include_adult=false&api_key=\(key)"),
+              let results = obj["results"] as? [[String: Any]] else { return [] }
+        let ranked: [(PersonResult, Double)] = results.compactMap { entry in
+            guard let id = entry["id"] as? Int, id > 0,
+                  let name = entry["name"] as? String, !name.isEmpty else { return nil }
+            let profile = (entry["profile_path"] as? String).flatMap { $0.isEmpty ? nil : "https://image.tmdb.org/t/p/w185\($0)" }
+            let knownFor = (entry["known_for"] as? [[String: Any]]) ?? []
+            guard profile != nil || !knownFor.isEmpty else { return nil }
+            let department = (entry["known_for_department"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            return (PersonResult(id: id, name: name, profileURL: profile, department: department),
+                    (entry["popularity"] as? Double) ?? 0)
+        }
+        return ranked.sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
+    }
+
+    /// Season poster art for a series, keyed by season number (0 = Specials), from /3/tv/{id}. Accepts the
+    /// catalog id forms the detail page carries (`tt…` resolved through /find, or `tmdb:<id>`); any other id,
+    /// a miss or an error returns [:] and the season selector falls back to the series poster.
+    static func seasonPosters(metaID: String) async -> [Int: String] {
+        let tvID: Int?
+        if metaID.hasPrefix("tmdb:") {
+            tvID = Int(metaID.dropFirst("tmdb:".count))
+        } else {
+            tvID = await tmdbNumericID(imdbID: metaID, type: "series")
+        }
+        guard let tvID, tvID > 0 else { return [:] }
+        let key = ApiKeys.effectiveTMDBKey()
+        guard let show = await get("/tv/\(tvID)?api_key=\(key)"),
+              let seasons = show["seasons"] as? [[String: Any]] else { return [:] }
+        var posters: [Int: String] = [:]
+        for season in seasons {
+            guard let number = season["season_number"] as? Int,
+                  let path = season["poster_path"] as? String, !path.isEmpty else { continue }
+            posters[number] = "https://image.tmdb.org/t/p/w342\(path)"
+        }
+        return posters
     }
 
     /// A person's filmography via /3/person/{id}/combined_credits, mapped onto the same `MetaPreview` cards the
     /// hub rails use: id = "tmdb:<id>", type from `media_type`, name from title/name, poster from poster_path.
-    /// Deduped by id; entries with no poster or no title are dropped; sorted most-popular first, then newest.
-    /// Fail-soft: [] on a non-positive id or any error, matching this file's fail-soft contract.
-    static func personCredits(id: Int) async -> [MetaPreview] {
+    /// Deduped by id; entries with no poster or no title are dropped; sorted newest first (undated last), then by
+    /// popularity. Fail-soft: [] on a non-positive id or any error, matching this file's fail-soft contract.
+    static func personCredits(id: Int) async -> [PersonCredit] {
         guard id > 0 else { return [] }
         let key = ApiKeys.effectiveTMDBKey()
         guard let obj = await get("/person/\(id)/combined_credits?api_key=\(key)"),
@@ -1259,8 +1327,9 @@ enum TMDBClient {
             return (preview, popularity, date)
         }
         return ranked.sorted { a, b in
-            a.popularity != b.popularity ? a.popularity > b.popularity : a.date > b.date
-        }.map(\.preview)
+            if a.date.isEmpty != b.date.isEmpty { return !a.date.isEmpty }
+            return a.date != b.date ? a.date > b.date : a.popularity > b.popularity
+        }.map { PersonCredit(preview: $0.preview, date: $0.date) }
     }
 
     /// VortX's keyless catalog edge: a cached, app-gated TMDB proxy that injects OUR key server-side, so
