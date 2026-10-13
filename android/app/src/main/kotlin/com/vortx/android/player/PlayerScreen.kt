@@ -67,6 +67,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.util.UnstableApi
 import com.vortx.android.VortXApplication
+import com.vortx.android.ui.theme.VortXTheme
 import com.vortx.android.cast.CastButton
 import com.vortx.android.cast.CastEligibility
 import com.vortx.android.cast.CastOverlay
@@ -126,7 +127,8 @@ fun PlayerScreen(
     playable: Playable,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
-    emberAccent: Color = DefaultEmber,
+    /** The chosen accent, so the scrubber, volume, spinners and HUD follow Appearance like the rest of the app. */
+    emberAccent: Color = VortXTheme.colors.accent,
     engineOverride: PlayerEngineRouter.Override = PlayerEngineRouter.Override.AUTO,
     /// Live position/duration (ms) callback for progress writeback. The host wires it to the engine so
     /// Continue Watching updates; a no-op by default keeps the screen usable in isolation.
@@ -2604,8 +2606,6 @@ private const val EXPECTED_RUNTIME_SLACK_MS = 10 * 60_000L
 /// file is under 2 minutes, but plenty of legitimate short content sits just above it, so this only
 /// catches outright samples/stubs. (Trailers never reach the check at all.)
 private const val JUNK_DURATION_FLOOR_MS = 2 * 60_000L
-
-internal val DefaultEmber = Color(0xFFD97706)
 
 /// Tile width for a captured trickplay frame, in pixels. 480 == the `maxWidth` Apple passes on both of its
 /// capture paths. The sheet builder downscales again to its own 320x180 tile, so this is only the

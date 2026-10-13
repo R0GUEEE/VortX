@@ -97,7 +97,6 @@ import com.vortx.android.model.PreferredEpisode
 import com.vortx.android.model.StreamSource
 import com.vortx.android.player.AutoAddLibrarySetting
 import com.vortx.android.player.BadSourceAutoRetrySetting
-import com.vortx.android.player.DefaultEmber
 import com.vortx.android.player.NextEpisodePreloadPolicy
 import com.vortx.android.player.NextEpisodePreloadTaskOwner
 import com.vortx.android.player.MpvEngineFactory
@@ -1920,7 +1919,7 @@ private fun UpNextOverlay(
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 14.sp,
                     modifier = Modifier
-                        .vortxGlassProminent(shape = RoundedCornerShape(8.dp), tint = DefaultEmber)
+                        .vortxGlassProminent(shape = RoundedCornerShape(8.dp), tint = VortXTheme.colors.accent)
                         .clickable(enabled = !resolving && !fired) {
                             fired = true
                             currentOnPlayNow()
@@ -1959,7 +1958,7 @@ private fun RetryingSourceOverlay() {
                 .vortxGlassPanel(RoundedCornerShape(14.dp))
                 .padding(horizontal = 28.dp, vertical = 22.dp),
         ) {
-            CircularProgressIndicator(color = DefaultEmber, modifier = Modifier.size(40.dp))
+            CircularProgressIndicator(color = VortXTheme.colors.accent, modifier = Modifier.size(40.dp))
             Text(
                 text = "That file wasn't right",
                 color = Color.White,
@@ -2038,7 +2037,7 @@ private fun ManualSourcePickOverlay(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .vortxGlassProminent(shape = RoundedCornerShape(10.dp), tint = DefaultEmber)
+                                .vortxGlassProminent(shape = RoundedCornerShape(10.dp), tint = VortXTheme.colors.accent)
                                 .then(manualSourceControlFocus(if (source.id == sources.firstOrNull()?.id) firstSourceFocus else null))
                                 .clickable(enabled = !resolving) { onPick(source) }
                                 .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -2102,7 +2101,7 @@ private fun manualSourceControlFocus(requester: FocusRequester? = null): Modifie
     return Modifier
         .then(if (requester != null) Modifier.focusRequester(requester) else Modifier)
         .onFocusChanged { focused = it.isFocused }
-        .border(2.dp, if (focused) DefaultEmber else Color.Transparent, RoundedCornerShape(10.dp))
+        .border(2.dp, if (focused) VortXTheme.colors.accent else Color.Transparent, RoundedCornerShape(10.dp))
 }
 
 /// Seconds the Up Next overlay counts down before auto-playing the next episode. Long enough to cancel,
