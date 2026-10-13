@@ -558,6 +558,23 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                 }) { continuation.resume(throwing: VortxNativeError.closed) }
         }
     }
+    /// One `forYou.` profile field (interests or a smart collection). Same fence as `setWatchlist`:
+    /// the edit lands only for the profile and account generation it was captured on, and the
+    /// continuation resumes after the durable commit, not on admission.
+    func setForYouField(_ field: String, value: VortxJSON, expected: WatchlistBinding) async throws {
+        try ForYouSync.validate(field, value: value)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            lock.lock(); defer { lock.unlock() }
+            guard watchlistBinding == expected else { continuation.resume(throwing: VortxNativeError.superseded); return }
+            if !enqueueMutation(type: "edit_for_you", raw: "", actions: [],
+                hostEdits: [.init(profileID: expected.profileID, fields: [field: value])], admission: { [weak self] in
+                    guard let self else { return false }
+                    return self.lock.withLock { self.watchlistBinding == expected }
+                }, completion: { result in continuation.resume(with: result.map { _ in () }) }) {
+                continuation.resume(throwing: VortxNativeError.closed)
+            }
+        }
+    }
     /// A synchronous UI admission receipt, not a durable-write acknowledgement. The native FIFO
     /// owns persistence and rejects stale profile gestures before resolving their effective bucket.
     func reorderAddonURLs(_ urls: [String], profileID: String) -> Bool {

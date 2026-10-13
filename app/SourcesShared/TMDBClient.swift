@@ -368,6 +368,49 @@ enum TMDBClient {
         return await discoverGenrePage(media: "tv", genreID: tvGenreID, key: key)
     }
 
+    /// A For You or smart collection row: one /discover page per media from `ForYouQuery` (the parameters
+    /// after `api_key`; nil skips that media), interleaved and resolved to playable tt previews exactly
+    /// like the genre rails. Fail-soft: [].
+    static func ruleTitles(movieQuery: String?, tvQuery: String?, limit: Int = 20) async -> [MetaPreview] {
+        let key = ApiKeys.effectiveTMDBKey()
+        async let movieRows = rulePage(media: "movie", query: movieQuery, key: key)
+        async let tvRows = rulePage(media: "tv", query: tvQuery, key: key)
+        return await resolveRows(interleave(await movieRows, await tvRows), key: key, limit: limit)
+    }
+
+    private static func rulePage(media: String, query: String?, key: String) async -> [DiscoverRow] {
+        guard let query else { return [] }
+        return parseDiscover(await get("/discover/\(media)?api_key=\(key)&\(query)&language=en-US&page=1"), media: media)
+    }
+
+    /// A followed person's best-known work for a For You row: acting plus directing and writing credits,
+    /// most-voted first, resolved to tt previews. Self appearances and talk, news and reality shows are
+    /// left out (they list every guest spot, not the person's work). Fail-soft: [].
+    static func personTopTitles(id: Int, limit: Int = 20) async -> [MetaPreview] {
+        guard id > 0 else { return [] }
+        let key = ApiKeys.effectiveTMDBKey()
+        guard let obj = await get("/person/\(id)/combined_credits?api_key=\(key)") else { return [] }
+        let cast = (obj["cast"] as? [[String: Any]]) ?? []
+        let crew = ((obj["crew"] as? [[String: Any]]) ?? []).filter {
+            ["Directing", "Writing"].contains($0["department"] as? String ?? "")
+        }
+        let appearanceGenres: Set<Int> = [10763, 10764, 10767]
+        var seen = Set<String>()
+        var ranked: [(row: DiscoverRow, votes: Int)] = []
+        for entry in cast + crew {
+            guard let tmdbID = entry["id"] as? Int, let media = entry["media_type"] as? String,
+                  media == "movie" || media == "tv", seen.insert("\(media):\(tmdbID)").inserted else { continue }
+            let character = (entry["character"] as? String ?? "").lowercased()
+            if ["self", "himself", "herself"].contains(where: { character.hasPrefix($0) }) { continue }
+            if !Set((entry["genre_ids"] as? [Int]) ?? []).isDisjoint(with: appearanceGenres) { continue }
+            let name = (entry["title"] as? String) ?? (entry["name"] as? String) ?? ""
+            let poster = (entry["poster_path"] as? String).map { "https://image.tmdb.org/t/p/w342\($0)" }
+            ranked.append(((tmdbID, media, name, poster), (entry["vote_count"] as? Int) ?? 0))
+        }
+        let rows = ranked.sorted { $0.votes > $1.votes }.map(\.row)
+        return await resolveRows(rows, key: key, limit: limit)
+    }
+
     /// "Top New": the most popular movies + shows released in the last `newWindowMonths`, merged and
     /// resolved to tt previews. Sorted by popularity (what's hot right now among recent releases).
     static func topNewTitles(region: String = deviceRegion, limit: Int = 24) async -> [MetaPreview] {

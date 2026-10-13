@@ -166,6 +166,7 @@ struct VortxNativeHostPreferences: Sendable {
     }
     private static func validateField(_ name: String, value: VortxJSON, global: Bool) throws {
         if !global, name.hasPrefix(VortxNativeWatchlist.prefix) { try VortxNativeWatchlist.validate(name, value: value) }
+        if !global, name.hasPrefix(ForYouSync.prefix) { try ForYouSync.validate(name, value: value) }
         let normalized = name.lowercased()
         guard !name.isEmpty, !Set(kernelFields.map { $0.lowercased() }).contains(normalized),
               !Set(reservedGlobals.map { $0.lowercased() }).contains(normalized),

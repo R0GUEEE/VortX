@@ -542,6 +542,23 @@ final class CoreBridge: ObservableObject {
               PlaybackMutationOwnershipPolicy.allowsNative(target, binding: watchlist.owner) else { throw VortxNativeError.superseded }
         return try await setNativeWatchlist(entry, present: present, target: watchlist)
     }
+    /// The active profile's For You interests and smart collections. Throws `closed` until the
+    /// signed-in account's native state is readable for the profile this device shows.
+    @MainActor func nativeForYou() throws -> (profileID: UUID, interests: ForYouInterests?, collections: [SmartCollection]) {
+        guard let facade = nativeFacade, let snapshot = facade.profileSnapshot(),
+              case .string(let id) = snapshot.state["activeProfileId"], let profile = UUID(uuidString: id),
+              ProfileStore.shared.activeID == profile else { throw VortxNativeError.closed }
+        let read = ForYouSync.read(host: snapshot.host, profileID: profile)
+        return (profile, read.interests, read.collections)
+    }
+    /// Durable write of one `forYou.` field under the watchlist's profile/account fence.
+    @MainActor func setNativeForYouField(_ field: String, value: VortxJSON, target: NativeWatchlistTarget) async throws {
+        try Task.checkCancellation()
+        guard nativeWatchlistTargetIsCurrent(target) else { throw VortxNativeError.superseded }
+        try await target.facade.setForYouField(field, value: value, expected: target.binding)
+        guard nativeWatchlistTargetIsCurrent(target) else { throw VortxNativeError.superseded }
+        NotificationCenter.default.post(name: ForYouStore.changedNote, object: nil)
+    }
 
     /// Never fall back to an unrelated legacy profile token once a native binding exists.
     func nativeCredentialSlot(profileID: UUID) -> String? {
