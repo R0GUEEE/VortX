@@ -854,7 +854,7 @@ struct PosterCard: View {
             }
         case .catalog:
             Button {
-                CoreBridge.shared.addToLibrary(metaId: id, expectedType: type, fallbackPreview: catalogPreview)
+                CoreBridge.shared.addToLibraryFromMenu(catalogPreview)
             } label: {
                 Label("Add to Library", systemImage: "plus.circle")
             }
@@ -881,7 +881,7 @@ struct PosterCard: View {
             }
             Divider()
             Button(role: .destructive) {
-                CoreBridge.shared.removeFromLibrary(id: id)
+                CoreBridge.shared.removeFromLibraryFromMenu(catalogPreview)
             } label: {
                 Label("Remove from Library", systemImage: "trash")
             }

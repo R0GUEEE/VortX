@@ -58,6 +58,9 @@ internal class NativeCatalogRepository(
     private val captureReclaimAdmission: ((VortxNativeSession, VortxNativeOwner) -> ((() -> Boolean) -> Boolean)?)? = null,
     private val withReclaimLifecycle: ((() -> Boolean) -> Boolean) = { action -> action() },
     private val nzbSourceAggregator: NzbSourceAggregator? = null,
+    /** Mirrors a deliberate save or removal to Trakt/SIMKL watchlists once the native checkpoint persisted it
+     *  (Apple `ScrobbleCoordinator.addedToLibrary` / `removedFromLibrary`): added, type, id. */
+    private val mirrorLibrary: (Boolean, MediaType, String) -> Unit = { _, _, _ -> },
     private val sessionProvider: () -> VortxNativeSession,
 ) : CatalogRepository, AuthRepository {
     private data class CatalogSpec(val addon: VortxResourceAddon, val catalog: JSONObject) {
@@ -728,18 +731,25 @@ internal class NativeCatalogRepository(
     private fun addAction(item: MetaItem, read: VortxNativeRead) = action("add_library_item").put("profileId", read.owner.profileID)
         .put("item", JSONObject().put("kind", "standard").put("id", item.id).put("type", item.type.id).put("name", item.name).put("poster", item.poster))
     override suspend fun addToLibrary(item: MetaItem) = attempt { val session = session(); val read = session.read(); session.dispatch(listOf(addAction(item, read)), read.owner); Unit }
+    // A dispatch returns only after the checkpoint committed, so each mirror below follows a persisted change.
+    override suspend fun saveToLibrary(item: MetaItem) = addToLibrary(item).onSuccess { mirrorLibrary(true, item.type, item.id) }
     override suspend fun removeFromLibrary(id: String) = attempt {
         DiagnosticsLog.log("library", "action=remove_saved surface=library")
         val session = session(); val read = session.read(); val item = savedItems(read).filter { it.id == id }.single()
-        session.dispatch(listOf(action("remove_library_item").put("profileId", read.owner.profileID).put("key", "${item.type.id}:$id")), read.owner); Unit
+        session.dispatch(listOf(action("remove_library_item").put("profileId", read.owner.profileID).put("key", "${item.type.id}:$id")), read.owner)
+        mirrorLibrary(false, item.type, id)
     }
     override suspend fun addToLibrary(type: MediaType, id: String, name: String, poster: String?): Result<MetaDetail> = attempt {
         addToLibrary(MetaItem(id, type, name, poster)).getOrThrow(); peekMeta(type, id) ?: meta(type, id).getOrThrow()
+    }
+    override suspend fun saveToLibrary(type: MediaType, id: String, name: String, poster: String?): Result<MetaDetail> = attempt {
+        saveToLibrary(MetaItem(id, type, name, poster)).getOrThrow(); peekMeta(type, id) ?: meta(type, id).getOrThrow()
     }
     override suspend fun removeFromLibrary(type: MediaType, id: String): Result<MetaDetail> = attempt {
         DiagnosticsLog.log("library", "action=remove_saved surface=detail")
         val session = session(); val read = session.read()
         session.dispatch(listOf(action("remove_library_item").put("profileId", read.owner.profileID).put("key", "${type.id}:$id")), read.owner)
+        mirrorLibrary(false, type, id)
         peekMeta(type, id) ?: meta(type, id).getOrThrow()
     }
     private fun requireWatchIdentity(read: VortxNativeRead, type: MediaType, id: String) {

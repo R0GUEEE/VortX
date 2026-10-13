@@ -79,8 +79,10 @@ let refresh = section(bridge, from: "private func refreshAddons()", until: "/// 
 let continueWatching = section(bridge, from: "func rebuildContinueWatching()", until: "/// FLOOR each engine")
 let event = section(bridge, from: "fileprivate func handleEvent", until: "// MARK: meta_details coalesce")
 let libraryEvent = section(event, from: "if fields.contains(\"library\")", until: "if fields.contains(\"search\")")
-let catalogAdd = section(bridge, from: "func addToLibrary(metaId:", until: "/// Add a fully-formed meta object")
+let catalogAdd = section(bridge, from: "func addToLibrary(metaId:", until: "func addToLibraryFromMenu(")
 let catalogWatched = section(bridge, from: "func setCatalogWatched(metaId:", until: "/// The raw `MetaItemPreview`")
+let menuAdd = section(bridge, from: "func addToLibraryFromMenu(", until: "func removeFromLibraryFromMenu(")
+let menuRemove = section(bridge, from: "func removeFromLibraryFromMenu(", until: "/// Add a fully-formed meta object")
 let tvCards = source("SourcesTV/SharedUI.swift")
 let iosCards = source("SourcesiOS/iOSRootView.swift")
 let meta = section(bridge, from: "private func scheduleMetaDetailsRepublish()", until: "private static func appleCWMetaRefreshIsSettled")
@@ -338,11 +340,21 @@ check(catalogAdd.contains("rawMetaPreview(forId: metaId) ?? fallbackPreview?.dic
                 && catalogWatched.contains("rawMetaPreview(forId: metaId) ?? fallbackPreview?.dictionary")
                 && catalogWatched.contains("canDispatchCatalogAdd"),
               "unloaded catalog actions retain a validated minimal card preview after resident lookup")
-check(tvCards.contains("fallbackPreview: catalogPreview")
-                && iosCards.contains("fallbackPreview: catalogPreview")
-                && tvCards.contains("expectedType: type")
-                && iosCards.contains("expectedType: catalogPreview.type"),
+check(tvCards.contains("addToLibraryFromMenu(catalogPreview)")
+                && iosCards.contains("addToLibraryFromMenu(catalogPreview)")
+                && menuAdd.contains("addToLibrary(metaId: card.id, expectedType: card.type, fallbackPreview: card, target: target)"),
               "Apple card menus pass their rendered id, type, name, and poster to the guarded fallback path")
+check(menuAdd.contains("guard addToLibrary(metaId: card.id")
+                && menuAdd.contains("ScrobbleCoordinator.shared.addedToLibrary(")
+                && menuAdd.contains("setNativeLibraryMembership(id: resident.id")
+                && !menuAdd.contains("dispatchCtx(")
+                && menuRemove.contains("setNativeLibraryMembership(id: saved.id")
+                && menuRemove.contains("ScrobbleCoordinator.shared.removedFromLibrary(")
+                && tvCards.contains("removeFromLibraryFromMenu(catalogPreview)")
+                && iosCards.contains("removeFromLibraryFromMenu(catalogPreview)")
+                && !catalogAdd.contains("ScrobbleCoordinator")
+                && !autoAddSource.contains("FromMenu"),
+              "card-menu library adds and removes mirror to Trakt/SIMKL only after the save, while auto-add on play never does")
 check(event.contains("guard let self, self.publicationStillCurrent(publicationToken), self.searchLoaded else { return }")
                 && event.contains("self.loadSearchRange()"),
               "ctx search-range redispatch is dropped for stale or blocked account context")

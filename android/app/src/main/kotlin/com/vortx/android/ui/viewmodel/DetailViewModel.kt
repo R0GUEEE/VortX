@@ -2454,7 +2454,7 @@ class DetailViewModel(
             if (inLibrary) {
                 repo.removeFromLibrary(target.type, target.id)
             } else {
-                repo.addToLibrary(target.type, target.id, current.name, current.poster)
+                repo.saveToLibrary(target.type, target.id, current.name, current.poster)
             }
         }
     }

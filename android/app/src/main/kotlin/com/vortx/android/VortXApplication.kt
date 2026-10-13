@@ -147,6 +147,10 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
                 manager::captureLocalLibraryMutationAdmission) }
         },
         withReclaimLifecycle = { action -> DownloadManager.withWatchedReclaimAdmission(this, action) },
+        mirrorLibrary = { added, type, id ->
+            if (added) com.vortx.android.sync.AccountLibrarySync.onLibraryAdded(this, type, id)
+            else com.vortx.android.sync.AccountLibrarySync.onLibraryRemoved(this, id, type)
+        },
         nzbSourceAggregator = run {
             val keys = DebridKeys(this)
             com.vortx.android.engine.NzbSourceAggregator(

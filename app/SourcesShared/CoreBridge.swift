@@ -4240,6 +4240,64 @@ final class CoreBridge: ObservableObject {
         return true
     }
 
+    /// A deliberate "Add to Library" from a catalog card's menu: the same add as `addToLibrary`, plus the
+    /// Trakt/SIMKL watchlist mirror the detail page already does. Auto-add on play keeps calling
+    /// `addToLibrary`, so playing a title never edits an external watchlist. A native profile saves through
+    /// the acknowledged path, which mirrors only after the checkpoint persisted the add.
+    func addToLibraryFromMenu(_ card: LibraryWatchedMutationPolicy.MetaPreview) {
+        let target = PlaybackMutationTarget.capture(core: self)
+#if VORTX_NATIVE_DATA_ENGINE
+        if usesNativeProfileState {
+            guard target.stillOwnsCurrentContext(core: self) else { return }
+            let resident = rawMetaPreview(forId: card.id).flatMap(Self.mutationPreview) ?? card
+            guard LibraryWatchedMutationPolicy.canDispatchCatalogAdd(
+                metaID: card.id, expectedType: card.type, previewID: resident.id, previewType: resident.type) else { return }
+            Task { @MainActor in
+                do {
+                    try await self.setNativeLibraryMembership(id: resident.id, type: resident.type, name: resident.name,
+                                                              poster: resident.poster, present: true, target: target)
+                } catch {
+                    DiagnosticsLog.log("library", "action=add_saved surface=menu result=failed")
+                }
+            }
+            return
+        }
+#endif
+        guard addToLibrary(metaId: card.id, expectedType: card.type, fallbackPreview: card, target: target) else { return }
+        ScrobbleCoordinator.shared.addedToLibrary(
+            PlaybackMeta(libraryId: card.id, videoId: card.id, type: card.type,
+                         name: card.name, poster: card.poster, season: nil, episode: nil))
+    }
+
+    /// A deliberate "Remove from Library" from a Library card's menu: removes the saved title and mirrors the
+    /// removal to Trakt/SIMKL watchlists, like the detail page. Dismissing Continue Watching never comes
+    /// through here, so it never edits a watchlist.
+    func removeFromLibraryFromMenu(_ card: LibraryWatchedMutationPolicy.MetaPreview) {
+#if VORTX_NATIVE_DATA_ENGINE
+        if usesNativeProfileState {
+            guard let saved = library?.catalog.first(where: { $0.id == card.id }) else { return }
+            let target = PlaybackMutationTarget.capture(core: self)
+            DiagnosticsLog.log("library", "action=remove_saved surface=menu")
+            Task { @MainActor in
+                do {
+                    try await self.setNativeLibraryMembership(id: saved.id, type: saved.type, name: saved.name,
+                                                              poster: saved.poster, present: false, target: target)
+                } catch {
+                    DiagnosticsLog.log("library", "action=remove_saved surface=menu result=failed")
+                }
+            }
+            return
+        }
+#endif
+        if ProfileStore.shared.activeUsesEngineHistory {
+            guard !logoutAccountMutationPending else { return }
+            ScrobbleCoordinator.shared.removedFromLibrary(
+                PlaybackMeta(libraryId: card.id, videoId: card.id, type: card.type,
+                             name: card.name, poster: card.poster, season: nil, episode: nil))
+        }
+        removeFromLibrary(id: card.id)
+    }
+
     /// Add a fully-formed meta object (e.g. a Cinemeta title resolved from a played magnet/link, #81) to
     /// the library, honouring the per-profile invariant. The dict must be a real catalog meta (a `tt…` /
     /// `tmdb…` id), never a synthetic magnet item, or it poisons official-client account sync.

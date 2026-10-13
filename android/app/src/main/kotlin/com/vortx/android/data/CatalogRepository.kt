@@ -203,9 +203,14 @@ interface CatalogRepository {
     suspend fun libraryPortableItems(now: String): Result<List<LibraryPortability.Item>> =
         Result.success(emptyList())
 
-    /// Add a title to the Library (the "Save"/bookmark action from a poster's long-press menu or the
-    /// detail page).
+    /// Add a title to the Library. Auto-add on play, played links and import call this directly, so they
+    /// never edit an external watchlist.
     suspend fun addToLibrary(item: MetaItem): Result<Unit>
+
+    /// A deliberate save from a poster's long-press menu (Apple `addToLibraryFromMenu`). The native
+    /// repository also mirrors it to Trakt/SIMKL watchlists once persisted; the legacy engine already
+    /// mirrors every account add at its own chokepoint, so the default is the plain add.
+    suspend fun saveToLibrary(item: MetaItem): Result<Unit> = addToLibrary(item)
 
     /// Remove a title from the Library (the Library grid's per-poster "x" control, DESIGN-SYSTEM.md §4
     /// "Library").
@@ -488,6 +493,10 @@ interface CatalogRepository {
     /// Save the open title to the library.
     suspend fun addToLibrary(type: MediaType, id: String, name: String, poster: String?): Result<MetaDetail> =
         meta(type, id)
+
+    /// The detail page's deliberate save, mirrored to watchlists like [saveToLibrary].
+    suspend fun saveToLibrary(type: MediaType, id: String, name: String, poster: String?): Result<MetaDetail> =
+        addToLibrary(type, id, name, poster)
 
     /// Remove the open title from the library.
     suspend fun removeFromLibrary(type: MediaType, id: String): Result<MetaDetail> = meta(type, id)

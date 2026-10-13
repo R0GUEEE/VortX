@@ -259,7 +259,7 @@ internal fun PosterQuickActionMenu(
                 }
                 DropdownMenuItem(
                     text = { Text("Add to Library") },
-                    onClick = { fire { it.addToLibrary(item) } },
+                    onClick = { fire { it.saveToLibrary(item) } },
                 )
                 DropdownMenuItem(
                     text = { Text("Mark as Watched") },
