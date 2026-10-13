@@ -173,8 +173,21 @@ private fun HomeContent(
         it.mediaId == initialHero.id && it.mediaType == initialHero.type && it.positionMs > 0L
     } == true
     val hubShown = collections.isVisible && !hubHidden
-    val rows = remember(visibleCatalogs, hubShown, hubOrder) {
-        homeRowsWithHub(visibleCatalogs, if (hubShown) collectionsHubSlot(visibleCatalogs, hubOrder) else null)
+    val forYouUi by viewModel.forYouUi.collectAsStateWithLifecycle()
+    // null: no picker; true: the once-per-profile first-run offer; false: Tune (edit).
+    var interestsPicker by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(forYouUi) { if (interestsPicker == null && viewModel.claimFirstRunOffer()) interestsPicker = true }
+    val forYouContext = androidx.compose.ui.platform.LocalContext.current
+    val forYouText = remember(forYouContext) { com.vortx.android.foryou.ForYouText(forYouContext) }
+    val rows = remember(visibleCatalogs, hubShown, hubOrder, forYouUi.showInvite) {
+        com.vortx.android.ui.homeRowsWithForYou(
+            homeRowsWithHub(visibleCatalogs, if (hubShown) collectionsHubSlot(visibleCatalogs, hubOrder) else null),
+            hubOrder, forYouUi.showInvite,
+        )
+    }
+    interestsPicker?.let { firstRun ->
+        com.vortx.android.ui.foryou.ForYouPickerDialog(forYouUi.interests, firstRun, com.vortx.android.ui.foryou.phoneForYouChip,
+            VortXTheme.spacing.edge) { interestsPicker = null }
     }
     val lastCatalogId = visibleCatalogs.lastOrNull()?.id
     // The featured hero is the first item of the first rail (Continue Watching, else the leading add-on
@@ -218,6 +231,8 @@ private fun HomeContent(
             when (row) {
                 HomeRowItem.HubRow ->
                     CollectionsHub(collections, viewModel::openCollection, viewModel::retryCollectionsHub)
+                HomeRowItem.ForYouHeader -> com.vortx.android.ui.foryou.ForYouHeaderPhone { interestsPicker = false }
+                HomeRowItem.ForYouInvite -> com.vortx.android.ui.foryou.ForYouInvitePhone { interestsPicker = false }
                 is HomeRowItem.CatalogRow -> {
                     val catalog = row.catalog
                     if (catalog.id == lastCatalogId) {
@@ -230,7 +245,7 @@ private fun HomeContent(
                         UPCOMING_EPISODES_CATALOG_ID, UPCOMING_MOVIES_CATALOG_ID -> "Coming soon"
                         TRAKT_WATCHLIST_CATALOG_ID -> "From Trakt"
                         SIMKL_WATCHLIST_CATALOG_ID -> "From SIMKL"
-                        else -> null
+                        else -> com.vortx.android.foryou.forYouReason(catalog)?.let(forYouText::reason)
                     }
                     PosterRail(
                         catalog = catalog,

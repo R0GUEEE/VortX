@@ -440,6 +440,7 @@ fun VortXApp(
         var showMediaServers by remember { mutableStateOf(false) }
         var showDownloads by remember { mutableStateOf(false) }
         var showWatchlist by remember { mutableStateOf(false) }
+        var showSmartCollections by remember { mutableStateOf(false) }
         var showPreviouslyWatched by remember { mutableStateOf(false) }
         var catalogBrowseTarget by remember { mutableStateOf<HomeCatalogTarget?>(null) }
         var catalogBrowseIsClientRail by remember { mutableStateOf(false) }
@@ -1198,6 +1199,18 @@ fun VortXApp(
             return@VortXTheme
         }
 
+        if (showSmartCollections) {
+            BackHandler { showSmartCollections = false }
+            com.vortx.android.ui.screens.SmartCollectionsScreen(
+                onBack = { showSmartCollections = false },
+                onItem = { item ->
+                    showSmartCollections = false
+                    onItem(item)
+                },
+            )
+            return@VortXTheme
+        }
+
         if (showPreviouslyWatched) {
             BackHandler { showPreviouslyWatched = false }
             val historyVm: LibraryLandingViewModel = viewModel(
@@ -1656,6 +1669,8 @@ fun VortXApp(
                     onDownloads = { showDownloads = true },
                     onWatchlist = { showWatchlist = true },
                     onPreviouslyWatched = { showPreviouslyWatched = true },
+                    onSmartCollections = ({ showSmartCollections = true })
+                        .takeIf { com.vortx.android.profile.ProfileStore.sharedOrNull()?.active?.isKids != true },
                 )
                 Tab.SEARCH -> SearchScreen(
                     viewModel<SearchViewModel>(factory = factory),

@@ -121,7 +121,8 @@ fun TvShell(
     var libraryReturnRoute by remember { mutableStateOf(TvLibraryRoute.DOWNLOADS) }
     var libraryRestoreFocusSignal by remember { mutableStateOf(0) }
     val libraryEntryFocus = remember {
-        listOf(TvLibraryRoute.DOWNLOADS, TvLibraryRoute.WATCHLIST, TvLibraryRoute.HISTORY).associateWith { FocusRequester() }
+        listOf(TvLibraryRoute.DOWNLOADS, TvLibraryRoute.WATCHLIST, TvLibraryRoute.HISTORY, TvLibraryRoute.SMART_COLLECTIONS)
+            .associateWith { FocusRequester() }
     }
     var homeBrowseSelected by remember { mutableStateOf(false) }
     val debridKeys = remember(appContext) { DebridKeys(appContext) }
@@ -263,6 +264,8 @@ fun TvShell(
                             onWatchlist = { openLibraryRoute(TvLibraryRoute.WATCHLIST) },
                             onPreviouslyWatched = { openLibraryRoute(TvLibraryRoute.HISTORY) },
                             entryFocusRequesters = libraryEntryFocus,
+                            onSmartCollections = ({ openLibraryRoute(TvLibraryRoute.SMART_COLLECTIONS) })
+                                .takeIf { com.vortx.android.profile.ProfileStore.sharedOrNull()?.active?.isKids != true },
                             modifier = Modifier.focusProperties { canFocus = libraryRoute == TvLibraryRoute.LANDING },
                         )
                     when (libraryRoute) {
@@ -281,6 +284,7 @@ fun TvShell(
                             onBack = ::closeLibraryRoute,
                             onItem = onItem,
                         )
+                        TvLibraryRoute.SMART_COLLECTIONS -> TvSmartCollectionsScreen(onBack = ::closeLibraryRoute, onItem = onItem)
                     }
                     }
                 }

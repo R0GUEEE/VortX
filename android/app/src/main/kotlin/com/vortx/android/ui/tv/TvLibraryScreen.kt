@@ -1,5 +1,6 @@
 package com.vortx.android.ui.tv
 
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -62,12 +63,13 @@ fun TvLibraryScreen(
     onPreviouslyWatched: () -> Unit,
     modifier: Modifier = Modifier,
     entryFocusRequesters: Map<TvLibraryRoute, FocusRequester> = emptyMap(),
+    onSmartCollections: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val landingState by landingViewModel.state.collectAsStateWithLifecycle()
 
     Column(modifier = modifier.fillMaxSize()) {
-        if (state !is UiState.Success) TvLibraryEntries(onDownloads, onWatchlist, onPreviouslyWatched, entryFocusRequesters)
+        if (state !is UiState.Success) TvLibraryEntries(onDownloads, onWatchlist, onPreviouslyWatched, entryFocusRequesters, onSmartCollections)
         when (val s = state) {
             is UiState.Loading -> TvLoading()
             is UiState.Error -> TvError(s.message, onRetry = viewModel::retry)
@@ -83,6 +85,7 @@ fun TvLibraryScreen(
                 onDownloads = onDownloads,
                 onWatchlist = onWatchlist,
                 onPreviouslyWatched = onPreviouslyWatched,
+                onSmartCollections = onSmartCollections,
                 entryFocusRequesters = entryFocusRequesters,
             )
         }
@@ -103,6 +106,7 @@ private fun TvLibraryContent(
     onWatchlist: () -> Unit,
     onPreviouslyWatched: () -> Unit,
     entryFocusRequesters: Map<TvLibraryRoute, FocusRequester>,
+    onSmartCollections: (() -> Unit)? = null,
 ) {
     val allItems = result.items
 
@@ -133,7 +137,7 @@ private fun TvLibraryContent(
         modifier = Modifier.fillMaxSize(),
         header = {
             item(key = "library-entries", span = { GridItemSpan(maxLineSpan) }) {
-                TvLibraryEntries(onDownloads, onWatchlist, onPreviouslyWatched, entryFocusRequesters)
+                TvLibraryEntries(onDownloads, onWatchlist, onPreviouslyWatched, entryFocusRequesters, onSmartCollections)
             }
             when (val landing = landingState) {
                 is UiState.Loading -> Unit
@@ -185,6 +189,7 @@ private fun TvLibraryEntries(
     onWatchlist: () -> Unit,
     onHistory: () -> Unit,
     focusRequesters: Map<TvLibraryRoute, FocusRequester>,
+    onSmartCollections: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = VortXTheme.spacing.sm),
@@ -194,6 +199,12 @@ private fun TvLibraryEntries(
         TvLibraryEntry("Downloads", "Offline", VortXIcons.download, onDownloads, Modifier.weight(1f).then(focusModifier(TvLibraryRoute.DOWNLOADS)))
         TvLibraryEntry("Watchlist", "Plan to watch", VortXIcons.starFill, onWatchlist, Modifier.weight(1f).then(focusModifier(TvLibraryRoute.WATCHLIST)))
         TvLibraryEntry("History", "Previously watched", VortXIcons.clock, onHistory, Modifier.weight(1f).then(focusModifier(TvLibraryRoute.HISTORY)))
+        onSmartCollections?.let {
+            TvLibraryEntry(androidx.compose.ui.res.stringResource(com.vortx.android.R.string.smart_collections_title),
+                androidx.compose.ui.res.stringResource(com.vortx.android.R.string.smart_collections_library_subtitle),
+                androidx.compose.material.icons.Icons.Filled.FilterList, it,
+                Modifier.weight(1f).then(focusModifier(TvLibraryRoute.SMART_COLLECTIONS)))
+        }
     }
 }
 

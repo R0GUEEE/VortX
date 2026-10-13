@@ -1,5 +1,6 @@
 package com.vortx.android.ui.screens
 
+import androidx.compose.material.icons.filled.FilterList
 import com.vortx.android.diagnostics.DiagnosticsLog
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
@@ -288,6 +289,7 @@ fun LibraryScreen(
     onDownloads: (() -> Unit)? = null,
     onWatchlist: (() -> Unit)? = null,
     onPreviouslyWatched: (() -> Unit)? = null,
+    onSmartCollections: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val landingState by landingViewModel.state.collectAsStateWithLifecycle()
@@ -304,8 +306,8 @@ fun LibraryScreen(
 
     val libraryHeader: @Composable () -> Unit = {
         Column(verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.md)) {
-            if (onDownloads != null || onWatchlist != null || onPreviouslyWatched != null) {
-                LibraryEntryCards(onDownloads, onWatchlist, onPreviouslyWatched)
+            if (onDownloads != null || onWatchlist != null || onPreviouslyWatched != null || onSmartCollections != null) {
+                LibraryEntryCards(onDownloads, onWatchlist, onPreviouslyWatched, onSmartCollections)
             }
             when (val landing = landingState) {
                 is UiState.Loading -> Unit
@@ -355,11 +357,17 @@ private fun LibraryEntryCards(
     onDownloads: (() -> Unit)?,
     onWatchlist: (() -> Unit)?,
     onPreviouslyWatched: (() -> Unit)?,
+    onSmartCollections: (() -> Unit)? = null,
 ) {
+    val smartTitle = androidx.compose.ui.res.stringResource(com.vortx.android.R.string.smart_collections_title)
+    val smartSubtitle = androidx.compose.ui.res.stringResource(com.vortx.android.R.string.smart_collections_library_subtitle)
     val entries: @Composable (Modifier) -> Unit = { cardModifier ->
         onDownloads?.let { LibraryEntryCard("Downloads", "Offline", VortXIcons.download, it, cardModifier) }
         onWatchlist?.let { LibraryEntryCard("Watchlist", "Plan to watch", VortXIcons.starFill, it, cardModifier) }
         onPreviouslyWatched?.let { LibraryEntryCard("Watched", "History", VortXIcons.clock, it, cardModifier) }
+        onSmartCollections?.let {
+            LibraryEntryCard(smartTitle, smartSubtitle, androidx.compose.material.icons.Icons.Filled.FilterList, it, cardModifier)
+        }
     }
     BoxWithConstraints(Modifier.fillMaxWidth().padding(vertical = VortXTheme.spacing.sm)) {
         if (maxWidth >= 600.dp) {

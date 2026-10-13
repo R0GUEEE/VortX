@@ -1,5 +1,6 @@
 package com.vortx.android.ui.viewmodel
 
+import com.vortx.android.foryou.englishForYouTitle
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -190,6 +191,8 @@ class HomeViewModel internal constructor(
     private val confirmationPollMs: Long = CONFIRMATION_POLL_MS,
     private val collectionsHub: CollectionsHubModel? = null,
     private val curatedCollections: CuratedCollectionsModel? = null,
+    private val forYouStore: com.vortx.android.foryou.ForYouStore? = null,
+    private val forYouTitle: (com.vortx.android.foryou.ForYouTitle) -> String = ::englishForYouTitle,
 ) : ViewModel() {
     private val _state = MutableStateFlow<UiState<List<Catalog>>>(UiState.Loading)
     val state: StateFlow<UiState<List<Catalog>>> = _state.asStateFlow()
@@ -252,9 +255,25 @@ class HomeViewModel internal constructor(
     private val continueWatchingRollbacks = mutableMapOf<ContinueWatchingDismissal, ContinueWatchingRollback>()
     private var renderedOwner: ContinueWatchingOwner? = null
     private var latestAuthoritativeRows: List<Catalog>? = null
+    // For You: rows from the profile's interests and smart collections pinned to Home (Apple parity).
+    private var forYouCatalogs: List<Catalog> = emptyList()
+    private var forYouOwned: Set<String> = emptySet()
+    private var forYouWatched: Set<String> = emptySet()
+    private val forYouRows = forYouStore?.let {
+        com.vortx.android.foryou.ForYouRowsModel(scope = scope, onRows = { rows ->
+            forYouCatalogs = com.vortx.android.foryou.forYouCatalogs(rows, forYouTitle)
+            publishHome()
+        })
+    }
+    private val _forYouUi = MutableStateFlow(com.vortx.android.foryou.ForYouUi())
+    /** Whether For You shows, invites, or offers the first-run interests picker for the active profile. */
+    internal val forYouUi: StateFlow<com.vortx.android.foryou.ForYouUi> = _forYouUi.asStateFlow()
 
     init {
         load()
+        forYouStore?.let { store -> scope.launch { store.state.collectLatest { refreshForYou() } } }
+        // Hiding For You in Customize Home also hides its invite.
+        if (forYouStore != null) railPreferences?.let { prefs -> scope.launch { prefs.state.drop(1).collectLatest { refreshForYou() } } }
         continueWatchingPreferences?.let { preferences ->
             scope.launch { preferences.state.drop(1).collectLatest {
                 clearSelectedContinueWatching()
@@ -482,6 +501,11 @@ class HomeViewModel internal constructor(
             val library = libraryResult.getOrNull()?.items.orEmpty()
             val continueWatching = rows.firstOrNull { it.id == "continue" }?.items.orEmpty()
             val watchlist = watchlistStore?.items?.value.orEmpty()
+            if (libraryResult.isSuccess) {
+                forYouOwned = (continueWatching + library).mapTo(hashSetOf()) { it.id }
+                forYouWatched = library.filter { it.watched }.mapTo(hashSetOf()) { it.id }
+                refreshForYou()
+            }
             fun requestIsCurrent(): Boolean =
                 generation == personalizedGeneration &&
                     owner == currentReleaseOwner() &&
@@ -553,6 +577,33 @@ class HomeViewModel internal constructor(
                 publishHome()
             }
         }
+    }
+
+    private val interestsOffered = mutableSetOf<String>()
+
+    /** True once per profile per Home lifetime: the first-run interests picker is offered, then never
+     * again this session even if dismissed with Back ("not now"). */
+    internal fun claimFirstRunOffer(): Boolean {
+        val ui = _forYouUi.value
+        val profile = ui.profileId ?: return false
+        return ui.undecided && interestsOffered.add(profile.lowercase())
+    }
+
+    /** Recompute For You for the active profile: kids profiles and not-yet-known choices get nothing. */
+    private fun refreshForYou() {
+        val store = forYouStore ?: return
+        val state = store.state.value
+        val enabled = state.ready && state.profileId?.equals(activeProfileId(), ignoreCase = true) == true &&
+            ProfileStore.sharedOrNull()?.active?.isKids != true
+        forYouRows?.refresh(state.profileId, state.interests, state.collections, forYouOwned, forYouWatched, enabled)
+        _forYouUi.value = com.vortx.android.foryou.ForYouUi(
+            enabled = enabled,
+            profileId = state.profileId,
+            interests = state.interests,
+            showInvite = enabled && (state.interests?.isEmpty ?: true) &&
+                railPreferences?.state?.value?.hidden?.contains(HomeRail.FOR_YOU) != true,
+            undecided = enabled && state.interests?.decided != true,
+        )
     }
 
     private fun currentContinueWatchingPermit(): ContinueWatchingPermit {
@@ -701,7 +752,7 @@ class HomeViewModel internal constructor(
         val hasClientRows = continueWatchingStatus != null || topPicksItems.isNotEmpty() || becauseYouWatchedRail != null ||
             traktWatchlist.isNotEmpty() || traktContinueWatchingItems.isNotEmpty() || simklWatchlist.isNotEmpty() || mediaServerRails.isNotEmpty() ||
             importedRails.isNotEmpty() || upcomingEpisodes.isNotEmpty() || upcomingMovies.isNotEmpty() ||
-            editorialRails.isNotEmpty()
+            editorialRails.isNotEmpty() || forYouCatalogs.isNotEmpty()
         if (!sourceHasRows && !hasClientRows) return
         val topRows = withTopPicksRail(baseRows, topPicksItems)
         val becauseRows = withBecauseYouWatchedRail(topRows, becauseYouWatchedRail)
@@ -727,7 +778,7 @@ class HomeViewModel internal constructor(
         val calendarRows = withReleaseCalendarRails(importedRows, upcomingEpisodes, upcomingMovies)
         // Editorial rails are spliced last; HomeRailPreferences.arrange re-groups everything by HomeRail and
         // places them at the EDITORIAL_COLLECTIONS slot (phone default order only, so TV drops them).
-        val enriched = withEditorialCollectionsRails(calendarRows, editorialRails)
+        val enriched = withEditorialCollectionsRails(calendarRows, editorialRails) + forYouCatalogs
         val rows = railPreferences?.let { preferences ->
             preferences.arrange(enriched, railSurface, preferences.state.value)
         } ?: enriched

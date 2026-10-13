@@ -98,6 +98,13 @@ fun TvHomeScreen(
     val collectionBrowse by viewModel.collectionBrowse.collectAsStateWithLifecycle()
     val hubOrder by viewModel.collectionsHubOrder.collectAsStateWithLifecycle()
     val hubHidden by viewModel.collectionsHubHidden.collectAsStateWithLifecycle()
+    val forYouUi by viewModel.forYouUi.collectAsStateWithLifecycle()
+    // null: no picker; true: the once-per-profile first-run offer; false: Tune (edit).
+    var interestsPicker by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(forYouUi) { if (interestsPicker == null && viewModel.claimFirstRunOffer()) interestsPicker = true }
+    interestsPicker?.let { firstRun ->
+        com.vortx.android.ui.foryou.ForYouPickerDialog(forYouUi.interests, firstRun, tvForYouChip, TvDimens.edge) { interestsPicker = null }
+    }
     if (collectionBrowse.target != null) {
         TvCollectionsBrowseScreen(
             state = collectionBrowse,
@@ -139,6 +146,8 @@ fun TvHomeScreen(
                     onLoadMoreRows = viewModel::loadMoreRows,
                     reselectSignal = reselectSignal,
                     modifier = modifier,
+                    forYouShowInvite = forYouUi.showInvite,
+                    onTuneForYou = { interestsPicker = false },
                 )
             }
     }
@@ -161,6 +170,8 @@ private fun TvHomeContent(
     onLoadMoreRows: () -> Unit,
     reselectSignal: Int = 0,
     modifier: Modifier,
+    forYouShowInvite: Boolean = false,
+    onTuneForYou: () -> Unit = {},
 ) {
     val colors = VortXTheme.colors
     val visibleCatalogs = remember(catalogs) { tvHomeCatalogs(catalogs) }
@@ -257,10 +268,13 @@ private fun TvHomeContent(
             // The hub is not a catalog, so [visibleCatalogs] (which drives focus + hero above) stays pure; the
             // hub rides Customize-Home order/hide only for THIS list via [homeRowsWithHub].
             val hubShown = collections.isVisible && !collectionsHubHidden
-            val rows = remember(visibleCatalogs, hubShown, collectionsHubOrder) {
-                homeRowsWithHub(
-                    visibleCatalogs,
-                    if (hubShown) collectionsHubSlot(visibleCatalogs, collectionsHubOrder) else null,
+            val rows = remember(visibleCatalogs, hubShown, collectionsHubOrder, forYouShowInvite) {
+                com.vortx.android.ui.homeRowsWithForYou(
+                    homeRowsWithHub(
+                        visibleCatalogs,
+                        if (hubShown) collectionsHubSlot(visibleCatalogs, collectionsHubOrder) else null,
+                    ),
+                    collectionsHubOrder, forYouShowInvite,
                 )
             }
             val lastCatalogId = visibleCatalogs.lastOrNull()?.id
@@ -278,6 +292,8 @@ private fun TvHomeContent(
                             onRetryCollections,
                             if (index == 0) firstCardFocus else null,
                         )
+                        HomeRowItem.ForYouHeader -> TvForYouHeader(onTuneForYou, if (index == 0) firstCardFocus else null)
+                        HomeRowItem.ForYouInvite -> TvForYouInvite(onTuneForYou, if (index == 0) firstCardFocus else null)
                         is HomeRowItem.CatalogRow -> {
                             val catalog = row.catalog
                             if (catalog.id == lastCatalogId) {
@@ -581,6 +597,8 @@ private fun TvCatalogHeader(
         HomeRail.TRAKT_WATCHLIST -> "From Trakt"
         HomeRail.TRAKT_CONTINUE_WATCHING -> "From Trakt"
         HomeRail.SIMKL_WATCHLIST -> "From SIMKL"
+        HomeRail.FOR_YOU, HomeRail.SMART_COLLECTIONS -> com.vortx.android.foryou.forYouReason(catalog)
+            ?.let(com.vortx.android.foryou.ForYouText(androidx.compose.ui.platform.LocalContext.current)::reason)
         else -> null
     }
     Row(
