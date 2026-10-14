@@ -539,6 +539,11 @@ android {
             // reach. The dev.jdtech.mpv classes.jar still ships inside the APK but is unreferenced.
             excludes += "**/libplayer.so"
         }
+        resources {
+            // smbj's BouncyCastle (bcprov) and jspecify both ship this multi-release OSGi manifest, which
+            // only the release Java-resource merge rejects as a duplicate. Android never reads it.
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
     }
 }
 
