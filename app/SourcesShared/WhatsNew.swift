@@ -5,19 +5,20 @@ import Foundation
 /// The in-app "What's New" screen (Settings > What's New) renders the full bundled CHANGELOG.md and only falls
 /// back to these highlights when that resource is absent. Pure logic so it compiles on every target.
 enum WhatsNew {
-    static let version = "0.5.0-beta.3"
+    static let version = "0.5.2"
     static let highlights: [String] = [
-        "Add-ons and episode sources stay with the account and profile that opened them. An older response cannot replace the current viewer's results, and episode sources supplied inside an add-on's title details are retained.",
-        "A cancelled next-episode request cannot clear the newer request. Binge preparation keeps the selected episode, add-on, release and audio-language choice while sources arrive.",
-        "Watch progress and watched changes stay attached to the exact episode. A short unfinished play does not count as finishing the episode, and marking another episode watched does not remove the current one from Continue Watching.",
-        "Sync shows success only after the complete update is saved. Newer edits made during an upload stay queued. Open apps listen for updates, with a three-second fallback. Background updates are not guaranteed when the app is closed or suspended.",
-        "Search shows separate Movies, Series and Collections rows as results arrive while you type, without waiting for every category to finish.",
-        "Quick View has a visible close button, closes when you tap outside or press Escape, shows a three-line description, and applies Watchlist to the title you opened.",
-        "Episode rows use the available width, with smaller cards, navigation arrows and watched/unwatched menus. Phone Home has a rounded hero; Settings and Library have more space and softly tinted glass, with calmer player controls.",
-        "Artwork is decoded at a bounded display size and reused from memory. Library no longer sorts the full viewing history on every redraw, reducing unnecessary work while browsing.",
-        "Usenet streaming retains a chunk until the player finishes reading it instead of repeatedly throwing it away and downloading it again. Seeking or cancelling releases that retained work safely. Existing cloud jobs keep the selected file and episode during recovery.",
-        "Apple and Android use build 263. Existing source tabs, downloads, integrations, subtitle controls, skip countdown cancellation and seek-bar choices remain available.",
-        "These fixes still need live-provider and physical-device testing. This release does not claim that every playback stall, Usenet performance issue or cross-device sync case has been verified."
+        "Accounts that would not load after updating from 0.4 load again. One unusual item saved by an older version no longer stops the whole account, and converting older account data is about twice as fast.",
+        "Finishing an episode keeps the series in Continue Watching as Up next, and choosing it opens the next unwatched episode. A series leaves only when you remove it or mark it watched or unwatched.",
+        "Everything you watch or start stays in your Library until you remove it. Watching it again brings it back.",
+        "Source rows from add-ons such as Debridio show the file name and size again.",
+        "A new series page on Mac, iPad and Apple TV: seasons as posters, episodes as a grid, and Trailer beside Play.",
+        "Actor pages with photo, biography and filmography, from the cast list or from search.",
+        "For You rows built from what each profile likes, plus smart collections by genre, cast, year or rating.",
+        "Network shares: browse and play from a NAS or computer over SMB, WebDAV or a web folder.",
+        "A TV guide for live channels whose add-on publishes a schedule.",
+        "Infuse hands your place back to VortX when you stop.",
+        "Effects and performance controls on Apple TV, and a quicker response to the remote.",
+        "Next episodes keep your chosen quality, and usenet can download ahead to storage."
     ]
 
     // Kept as release-history fallback text for older bundled changelogs. The current screen uses

@@ -4,6 +4,47 @@ All notable changes to VortX, newest first. VortX is Apple TV first, with an iPh
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
+## 0.5.2 - Up next, a new series page, For You, network shares and a TV guide
+
+Build **271** across Apple and Android. This release fixes accounts that would not load after
+updating from 0.4, keeps a series in Continue Watching after you finish an episode, and keeps
+everything you watch in your Library. It adds a redesigned series page, actor pages, For You
+rows built from what you like, network shares from your own NAS, and a TV guide for live
+channels. Android catches up with the Apple apps on design and features.
+
+### Fixed
+
+- **Accounts that would not load after updating from 0.4 (#262).** One unusual item saved by an older VortX version stopped the whole account, so profiles, add-ons and Stremio sign-in all failed. That item is now set aside and everything else loads. Converting older account data when the app opens or syncs is also about twice as fast. Thanks to BattleCrusader and atanukn for the reports and logs.
+- **A series leaving Continue Watching after an episode.** Finishing an episode used to remove the whole series. It now stays as Up next, and choosing it opens the next unwatched episode. A series leaves only when you remove it, mark the whole show watched, or mark it unwatched.
+- **Watched titles stay in your Library.** Everything you watch or start stays in the Library until you remove it, and watching it again brings it back. Removing a title from Continue Watching no longer removes it from the Library.
+- **Missing source details.** Debridio and similar add-ons showed only a label like "Debridio 1080p". The file name and size show again.
+- **Next episodes keep your quality.** A binge no longer steps down from 1080p to 720p to 480p.
+- **Usenet with your own provider** plays through your own servers, trusts the file an add-on picks, and accepts indexer addresses typed without /api.
+- **Saving to the Library from a catalog menu** reaches your Trakt and SIMKL watchlists too, like the button on a title's page.
+- **Stremio QR sign-in** now finishes or shows an error instead of waiting forever.
+- **Apple TV remote feels quicker.** Screens no longer redo their work on every press or redraw for changes they cannot show.
+- **Mac:** every settings page has Back and Esc, the top bar floats over scrolling content (also on wide iPad), and the NZB indexer editor opens.
+- **Choosing a season** starts its episodes at episode 1.
+- **Your accent colour reaches everything**, including the player, the Mac volume slider, segmented choices and loading spinners.
+
+### New
+
+- **A new series page on Mac, iPad and Apple TV.** Seasons appear as their posters and each season's episodes as a grid. Trailer sits beside Play. iPhone keeps the swipeable episode row.
+- **Actor pages.** Select a cast member, or search for a name: photo, age, biography and links, then their films and shows, newest first, filtered by All, Movies or Shows.
+- **Swipe the Home hero** on touch screens, with a two-finger swipe or the arrows on Mac, or tap its dots.
+- **One add-on row under your sources**, in your accent colour, with arrows for a mouse.
+- **For You.** The first time you open Home, each profile can pick what it likes. Home then adds rows built from those interests, plus smart collections by genre, cast, year or rating. The question waits until a profile is chosen.
+- **Network shares.** Library > Network shares browses folders on a NAS or computer and plays videos straight from them, with no media server needed. SMB, WebDAV (Synology, QNAP, TrueNAS, Nextcloud) and web-server folders work. Shares and their passwords stay on the device.
+- **TV guide.** Live > TV guide shows your live channels with what is on now and later, for channels whose add-on publishes a schedule.
+- **Your place comes back from Infuse.** When you stop in Infuse, VortX saves where you stopped. On Android the same works with MX Player and VLC.
+- **Effects and performance controls on Apple TV and Android TV:** focus backdrop, glass and blur, animations, and artwork quality. Auto follows your Performance setting.
+- **Usenet downloads ahead to storage.** The Streaming cache setting now sets how much of a release is saved ahead of playback, up to the whole file, and connections are sized for your device.
+- **Export the diagnostic log before signing in**, from the sign-in and profile screens, so a failed start can still be reported. Logs for PIN-protected profiles stay behind their PIN.
+
+### Android
+
+Android now matches the Apple apps: the new series page on tablets and Android TV, actor pages, people in search, the swipeable hero, the add-on row, the accent-coloured player, For You, network shares, the TV guide, the Effects controls, and diagnostic log export. Playback progress no longer uploads your whole account every few seconds, and add-ons are asked in your order. VortX is Apple first, and the Android APK is still an early technical preview, so expect missing features and rough edges.
+
 ## 0.5.0-beta.3 - Account loading, watch state, and Cinema polish
 
 Build **263** across Apple and Android. This release repairs account-owned add-on and episode
