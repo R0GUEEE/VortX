@@ -132,7 +132,7 @@ android {
         minSdk = 26          // Android 8.0; covers phones and Android TV (Fire TV / Google TV)
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 269
+        versionCode = 270
         versionName = "0.5.1"
 
         // Native selection by default; missing native session/artifact fails closed and never falls back

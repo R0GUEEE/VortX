@@ -71,7 +71,7 @@ require_grep "signed candidate APK and AAB both verify complete engine ABIs" \
     <(printf '%s\n' "$candidate_signing_step")
 ok "Apple and both Android lanes use one exact wrapper revision"
 native_pin="$(awk '/^      NORMAL_NATIVE_REVISION:/{print $2}' "$APPLE_RELEASE_WF")"
-[[ "$native_pin" = dd520b0c9e540e11b9e115467b4fe5ec0ccb3fb2 ]] || fail "Apple normal native pin differs from the reviewed revision"
+[[ "$native_pin" = a7984adcc057e98d2be500d82fd8ead8e224fa50 ]] || fail "Apple normal native pin differs from the reviewed revision"
 apple_native_ref="$(awk '/repository: VortXTV\/vortx-core/{active=1; next}
     active && /^[[:space:]]+ref:/{sub(/^[[:space:]]+ref: /, ""); print; exit}' "$APPLE_RELEASE_WF")"
 [[ "$apple_native_ref" = '${{ steps.native_source.outputs.revision }}' ]] || fail "Apple checkout must consume the authenticated source selection"
@@ -791,11 +791,13 @@ const expression = block.match(/^    if: >-\n([\s\S]*?)^    concurrency:/m)?.[1]
 assert.ok(expression, 'published-release job must have its own condition');
 // GitHub expressions accept hyphenated properties; use equivalent JS bracket access.
 const jsExpression = expression.replaceAll('needs.attach-release', "needs['attach-release']");
-const evaluate = new Function('github', 'inputs', 'needs', 'always', 'startsWith', `return (${jsExpression});`);
+const evaluate = new Function('github', 'inputs', 'needs', 'always', 'startsWith', 'contains', `return (${jsExpression});`);
 const eligible = (event, tag, publish = false, result = 'skipped') => evaluate(
-  {event_name: event, event: {release: {tag_name: tag}}}, {publish_release: publish},
+  {event_name: event, event: {release: {tag_name: tag, body: ''}}}, {publish_release: publish},
   {'attach-release': {result}}, () => true,
   (value, prefix) => String(value).toLowerCase().startsWith(String(prefix).toLowerCase()),
+  // GitHub's contains() is case-insensitive substring search, like startsWith() above.
+  (value, part) => String(value).toLowerCase().includes(String(part).toLowerCase()),
 );
 for (const tag of ['v0.5.0', 'v0.5.0-beta.1', 'v0.5.0-vendor-test', 'other-release']) {
   assert.equal(eligible('release', tag), true, `${tag}: retain external app verification`);
