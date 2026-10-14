@@ -11,7 +11,7 @@ struct TVNetworkSharesView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.lg) {
                 Text("Network shares").screenTitleStyle()
-                Text("Play videos straight from a NAS or computer on your network. Add its WebDAV address, or a web server's folder listing.")
+                Text("Play videos straight from a NAS or computer on your network: an SMB share (smb://nas/Movies), a WebDAV address, or a web server's folder listing.")
                     .font(Theme.Typography.body).foregroundStyle(Theme.Palette.textSecondary)
                     .frame(maxWidth: 1100, alignment: .leading)
                 Button { adding = true } label: { Label("Add a share", systemImage: "plus") }
@@ -110,7 +110,9 @@ struct TVNetworkFolderView: View {
         Task {
             do {
                 let target = try await NetworkShareStore.shared.playbackTarget(share, for: entry.url)
-                presenter.request = PlaybackRequest(url: target.url, title: entry.name, headers: target.headers)
+                // smb:// plays only through libmpv (its FFmpeg carries the SMB protocol), never AVPlayer.
+                presenter.request = PlaybackRequest(url: target.url, title: entry.name, headers: target.headers,
+                                                    forceMPV: share.kind == .smb)
             } catch {
                 playMessage = (error as? NetworkShareError)?.message ?? NetworkShareError.unreachable.message
             }
@@ -131,7 +133,7 @@ private struct TVAddNetworkShareView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.md) {
             Text("Add a network share").font(Theme.Typography.sectionTitle).foregroundStyle(Theme.Palette.textPrimary)
-            Text("For example 192.168.1.20:5005/video for a Synology WebDAV share. Leave the username empty if the share has no login.")
+            Text("For example smb://192.168.1.20/Movies for a shared folder, or 192.168.1.20:5005/video for a Synology WebDAV share. Leave the username empty if the share has no login.")
                 .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
             field { TextField("Address", text: $address).textInputAutocapitalization(.never).autocorrectionDisabled() }
             field { TextField("Name (optional)", text: $name) }

@@ -12,6 +12,7 @@ private func check(_ name: String, _ condition: @autoclosure () -> Bool) {
 enum NetworkSharesTests {
     static func main() {
         addresses()
+        smb()
         scoping()
         webDAV()
         webFolders()
@@ -30,6 +31,41 @@ enum NetworkSharesTests {
               && NetworkSharePolicy.rootURL("ftp://nas.local/") == nil && NetworkSharePolicy.rootURL("file:///etc/") == nil)
         check("queries and empty input are refused", NetworkSharePolicy.rootURL("http://nas.local/?a=1") == nil
               && NetworkSharePolicy.rootURL("   ") == nil)
+    }
+
+    static func smb() {
+        check("smb addresses keep their share and gain a slash",
+              NetworkSharePolicy.smbRootURL(" smb://NAS.local/Movies ")?.absoluteString == "smb://NAS.local/Movies/")
+        check("Windows paths become smb addresses",
+              NetworkSharePolicy.smbRootURL(#"\\192.168.1.20\Movies\Kids"#)?.absoluteString == "smb://192.168.1.20/Movies/Kids/")
+        check("spaces are escaped", NetworkSharePolicy.smbRootURL("smb://nas/My Videos")?.absoluteString == "smb://nas/My%20Videos/")
+        check("a bare server is a root that lists its shares", NetworkSharePolicy.smbRootURL("smb://nas")?.absoluteString == "smb://nas/")
+        check("logins in the address and non-smb text are refused",
+              NetworkSharePolicy.smbRootURL("smb://me:pw@nas/Movies") == nil && NetworkSharePolicy.smbRootURL("http://nas/") == nil
+                  && NetworkSharePolicy.smbRootURL("nas/Movies") == nil)
+
+        let server = URL(string: "smb://nas/")!
+        let shares = NetworkSharePolicy.smbEntries([("Movies", 3), ("IPC$", 6), ("ADMIN$", 3), ("Printer", 4), ("WORKGROUP", 1), (".", 7)],
+                                                   directory: server)
+        check("a server root lists its shares as folders, without admin or printer shares",
+              shares.map(\.name) == ["Movies"] && shares[0].isFolder && shares[0].url.absoluteString == "smb://nas/Movies/")
+        let folder = URL(string: "smb://nas/Movies/")!
+        let inside = NetworkSharePolicy.visible(NetworkSharePolicy.smbEntries(
+            [(".", 7), ("..", 7), ("Season 1", 7), ("Arrival (2016).mkv", 8), ("notes.txt", 8), ("Stray share", 3), ("a/b.mkv", 8)],
+            directory: folder))
+        check("inside a share: folders and videos, dots and odd names dropped",
+              inside.map(\.name) == ["Season 1", "Arrival (2016).mkv"]
+                  && inside[1].url.absoluteString == "smb://nas/Movies/Arrival%20(2016).mkv"
+                  && inside[0].url.absoluteString == "smb://nas/Movies/Season%201/")
+        let file = URL(string: "smb://nas/Movies/Arrival%20(2016).mkv")!
+        check("the player gets the login inside the address, escaped",
+              NetworkSharePolicy.smbPlaybackURL(file, root: folder, username: "me@home", password: "p:w/d")?.absoluteString
+                  == "smb://me%40home:p%3Aw%2Fd@nas/Movies/Arrival%20(2016).mkv")
+        check("no login, no credentials", NetworkSharePolicy.smbPlaybackURL(file, root: folder, username: "", password: "")?.absoluteString
+              == "smb://nas/Movies/Arrival%20(2016).mkv")
+        check("never for a file outside the share",
+              NetworkSharePolicy.smbPlaybackURL(URL(string: "smb://other/Movies/x.mkv")!, root: folder, username: "me", password: "pw") == nil
+                  && NetworkSharePolicy.smbPlaybackURL(URL(string: "smb://nas/Private/x.mkv")!, root: folder, username: "me", password: "pw") == nil)
     }
 
     static func scoping() {

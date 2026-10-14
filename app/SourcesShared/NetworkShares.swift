@@ -10,11 +10,14 @@ import Foundation
 enum NetworkShareKind: String, Codable, CaseIterable, Sendable {
     case webdav
     case http
+    /// Windows / Mac / NAS file sharing, browsed and played through the libsmbclient the player already links.
+    case smb
 
     var label: String {
         switch self {
         case .webdav: return "WebDAV"
         case .http: return "Web folder"
+        case .smb: return "SMB"
         }
     }
 }
@@ -74,6 +77,75 @@ enum NetworkSharePolicy {
         if !components.path.hasSuffix("/") { components.path += "/" }
         return components.url
     }
+
+    /// The SMB root for what the viewer typed: `smb://host[/share[/folder]]` or a Windows path
+    /// `\\host\share\folder`, without a login in it, normalized to end in "/". Nil for anything else.
+    static func smbRootURL(_ raw: String) -> URL? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("\\\\") {
+            text = "smb://" + text.dropFirst(2).replacingOccurrences(of: "\\", with: "/")
+        }
+        guard text.lowercased().hasPrefix("smb://") else { return nil }
+        let encoded = text.addingPercentEncoding(withAllowedCharacters: smbAllowed) ?? text
+        guard var components = URLComponents(string: encoded), let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil, components.query == nil, components.fragment == nil else { return nil }
+        components.scheme = "smb"
+        if !components.percentEncodedPath.hasSuffix("/") { components.percentEncodedPath += "/" }
+        return components.url
+    }
+
+    /// The direct children of an SMB folder from libsmbclient's (name, type) listing. On a server root the
+    /// shares become folders (admin and printer shares left out); inside a share, folders and files.
+    static func smbEntries(_ raw: [(name: String, type: UInt32)], directory: URL) -> [NetworkShareEntry] {
+        let atServer = directory.path.split(separator: "/").isEmpty
+        return raw.compactMap { item in
+            guard item.name != ".", item.name != "..", !item.name.isEmpty, !item.name.contains("/") else { return nil }
+            let isFolder: Bool
+            switch item.type {
+            case smbFileShare where atServer: isFolder = true
+            case smbDirectory where !atServer: isFolder = true
+            case smbFile where !atServer: isFolder = false
+            default: return nil
+            }
+            if atServer, item.name.hasSuffix("$") { return nil }
+            guard let escaped = item.name.addingPercentEncoding(withAllowedCharacters: smbNameAllowed),
+                  let url = URL(string: escaped + (isFolder ? "/" : ""), relativeTo: directory)?.absoluteURL else { return nil }
+            return NetworkShareEntry(name: item.name, url: url, isFolder: isFolder, size: nil)
+        }
+    }
+
+    /// The address the player opens for an SMB file: the login rides in the URL because that is the only
+    /// way FFmpeg's SMB protocol takes it (diagnostic logs scrub `user:password@` from any scheme). Nil
+    /// for a file outside the share.
+    static func smbPlaybackURL(_ file: URL, root: URL, username: String, password: String) -> URL? {
+        guard isInside(file, root: root), var components = URLComponents(url: file, resolvingAgainstBaseURL: false) else { return nil }
+        if !username.isEmpty {
+            components.percentEncodedUser = username.addingPercentEncoding(withAllowedCharacters: credentialAllowed)
+            components.percentEncodedPassword = password.addingPercentEncoding(withAllowedCharacters: credentialAllowed)
+        }
+        return components.url
+    }
+
+    // libsmbclient.h: SMBC_FILE_SHARE, SMBC_DIR, SMBC_FILE.
+    static let smbFileShare: UInt32 = 3
+    static let smbDirectory: UInt32 = 7
+    static let smbFile: UInt32 = 8
+
+    private static let smbAllowed: CharacterSet = {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.insert(charactersIn: "%")
+        return allowed
+    }()
+    private static let smbNameAllowed: CharacterSet = {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/;:")
+        return allowed
+    }()
+    private static let credentialAllowed: CharacterSet = {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return allowed
+    }()
 
     /// True when `url` is the share's own server and inside its root folder. Only such URLs ever receive
     /// the share's login, and only such entries are listed, so a hostile listing cannot point VortX, or the
@@ -188,7 +260,12 @@ enum NetworkSharePolicy {
     }
 
     private static func effectivePort(_ url: URL) -> Int {
-        url.port ?? (url.scheme?.lowercased() == "https" ? 443 : 80)
+        if let port = url.port { return port }
+        switch url.scheme?.lowercased() {
+        case "https": return 443
+        case "smb": return 445
+        default: return 80
+        }
     }
 
     private static func lastComponent(_ url: URL) -> String {

@@ -26,6 +26,7 @@ struct PlaybackRequest: Identifiable {
     let url: URL
     let title: String
     var headers: [String: String]? = nil
+    var forceMPV: Bool = false
 }
 
 final class PlayerPresenter: ObservableObject {

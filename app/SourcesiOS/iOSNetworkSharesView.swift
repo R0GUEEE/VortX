@@ -12,7 +12,7 @@ struct iOSNetworkSharesView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.md) {
-                Text("Play videos straight from a NAS or computer on your network. Add its WebDAV address, or a web server's folder listing.")
+                Text("Play videos straight from a NAS or computer on your network: an SMB share (smb://nas/Movies), a WebDAV address, or a web server's folder listing.")
                     .font(Theme.Typography.body).foregroundStyle(Theme.Palette.textSecondary)
                 Button { adding = true } label: { Label("Add a share", systemImage: "plus") }
                     .buttonStyle(ChipButtonStyle(selected: false))
@@ -139,7 +139,7 @@ private struct iOSAddNetworkShareView: View {
                         #endif
                     TextField("Name (optional)", text: $name)
                 } footer: {
-                    Text("For example 192.168.1.20:5005/video for a Synology WebDAV share.")
+                    Text("For example smb://192.168.1.20/Movies for a shared folder, or 192.168.1.20:5005/video for a Synology WebDAV share.")
                 }
                 Section {
                     TextField("Username", text: $username)

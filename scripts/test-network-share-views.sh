@@ -17,6 +17,7 @@ trap 'rm -rf "$dir"' EXIT
 shared=(
   "$dir/support.swift" app/Tests/ForYouViewStubs.swift app/Tests/NetworkShareViewStubs.swift
   app/SourcesShared/NetworkShares.swift app/SourcesShared/NetworkShareClient.swift app/SourcesShared/NetworkShareStore.swift
+  app/SourcesShared/SMB/NetworkShareSMB.swift -import-objc-header app/SourcesShared/SMB/VortXSMBShim.h
 )
 check() {
   local sdk=$1 target=$2
