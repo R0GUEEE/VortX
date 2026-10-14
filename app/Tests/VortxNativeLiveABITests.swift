@@ -276,7 +276,13 @@ private final class NativeFieldNotifications: @unchecked Sendable {
                                              "metadata": .object(["type": .string("series")])])
         check(!facade.dispatchForProfile(kidProgress, profileID: scope.ownerProfileID, expectedAccountGeneration: facade.accountGeneration))
         check(facade.dispatchForProfile(kidProgress, profileID: "kid", expectedAccountGeneration: facade.accountGeneration)); await facade.settled()
-        check(try field("library")["catalog"] == .array([]))
+        // Watched or started titles are listed in the Library as previously watched, never as saved membership.
+        func watchedOnlyLibrary() throws -> Set<String> {
+            let rows = try field("library")["catalog"]?.array ?? []
+            guard rows.allSatisfy({ $0["previouslyWatched"] == .bool(true) }) else { return [] }
+            return Set(rows.compactMap { row -> String? in if case .string(let id)? = row["_id"] { return id }; return nil })
+        }
+        check(try watchedOnlyLibrary() == ["unsaved-kid"])
         check(try field("continue_watching_preview")["items"]?.array?.first?["state"]?["video_id"] == .string("opaque-kid-episode"))
         check(facade.cachedResumeSeconds(id: "opaque-kid-episode") == 3.001)
         check(try await facade.resumeSeconds(id: "opaque-kid-episode", profileID: "kid", expectedAccountGeneration: facade.accountGeneration) == 3.001)
@@ -284,7 +290,9 @@ private final class NativeFieldNotifications: @unchecked Sendable {
                                               "metadata": .object(["type": .string("movie")])])
         check(facade.dispatchForProfile(watchedMovie, profileID: "kid", expectedAccountGeneration: facade.accountGeneration)); await facade.settled()
         check(try field("native_history")["items"]?.array?.contains { $0["_id"] == .string("unsaved-movie") && $0["state"]?["timesWatched"] == .integer(1) } == true)
-        check(try field("library")["catalog"] == .array([]))
+        // The Library view is filtered to series here (selected above), so the watched movie is not listed in it.
+        check(try watchedOnlyLibrary() == ["unsaved-kid"] && field("library")["selectable"]?["types"]?.array?
+            .contains { $0["type"] == .string("movie") } == true)
         // Ctx add-on mutations use the exact kernel actions. Invalid new descriptors are rejected before
         // old membership is considered; replacement, order and removal are committed through one FIFO.
         let replacementURL = "http://127.0.0.1:\(port)/replacement/manifest.json"

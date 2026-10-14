@@ -87,6 +87,7 @@ struct CoreCWItem {
     var resumeSeconds: Double { state.timeOffset / 1000 }
     var progress: Double { state.duration > 0 ? state.timeOffset / state.duration : 0 }
     var isFinished: Bool { progress >= 0.95 }
+    var isUpNext: Bool { false }   // fixtures carry no watched flag
     var removed: Bool? { nil }
     var temp: Bool? { nil }
 }

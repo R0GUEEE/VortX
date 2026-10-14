@@ -29,7 +29,7 @@ if [[ -n "${VORTX_FFI_LIBRARY:-}" ]]; then
         app/SourcesShared/VortxNativeBootstrapArchive.swift app/SourcesShared/VortxNativeHostPreferences.swift "${native_watched_swift_inputs[@]}" app/SourcesShared/VortxNativeSession.swift \
         app/SourcesShared/ProfileAddonPreferences.swift app/SourcesShared/VortxNativeProfileEditHost.swift app/SourcesShared/VortxProfileOverlayWitness.swift \
         app/SourcesShared/AuthenticatedHTTPTransport.swift app/SourcesShared/LinkAuthService.swift app/SourcesShared/VortxNativeOwnAccountProducer.swift \
-        app/SourcesShared/VortxNativeProfiles.swift app/SourcesShared/VortxNativeCoreFacade.swift app/SourcesShared/VortxNativeAccountCredentials.swift \
+        app/SourcesShared/VortxNativeProfiles.swift app/SourcesShared/VortxNativeCoreFacade.swift app/SourcesShared/VortxNativePreviouslyWatched.swift app/SourcesShared/VortxNativeAccountCredentials.swift \
         "$own_source_dir/UserProfile.swift" "$own_source_dir/Discovery.swift" app/Tests/VortxNativeOwnAccountLiveTests.swift \
         "$VORTX_FFI_LIBRARY" -o "$own_source_dir/own-live"
     DYLD_LIBRARY_PATH="$(dirname "$VORTX_FFI_LIBRARY"):$(dirname "$VORTX_FFI_LIBRARY")/deps" "$own_source_dir/own-live" "$own_source_dir/checkpoints"

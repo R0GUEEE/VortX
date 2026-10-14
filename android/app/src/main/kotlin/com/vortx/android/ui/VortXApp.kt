@@ -212,7 +212,7 @@ internal fun detailViewModelKey(
 internal fun detailEpisodeRouteKey(preferredEpisode: PreferredEpisode?): String {
     val hint = preferredEpisode ?: return "none"
     val identity = hint.videoIdentity.orEmpty()
-    return "${hint.season}:${hint.episode}:${identity.length}:$identity"
+    return "${hint.season}:${hint.episode}:${identity.length}:$identity" + if (hint.upNext) ":up" else ""
 }
 
 private enum class Tab(

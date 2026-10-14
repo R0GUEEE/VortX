@@ -704,6 +704,7 @@ class DetailViewModel(
                 videos = detail.videos,
                 preferredEpisode = detailPreferredEpisodeForAdmission(initialPreferredEpisode, continueWatchingAdmission),
                 manualEpisodeId = explicitManualEpisodeId,
+                watchedVideoIds = detail.watchedVideoIds,
             ) ?: primaryEpisodeOf(detail)?.first
             if (target != null) {
                 _selectedSeason.value = target.season
@@ -975,6 +976,7 @@ class DetailViewModel(
                         videos = it.videos,
                         preferredEpisode = detailPreferredEpisodeForAdmission(initialPreferredEpisode, continueWatchingAdmission),
                         manualEpisodeId = explicitManualEpisodeId,
+                        watchedVideoIds = it.watchedVideoIds,
                     )
                 }
                     ?: detail?.let { primaryEpisodeOf(it)?.first }
@@ -2647,6 +2649,7 @@ internal fun detailEpisodeTargetForRoute(
     videos: List<Episode>,
     preferredEpisode: PreferredEpisode?,
     manualEpisodeId: String?,
+    watchedVideoIds: Set<String> = emptySet(),
 ): Episode? {
     manualEpisodeId?.let { selectedId ->
         videos.firstOrNull { it.id == selectedId }?.let { return it }
@@ -2654,11 +2657,16 @@ internal fun detailEpisodeTargetForRoute(
     val hint = preferredEpisode
         ?.takeIf { it.season >= 0 && it.episode > 0 }
         ?: return null
-    return videos.firstOrNull { candidate ->
+    val hinted = videos.firstOrNull { candidate ->
         candidate.season == hint.season &&
             candidate.episode == hint.episode &&
             (hint.videoIdentity == null || candidate.id == hint.videoIdentity)
-    }
+    } ?: return null
+    if (!hint.upNext || hinted.id !in watchedVideoIds) return hinted
+    // Up next (twin of Apple DetailEpisodeTargetPolicy): the next unwatched episode after the finished one,
+    // never back to earlier specials; the last episode stays put.
+    val ordered = videos.sortedWith(compareBy<Episode>({ it.season }, { it.episode }))
+    return ordered.drop(ordered.indexOf(hinted) + 1).firstOrNull { it.id !in watchedVideoIds } ?: hinted
 }
 
 /**

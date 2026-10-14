@@ -1046,7 +1046,11 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         check(nativeCW["items"]?.array?.first?["state"]?["timeOffset"] == .integer(120001))
         check(nativeCW["items"]?.array?.first?["state"]?["video_id"] == .string("opaque-video"))
         let nativeLibrary = try JSONDecoder().decode(VortxJSON.self, from: facade.stateData("library")!)
-        check(nativeLibrary["catalog"] == .array([])) // history/resume is not saved membership
+        // Nothing is saved, but every title watched or started stays in the Library as previously watched.
+        func ids(_ rows: VortxJSON?) -> Set<String> {
+            Set((rows?.array ?? []).compactMap { row -> String? in if case .string(let id)? = row["_id"] { return id }; return nil })
+        }
+        check(!ids(nativeCW["items"]).isEmpty && ids(nativeCW["items"]).isSubset(of: ids(nativeLibrary["catalog"])))
         check(facade.cachedResumeSeconds(id: "opaque-video") == 120.001)
         check(facade.cachedResumeSeconds(id: "finished") == 0)
         check(facade.cachedResumeSeconds(id: "unknown") == nil)

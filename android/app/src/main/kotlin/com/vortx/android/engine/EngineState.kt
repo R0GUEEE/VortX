@@ -1075,7 +1075,9 @@ internal object EngineState {
         // Stable id matching CoreStream.id: (url|externalUrl|infoHash|nzbUrl) + "#" + name + description.
         val handle = url ?: externalUrl ?: nzbUrls.firstOrNull() ?: infoHash ?: "?"
         val name = obj.optStringOrNull("name")
-        val description = obj.optStringOrNull("description")
+        // Many add-ons (Debridio, Torrentio-style debrid add-ons) still put the file name, size and seeders in
+        // the older `title` field; Stremio reads it as the description, and so do we (Apple `CoreStream`).
+        val description = obj.optStringOrNull("description") ?: obj.optStringOrNull("title")
         return StreamSource(
             id = handle + "#" + (name ?: "") + (description ?: ""),
             addon = addon,

@@ -169,7 +169,9 @@ private fun HomeContent(
     val initialHero = heroCandidates.firstOrNull()
     val savedStream = initialHero?.let { lastStreamStore.load() }
     // WHY audit R01: direct resume belongs only to the first Continue Watching hero, never ordinary cards.
-    val heroCanDirectResume = heroCatalog?.id == "continue" && !heroCatalog.readOnly && initialHero != null && savedStream?.let {
+    // An up-next hero names a finished episode: it opens Detail on the next one, never replays the old link.
+    val heroCanDirectResume = heroCatalog?.id == "continue" && !heroCatalog.readOnly && initialHero != null &&
+        initialHero.preferredEpisode?.upNext != true && savedStream?.let {
         it.mediaId == initialHero.id && it.mediaType == initialHero.type && it.positionMs > 0L
     } == true
     val hubShown = collections.isVisible && !hubHidden

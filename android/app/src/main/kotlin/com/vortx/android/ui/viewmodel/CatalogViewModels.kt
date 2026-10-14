@@ -586,6 +586,8 @@ class HomeViewModel internal constructor(
     internal fun claimFirstRunOffer(): Boolean {
         val ui = _forYouUi.value
         val profile = ui.profileId ?: return false
+        // Twin of Apple: never before "Who's watching?" settles; `undecided` already needs this profile's loaded choices.
+        if (ProfileStore.sharedOrNull()?.needsPicker == true) return false
         return ui.undecided && interestsOffered.add(profile.lowercase())
     }
 

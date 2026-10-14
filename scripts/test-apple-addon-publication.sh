@@ -51,7 +51,7 @@ xcrun swiftc -swift-version 6 -parse-as-library -strict-concurrency=complete -wa
     -D VORTX_ENGINE_STATE_BRIDGE -D VORTX_ENGINE_RESOURCE_HOST -D VORTX_NATIVE_DATA_ENGINE -I "$publication_headers" \
     app/SourcesShared/VortxNativeRuntime.swift app/SourcesShared/VortxResourceBridge.swift app/SourcesShared/VortxResourceProjection.swift \
     app/SourcesShared/VortxNativeBootstrapArchive.swift app/SourcesShared/VortxNativeHostPreferences.swift "${native_watched_swift_inputs[@]}" \
-    app/SourcesShared/VortxNativeSession.swift app/SourcesShared/VortxNativeCoreFacade.swift app/SourcesShared/VortxNativeProfiles.swift \
+    app/SourcesShared/VortxNativeSession.swift app/SourcesShared/VortxNativeCoreFacade.swift app/SourcesShared/VortxNativePreviouslyWatched.swift app/SourcesShared/VortxNativeProfiles.swift \
     app/SourcesShared/ProfileAddonPreferences.swift app/SourcesShared/VortxNativeProfileEditHost.swift app/SourcesShared/VortxNativeProviderCredentials.swift app/SourcesShared/VortxProfileOverlayWitness.swift \
     app/SourcesShared/CatalogRowResolution.swift "$publication_test_dir/UserProfile.swift" "$publication_test_dir/Discovery.swift" "$publication_test_dir/AddonModels.swift" \
     "$publication_test_dir/AddonConfirmationProbe.swift" app/Tests/AppleAddonPublicationLiveTests.swift "$publication_library" -framework Security -framework SystemConfiguration -o "$publication_test_dir/addon-publication"

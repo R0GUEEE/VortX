@@ -1253,7 +1253,7 @@ struct iOSHomeView: View {
             if selection.source.isPrivate {
                 return RailItem(id: $0.id, type: $0.type, name: $0.name, poster: $0.poster,
                                 progress: selection.displayProgress[$0.id] ?? $0.progress,
-                                cwVideoId: $0.state.videoId, caption: selection.captions[$0.id],
+                                cwVideoId: $0.state.videoId, cwUpNext: $0.isUpNext, caption: selection.captions[$0.id],
                                 resumeSeconds: $0.resumeSeconds)
             }
             return cinemaHistoryRailItem($0, catalog: residentCatalog, residentMeta: core.metaDetails?.meta)
@@ -1804,6 +1804,7 @@ struct iOSHomeView: View {
         .onChange(of: forYou.ready) { _ in refreshForYou() }
         .onChange(of: forYou.profileID) { _ in refreshForYou() }
         .onChange(of: isActive) { _ in offerInterestsIfNeeded() }
+        .onChange(of: profiles.needsPicker) { _ in offerInterestsIfNeeded() }
         .sheet(item: $interestsPresentation) { presentation in
             ForYouInterestsView(initial: forYou.interests, firstRun: presentation.firstRun) {
                 interestsPresentation = nil
@@ -1941,9 +1942,11 @@ struct iOSHomeView: View {
     }
 
     private func offerInterestsIfNeeded() {
+        // Only once a viewer is chosen ("Who's watching?" settled) and this profile's own choices have loaded:
+        // before that the store reads nil interests, which looks undecided for every profile.
         guard isActive, interestsPresentation == nil, player == nil, !showSignIn, !showCustomizeHome, forYouEnabled,
-              let profile = profiles.activeID, forYou.interests?.decided != true,
-              !interestsOffered.contains(profile) else { return }
+              !profiles.needsPicker, let profile = profiles.activeID, forYou.ready, forYou.profileID == profile,
+              forYou.interests?.decided != true, !interestsOffered.contains(profile) else { return }
         interestsOffered.insert(profile)
         interestsPresentation = iOSForYouInterestsPresentation(firstRun: true)
     }
@@ -4483,6 +4486,9 @@ struct RailItem: Identifiable {
     /// direct resume can confirm the remembered link still matches the episode the engine
     /// is parked on (mirrors the tvOS `directResume` series guard). Nil for catalog/library cards.
     var cwVideoId: String? = nil
+    /// The Continue-Watching entry is a series whose latest episode is finished (`CoreCWItem.isUpNext`): a tap
+    /// opens detail on the next episode instead of resuming the remembered link.
+    var cwUpNext: Bool = false
     /// A small secondary caption shown UNDER the card title (e.g. "S2E5 · Jun 30" on the Upcoming
     /// Episodes rail). Nil on every other rail, so their cards are byte-for-byte unchanged.
     var caption: String? = nil
@@ -4520,6 +4526,7 @@ private func cinemaHistoryRailItem(_ item: CoreCWItem, catalog: [CoreMeta], resi
                     imdbRating: preview?.imdbRating ?? meta?.imdbRating,
                     genres: preview?.genres ?? meta?.genres,
                     cwVideoId: includesResume ? item.state.videoId : nil,
+                    cwUpNext: includesResume && item.isUpNext,
                     caption: includesResume ? coordinate : nil,
                     resumeSeconds: includesResume ? item.resumeSeconds : nil)
 }
@@ -4647,6 +4654,10 @@ private func iOSDirectResume(for item: RailItem, core: CoreBridge,
             || TraktAuth.storedSessionID == expectedTraktSession else { return nil }
     let pid = ProfileStore.shared.activeID
     let accountBoundary = account.credentialBoundaryGeneration
+    // Up next: the remembered link is the finished episode. Detail picks the next one.
+    if item.cwUpNext {
+        LastStreamStore.logResume("upNext", libraryId: item.id, profileID: pid); return nil
+    }
     guard let entry = LastStreamStore.entry(for: item.id, profileID: pid) else {
         LastStreamStore.logResume("noEntry", libraryId: item.id, profileID: pid); return nil
     }

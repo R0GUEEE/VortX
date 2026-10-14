@@ -126,7 +126,7 @@ jobs:
       VORTX_NATIVE_ONLY: ${{ github.event_name != 'workflow_dispatch' || inputs.native_only }}
       BUILD_SOURCE_SHA: ${{ inputs.recovery_source_commit || github.sha }}
       # Normal new app sources advance independently of admitted historical recovery cuts.
-      NORMAL_NATIVE_REVISION: a7984adcc057e98d2be500d82fd8ead8e224fa50
+      NORMAL_NATIVE_REVISION: 09078f62e0dbd33ddbe76b8ee8aa9bed958797f2
     # GitHub-owned actions are SHA-pinned too (a mutable tag -- even on an actions/* repo -- can be
     # repointed, and this job holds ENGINE_REPO_TOKEN + the release secrets). Each pin carries the
     # tag it resolved from.
@@ -232,7 +232,7 @@ jobs:
           [ "$(git rev-parse HEAD)" = "$BUILD_SOURCE_SHA" ] && [ -z "$(git status --porcelain)" ] || exit 1
           if [ -z "$RECOVERY_SOURCE" ]; then
             [ "$BUILD_SOURCE_SHA" = "$GITHUB_SHA" ] && [ "$RECOVERY_OUTCOME" = skipped ] && [ -z "$ADMITTED_SOURCE$ADMITTED_NATIVE_REVISION" ] || exit 1
-            [ "$NORMAL_NATIVE_REVISION" = a7984adcc057e98d2be500d82fd8ead8e224fa50 ] || exit 1
+            [ "$NORMAL_NATIVE_REVISION" = 09078f62e0dbd33ddbe76b8ee8aa9bed958797f2 ] || exit 1
             NATIVE_REVISION="$NORMAL_NATIVE_REVISION"
           else
             [ "$RECOVERY_OUTCOME" = success ] && [ "$RECOVERY_SOURCE" = "$BUILD_SOURCE_SHA" ] && [ "$ADMITTED_SOURCE" = "$BUILD_SOURCE_SHA" ] || exit 1

@@ -850,7 +850,9 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             } else {
                 guard let id = string(action["args"]?["args"]) else { return fail("invalid_library_id") }
                 let matches = state?["libraries"]?[profile]?["items"]?.array?.filter { $0["id"] == .string(id) && $0["kind"] == .string("standard") } ?? []
-                guard matches.count == 1, let type = string(matches[0]["type"]) else { return fail("ambiguous_library_id") }
+                // A watched-only Library title is removed under its own watch type (the engine records it).
+                let watchedType = matches.isEmpty ? VortxNativePreviouslyWatched.type(of: id, playback: lock.withLock { playback }) : nil
+                guard let type = matches.count == 1 ? string(matches[0]["type"]) : watchedType else { return fail("ambiguous_library_id") }
                 native["type"] = .string("remove_library_item"); native["key"] = .string(type + ":" + id)
             }
             guard let bytes = try? JSONEncoder().encode(VortxJSON.object(["action": .string("Vortx"), "args": .object(native)])) else { return false }
@@ -1232,21 +1234,36 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             }
         }
     }
+    /// The Library: every saved title, then every title watched or started, most recent
+    /// first. A watched title leaves only when the viewer removed it from the Library after its last
+    /// watch; watching it again brings it back.
     private func projectedLibraryItems(_ state: VortxJSON) throws -> [VortxJSON] {
         guard let active = string(state["activeProfileId"]), let library = state["libraries"]?[active] else { throw VortxNativeError.invalidSnapshot }
-        return (library["items"]?.array ?? []).filter { $0["kind"] == .string("standard") }.compactMap { item -> VortxJSON? in
+        let saved = (library["items"]?.array ?? []).filter { $0["kind"] == .string("standard") }.compactMap { item -> VortxJSON? in
             guard let id = string(item["id"]), let type = string(item["type"]) else { return nil }
-            // Exact native selected-unit projection, never max(old episode offsets). A saved
-            // membership without watch evidence stays unwatched and out of Continue Watching.
-            let resume = playback?["continueWatching"]?.array?.first { $0["metaId"] == .string(id) }
-            let offset = resume?["offsetMs"] ?? .integer(0)
-            let duration = resume?["durationMs"] ?? .integer(0)
-            let watched = playback?["watchedTitles"]?[id] ?? .integer(0)
-            return .object(["_id": .string(id), "type": .string(type), "name": item["name"] ?? .string(id), "poster": item["poster"] ?? .null,
-                            "state": .object(["timeOffset": offset, "duration": duration,
-                                              "video_id": resume?["videoId"] ?? .null, "lastWatched": isoTimestamp(resume?["updatedAt"]),
-                                              "flaggedWatched": watched, "timesWatched": watched])])
+            return libraryRow(id: id, type: type, name: item["name"] ?? .string(id), poster: item["poster"] ?? .null)
         }
+        let savedIDs = Set(saved.compactMap { string($0["_id"]) })
+        let records = state["nativeSync"]?["libraries"]?[active]?["records"]
+        return saved + VortxNativePreviouslyWatched.titles(playback: playback, excluding: savedIDs) { type, id in
+            try? records?[type + ":" + id]?["removedAt"]?.decode(UInt64.self)
+        }.map { libraryRow(id: $0.id, type: $0.type, name: $0.name, poster: $0.poster, previouslyWatched: true) }
+    }
+    /// `previouslyWatched` marks a watched-only row: listed in the Library, but not saved membership, so Detail
+    /// still offers Add to Library and a removal never edits a Trakt/SIMKL watchlist.
+    private func libraryRow(id: String, type: String, name: VortxJSON, poster: VortxJSON, previouslyWatched: Bool = false) -> VortxJSON {
+        // Exact native selected-unit projection, never max(old episode offsets). A saved
+        // membership without watch evidence stays unwatched and out of Continue Watching.
+        let resume = playback?["continueWatching"]?.array?.first { $0["metaId"] == .string(id) }
+        let offset = resume?["offsetMs"] ?? .integer(0)
+        let duration = resume?["durationMs"] ?? .integer(0)
+        let watched = playback?["watchedTitles"]?[id] ?? .integer(0)
+        var row: [String: VortxJSON] = ["_id": .string(id), "type": .string(type), "name": name, "poster": poster,
+                        "state": .object(["timeOffset": offset, "duration": duration,
+                                          "video_id": resume?["videoId"] ?? .null, "lastWatched": isoTimestamp(resume?["updatedAt"]),
+                                          "flaggedWatched": watched, "timesWatched": watched])]
+        if previouslyWatched { row["previouslyWatched"] = .bool(true) }
+        return .object(row)
     }
     private func libraryProjection(state: VortxJSON, request: VortxJSON?) -> VortxJSON? {
         let requestedType: String?
@@ -1314,7 +1331,8 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     }
     private func metaWithPlayback(_ detail: VortxJSON, library: [VortxJSON]) -> VortxJSON {
         guard case .object(var fields) = detail, let id = string(detail["selected"]?["metaPath"]?["id"]) else { return detail }
-        fields["libraryItem"] = library.first { $0["_id"] == .string(id) } ?? .null
+        // Saved membership only: a watched-only Library row must leave Detail offering Add to Library.
+        fields["libraryItem"] = library.first { $0["_id"] == .string(id) && $0["previouslyWatched"] != .bool(true) } ?? .null
         fields["watchedVideoIds"] = playback?["watchedVideoIdsByTitle"]?[id] ?? .array([])
         return .object(fields)
     }

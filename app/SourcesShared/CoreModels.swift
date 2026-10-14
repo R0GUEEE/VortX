@@ -35,8 +35,10 @@ struct CoreCWItem: Decodable, Identifiable {
     /// and watched-from-catalog markers are `temp`. "In the library" means neither.
     var removed: Bool? = nil
     var temp: Bool? = nil
+    /// A native Library row for a title watched or started but never saved: listed, not saved membership.
+    var previouslyWatched: Bool? = nil
 
-    enum CodingKeys: String, CodingKey { case id = "_id", type, name, poster, state, removed, temp }
+    enum CodingKeys: String, CodingKey { case id = "_id", type, name, poster, state, removed, temp, previouslyWatched }
 
     /// 0…1 watch progress (timeOffset/duration; both in ms).
     var progress: Double {
@@ -74,6 +76,12 @@ struct CoreCWItem: Decodable, Identifiable {
         let inProgress = progress > resumeFloor && progress < 0.9
         if inProgress { return false }
         return watchedToEnd || state.flaggedWatched > 0 || state.timesWatched > 0
+    }
+
+    /// A series whose latest episode is finished. The native engine keeps it in Continue Watching with no
+    /// offset and flagged watched, so a tap opens the next episode instead of replaying the finished one.
+    var isUpNext: Bool {
+        EpisodePlaybackIdentity.usesSeriesLifecycle(type: type) && state.flaggedWatched > 0 && state.timeOffset <= 0
     }
 
     /// The engine's own "has been watched" predicate (upstream `LibraryItem::watched()`:
@@ -1547,6 +1555,37 @@ struct CoreStream: Decodable, Identifiable, Equatable, Sendable {
     var requestHeaders: [String: String]? {
         guard let headers = behaviorHints?.proxyHeaders?.request, !headers.isEmpty else { return nil }
         return headers
+    }
+}
+
+extension CoreStream {
+    private enum CodingKeys: String, CodingKey {
+        case url, ytId, infoHash, fileIdx, sources, externalUrl, name, description, title, behaviorHints
+        case nzbUrl, nzbUrls, servers, fileMustInclude, vortxProvider
+    }
+
+    /// Many add-ons (Debridio, Torrentio-style debrid add-ons) still put the file name, size and seeders
+    /// in the older `title` field instead of `description`. Stremio reads them as one field. The native
+    /// engine passes both through unchanged, so `description` falls back to `title`; without it the
+    /// source list showed only the add-on's short name, like "Debridio 1080p".
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        url = try container.decodeIfPresent(String.self, forKey: .url)
+        ytId = try container.decodeIfPresent(String.self, forKey: .ytId)
+        infoHash = try container.decodeIfPresent(String.self, forKey: .infoHash)
+        fileIdx = try container.decodeIfPresent(Int.self, forKey: .fileIdx)
+        sources = try container.decodeIfPresent([String].self, forKey: .sources)
+        externalUrl = try container.decodeIfPresent(String.self, forKey: .externalUrl)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        let detail = try container.decodeIfPresent(String.self, forKey: .description)
+        let legacyDetail = try? container.decodeIfPresent(String.self, forKey: .title)
+        description = detail.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } ?? legacyDetail ?? detail
+        behaviorHints = try container.decodeIfPresent(CoreStreamBehaviorHints.self, forKey: .behaviorHints)
+        nzbUrl = try container.decodeIfPresent(String.self, forKey: .nzbUrl)
+        nzbUrls = try container.decodeIfPresent([String].self, forKey: .nzbUrls)
+        servers = try container.decodeIfPresent([String].self, forKey: .servers)
+        fileMustInclude = try container.decodeIfPresent(String.self, forKey: .fileMustInclude)
+        vortxProvider = try container.decodeIfPresent(String.self, forKey: .vortxProvider)
     }
 }
 

@@ -4276,6 +4276,8 @@ final class CoreBridge: ObservableObject {
 #if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             guard let saved = library?.catalog.first(where: { $0.id == card.id }) else { return }
+            // Watched-only: never saved, so no watchlist was written for it. Record the removal only.
+            if saved.previouslyWatched == true { removeFromLibrary(id: saved.id); return }
             let target = PlaybackMutationTarget.capture(core: self)
             DiagnosticsLog.log("library", "action=remove_saved surface=menu")
             Task { @MainActor in

@@ -41,7 +41,9 @@ internal fun nativeContinueWatchingItem(item: JSONObject, saved: List<MetaItem>)
     val offset = item.getLong("offsetMs"); val duration = item.getLong("durationMs")
     return MetaItem(id, type, item.getString("name"), poster = item.optStringOrNull("poster") ?: matches.singleOrNull()?.poster,
         progress = if (duration > 0) (offset.toFloat() / duration).coerceIn(0f, 1f) else 0f, resumeSeconds = offset / 1000.0,
-        preferredEpisode = continueWatchingEpisodeFromVideoIdentity(type, item.optStringOrNull("videoId")),
+        preferredEpisode = continueWatchingEpisodeFromVideoIdentity(type, item.optStringOrNull("videoId"))
+            // A finished latest episode keeps its series here with no offset, flagged watched: up next.
+            ?.let { if (item.optBoolean("watched") && offset == 0L) it.copy(upNext = true) else it },
         continueWatchingActivityAtMillis = item.optLong("updatedAt", 0).takeIf { it > 0 })
 }
 
@@ -712,7 +714,14 @@ internal class NativeCatalogRepository(
         val request = requestJson?.let(::JSONObject) ?: JSONObject().put("type", "all").put("sort", "recent")
         val type = request.getString("type"); val sort = request.getString("sort")
         require(sort in setOf("recent", "name"))
-        val all = visibleLocal(savedItems(read), read); var items = all.filter { type == "all" || it.type.id == type }
+        // Saved titles, then every title watched or started that the viewer has not removed (twin of Apple).
+        val saved = savedItems(read)
+        val records = read.state.optJSONObject("nativeSync")?.optJSONObject("libraries")
+            ?.optJSONObject(read.owner.profileID)?.optJSONObject("records")
+        val watched = NativePreviouslyWatched.titles(playback(read), saved.map { it.id }.toSet()) { kind, id ->
+            records?.optJSONObject("$kind:$id")?.optLong("removedAt", 0)
+        }
+        val all = visibleLocal(saved + watched, read); var items = all.filter { type == "all" || it.type.id == type }
         if (sort == "name") items = items.sortedBy { it.name.lowercase() }
         fun wire(t: String = type, s: String = sort) = JSONObject().put("type", t).put("sort", s).toString()
         session.owned(read.owner) { LibraryResult(items, LibraryFilters(
@@ -735,9 +744,18 @@ internal class NativeCatalogRepository(
     override suspend fun saveToLibrary(item: MetaItem) = addToLibrary(item).onSuccess { mirrorLibrary(true, item.type, item.id) }
     override suspend fun removeFromLibrary(id: String) = attempt {
         DiagnosticsLog.log("library", "action=remove_saved surface=library")
-        val session = session(); val read = session.read(); val item = savedItems(read).filter { it.id == id }.single()
-        session.dispatch(listOf(action("remove_library_item").put("profileId", read.owner.profileID).put("key", "${item.type.id}:$id")), read.owner)
-        mirrorLibrary(false, item.type, id)
+        val session = session(); val read = session.read(); val saved = savedItems(read).filter { it.id == id }
+        if (saved.isEmpty()) {
+            // Watched-only Library title (twin of Apple): record the removal under its watch type. It was never
+            // saved, so no watchlist was written for it and none is edited.
+            val kind = checkNotNull(NativePreviouslyWatched.type(playback(read), id)) { "Unknown native library title" }
+            session.dispatch(listOf(action("remove_library_item").put("profileId", read.owner.profileID).put("key", "$kind:$id")), read.owner)
+        } else {
+            val item = saved.single()
+            session.dispatch(listOf(action("remove_library_item").put("profileId", read.owner.profileID).put("key", "${item.type.id}:$id")), read.owner)
+            mirrorLibrary(false, item.type, id)
+        }
+        Unit
     }
     override suspend fun addToLibrary(type: MediaType, id: String, name: String, poster: String?): Result<MetaDetail> = attempt {
         addToLibrary(MetaItem(id, type, name, poster)).getOrThrow(); peekMeta(type, id) ?: meta(type, id).getOrThrow()

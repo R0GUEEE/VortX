@@ -304,6 +304,7 @@ struct HomeView: View {
         .onChange(of: forYou.profileID) { _ in refreshForYou() }
         .onChange(of: isActive) { _ in offerInterestsIfNeeded() }
         .onChange(of: presenter.request == nil) { _ in offerInterestsIfNeeded() }
+        .onChange(of: profiles.needsPicker) { _ in offerInterestsIfNeeded() }
         .fullScreenCover(item: $interestsPresentation) { presentation in
             ForYouInterestsView(initial: forYou.interests, firstRun: presentation.firstRun) {
                 interestsPresentation = nil
@@ -327,9 +328,11 @@ struct HomeView: View {
     }
 
     private func offerInterestsIfNeeded() {
-        guard isActive, interestsPresentation == nil, presenter.request == nil, forYouEnabled,
-              let profile = profiles.activeID, forYou.interests?.decided != true,
-              !interestsOffered.contains(profile) else { return }
+        // Only once a viewer is chosen ("Who's watching?" settled) and this profile's own choices have loaded:
+        // before that the store reads nil interests, which looks undecided for every profile.
+        guard isActive, interestsPresentation == nil, presenter.request == nil, forYouEnabled, !profiles.needsPicker,
+              let profile = profiles.activeID, forYou.ready, forYou.profileID == profile,
+              forYou.interests?.decided != true, !interestsOffered.contains(profile) else { return }
         interestsOffered.insert(profile)
         interestsPresentation = ForYouInterestsPresentation(firstRun: true)
     }
@@ -923,6 +926,10 @@ struct CoreContinueWatchingRow: View {
         // Resolve its captured target through Detail; never borrow this device's last stream.
         guard intent?.source != .simkl else { return nil }
         let pid = profiles.activeID
+        // Up next: the remembered link is the finished episode. Detail picks the next one.
+        if item.isUpNext {
+            LastStreamStore.logResume("upNext", libraryId: item.id, profileID: pid); return nil
+        }
         guard let entry = LastStreamStore.entry(for: item.id, profileID: pid) else {
             LastStreamStore.logResume("noEntry", libraryId: item.id, profileID: pid); return nil
         }
