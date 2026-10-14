@@ -113,6 +113,11 @@ struct LibraryView: View {
                                     Label("Smart collections", systemImage: "line.3.horizontal.decrease.circle")
                                 }
                                 .buttonStyle(ChipButtonStyle(selected: false))
+                                // Folders on a NAS or computer (WebDAV / web folder), saved on this Apple TV.
+                                NavigationLink { TVNetworkSharesView() } label: {
+                                    Label("Network shares", systemImage: "externaldrive.connected.to.line.below")
+                                }
+                                .buttonStyle(ChipButtonStyle(selected: false))
                             }
                         }
                         .padding(.horizontal, Theme.Space.screenEdge)

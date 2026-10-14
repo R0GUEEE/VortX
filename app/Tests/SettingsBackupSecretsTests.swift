@@ -93,8 +93,13 @@ struct SettingsBackupSecretsTests {
         "vortx.collections.providersAt.v2.",
     ]
     static let derivedCacheRegions = ["GB", "US"]
+    /// Per-device choices and state (effects, Infuse handoffs, network shares) that must never travel either.
+    static let deviceOnlyKeys = [
+        "vortx.effects.backdrop", "vortx.effects.glass", "vortx.effects.motion", "vortx.effects.artwork",
+        "vortx.infuse.handoffs", "vortx.networkShares.list",
+    ]
     static var derivedCacheKeys: [String] {
-        derivedCacheExactKeys + derivedRegionCachePrefixes.flatMap { prefix in
+        derivedCacheExactKeys + deviceOnlyKeys + derivedRegionCachePrefixes.flatMap { prefix in
             derivedCacheRegions.map { prefix + $0 }
         }
     }

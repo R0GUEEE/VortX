@@ -71,6 +71,17 @@ enum SettingsBackup {
         "vortx.collections.decadeCoversFailedAt",
         "vortx.collections.globalProviders.v2",
         "vortx.collections.globalProvidersAt.v2",
+        // Settings > Effects and performance: chosen for THIS device's hardware. A weak box choosing still
+        // backdrops must not switch them off on a 4K Apple TV.
+        "vortx.effects.backdrop",
+        "vortx.effects.glass",
+        "vortx.effects.motion",
+        "vortx.effects.artwork",
+        // Infuse launches waiting for Infuse's callback on this device; meaningless anywhere else.
+        "vortx.infuse.handoffs",
+        // Network shares are addresses on this device's network, and their passwords stay in this
+        // device's Keychain, so a synced copy would arrive as a share that cannot log in.
+        "vortx.networkShares.list",
         // DELIBERATELY NOT HERE: "vortx.downloads.autoDeleteWatched". It looks like it belongs with the two
         // above, and it does not. It is a real cross-device POLICY preference ("I do not want to keep watched
         // downloads"), which is true of the user rather than of the hardware, so it must keep syncing. The test

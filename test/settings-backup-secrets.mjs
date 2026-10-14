@@ -13,7 +13,7 @@ const out = mkdtempSync(join(build, 'settings-backup-secrets.'));
 const backupPath = join(root, 'app/SourcesShared/SettingsBackup.swift');
 const testPath = join(root, 'app/Tests/SettingsBackupSecretsTests.swift');
 const backup = readFileSync(backupPath, 'utf8');
-const sharedInputs = ['CredentialScope.swift', 'Keychain.swift']
+const sharedInputs = ['CredentialScope.swift', 'Keychain.swift', 'LegacySyncRetention.swift']
   .map(name => join(root, 'app/SourcesShared', name));
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const inputs = [backupPath, testPath, ...sharedInputs].map(path => ({

@@ -2525,6 +2525,7 @@ struct iOSLibraryView: View {
         case queue        // the download-queue manager (reorder / pause / concurrency), pushed from Downloads
         case watchlist
         case smartCollections
+        case networkShares   // Network shares (NAS / WebDAV / web folder), saved on this device
     }
 
     #if !os(tvOS)
@@ -2629,6 +2630,11 @@ struct iOSLibraryView: View {
                                               systemImage: "line.3.horizontal.decrease.circle.fill")
                         }
                         .buttonStyle(.plain)
+                        NavigationLink(value: LibraryRoute.networkShares) {
+                            iOSLibraryHubCard(title: "Network shares", subtitle: "Play videos from a NAS or computer on your network",
+                                              systemImage: "externaldrive.connected.to.line.below.fill")
+                        }
+                        .buttonStyle(.plain)
                     }
                     Button {
                         segment = .all
@@ -2720,6 +2726,7 @@ struct iOSLibraryView: View {
                 case .queue: DownloadQueueView()
                 case .watchlist: CinemaWatchlist(onOpen: handleTap, onWatch: watchFromQuickView)
                 case .smartCollections: iOSSmartCollectionsView(onOpen: handleTap)
+                case .networkShares: iOSNetworkSharesView(onPlay: { downloadPlayer = $0 })
                 }
             }
             .iOSPlayerCover($downloadPlayer, account: account, core: core)
