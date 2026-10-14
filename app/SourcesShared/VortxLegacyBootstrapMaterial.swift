@@ -13,12 +13,40 @@ enum VortxLegacyBootstrapMaterial {
         var errorDescription: String? { "Native migration reconciliation required: " + reason }
     }
 
+    /// One source unit (a library row, add-on, intent, overlay entry or watch) the projection could
+    /// not represent (issue #262). It is held, never fatal: the unit stays only in the retained
+    /// original document, enters no native state, and every other unit still imports. A whole-account
+    /// stop for one odd row locked users out of profiles, add-ons and sync together. The kind is a
+    /// fixed code; the reason can name a source key, so scrub it before logging.
+    struct Held: Sendable, Equatable {
+        let kind: String
+        let reason: String
+    }
+
     /// The host must seal pending receipts with its authenticated source archive before committing
     /// this material. Pending receipts are neither installed membership nor acknowledged removals.
     struct Preparation: Sendable {
         let material: Data
         let pendingMembershipReceipts: Data?
         let pendingCount: Int
+        let held: [Held]
+    }
+
+    /// Marks a row an own-account source view could not project, so the adapter holds just that row.
+    fileprivate static let heldReasonKey = "vortxHeldReason"
+
+    /// A one-line, value-free summary of held units for diagnostics: `kind:reason(count)` pairs.
+    static func heldSummary(_ held: [Held]) -> String {
+        let counts = Dictionary(grouping: held) { $0.kind + ":" + scrubbedReason($0.reason) }.mapValues(\.count)
+        return counts.keys.sorted().map { $0 + "(" + String(counts[$0] ?? 0) + ")" }.joined(separator: ",")
+    }
+
+    /// A reconciliation reason as a diagnostics code. Reasons are fixed text plus, at most, a source
+    /// key such as a profile UUID or video ID; any word that is not plain letters becomes `x`.
+    static func scrubbedReason(_ reason: String) -> String {
+        reason.split(separator: " ").map { word in
+            word.allSatisfy { $0.isASCII && ($0.isLetter || $0 == "-") } ? word.lowercased() : "x"
+        }.joined(separator: "_")
     }
     static let maximumPendingMembershipReceipts = 10_000
 
@@ -162,7 +190,8 @@ enum VortxLegacyBootstrapMaterial {
             watchedEvidence: watchedEvidence, preparePendingMembership: true)
     }
 
-    private static func project(document: Data, roster: [UserProfile], ownerProfileID: UUID,
+    /// `encode` and `prepare` both project through here; the result also reports held units.
+    static func project(document: Data, roster: [UserProfile], ownerProfileID: UUID,
                        rosterModifiedSeconds: Double?, deferProfileEdits: Bool = false,
                        ownAccountSources: [OwnAccountSource] = [], retainedOwnAccountBaseline: Data? = nil,
                        retainedOwnAccountSourceEnvelopes: [RetainedOwnAccountSourceEnvelope] = [],
@@ -190,7 +219,7 @@ enum VortxLegacyBootstrapMaterial {
                                                                          deferredOwnAccountOverlays: deferredOwnAccountOverlays,
                                                                          rootDocumentSHA256: sha256(document)), options: [.sortedKeys, .withoutEscapingSlashes])
         return Preparation(material: material, pendingMembershipReceipts: try adapter.pendingMembershipData(),
-                           pendingCount: adapter.pendingMembership.count)
+                           pendingCount: adapter.pendingMembership.count, held: adapter.held)
     }
 
     /// Classifies nonempty UUID-scoped own overlays before a cold material projection. Active
@@ -239,6 +268,9 @@ enum VortxLegacyBootstrapMaterial {
         var deleted = Set<String>()
         var watches: [String: [Object]] = [:]
         var titles: [String: [String: Object]] = [:]
+        var held: [Held] = []
+        /// One undo list per open unit; a held unit replays its own list, a kept one hands it outward.
+        private var undo: [[() -> Void]] = []
 
         init(document: Object, roster: [UserProfile], ownerID: UUID, modified: Double?,
              deferProfileEdits: Bool, allowIndependentSource: Bool = false,
@@ -267,6 +299,42 @@ enum VortxLegacyBootstrapMaterial {
                 self.owner = owners[0]
             }
             profiles = Dictionary(uniqueKeysWithValues: roster.map { ($0.id.uuidString, $0) })
+        }
+
+        /// Projects one source unit atomically. A unit that needs reconciliation is held: every effect
+        /// it made (titles, watches, provenance, pending receipts) is undone, it is recorded, and the
+        /// projection continues. Units nest; any other error still stops the projection. Returns
+        /// false when held.
+        @discardableResult
+        func unit(_ kind: String, _ body: () throws -> Void) throws -> Bool {
+            let watchCounts = watches.mapValues(\.count), heldCount = held.count
+            undo.append([])
+            do {
+                try body()
+                let effects = undo.removeLast()
+                if !undo.isEmpty { undo[undo.count - 1] += effects }
+                return true
+            } catch let error as ReconciliationRequired {
+                for step in undo.removeLast().reversed() { step() }
+                // Watches only grow by appending inside a unit, so their prior counts restore them.
+                for profile in Array(watches.keys) {
+                    guard let keep = watchCounts[profile] else { watches.removeValue(forKey: profile); continue }
+                    if var rows = watches[profile], rows.count > keep { rows.removeSubrange(keep...); watches[profile] = rows }
+                }
+                held.removeSubrange(heldCount...)
+                held.append(Held(kind: (independentSource ? "own_" : "") + kind, reason: error.reason))
+                return false
+            }
+        }
+
+        /// Registers how to undo one effect of the innermost open unit.
+        private func onHold(_ step: @escaping () -> Void) {
+            if !undo.isEmpty { undo[undo.count - 1].append(step) }
+        }
+
+        /// A row an own-account source could not project arrives as a held marker; hold it here.
+        func heldSource(_ row: Object) throws {
+            if let reason = row[VortxLegacyBootstrapMaterial.heldReasonKey] as? String { throw fail(reason) }
         }
 
         func pendingMembershipData() throws -> Data? {
@@ -298,12 +366,20 @@ enum VortxLegacyBootstrapMaterial {
             let size = try JSONSerialization.data(withJSONObject: retained, options: [.sortedKeys, .withoutEscapingSlashes]).count
             let newSize = pendingMembershipBytes - (pendingMembershipSizes[key] ?? 0) + size
             try require(newSize <= 32 * 1024 * 1024, "Pending membership receipts exceed archive limit")
+            let priorReceipt = pendingMembership[key], priorSize = pendingMembershipSizes[key], priorBytes = pendingMembershipBytes
+            onHold {
+                self.pendingMembership[key] = priorReceipt
+                self.pendingMembershipSizes[key] = priorSize
+                self.pendingMembershipBytes = priorBytes
+            }
             pendingMembershipBytes = newSize; pendingMembershipSizes[key] = size
             pendingMembership[key] = retained
         }
 
         private func rememberWatchSource(profileID: String, unit: String, sourceField: String, receipt: Object) {
             guard preparePendingMembership && !independentSource else { return }
+            let prior = watchSources[profileID]?[unit]?[sourceField]
+            onHold { self.watchSources[profileID]?[unit]?[sourceField] = prior }
             watchSources[profileID, default: [:]][unit, default: [:]][sourceField] = receipt
         }
 
@@ -317,23 +393,26 @@ enum VortxLegacyBootstrapMaterial {
         }
 
         private func preparedWatches(profileID: String, rows: [Object]) throws -> [Object] {
-            guard preparePendingMembership else { return try resolveWatches(rows) }
+            guard preparePendingMembership else { return try resolveWatches(rows, held: &held) }
             let grouped = try Dictionary(grouping: rows) { row in
                 try optionalString(row, "videoId") ?? string(row, "metaId")
             }
             let conflicts = try Set(grouped.filter { _, rows in
                 try Set(rows.map { try string($0, "metaId") }).count > 1
             }.keys)
-            for unit in conflicts.sorted() {
-                let originals = watchSources[profileID]?[unit] ?? [:]
-                try require(!originals.isEmpty, "Conflicting watch identity lacks original source receipts")
-                let sources: [Object] = originals.keys.sorted().map { ["sourceField": $0, "receipt": originals[$0]!] }
-                try retainPendingMembership(kind: "watch_identity_conflict", profileID: profileID, identity: unit,
-                    sourceField: "/vortx/byProfile/" + pointer(profileID) + "/watch_identity_conflicts", receipt: ["sources": sources])
+            for identity in conflicts.sorted() {
+                // Either way the conflicting unit leaves the projection: as a pending receipt, or held.
+                try unit("watch") {
+                    let originals = watchSources[profileID]?[identity] ?? [:]
+                    try require(!originals.isEmpty, "Conflicting watch identity lacks original source receipts")
+                    let sources: [Object] = originals.keys.sorted().map { ["sourceField": $0, "receipt": originals[$0]!] }
+                    try retainPendingMembership(kind: "watch_identity_conflict", profileID: profileID, identity: identity,
+                        sourceField: "/vortx/byProfile/" + pointer(profileID) + "/watch_identity_conflicts", receipt: ["sources": sources])
+                }
             }
             return try resolveWatches(rows.filter { row in
                 !conflicts.contains(try optionalString(row, "videoId") ?? string(row, "metaId"))
-            })
+            }, held: &held)
         }
 
         private func pointer(_ raw: String) -> String {
@@ -358,10 +437,14 @@ enum VortxLegacyBootstrapMaterial {
             // downgraded from an impossible owner-owned source claim.
             try require(!roster.contains { $0.isOwner && $0.usesOwnAccount },
                         "Owner profile cannot use an independent streaming account")
-            deleted = Set(try strings(vortx, "deletedProfiles").map { raw in
-                guard let id = UUID(uuidString: raw) else { throw fail("Invalid deleted profile identity") }
-                return id.uuidString
-            })
+            // A tombstone that names no valid UUID can match no profile; hold it rather than the account.
+            deleted = []
+            for value in try array(vortx, "deletedProfiles") ?? [] {
+                try unit("deleted_profile") {
+                    guard let raw = value as? String, let id = UUID(uuidString: raw) else { throw fail("Invalid deleted profile identity") }
+                    deleted.insert(id.uuidString)
+                }
+            }
             try require(!deleted.contains(owner.id.uuidString), "Owner profile is tombstoned")
             let resolved = try resolveOwnAccountSources(ownAccountSources, retainedBaseline: retainedOwnAccountBaseline,
                                                         retainedSourceEnvelopes: retainedOwnAccountSourceEnvelopes,
@@ -389,6 +472,7 @@ enum VortxLegacyBootstrapMaterial {
             var retainedWatchProfiles = Set<String>()
             for (profileID, source) in sources {
                 let buckets = try source.buckets(accountID: accountID, watchedEvidence: watchedEvidence)
+                held += buckets.held
                 addonBuckets[profileID] = buckets.addons
                 libraryBuckets[profileID] = buckets.library
                 watches[profileID] = buckets.watches
@@ -399,12 +483,17 @@ enum VortxLegacyBootstrapMaterial {
                 if let witness = source.profileOverlaySHA256 { proof["profileOverlaySha256"] = witness }
                 ownSourceMaterial[profileID] = proof
             }
+            // Resolving can record holds on this adapter, so iterate a copy, never the live map.
+            let collected = watches
+            var resolvedWatches: [String: [Object]] = [:]
+            for profileID in collected.keys.sorted() {
+                let rows = collected[profileID] ?? []
+                resolvedWatches[profileID] = retainedWatchProfiles.contains(profileID) ? rows : try preparedWatches(profileID: profileID, rows: rows)
+            }
             var result: Object = [
                 "schemaVersion": sources.isEmpty ? 1 : 2, "roster": nativeRoster, "deletedProfileIds": deleted.sorted(),
                 "addons": addonBuckets, "libraries": libraryBuckets,
-                "watches": try Dictionary(uniqueKeysWithValues: watches.map { profileID, rows in
-                    (profileID, retainedWatchProfiles.contains(profileID) ? rows : try preparedWatches(profileID: profileID, rows: rows))
-                }),
+                "watches": resolvedWatches,
                 // Removal keys do not establish an IMDb/TMDB equivalence edge. The caller must
                 // reconcile such aliases explicitly; this adapter never guesses an identity link.
                 "identityLinks": identityLinks
@@ -416,27 +505,41 @@ enum VortxLegacyBootstrapMaterial {
         }
 
         private func projectProfile(_ profile: UserProfile, ownSource: ResolvedOwnAccountSource?) throws -> Object {
-            try require(profile.textScale.isFinite && profile.textScale > 0 && profile.textScale <= 100,
-                        "Invalid profile text scale")
+            // A profile cannot be held, only a preference it carries: an unrepresentable one keeps
+            // its native default and stays in the retained roster.
+            var textScale = 1000
+            try unit("profile_setting") {
+                try require(profile.textScale.isFinite && profile.textScale > 0 && profile.textScale <= 100,
+                            "Invalid profile text scale")
+                textScale = Int((profile.textScale * 1000).rounded())
+            }
             let inherited = owner.addonPreferences?.disabledAddonURLsOverride ?? owner.disabledAddons ?? []
             // Follow the shipping profile policy without consulting the active profile/defaults.
             let disabled = profile.addonPreferences?.disabledAddonURLsOverride
                 ?? (profile.addonPreferences == nil ? profile.disabledAddons : nil)
                 ?? (profile.isOwner ? profile.disabledAddons ?? [] : inherited)
+            var disabledURLs: [String] = []
+            for raw in disabled {
+                try unit("profile_setting") { disabledURLs.append(try normalizeURL(raw)) }
+            }
             let languages = unique([profile.playback?.audioLang, profile.playback?.subtitleLang].compactMap { $0 }.filter { !$0.isEmpty })
             var settings: Object = ["accent": profile.accentID, "oled": profile.oled,
-                                    "textScale": Int((profile.textScale * 1000).rounded()),
-                                    "languages": languages, "disabledAddons": unique(try disabled.map(normalizeURL))]
+                                    "textScale": textScale,
+                                    "languages": languages, "disabledAddons": unique(disabledURLs)]
             if let playback = profile.playback {
                 var ranking: Object = ["preferred_languages": unique(terms(playback.audioLang)).sorted()]
                 if let resolution = playback.maxResolution, resolution != 0 {
-                    let values = [480: "480p", 720: "720p", 1080: "1080p", 2160: "2160p", 4000: "2160p"]
-                    guard let value = values[resolution] else { throw fail("Unsupported profile resolution cap") }
-                    ranking["max_resolution"] = value
+                    try unit("profile_setting") {
+                        let values = [480: "480p", 720: "720p", 1080: "1080p", 2160: "2160p", 4000: "2160p"]
+                        guard let value = values[resolution] else { throw fail("Unsupported profile resolution cap") }
+                        ranking["max_resolution"] = value
+                    }
                 }
                 if let size = playback.maxFileSizeGB {
-                    try require(size.isFinite && size >= 0, "Invalid profile file-size cap")
-                    if size > 0 { ranking["max_filesize_gb"] = size }
+                    try unit("profile_setting") {
+                        try require(size.isFinite && size >= 0, "Invalid profile file-size cap")
+                        if size > 0 { ranking["max_filesize_gb"] = size }
+                    }
                 }
                 // Transport classes (debrid/torrent/etc.) are NOT native quality classes
                 // (remux/web/etc.). Transport order, regex filters, and UI overrides remain in the
@@ -473,6 +576,7 @@ enum VortxLegacyBootstrapMaterial {
             let watches: [Object]
             let titles: [String: Object]
             let identityLinks: [[String]]
+            var held: [Held] = []
         }
 
         private struct ResolvedOwnAccountSource {
@@ -501,9 +605,10 @@ enum VortxLegacyBootstrapMaterial {
                 let library = try adapter.ownerLibrary()
                 try adapter.importOverlays()
                 try adapter.validateProfileEdits(ownerLibrary: library)
-                return OwnAccountBuckets(addons: addons, library: library,
-                                         watches: try VortxLegacyBootstrapMaterial.resolveWatches(adapter.watches[profileID] ?? []),
-                                         titles: adapter.titles[profileID] ?? [:], identityLinks: [])
+                var held = adapter.held
+                let watches = try VortxLegacyBootstrapMaterial.resolveWatches(adapter.watches[profileID] ?? [], held: &held, kind: "own_watch")
+                return OwnAccountBuckets(addons: addons, library: library, watches: watches,
+                                         titles: adapter.titles[profileID] ?? [:], identityLinks: [], held: held)
             }
         }
 
@@ -542,17 +647,23 @@ enum VortxLegacyBootstrapMaterial {
             try VortxLegacyBootstrapMaterial.rejectCredentials(libraryEnvelope)
             try VortxLegacyBootstrapMaterial.rejectCredentials(addonEnvelope)
             try VortxLegacyBootstrapMaterial.rejectCredentials(overlay)
-            let rows = try libraryRows.map(projectOwnLibraryRow)
-            let descriptors = try addons.map { raw -> Object in
-                guard let descriptor = raw as? Object else { throw fail("Malformed own-account add-on descriptor") }
-                _ = try string(descriptor, "transportUrl")
-                guard let manifest = try object(descriptor, "manifest") else { throw fail("Own-account add-on requires a manifest") }
-                _ = try string(manifest, "id"); _ = try string(manifest, "name"); _ = try string(manifest, "version")
+            // A row or descriptor this view cannot carry becomes a held marker; the adapter holds
+            // that one unit, and the exact response bytes stay bound to the source proof.
+            let rows: [Object] = libraryRows.map { raw in
+                do { return try projectOwnLibraryRow(raw) } catch {
+                    return [heldReasonKey: (error as? ReconciliationRequired)?.reason ?? "Malformed own-account library row"]
+                }
+            }
+            let descriptors: [Object] = addons.map { raw in
+                guard let descriptor = raw as? Object else { return [heldReasonKey: "Malformed own-account add-on descriptor"] }
+                guard let manifest = descriptor["manifest"] as? Object, (try? string(manifest, "id")) != nil else {
+                    return [heldReasonKey: "Own-account add-on requires a manifest"]
+                }
                 return descriptor
             }
             var vortx: Object = ["library": rows, "addons": descriptors]
             var document: Object = ["vortx": vortx,
-                                    "addonOrder": try descriptors.map { try string($0, "transportUrl") }]
+                                    "addonOrder": descriptors.compactMap { try? string($0, "transportUrl") }]
             guard Set(overlay.keys).isSubset(of: ["vortx", "webProgress"]) else {
                 throw fail("Own-account overlay has unsupported source carrier")
             }
@@ -1018,17 +1129,23 @@ enum VortxLegacyBootstrapMaterial {
             var descriptors: [String: Object] = [:]
             var descriptorOrder: [String] = []
             // The app-owned descriptor wins against a stale generic imported descriptor.
-            for rows in [try objects(vortx, "addons"), try objects(document, "addons")] {
-                for raw in rows {
-                    let url = try normalizeURL(string(raw, "transportUrl"))
-                    guard let manifest = try object(raw, "manifest") else { throw fail("URL-only add-on requires manifest reconciliation") }
-                    _ = try string(manifest, "id"); _ = try string(manifest, "name"); _ = try string(manifest, "version")
-                    if let flags = try object(raw, "flags") {
-                        _ = try boolean(flags, "official"); _ = try boolean(flags, "protected")
-                    }
-                    if descriptors[url] == nil {
-                        var row = raw; row["transportUrl"] = url
-                        descriptors[url] = row; descriptorOrder.append(url)
+            for rows in [try array(vortx, "addons") ?? [], try array(document, "addons") ?? []] {
+                for value in rows {
+                    try unit("addon") {
+                        guard let raw = value as? Object else { throw fail("Malformed object row addons") }
+                        try heldSource(raw)
+                        let url = try normalizeURL(string(raw, "transportUrl"))
+                        guard let manifest = try object(raw, "manifest") else { throw fail("URL-only add-on requires manifest reconciliation") }
+                        _ = try string(manifest, "id"); _ = try string(manifest, "name"); _ = try string(manifest, "version")
+                        if let flags = try object(raw, "flags") {
+                            _ = try boolean(flags, "official"); _ = try boolean(flags, "protected")
+                        }
+                        // Checked per descriptor so one credential-bearing manifest holds only itself.
+                        try rejectCredentials(raw)
+                        if descriptors[url] == nil {
+                            var row = raw; row["transportUrl"] = url
+                            descriptors[url] = row; descriptorOrder.append(url)
+                        }
                     }
                 }
             }
@@ -1047,59 +1164,91 @@ enum VortxLegacyBootstrapMaterial {
             var exactIntentCarriers: [String: Object] = [:]
             var exactDeletedCarriers: [String: [String]] = [:]
             var exactWebRemovalCarriers: [String: [String]] = [:]
-            for (raw, value) in try object(vortx, "deletedAddonsTs") ?? [:] {
-                guard let entry = value as? Object else { throw fail("Malformed add-on intent") }
-                try require(Set(entry.keys).isSubset(of: ["addedAt", "removedAt", "intentV3"]), "Unsupported add-on intent carrier")
-                let url = try resolve(raw)
-                exactIntentCarriers[url, default: [:]][raw] = value
-                if try clock(entry, "addedAt") != nil || clock(entry, "removedAt") != nil { publishedStamps.insert(url) }
-                var intent = intents[url] ?? ["transportUrl": url]
-                try mergeClock(entry, into: &intent, from: "addedAt", to: "addedAtMs")
-                try mergeClock(entry, into: &intent, from: "removedAt", to: "removedAtMs")
-                if let rawIntent = entry["intentV3"] {
-                    let typed = try legacyAddonIntentV3(rawIntent)
-                    if let previous = intent["intentV3"] as? Object {
-                        intent["intentV3"] = try mergeLegacyAddonIntentV3(previous, typed)
-                    } else { intent["intentV3"] = typed }
-                }
-                intents[url] = intent
+            // Spellings of one URL merge into one intent, so they are held or kept together.
+            let rawIntents = try object(vortx, "deletedAddonsTs") ?? [:]
+            var spellings: [String: [String]] = [:]
+            for raw in rawIntents.keys.sorted() {
+                try unit("addon_intent") { spellings[try resolve(raw), default: []].append(raw) }
             }
-            for raw in try strings(vortx, "deletedAddons") {
-                let url = try resolve(raw)
-                exactDeletedCarriers[url, default: []].append(raw)
-                // Shipping AddonTombstones migration epoch is 1ms, not a fabricated 'now'.
-                if intents[url]?["addedAtMs"] == nil && intents[url]?["removedAtMs"] == nil && intents[url]?["intentV3"] == nil {
-                    try require(!publishedStamps.contains(url), "Ambiguous zero-stamp add-on removal requires reconciliation")
-                    intents[url] = ["transportUrl": url, "removedAtMs": 1.0]
+            for url in spellings.keys.sorted() {
+                try unit("addon_intent") {
+                    var intent: Object = ["transportUrl": url]
+                    var stamped = false
+                    for raw in spellings[url] ?? [] {
+                        guard let entry = rawIntents[raw] as? Object else { throw fail("Malformed add-on intent") }
+                        try require(Set(entry.keys).isSubset(of: ["addedAt", "removedAt", "intentV3"]), "Unsupported add-on intent carrier")
+                        if try clock(entry, "addedAt") != nil || clock(entry, "removedAt") != nil { stamped = true }
+                        try mergeClock(entry, into: &intent, from: "addedAt", to: "addedAtMs")
+                        try mergeClock(entry, into: &intent, from: "removedAt", to: "removedAtMs")
+                        if let rawIntent = entry["intentV3"] {
+                            let typed = try legacyAddonIntentV3(rawIntent)
+                            if let previous = intent["intentV3"] as? Object {
+                                intent["intentV3"] = try mergeLegacyAddonIntentV3(previous, typed)
+                            } else { intent["intentV3"] = typed }
+                        }
+                    }
+                    for raw in spellings[url] ?? [] { exactIntentCarriers[url, default: [:]][raw] = rawIntents[raw] }
+                    if stamped { publishedStamps.insert(url) }
+                    intents[url] = intent
                 }
             }
-            for raw in try strings(document, "webAddonRemovals") {
-                let url = try resolve(raw)
-                exactWebRemovalCarriers[url, default: []].append(raw)
-                let intent = intents[url] ?? [:]
-                try require(intent["intentV3"] != nil || (try clock(intent, "addedAtMs") ?? 0) > 0 || (try clock(intent, "removedAtMs") ?? 0) > 0,
-                            "Unclocked web add-on removal requires reconciliation")
+            for value in try array(vortx, "deletedAddons") ?? [] {
+                try unit("addon_removal") {
+                    guard let raw = value as? String, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw fail("Malformed identity deletedAddons")
+                    }
+                    let url = try resolve(raw)
+                    // Shipping AddonTombstones migration epoch is 1ms, not a fabricated 'now'.
+                    if intents[url]?["addedAtMs"] == nil && intents[url]?["removedAtMs"] == nil && intents[url]?["intentV3"] == nil {
+                        try require(!publishedStamps.contains(url), "Ambiguous zero-stamp add-on removal requires reconciliation")
+                        intents[url] = ["transportUrl": url, "removedAtMs": 1.0]
+                    }
+                    exactDeletedCarriers[url, default: []].append(raw)
+                }
+            }
+            for value in try array(document, "webAddonRemovals") ?? [] {
+                try unit("addon_web_removal") {
+                    guard let raw = value as? String, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw fail("Malformed identity webAddonRemovals")
+                    }
+                    let url = try resolve(raw)
+                    let intent = intents[url] ?? [:]
+                    try require(intent["intentV3"] != nil || (try clock(intent, "addedAtMs") ?? 0) > 0 || (try clock(intent, "removedAtMs") ?? 0) > 0,
+                                "Unclocked web add-on removal requires reconciliation")
+                    exactWebRemovalCarriers[url, default: []].append(raw)
+                }
             }
             for url in intents.keys.sorted() {
-                let row = intents[url]!
-                let added = try clock(row, "addedAtMs") ?? 0, removed = try clock(row, "removedAtMs") ?? 0
-                let live = try legacyAddonIntentV3IsPresent(row, added: added, removed: removed)
-                if live && descriptors[url] == nil && preparePendingMembership {
-                    let exact = exactIntentCarriers[url] ?? [:]
-                    try require(!exact.isEmpty, "Live add-on install requires descriptor reconciliation")
-                    try retainPendingMembership(kind: "addon_install", profileID: owner.id.uuidString, identity: url,
-                        sourceField: "/vortx/deletedAddonsTs", receipt: ["deletedAddonsTs": exact,
-                            "deletedAddons": exactDeletedCarriers[url] ?? [],
-                            "webAddonRemovals": exactWebRemovalCarriers[url] ?? []])
-                    intents.removeValue(forKey: url)
-                    continue
+                let kept = try unit("addon_intent") {
+                    let row = intents[url] ?? [:]
+                    let added = try clock(row, "addedAtMs") ?? 0, removed = try clock(row, "removedAtMs") ?? 0
+                    let live = try legacyAddonIntentV3IsPresent(row, added: added, removed: removed)
+                    if live && descriptors[url] == nil && preparePendingMembership {
+                        let exact = exactIntentCarriers[url] ?? [:]
+                        try require(!exact.isEmpty, "Live add-on install requires descriptor reconciliation")
+                        try retainPendingMembership(kind: "addon_install", profileID: owner.id.uuidString, identity: url,
+                            sourceField: "/vortx/deletedAddonsTs", receipt: ["deletedAddonsTs": exact,
+                                "deletedAddons": exactDeletedCarriers[url] ?? [],
+                                "webAddonRemovals": exactWebRemovalCarriers[url] ?? []])
+                        intents.removeValue(forKey: url)
+                        return
+                    }
+                    try require(!live || descriptors[url] != nil,
+                                "Live add-on install requires descriptor reconciliation")
                 }
-                try require(!live || descriptors[url] != nil,
-                            "Live add-on install requires descriptor reconciliation")
+                if !kept { intents.removeValue(forKey: url) }
             }
-            let order = try strings(document, "addonOrder").map(resolve)
-            try require(Set(order).count == order.count && order.allSatisfy { descriptors[$0] != nil },
-                        "Add-on order has duplicate or unknown descriptors")
+            var order: [String] = []
+            for value in try array(document, "addonOrder") ?? [] {
+                try unit("addon_order") {
+                    guard let raw = value as? String, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw fail("Malformed identity addonOrder")
+                    }
+                    let url = try resolve(raw)
+                    try require(descriptors[url] != nil && !order.contains(url), "Add-on order has duplicate or unknown descriptors")
+                    order.append(url)
+                }
+            }
             return ["items": descriptorOrder.compactMap { descriptors[$0] }, "order": order,
                     "intents": intents.keys.sorted().compactMap { intents[$0] }]
         }
@@ -1111,47 +1260,68 @@ enum VortxLegacyBootstrapMaterial {
             var removedRows = Set<String>(), publishedStamps = Set<String>()
             var seen = Set<String>()
             for (index, value) in rows.enumerated() {
-                guard let row = value as? Object else { throw fail("Malformed owner library row") }
-                let id = try string(row, "id"), type = try contentType(row)
-                try known(ownerID, id, row)
-                let key = type + ":" + id
-                try require(seen.insert(key).inserted, "Duplicate owner library identity")
-                var item: Object = ["kind": "standard", "id": id, "type": type, "name": try optionalString(row, "name") ?? ""]
-                if let poster = try optionalString(row, "poster"), !poster.isEmpty { item["poster"] = poster }
-                let temporary = try boolean(row, "temp") == true
-                let removed = try boolean(row, "removed") == true
-                if temporary && !independentSource { throw fail("Temporary owner-library membership requires reconciliation") }
-                if removed && !temporary {
-                    // eventEpochMs/lastWatched describe viewing, not membership removal. Require
-                    // a separately proven library tombstone below; never promote a viewing clock.
-                    // A freshly authenticated own-account baseline has no causal deletion clock;
-                    // its explicit `removed:true` is represented by the documented weak epoch 1.
-                    removedRows.insert(key)
-                    if independentSource { intents[key] = ["key": key, "removedAtMs": 1.0] }
-                } else if !temporary { items[key] = item }
-                let locator: LegacyWatchedBitfieldMigrationEvidence.SourceRowLocator = independentSource
-                    ? .ownAccountLibraryResponse(index: index)
-                    : (vortx["library"] is [Any] ? .authenticatedOwnerLibrary(index: index) : .authenticatedLegacyRootLibrary(index: index))
-                try importWatch(ownerID, id, row, history: false, overlay: false, locator: locator)
-                try importMarks(ownerID, id, row, sourceField: locator.pointer)
+                try unit("library_row") {
+                    guard let row = value as? Object else { throw fail("Malformed owner library row") }
+                    try heldSource(row)
+                    let id = try string(row, "id"), type = try contentType(row)
+                    let key = type + ":" + id
+                    try require(!seen.contains(key), "Duplicate owner library identity")
+                    var item: Object = ["kind": "standard", "id": id, "type": type, "name": try optionalString(row, "name") ?? ""]
+                    if let poster = try optionalString(row, "poster"), !poster.isEmpty { item["poster"] = poster }
+                    let temporary = try boolean(row, "temp") == true
+                    let removed = try boolean(row, "removed") == true
+                    if temporary && !independentSource { throw fail("Temporary owner-library membership requires reconciliation") }
+                    try known(ownerID, id, row)
+                    let locator: LegacyWatchedBitfieldMigrationEvidence.SourceRowLocator = independentSource
+                        ? .ownAccountLibraryResponse(index: index)
+                        : (vortx["library"] is [Any] ? .authenticatedOwnerLibrary(index: index) : .authenticatedLegacyRootLibrary(index: index))
+                    // Viewing state is its own unit: a progress record the engine cannot represent is
+                    // held without dropping the title's saved membership.
+                    try unit("library_progress") {
+                        try importWatch(ownerID, id, row, history: false, overlay: false, locator: locator)
+                        try importMarks(ownerID, id, row, sourceField: locator.pointer)
+                    }
+                    seen.insert(key)
+                    if removed && !temporary {
+                        // eventEpochMs/lastWatched describe viewing, not membership removal. Require
+                        // a separately proven library tombstone below; never promote a viewing clock.
+                        // A freshly authenticated own-account baseline has no causal deletion clock;
+                        // its explicit `removed:true` is represented by the documented weak epoch 1.
+                        removedRows.insert(key)
+                        if independentSource { intents[key] = ["key": key, "removedAtMs": 1.0] }
+                    } else if !temporary { items[key] = item }
+                }
             }
             do {
                 let buckets = try object(vortx, "byProfile") ?? [:]
-                for (rawID, value) in buckets where UUID(uuidString: rawID) == UserProfile.ownerID || UUID(uuidString: rawID) == owner.id {
-                    guard let bucket = value as? Object else { throw fail("Malformed owner-history bucket") }
-                    for (index, row) in try objects(bucket, "ownerHistory").enumerated() {
-                        let id = try string(row, "id")
-                        try known(ownerID, id, row)
-                        let locator: LegacyWatchedBitfieldMigrationEvidence.SourceRowLocator = independentSource
-                            ? .ownAccountOwnerHistory(index: index)
-                            : .authenticatedOwnerHistory(sourceProfileID: rawID, index: index)
-                        try importWatch(ownerID, id, row, history: true, overlay: false, locator: locator)
-                        try importMarks(ownerID, id, row, sourceField: locator.pointer)
+                for rawID in buckets.keys.sorted() where UUID(uuidString: rawID) == UserProfile.ownerID || UUID(uuidString: rawID) == owner.id {
+                    try unit("owner_history") {
+                        guard let bucket = buckets[rawID] as? Object else { throw fail("Malformed owner-history bucket") }
+                        for (index, value) in (try array(bucket, "ownerHistory") ?? []).enumerated() {
+                            try unit("owner_history") {
+                                guard let row = value as? Object else { throw fail("Malformed object row ownerHistory") }
+                                let id = try string(row, "id")
+                                try known(ownerID, id, row)
+                                let locator: LegacyWatchedBitfieldMigrationEvidence.SourceRowLocator = independentSource
+                                    ? .ownAccountOwnerHistory(index: index)
+                                    : .authenticatedOwnerHistory(sourceProfileID: rawID, index: index)
+                                try importWatch(ownerID, id, row, history: true, overlay: false, locator: locator)
+                                try importMarks(ownerID, id, row, sourceField: locator.pointer)
+                            }
+                        }
                     }
                 }
             }
             let rawLibraryIntents = try object(vortx, "deletedLibraryTs") ?? [:]
-            let rawLibraryDeletes = try strings(vortx, "deletedLibrary")
+            var rawLibraryDeletes: [String] = []
+            for value in try array(vortx, "deletedLibrary") ?? [] {
+                try unit("library_removal") {
+                    guard let raw = value as? String, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw fail("Malformed identity deletedLibrary")
+                    }
+                    rawLibraryDeletes.append(raw)
+                }
+            }
             let exactLibraryDeletes = Dictionary(grouping: rawLibraryDeletes, by: { $0 })
             func keyFor(_ raw: String) throws -> String? {
                 let matches = (titles[ownerID] ?? [:]).filter { id, row in
@@ -1183,34 +1353,43 @@ enum VortxLegacyBootstrapMaterial {
                 return (try contentType(match.value)) + ":" + match.key
             }
             for raw in rawLibraryIntents.keys.sorted() {
-                let value = rawLibraryIntents[raw]!
-                guard let entry = value as? Object else { throw fail("Malformed library intent") }
-                try require(Set(entry.keys).isSubset(of: ["addedAt", "removedAt"]), "Unsupported library intent carrier")
-                // Validate clocks before deferral: pending is not a malformed-input escape hatch.
-                _ = try clock(entry, "addedAt"); _ = try clock(entry, "removedAt")
-                guard let key = try keyFor(raw) else { continue }
-                if try clock(entry, "addedAt") != nil || clock(entry, "removedAt") != nil { publishedStamps.insert(key) }
-                var intent = intents[key] ?? ["key": key]
-                try mergeClock(entry, into: &intent, from: "addedAt", to: "addedAtMs")
-                try mergeClock(entry, into: &intent, from: "removedAt", to: "removedAtMs")
-                intents[key] = intent
-            }
-            for raw in rawLibraryDeletes {
-                guard let key = try keyFor(raw) else { continue }
-                if intents[key]?["addedAtMs"] == nil && intents[key]?["removedAtMs"] == nil {
-                    try require(!publishedStamps.contains(key), "Ambiguous zero-stamp library removal requires reconciliation")
-                    intents[key] = ["key": key, "removedAtMs": 1.0]
+                try unit("library_intent") {
+                    guard let entry = rawLibraryIntents[raw] as? Object else { throw fail("Malformed library intent") }
+                    try require(Set(entry.keys).isSubset(of: ["addedAt", "removedAt"]), "Unsupported library intent carrier")
+                    // Validate clocks before deferral: pending is not a malformed-input escape hatch.
+                    let added = try clock(entry, "addedAt"), removed = try clock(entry, "removedAt")
+                    guard let key = try keyFor(raw) else { return }
+                    var intent = intents[key] ?? ["key": key]
+                    try mergeClock(entry, into: &intent, from: "addedAt", to: "addedAtMs")
+                    try mergeClock(entry, into: &intent, from: "removedAt", to: "removedAtMs")
+                    if added != nil || removed != nil { publishedStamps.insert(key) }
+                    intents[key] = intent
                 }
             }
-            for key in removedRows {
-                let intent = intents[key] ?? [:]
-                try require((try clock(intent, "removedAtMs") ?? 0) > (try clock(intent, "addedAtMs") ?? 0),
-                            "Owner-library removal lacks a proven membership tombstone")
+            for raw in rawLibraryDeletes {
+                try unit("library_removal") {
+                    guard let key = try keyFor(raw) else { return }
+                    if intents[key]?["addedAtMs"] == nil && intents[key]?["removedAtMs"] == nil {
+                        try require(!publishedStamps.contains(key), "Ambiguous zero-stamp library removal requires reconciliation")
+                        intents[key] = ["key": key, "removedAtMs": 1.0]
+                    }
+                }
             }
-            for (key, row) in intents {
-                let added = try clock(row, "addedAtMs") ?? 0, removed = try clock(row, "removedAtMs") ?? 0
-                try require(added <= 0 || added < removed || items[key] != nil,
-                            "Live library addition requires descriptor reconciliation")
+            for key in removedRows.sorted() {
+                try unit("library_row") {
+                    let intent = intents[key] ?? [:]
+                    try require((try clock(intent, "removedAtMs") ?? 0) > (try clock(intent, "addedAtMs") ?? 0),
+                                "Owner-library removal lacks a proven membership tombstone")
+                }
+            }
+            for key in intents.keys.sorted() {
+                let kept = try unit("library_intent") {
+                    let row = intents[key] ?? [:]
+                    let added = try clock(row, "addedAtMs") ?? 0, removed = try clock(row, "removedAtMs") ?? 0
+                    try require(added <= 0 || added < removed || items[key] != nil,
+                                "Live library addition requires descriptor reconciliation")
+                }
+                if !kept { intents.removeValue(forKey: key) }
             }
             return ["items": items.keys.sorted().compactMap { items[$0] }, "intents": intents.keys.sorted().compactMap { intents[$0] }]
         }
@@ -1222,64 +1401,79 @@ enum VortxLegacyBootstrapMaterial {
             let web = try object(removed, "byProfile") ?? [:]
             var seen = Set<String>()
             for rawID in Set(buckets.keys).union(web.keys).sorted() {
-                guard let uuid = UUID(uuidString: rawID) else { throw fail("Watch carrier references an unknown profile") }
-                let id = uuid.uuidString
-                if excludedProfiles.contains(id) { continue }
-                try require(seen.insert(id).inserted, "Duplicate profile bucket identity")
-                let bucket = try object(buckets, rawID) ?? [:]
-                if deleted.contains(id) { continue } // Retained verbatim in the original encrypted carrier.
-                if uuid == UserProfile.ownerID && profiles[id] == nil {
-                    try require(!["library", "watched", "removed"].contains { bucket[$0] != nil } && web[rawID] == nil,
-                                "Ambiguous historical owner overlay")
-                    continue
-                }
-                try require(profiles[id] != nil, "Watch carrier references an unknown profile")
-                if uuid != owner.id && uuid != UserProfile.ownerID && bucket["ownerHistory"] != nil {
-                    throw fail("Owner history attached to a secondary profile")
-                }
-                let rows = try objects(bucket, "library")
-                let railTitles = Set(try rows.map { try string($0, "id") })
-                try require(railTitles.count == rows.count, "Duplicate overlay title snapshots require reconciliation")
-                for (index, row) in rows.enumerated() {
-                    let meta = try string(row, "id")
-                    try known(id, meta, row)
-                    let locator: LegacyWatchedBitfieldMigrationEvidence.SourceRowLocator = independentSource
-                        ? .ownAccountProfileLibrary(index: index) : .authenticatedProfileLibrary(index: index)
-                    let sourceField = sourcePointer(locator, profileID: rawID)
-                    try importWatch(id, meta, row, history: false, overlay: true, locator: locator, sourceField: sourceField)
-                    try importMarks(id, meta, row, sourceField: sourceField)
-                }
-                for (meta, value) in try object(bucket, "watched") ?? [:] {
-                    guard let row = value as? Object else { throw fail("Malformed durable watched row") }
-                    try require(!meta.isEmpty, "Empty durable watch identity")
-                    // Apple account-doc ingress gives the complete rail snapshot precedence over
-                    // the ENTIRE duplicate durable row, including its explicit ma/ua clocks. The
-                    // durable map fills titles beyond the rail; it is not an independent operation log.
-                    if !railTitles.contains(meta) {
-                        try importMarks(id, meta, row, sourceField: "/vortx/byProfile/" + pointer(rawID) + "/watched/" + pointer(meta))
+                // A bucket whose profile cannot be resolved is held whole; its rows hold one by one.
+                try unit("profile_overlay") {
+                    guard let uuid = UUID(uuidString: rawID) else { throw fail("Watch carrier references an unknown profile") }
+                    let id = uuid.uuidString
+                    if excludedProfiles.contains(id) { return }
+                    try require(seen.insert(id).inserted, "Duplicate profile bucket identity")
+                    let bucket = try object(buckets, rawID) ?? [:]
+                    if deleted.contains(id) { return } // Retained verbatim in the original encrypted carrier.
+                    if uuid == UserProfile.ownerID && profiles[id] == nil {
+                        try require(!["library", "watched", "removed"].contains { bucket[$0] != nil } && web[rawID] == nil,
+                                    "Ambiguous historical owner overlay")
+                        return
                     }
-                }
-                let removals = try objects(bucket, "removed").enumerated().map {
-                    ("/vortx/byProfile/" + pointer(rawID) + "/removed/" + String($0.offset), $0.element)
-                } + objects(web, rawID).enumerated().map {
-                    ("/webProgress/removed/byProfile/" + pointer(rawID) + "/" + String($0.offset), $0.element)
-                }
-                for (sourceField, removal) in removals {
-                    let keys = try strings(removal, "keys")
-                    guard let at = try clock(removal, "removedAt"), at > 0, !keys.isEmpty else { throw fail("Unclocked or empty watch removal") }
-                    let matches = (titles[id] ?? [:]).filter { meta, row in
-                        keys.contains { removalMatches($0, meta: meta, type: row["type"] as? String ?? "") }
+                    try require(profiles[id] != nil, "Watch carrier references an unknown profile")
+                    if uuid != owner.id && uuid != UserProfile.ownerID && bucket["ownerHistory"] != nil {
+                        throw fail("Owner history attached to a secondary profile")
                     }
-                    // Several matched titles are NOT proof that they are equivalent. An explicit
-                    // alias reconciliation must precede this extraction in that case.
-                    try require(matches.count == 1 && keys.allSatisfy { key in
-                        matches.contains { removalMatches(key, meta: $0.key, type: $0.value["type"] as? String ?? "") }
-                    }, "Watch removal requires verified title reconciliation")
-                    let match = matches.first!
-                    var row = context(id, match.key)
-                    row["removedAtMs"] = at
-                    watches[id, default: []].append(row)
-                    rememberWatchSource(profileID: id, unit: match.key, sourceField: sourceField, receipt: removal)
+                    let rows = try array(bucket, "library") ?? []
+                    // Every rail title, held or not, outranks its duplicate durable row below.
+                    let railIDs = rows.compactMap { ($0 as? Object).flatMap { try? string($0, "id") } }
+                    let railTitles = Set(railIDs)
+                    let duplicated = Set(Dictionary(grouping: railIDs, by: { $0 }).filter { $0.value.count > 1 }.keys)
+                    for (index, value) in rows.enumerated() {
+                        try unit("profile_overlay_row") {
+                            guard let row = value as? Object else { throw fail("Malformed object row library") }
+                            let meta = try string(row, "id")
+                            try require(!duplicated.contains(meta), "Duplicate overlay title snapshots require reconciliation")
+                            try known(id, meta, row)
+                            let locator: LegacyWatchedBitfieldMigrationEvidence.SourceRowLocator = independentSource
+                                ? .ownAccountProfileLibrary(index: index) : .authenticatedProfileLibrary(index: index)
+                            let sourceField = sourcePointer(locator, profileID: rawID)
+                            try importWatch(id, meta, row, history: false, overlay: true, locator: locator, sourceField: sourceField)
+                            try importMarks(id, meta, row, sourceField: sourceField)
+                        }
+                    }
+                    let durable = try object(bucket, "watched") ?? [:]
+                    for meta in durable.keys.sorted() {
+                        try unit("profile_overlay_watched") {
+                            guard let row = durable[meta] as? Object else { throw fail("Malformed durable watched row") }
+                            try require(!meta.isEmpty, "Empty durable watch identity")
+                            // Apple account-doc ingress gives the complete rail snapshot precedence over
+                            // the ENTIRE duplicate durable row, including its explicit ma/ua clocks. The
+                            // durable map fills titles beyond the rail; it is not an independent operation log.
+                            if !railTitles.contains(meta) {
+                                try importMarks(id, meta, row, sourceField: "/vortx/byProfile/" + pointer(rawID) + "/watched/" + pointer(meta))
+                            }
+                        }
+                    }
+                    let removals = try (array(bucket, "removed") ?? []).enumerated().map {
+                        ("/vortx/byProfile/" + pointer(rawID) + "/removed/" + String($0.offset), $0.element)
+                    } + (array(web, rawID) ?? []).enumerated().map {
+                        ("/webProgress/removed/byProfile/" + pointer(rawID) + "/" + String($0.offset), $0.element)
+                    }
+                    for (sourceField, value) in removals {
+                        try unit("profile_overlay_removal") {
+                            guard let removal = value as? Object else { throw fail("Malformed object row removed") }
+                            let keys = try strings(removal, "keys")
+                            guard let at = try clock(removal, "removedAt"), at > 0, !keys.isEmpty else { throw fail("Unclocked or empty watch removal") }
+                            let matches = (titles[id] ?? [:]).filter { meta, row in
+                                keys.contains { removalMatches($0, meta: meta, type: row["type"] as? String ?? "") }
+                            }
+                            // Several matched titles are NOT proof that they are equivalent. An explicit
+                            // alias reconciliation must precede this extraction in that case.
+                            try require(matches.count == 1 && keys.allSatisfy { key in
+                                matches.contains { removalMatches(key, meta: $0.key, type: $0.value["type"] as? String ?? "") }
+                            }, "Watch removal requires verified title reconciliation")
+                            let match = matches.first!
+                            var row = context(id, match.key)
+                            row["removedAtMs"] = at
+                            watches[id, default: []].append(row)
+                            rememberWatchSource(profileID: id, unit: match.key, sourceField: sourceField, receipt: removal)
+                        }
+                    }
                 }
             }
         }
@@ -1384,29 +1578,40 @@ enum VortxLegacyBootstrapMaterial {
         }
 
         func importOwnerIntents() throws {
-            struct Intent { let title: String; let video: String; let watched: Bool; let clock: Double; let actor: String }
-            var winners: [String: Intent] = [:]
-            for (sourceKey, value) in try object(vortx, "ownerWatched") ?? [:] {
-                guard let raw = value as? Object else { throw fail("Malformed owner watched intent") }
-                let title = try string(raw, "t"), video = try string(raw, "v"), actor = try string(raw, "a")
-                guard let watched = try boolean(raw, "w"), let at = try clock(raw, "u"), at > 0 else { throw fail("Unclocked owner watched intent") }
-                rememberWatchSource(profileID: owner.id.uuidString, unit: video,
-                                    sourceField: "/vortx/ownerWatched/" + pointer(sourceKey), receipt: raw)
-                let next = Intent(title: title, video: video, watched: watched, clock: at, actor: actor)
-                let key = title + "\u{1f}" + video
-                if let old = winners[key] {
-                    try require(old.clock != at || old.actor != actor || old.watched == watched, "Conflicting owner watched intent tie")
-                    if at < old.clock || (at == old.clock && actor < old.actor) { continue }
+            struct Intent { let sourceKey: String; let raw: Object; let title: String; let video: String; let watched: Bool; let clock: Double; let actor: String }
+            let carrier = try object(vortx, "ownerWatched") ?? [:]
+            var candidates: [String: [Intent]] = [:]
+            for sourceKey in carrier.keys.sorted() {
+                try unit("owner_watched_intent") {
+                    guard let raw = carrier[sourceKey] as? Object else { throw fail("Malformed owner watched intent") }
+                    let title = try string(raw, "t"), video = try string(raw, "v"), actor = try string(raw, "a")
+                    guard let watched = try boolean(raw, "w"), let at = try clock(raw, "u"), at > 0 else { throw fail("Unclocked owner watched intent") }
+                    candidates[title + "\u{1f}" + video, default: []].append(
+                        Intent(sourceKey: sourceKey, raw: raw, title: title, video: video, watched: watched, clock: at, actor: actor))
                 }
-                winners[key] = next
             }
-            for intent in winners.values {
-                let id = owner.id.uuidString
-                try require(intent.title != intent.video || titles[id]?[intent.title]?["type"] as? String == "movie",
-                            "Whole-title owner intent requires verified movie or episode reconciliation")
-                var row = context(id, intent.title); row["videoId"] = intent.video
-                row[intent.watched ? "markedAtMs" : "resetAtMs"] = intent.clock
-                watches[id, default: []].append(row)
+            // Every intent for one title/video is decided together, so a tie conflict holds them all.
+            for key in candidates.keys.sorted() {
+                try unit("owner_watched_intent") {
+                    var winner: Intent?
+                    for next in candidates[key] ?? [] {
+                        rememberWatchSource(profileID: owner.id.uuidString, unit: next.video,
+                                            sourceField: "/vortx/ownerWatched/" + pointer(next.sourceKey), receipt: next.raw)
+                        if let old = winner {
+                            try require(old.clock != next.clock || old.actor != next.actor || old.watched == next.watched,
+                                        "Conflicting owner watched intent tie")
+                            if next.clock < old.clock || (next.clock == old.clock && next.actor < old.actor) { continue }
+                        }
+                        winner = next
+                    }
+                    guard let intent = winner else { return }
+                    let id = owner.id.uuidString
+                    try require(intent.title != intent.video || titles[id]?[intent.title]?["type"] as? String == "movie",
+                                "Whole-title owner intent requires verified movie or episode reconciliation")
+                    var row = context(id, intent.title); row["videoId"] = intent.video
+                    row[intent.watched ? "markedAtMs" : "resetAtMs"] = intent.clock
+                    watches[id, default: []].append(row)
+                }
             }
         }
 
@@ -1424,6 +1629,8 @@ enum VortxLegacyBootstrapMaterial {
                     else { metadata[key] = value }
                 }
             }
+            let prior = titles[profile]?[meta]
+            onHold { self.titles[profile]?[meta] = prior }
             titles[profile, default: [:]][meta] = metadata
         }
 
@@ -1475,8 +1682,11 @@ enum VortxLegacyBootstrapMaterial {
         }
     }
 
-    private static func resolveWatches(_ source: [[String: Any]]) throws -> [[String: Any]] {
+    /// Folds watch rows into one row per video unit. A unit whose rows contradict each other is
+    /// held as a whole (recorded under `kind`); every other unit still resolves.
+    private static func resolveWatches(_ source: [[String: Any]], held: inout [Held], kind: String = "watch") throws -> [[String: Any]] {
         var units: [String: [String: Any]] = [:]
+        var contradicted = Set<String>()
         // A stable source ordering makes omitted-field fallback independent of the dictionary or
         // carrier traversal order, including duration metadata with equal source clocks.
         let ordered = try source.map { row in
@@ -1486,30 +1696,37 @@ enum VortxLegacyBootstrapMaterial {
         for (incoming, _, _) in ordered {
             let meta = try string(incoming, "metaId")
             let key = try optionalString(incoming, "videoId") ?? meta
+            if contradicted.contains(key) { continue }
             guard var old = units[key] else { units[key] = incoming; continue }
-            try require(old["metaId"] as? String == meta, "Watch unit belongs to conflicting title identities")
-            let oldType = old["type"] as? String, newType = incoming["type"] as? String
-            try require(oldType == nil || newType == nil || oldType == newType, "Watch unit belongs to conflicting content types")
-            let before = try clock(old, "lastPlayedAtMs") ?? 0, after = try clock(incoming, "lastPlayedAtMs") ?? 0
-            if let a = old["positionMs"] as? Int64, let b = incoming["positionMs"] as? Int64, before == after {
-                try require(a == b, "Equal viewing clocks have conflicting positions")
+            do {
+                try require(old["metaId"] as? String == meta, "Watch unit belongs to conflicting title identities")
+                let oldType = old["type"] as? String, newType = incoming["type"] as? String
+                try require(oldType == nil || newType == nil || oldType == newType, "Watch unit belongs to conflicting content types")
+                let before = try clock(old, "lastPlayedAtMs") ?? 0, after = try clock(incoming, "lastPlayedAtMs") ?? 0
+                if let a = old["positionMs"] as? Int64, let b = incoming["positionMs"] as? Int64, before == after {
+                    try require(a == b, "Equal viewing clocks have conflicting positions")
+                }
+                if old["durationMs"] == nil { old["durationMs"] = incoming["durationMs"] }
+                if after > before || old["positionMs"] == nil {
+                    for field in ["lastPlayedAtMs", "positionMs", "durationMs"] where incoming[field] != nil { old[field] = incoming[field] }
+                }
+                for field in ["name", "type", "poster", "videoId"] {
+                    guard let value = incoming[field] as? String, !value.isEmpty else { continue }
+                    if let prior = old[field] as? String, !prior.isEmpty {
+                        if after > before { old[field] = value }
+                        else if after == before { old[field] = min(prior, value) }
+                    } else { old[field] = value }
+                }
+                for field in ["markedAtMs", "resetAtMs", "removedAtMs", "timesWatched"] {
+                    if let value = try clock(incoming, field) { old[field] = max(value, try clock(old, field) ?? 0) }
+                }
+                if incoming["watched"] as? Bool == true { old["watched"] = true }
+                units[key] = old
+            } catch let error as ReconciliationRequired {
+                contradicted.insert(key)
+                units.removeValue(forKey: key)
+                held.append(Held(kind: kind, reason: error.reason))
             }
-            if old["durationMs"] == nil { old["durationMs"] = incoming["durationMs"] }
-            if after > before || old["positionMs"] == nil {
-                for field in ["lastPlayedAtMs", "positionMs", "durationMs"] where incoming[field] != nil { old[field] = incoming[field] }
-            }
-            for field in ["name", "type", "poster", "videoId"] {
-                guard let value = incoming[field] as? String, !value.isEmpty else { continue }
-                if let prior = old[field] as? String, !prior.isEmpty {
-                    if after > before { old[field] = value }
-                    else if after == before { old[field] = min(prior, value) }
-                } else { old[field] = value }
-            }
-            for field in ["markedAtMs", "resetAtMs", "removedAtMs", "timesWatched"] {
-                if let value = try clock(incoming, field) { old[field] = max(value, try clock(old, field) ?? 0) }
-            }
-            if incoming["watched"] as? Bool == true { old["watched"] = true }
-            units[key] = old
         }
         return units.keys.sorted().map { key in
             var row = units[key]!

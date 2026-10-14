@@ -1147,7 +1147,9 @@ final class VortXSyncManager: ObservableObject {
         let preparedArchive = try VortxLegacyMembershipReceiptArchive.appending(preparation.pendingMembershipReceipts,
             to: archive, scope: scope.account, ownerProfileID: scope.ownerProfileID,
             sourceDocumentSHA256: SHA256.hash(data: documentBytes).map { String(format: "%02x", $0) }.joined())
-        DiagnosticsLog.log("native-profiles", "prepare result=ready pending_membership_receipts=\(preparation.pendingCount)")
+        // Held units (issue #262) stay only in the retained original document; name them without values.
+        let held = preparation.held.isEmpty ? "" : " held=\(preparation.held.count) held_units=" + VortxLegacyBootstrapMaterial.heldSummary(preparation.held)
+        DiagnosticsLog.log("native-profiles", "prepare result=ready pending_membership_receipts=\(preparation.pendingCount)\(held)")
         nativeOwnAccountResyncUnavailable = unavailable
         for source in sources {
             guard let binding = captured.first(where: { $0.profileID == source.profileID }) else { throw VortxNativeError.invalidSnapshot }
@@ -1500,7 +1502,9 @@ final class VortXSyncManager: ObservableObject {
                    ProfileStore.shared.activeID == selectedProfile { self.nativeCheckpointStatus = (error as? VortxNativeWatchedArchive.Failure) == .pending ? "watched_migration_pending" : "native_checkpoint_unavailable" }
                 // A system error has no VortX code; its domain and number (never paths) name the failing layer.
                 let system = error is VortxNativeError ? "" : " domain=\((error as NSError).domain) code=\((error as NSError).code)"
-                DiagnosticsLog.log("native-profiles", "restore result=failed stage=\(stage) reason=\(VortxNativeError.diagnosticCode(error))\(system)")
+                // A whole-account stop names its reconciliation reason, scrubbed of source values.
+                let detail = (error as? VortxLegacyBootstrapMaterial.ReconciliationRequired).map { " detail=" + VortxLegacyBootstrapMaterial.scrubbedReason($0.reason) } ?? ""
+                DiagnosticsLog.log("native-profiles", "restore result=failed stage=\(stage) reason=\(VortxNativeError.diagnosticCode(error))\(system)\(detail)")
                 return false // No empty account, legacy token dispatch, or destructive repair fallback.
             }
         }
@@ -3736,7 +3740,8 @@ final class VortXSyncManager: ObservableObject {
             doc["apiKeys"] = try mirrorNativeProviderKeys(providers, original: doc["apiKeys"])
             applyNativeGlobals(merged["nativeHostPreferences"]!)
         } catch {
-            DiagnosticsLog.log("sync", "operation=native_sync_export result=failed stage=\(exportStage) reason=\(VortxNativeError.diagnosticCode(error))")
+            let detail = (error as? VortxLegacyBootstrapMaterial.ReconciliationRequired).map { " detail=" + VortxLegacyBootstrapMaterial.scrubbedReason($0.reason) } ?? ""
+            DiagnosticsLog.log("sync", "operation=native_sync_export result=failed stage=\(exportStage) reason=\(VortxNativeError.diagnosticCode(error))\(detail)")
             return nil
         }
         // Never rewrite the legacy migration baseline from native/profile/overlay mirrors. Until

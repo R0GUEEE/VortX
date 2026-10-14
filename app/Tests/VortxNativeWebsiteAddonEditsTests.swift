@@ -143,6 +143,18 @@ private final class AddonCheckpointStore: VortxCheckpointStore, @unchecked Senda
             return response
         })
         check(imported == [descriptor])
+        // Issue #262: one descriptor the engine cannot represent is skipped; the rest still import.
+        let urlOnly = VortxJSON.object(["transportUrl": .string("https://old.example.invalid/manifest.json"), "name": .string("Old")])
+        let mixed = AuthenticatedHTTPResponse(data: try JSONEncoder().encode(VortxJSON.object(["result": .object(["addons": .array([urlOnly, descriptor])])])), statusCode: 200)
+        let partial = try await VortxNativeOwnerAddonImport.fetch(authKey: "synthetic-token", verifiedUID: "verified-fixture-uid", owner: owner,
+                                                                  authority: ImportAuthority(), send: { _ in mixed })
+        check(partial == [descriptor])
+        let duplicated = AuthenticatedHTTPResponse(data: try JSONEncoder().encode(VortxJSON.object(["result": .object(["addons": .array([descriptor, descriptor])])])), statusCode: 200)
+        do {
+            _ = try await VortxNativeOwnerAddonImport.fetch(authKey: "synthetic-token", verifiedUID: "verified-fixture-uid", owner: owner,
+                                                            authority: ImportAuthority(), send: { _ in duplicated })
+            fatalError("duplicate descriptors silently collapsed")
+        } catch VortxNativeError.invalidResponse {}
         do {
             _ = try await VortxNativeOwnerAddonImport.fetch(authKey: "synthetic-token", verifiedUID: "verified-fixture-uid", owner: owner, authority: authority, send: { _ in
                 authority.invalidate(); return response
