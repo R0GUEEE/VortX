@@ -441,6 +441,7 @@ fun VortXApp(
         var showDownloads by remember { mutableStateOf(false) }
         var showWatchlist by remember { mutableStateOf(false) }
         var showSmartCollections by remember { mutableStateOf(false) }
+        var showNetworkShares by remember { mutableStateOf(false) }
         var showPreviouslyWatched by remember { mutableStateOf(false) }
         var catalogBrowseTarget by remember { mutableStateOf<HomeCatalogTarget?>(null) }
         var catalogBrowseIsClientRail by remember { mutableStateOf(false) }
@@ -1199,6 +1200,21 @@ fun VortXApp(
             return@VortXTheme
         }
 
+        if (showNetworkShares) {
+            // The screen's own BackHandler walks up folders first and calls onBack at the share list.
+            com.vortx.android.ui.screens.NetworkSharesScreen(
+                onBack = { showNetworkShares = false },
+                // A share file carries no catalog meta, so it plays like a local download: no library identity.
+                onPlay = {
+                    playingEngineOverride = automaticEngineFor(it)
+                    playing = it
+                    playingMeta = null
+                    autoAdvanceStreak[0] = 0
+                },
+            )
+            return@VortXTheme
+        }
+
         if (showSmartCollections) {
             BackHandler { showSmartCollections = false }
             com.vortx.android.ui.screens.SmartCollectionsScreen(
@@ -1670,6 +1686,8 @@ fun VortXApp(
                     onWatchlist = { showWatchlist = true },
                     onPreviouslyWatched = { showPreviouslyWatched = true },
                     onSmartCollections = ({ showSmartCollections = true })
+                        .takeIf { com.vortx.android.profile.ProfileStore.sharedOrNull()?.active?.isKids != true },
+                    onNetworkShares = ({ showNetworkShares = true })
                         .takeIf { com.vortx.android.profile.ProfileStore.sharedOrNull()?.active?.isKids != true },
                 )
                 Tab.SEARCH -> SearchScreen(

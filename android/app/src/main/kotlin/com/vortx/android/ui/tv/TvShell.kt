@@ -121,7 +121,8 @@ fun TvShell(
     var libraryReturnRoute by remember { mutableStateOf(TvLibraryRoute.DOWNLOADS) }
     var libraryRestoreFocusSignal by remember { mutableStateOf(0) }
     val libraryEntryFocus = remember {
-        listOf(TvLibraryRoute.DOWNLOADS, TvLibraryRoute.WATCHLIST, TvLibraryRoute.HISTORY, TvLibraryRoute.SMART_COLLECTIONS)
+        listOf(TvLibraryRoute.DOWNLOADS, TvLibraryRoute.WATCHLIST, TvLibraryRoute.HISTORY, TvLibraryRoute.SMART_COLLECTIONS,
+            TvLibraryRoute.NETWORK_SHARES)
             .associateWith { FocusRequester() }
     }
     var homeBrowseSelected by remember { mutableStateOf(false) }
@@ -266,6 +267,8 @@ fun TvShell(
                             entryFocusRequesters = libraryEntryFocus,
                             onSmartCollections = ({ openLibraryRoute(TvLibraryRoute.SMART_COLLECTIONS) })
                                 .takeIf { com.vortx.android.profile.ProfileStore.sharedOrNull()?.active?.isKids != true },
+                            onNetworkShares = ({ openLibraryRoute(TvLibraryRoute.NETWORK_SHARES) })
+                                .takeIf { com.vortx.android.profile.ProfileStore.sharedOrNull()?.active?.isKids != true },
                             modifier = Modifier.focusProperties { canFocus = libraryRoute == TvLibraryRoute.LANDING },
                         )
                     when (libraryRoute) {
@@ -285,6 +288,7 @@ fun TvShell(
                             onItem = onItem,
                         )
                         TvLibraryRoute.SMART_COLLECTIONS -> TvSmartCollectionsScreen(onBack = ::closeLibraryRoute, onItem = onItem)
+                        TvLibraryRoute.NETWORK_SHARES -> TvNetworkSharesScreen(onBack = ::closeLibraryRoute, onPlay = onPlayLocal)
                     }
                     }
                 }

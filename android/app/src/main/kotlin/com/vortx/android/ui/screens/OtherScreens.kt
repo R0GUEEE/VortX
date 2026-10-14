@@ -1,5 +1,6 @@
 package com.vortx.android.ui.screens
 
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.FilterList
 import com.vortx.android.diagnostics.DiagnosticsLog
 import androidx.compose.foundation.ScrollState
@@ -290,6 +291,7 @@ fun LibraryScreen(
     onWatchlist: (() -> Unit)? = null,
     onPreviouslyWatched: (() -> Unit)? = null,
     onSmartCollections: (() -> Unit)? = null,
+    onNetworkShares: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val landingState by landingViewModel.state.collectAsStateWithLifecycle()
@@ -306,8 +308,8 @@ fun LibraryScreen(
 
     val libraryHeader: @Composable () -> Unit = {
         Column(verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.md)) {
-            if (onDownloads != null || onWatchlist != null || onPreviouslyWatched != null || onSmartCollections != null) {
-                LibraryEntryCards(onDownloads, onWatchlist, onPreviouslyWatched, onSmartCollections)
+            if (onDownloads != null || onWatchlist != null || onPreviouslyWatched != null || onSmartCollections != null || onNetworkShares != null) {
+                LibraryEntryCards(onDownloads, onWatchlist, onPreviouslyWatched, onSmartCollections, onNetworkShares)
             }
             when (val landing = landingState) {
                 is UiState.Loading -> Unit
@@ -358,6 +360,7 @@ private fun LibraryEntryCards(
     onWatchlist: (() -> Unit)?,
     onPreviouslyWatched: (() -> Unit)?,
     onSmartCollections: (() -> Unit)? = null,
+    onNetworkShares: (() -> Unit)? = null,
 ) {
     val smartTitle = androidx.compose.ui.res.stringResource(com.vortx.android.R.string.smart_collections_title)
     val smartSubtitle = androidx.compose.ui.res.stringResource(com.vortx.android.R.string.smart_collections_library_subtitle)
@@ -367,6 +370,9 @@ private fun LibraryEntryCards(
         onPreviouslyWatched?.let { LibraryEntryCard("Watched", "History", VortXIcons.clock, it, cardModifier) }
         onSmartCollections?.let {
             LibraryEntryCard(smartTitle, smartSubtitle, androidx.compose.material.icons.Icons.Filled.FilterList, it, cardModifier)
+        }
+        onNetworkShares?.let {
+            LibraryEntryCard("Network shares", "NAS and computers", androidx.compose.material.icons.Icons.Filled.Storage, it, cardModifier)
         }
     }
     BoxWithConstraints(Modifier.fillMaxWidth().padding(vertical = VortXTheme.spacing.sm)) {
