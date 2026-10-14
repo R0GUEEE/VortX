@@ -1,6 +1,7 @@
 package com.vortx.android.engine
 
 import com.vortx.android.backup.SettingsBackup
+import com.vortx.android.diagnostics.DiagnosticsLog
 import com.vortx.android.profile.UserProfile
 import com.vortx.android.sync.NativeAccountGateway
 import com.vortx.android.sync.NativeAccountExport
@@ -464,8 +465,19 @@ internal class NativeAccountCoordinator(
         }
         val watched = watchedProducer.prepare(scope, materialDocument, roster, sources,
             priorArchive?.optJSONArray("nativeWatchedMigrationEvidence"), migrationCurrent)
-        val preparation = if (unavailable.isNotEmpty() || !watched.isComplete) null else prepareNativeLegacyMaterial(materialDocument, roster, resolved.modifiedSeconds,
-            sources, ownBaseline, scope, pendingOverlays, watchedMigration = watched)
+        val preparation = if (unavailable.isNotEmpty() || !watched.isComplete) null else try {
+            prepareNativeLegacyMaterial(materialDocument, roster, resolved.modifiedSeconds,
+                sources, ownBaseline, scope, pendingOverlays, watchedMigration = watched)
+        } catch (error: LegacyReconciliationRequired) {
+            // A whole-account stop names its reconciliation reason, scrubbed of source values.
+            DiagnosticsLog.log("native-profiles", "restore result=failed stage=legacy_preparation detail=${scrubbedLegacyReason(error.reason)}")
+            throw error
+        }
+        // Held units (issue #262) stay only in the retained original document; name them without values.
+        preparation?.let { prepared ->
+            val held = if (prepared.held.isEmpty()) "" else " held=${prepared.held.size} held_units=${nativeLegacyHeldSummary(prepared.held)}"
+            DiagnosticsLog.log("native-profiles", "prepare result=ready pending_membership_receipts=${prepared.pendingMembershipReceipts.length()}$held")
+        }
         val material = preparation?.material
         // Retain exact unresolved source receipts in the same sealed candidate checkpoint as the
         // accepted material. Never turn a historical receipt into an install, removal or clock.
