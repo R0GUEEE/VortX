@@ -93,7 +93,8 @@ enum ExternalPlayers {
             Task { @MainActor in
                 guard let url = await InfuseReturnCoordinator.launchURL(
                     stream: streamURL, meta: metadata, startSeconds: startSeconds, durationSeconds: durationSeconds) else { return }
-                UIApplication.shared.open(url)
+                // Inside a Task this resolves to the async open(_:options:); the Bool is not needed.
+                _ = await UIApplication.shared.open(url)
             }
             return true
         }
