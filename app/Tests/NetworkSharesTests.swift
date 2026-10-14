@@ -85,6 +85,10 @@ enum NetworkSharesTests {
         """
         check("a body with a DOCTYPE or entities is refused before parsing",
               NetworkSharePolicy.parseWebDAV(Data(entityBomb.utf8), directory: directory, root: root) == nil)
+        let utf16 = entityBomb.data(using: .utf16LittleEndian)!
+        check("a UTF-16 body cannot slip a DOCTYPE past the scan",
+              NetworkSharePolicy.parseWebDAV(utf16, directory: directory, root: root) == nil
+                  && NetworkSharePolicy.parseWebDAV(Data([0xFF, 0xFE]) + utf16, directory: directory, root: root) == nil)
         check("unprefixed DAV namespaces parse too",
               NetworkSharePolicy.parseWebDAV(Data(lowercase.utf8), directory: directory, root: root)?.map(\.name) == ["a.mkv"])
     }

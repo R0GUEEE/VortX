@@ -3,7 +3,9 @@ package com.vortx.android.network
 import java.net.URI
 import java.util.Base64
 import javax.xml.parsers.DocumentBuilderFactory
+import java.io.StringReader
 import org.w3c.dom.Element
+import org.xml.sax.InputSource
 
 /**
  * Network shares: folders on a NAS or computer that VortX browses and plays directly, without Plex or Jellyfin.
@@ -103,7 +105,7 @@ object NetworkSharePolicy {
     fun parseWebDav(xml: String, directory: String, root: String): List<NetworkShareEntry>? {
         // A multistatus body never needs a DOCTYPE; refusing one rules out entity expansion outright instead of
         // relying on optional parser features, which some Android parsers do not support.
-        if (xml.contains("<!DOCTYPE", ignoreCase = true) || xml.contains("<!ENTITY", ignoreCase = true)) return null
+        if (xml.contains("<!DOCTYPE", ignoreCase = true) || xml.contains("<!ENTITY", ignoreCase = true) || xml.contains('\u0000')) return null
         val document = runCatching {
             val factory = DocumentBuilderFactory.newInstance()
             factory.isNamespaceAware = true
@@ -112,7 +114,9 @@ object NetworkSharePolicy {
             runCatching { factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
             runCatching { factory.setFeature("http://xml.org/sax/features/external-general-entities", false) }
             runCatching { factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
-            factory.newDocumentBuilder().parse(xml.byteInputStream(Charsets.UTF_8))
+            // A character stream: the parser reads exactly the text checked above, whatever encoding the
+            // body's XML declaration claims.
+            factory.newDocumentBuilder().parse(InputSource(StringReader(xml)))
         }.getOrNull() ?: return null
         val top = document.documentElement ?: return null
         if (localName(top) != "multistatus") return null

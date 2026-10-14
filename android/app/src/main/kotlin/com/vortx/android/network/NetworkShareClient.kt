@@ -160,6 +160,7 @@ class NetworkShareClient(private val http: OkHttpClient = DEFAULT_CLIENT) {
         if (body.contentLength() > MAX_LISTING_BYTES) return null
         val source = body.source()
         if (source.request(MAX_LISTING_BYTES + 1)) return null
+        // Listings are read as UTF-8 only, the same text the WebDAV parser and its DOCTYPE check see.
         return source.buffer.readUtf8()
     }
 

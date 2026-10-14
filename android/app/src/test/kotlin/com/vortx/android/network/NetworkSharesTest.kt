@@ -72,6 +72,10 @@ class NetworkSharesTest {
         assertNull(NetworkSharePolicy.parseWebDav("<html><body>Login</body></html>", directory, root))
         assertNull(NetworkSharePolicy.parseWebDav("""<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><multistatus xmlns="DAV:">&e;</multistatus>""", directory, root))
         assertNull(NetworkSharePolicy.parseWebDav("""<?xml version="1.0"?><!doctype m [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]><multistatus xmlns="DAV:"><response><href>&b;</href></response></multistatus>""", directory, root))
+        val utf16Declared = """<?xml version="1.0" encoding="UTF-16"?><multistatus xmlns="DAV:"><response><href>/video/Films/a.mkv</href><propstat><prop><resourcetype/></prop></propstat></response></multistatus>"""
+        assertEquals("a declared encoding cannot change what the parser reads",
+            listOf("a.mkv"), NetworkSharePolicy.parseWebDav(utf16Declared, directory, root)?.map { it.name })
+        assertNull(NetworkSharePolicy.parseWebDav("<\u0000!\u0000D\u0000O\u0000C", directory, root))
         val unprefixed = """<multistatus xmlns="DAV:"><response><href>/video/Films/a.mkv</href><propstat><prop><resourcetype/></prop></propstat></response></multistatus>"""
         assertEquals(listOf("a.mkv"), NetworkSharePolicy.parseWebDav(unprefixed, directory, root)?.map { it.name })
     }

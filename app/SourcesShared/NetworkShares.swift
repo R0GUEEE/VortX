@@ -108,17 +108,18 @@ enum NetworkSharePolicy {
     /// The direct children of `directory` in a WebDAV multistatus response.
     static func parseWebDAV(_ data: Data, directory: URL, root: URL) -> [NetworkShareEntry]? {
         // A multistatus body never needs a DOCTYPE; refusing one rules out entity expansion outright rather
-        // than relying on parser settings.
-        if let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
-           text.range(of: "<!DOCTYPE", options: .caseInsensitive) != nil || text.range(of: "<!ENTITY", options: .caseInsensitive) != nil {
-            return nil
-        }
+        // than relying on parser settings. Only plain UTF-8 is accepted, so the scan sees exactly the text the
+        // parser will: no NUL bytes (UTF-16/32 ASCII carries them) and no UTF-16/32 byte-order mark.
+        guard !data.contains(0), !data.starts(with: [0xFE, 0xFF]), !data.starts(with: [0xFF, 0xFE]),
+              let text = String(data: data, encoding: .utf8),
+              text.range(of: "<!DOCTYPE", options: .caseInsensitive) == nil,
+              text.range(of: "<!ENTITY", options: .caseInsensitive) == nil else { return nil }
         let reader = WebDAVReader()
         let parser = XMLParser(data: data)
         parser.shouldProcessNamespaces = true
         parser.shouldResolveExternalEntities = false
         parser.delegate = reader
-        guard parser.parse(), reader.sawMultistatus else { return nil }
+        guard parser.parse(), reader.sawMultistatus, !reader.sawDeclaration else { return nil }
         return reader.responses.compactMap { response in
             guard let url = child(href: response.href, directory: directory, root: root, isFolder: response.isFolder) else { return nil }
             let name = response.displayName.flatMap { $0.isEmpty ? nil : $0 } ?? lastComponent(url)
@@ -207,6 +208,21 @@ private final class WebDAVReader: NSObject, XMLParserDelegate {
 
     private(set) var responses: [Response] = []
     private(set) var sawMultistatus = false
+    /// Set, and parsing stopped, at any DTD declaration: a listing never declares anything.
+    private(set) var sawDeclaration = false
+
+    private func refuse(_ parser: XMLParser) {
+        sawDeclaration = true
+        parser.abortParsing()
+    }
+
+    func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) { refuse(parser) }
+    func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) { refuse(parser) }
+    func parser(_ parser: XMLParser, foundUnparsedEntityDeclarationWithName name: String, publicID: String?, systemID: String?, notationName: String?) { refuse(parser) }
+    func parser(_ parser: XMLParser, foundElementDeclarationWithName elementName: String, model: String) { refuse(parser) }
+    func parser(_ parser: XMLParser, foundNotationDeclarationWithName name: String, publicID: String?, systemID: String?) { refuse(parser) }
+    func parser(_ parser: XMLParser, foundAttributeDeclarationWithName attributeName: String, forElement elementName: String,
+                type: String?, defaultValue: String?) { refuse(parser) }
     private var current: Response?
     private var text = ""
 
