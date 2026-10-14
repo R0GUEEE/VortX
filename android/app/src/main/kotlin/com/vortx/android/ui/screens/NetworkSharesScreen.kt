@@ -91,6 +91,9 @@ fun NetworkSharesScreen(onBack: () -> Unit, onPlay: (Playable) -> Unit, modifier
                         trailing = { IconButton(onClick = { removing = share }) { Icon(Icons.Filled.Delete, "Remove ${share.name}") } })
                 }
             } else {
+                browser.playError?.let { message ->
+                    item { Text(message, style = VortXTheme.type.label.copy(color = VortXTheme.colors.danger)) }
+                }
                 val entries = browser.entries
                 val error = browser.error
                 when {
@@ -104,7 +107,7 @@ fun NetworkSharesScreen(onBack: () -> Unit, onPlay: (Playable) -> Unit, modifier
                     entries.isEmpty() -> item { Note("No folders or videos here.") }
                     else -> items(entries, key = { it.url }) { entry ->
                         if (entry.isFolder) ShareRow(Icons.Filled.Folder, entry.name, null, onClick = { browser.enter(entry) })
-                        else ShareRow(Icons.Filled.Movie, entry.name, entry.sizeLabel(), onClick = { browser.playable(entry)?.let(onPlay) })
+                        else ShareRow(Icons.Filled.Movie, entry.name, entry.sizeLabel(), onClick = { browser.play(entry, onPlay) })
                     }
                 }
             }

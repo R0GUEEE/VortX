@@ -101,6 +101,9 @@ object NetworkSharePolicy {
 
     /** The direct children of [directory] in a WebDAV multistatus response, or null when it is not one. */
     fun parseWebDav(xml: String, directory: String, root: String): List<NetworkShareEntry>? {
+        // A multistatus body never needs a DOCTYPE; refusing one rules out entity expansion outright instead of
+        // relying on optional parser features, which some Android parsers do not support.
+        if (xml.contains("<!DOCTYPE", ignoreCase = true) || xml.contains("<!ENTITY", ignoreCase = true)) return null
         val document = runCatching {
             val factory = DocumentBuilderFactory.newInstance()
             factory.isNamespaceAware = true

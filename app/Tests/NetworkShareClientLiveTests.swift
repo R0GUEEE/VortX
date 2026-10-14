@@ -42,6 +42,23 @@ enum NetworkShareClientLiveTests {
             check("a redirect off the share is refused", false)
         } catch { check("a redirect off the share is refused", error as? NetworkShareError == .notAShare) }
 
+        let matrix = URL(string: "\(web.absoluteString)The%20Matrix%20(1999).mp4")!
+        let direct = try? await NetworkShareClient.resolveForPlayback(matrix, root: web, login: good)
+        check("a file inside the share resolves to itself", direct == matrix)
+        let moved = try? await NetworkShareClient.resolveForPlayback(URL(string: "\(web.absoluteString)moved.mkv")!, root: web, login: good)
+        check("a redirect within the share resolves to its target", moved == matrix)
+        do {
+            _ = try await NetworkShareClient.resolveForPlayback(URL(string: "\(web.absoluteString)go-away.mkv")!, root: web, login: good)
+            check("a file redirected off the share is refused", false)
+        } catch { check("a file redirected off the share is refused", error as? NetworkShareError == .redirectedAway) }
+        let arrival = URL(string: "\(dav.absoluteString)Arrival%20(2016).mkv")!
+        let ranged = try? await NetworkShareClient.resolveForPlayback(arrival, root: dav, login: good)
+        check("a server refusing HEAD is probed with a one-byte GET", ranged == arrival)
+        do {
+            _ = try await NetworkShareClient.resolveForPlayback(matrix, root: web, login: bad)
+            check("playback with a wrong password is refused", false)
+        } catch { check("playback with a wrong password is refused", error as? NetworkShareError == .unauthorized) }
+
         if failures > 0 { print("\n\(failures) check(s) failed"); exit(1) }
         print("\nAll live network share checks passed")
     }

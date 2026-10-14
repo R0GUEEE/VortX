@@ -49,10 +49,14 @@ class NetworkShareStore private constructor(context: Context, private val client
     suspend fun list(share: NetworkShare, folder: String? = null): List<NetworkShareEntry> =
         client.list(folder ?: share.url, share.kind, share.url, login(share))
 
-    /** What the player sends with a file from this share: the login, and only for a file inside it. */
-    fun playbackHeaders(share: NetworkShare, url: String): Map<String, String> {
+    /**
+     * What the player opens for a file from this share: the final address after the server's own redirects
+     * (followed only within the share), and the login only when that address is inside it.
+     */
+    suspend fun playbackTarget(share: NetworkShare, url: String): Pair<String, Map<String, String>> {
         val login = login(share)
-        return NetworkSharePolicy.headers(url, share.url, login.username, login.password)
+        val final = client.resolveForPlayback(url, share.url, login)
+        return final to NetworkSharePolicy.headers(final, share.url, login.username, login.password)
     }
 
     private fun login(share: NetworkShare): NetworkShareClient.Login =

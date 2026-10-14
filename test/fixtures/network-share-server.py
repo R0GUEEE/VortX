@@ -18,6 +18,9 @@ TREE = {
     "/web/Shows/": ["S01E01.mkv"],
 }
 AUTH = "Basic " + base64.b64encode(b"me:pw").decode()
+# Video files for the playback probe. /dav/ refuses HEAD (405) so the client falls back to a ranged GET.
+FILES = {"/web/The Matrix (1999).mp4", "/dav/Arrival (2016).mkv"}
+REDIRECTS = {"/web/moved.mkv": "/web/The%20Matrix%20(1999).mp4", "/web/go-away.mkv": "http://elsewhere.invalid/x.mkv"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -69,7 +72,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def serve_file(self, head):
+        path = self.path_only()
+        if path in REDIRECTS:
+            self.redirect(REDIRECTS[path])
+            return True
+        if path not in FILES:
+            return False
+        if not self.authorized():
+            return True
+        if head and path.startswith("/dav/"):
+            self.send_response(405)
+            self.end_headers()
+            return True
+        body = b"0123456789"
+        ranged = self.headers.get("Range") == "bytes=0-0"
+        self.send_response(206 if ranged else 200)
+        self.send_header("Content-Length", "1" if ranged else str(len(body)))
+        self.end_headers()
+        if not head:
+            self.wfile.write(body[:1] if ranged else body)
+        return True
+
+    def do_HEAD(self):
+        if not self.serve_file(head=True):
+            self.send_response(404)
+            self.end_headers()
+
     def do_GET(self):
+        if self.serve_file(head=False):
+            return
         path = self.path_only()
         if path == "/web/hop/":
             return self.redirect("/web/Shows/")

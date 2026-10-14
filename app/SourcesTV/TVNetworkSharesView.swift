@@ -55,11 +55,15 @@ struct TVNetworkFolderView: View {
     @EnvironmentObject private var presenter: PlayerPresenter
     @State private var entries: [NetworkShareEntry]?
     @State private var errorMessage: String?
+    @State private var playMessage: String?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.md) {
                 Text(title).screenTitleStyle()
+                if let playMessage {
+                    Text(playMessage).font(Theme.Typography.label).foregroundStyle(Theme.Palette.danger)
+                }
                 if let errorMessage {
                     Text(errorMessage).font(Theme.Typography.body).foregroundStyle(Theme.Palette.textSecondary)
                     Button { Task { await load() } } label: { Label("Try again", systemImage: "arrow.clockwise") }
@@ -99,9 +103,18 @@ struct TVNetworkFolderView: View {
         catch { errorMessage = (error as? NetworkShareError)?.message ?? NetworkShareError.unreachable.message }
     }
 
+    /// Resolves the file's final address first (redirects only within the share), so the player never takes
+    /// the login anywhere else.
     private func play(_ entry: NetworkShareEntry) {
-        presenter.request = PlaybackRequest(url: entry.url, title: entry.name,
-                                            headers: NetworkShareStore.shared.playbackHeaders(share, for: entry.url))
+        playMessage = nil
+        Task {
+            do {
+                let target = try await NetworkShareStore.shared.playbackTarget(share, for: entry.url)
+                presenter.request = PlaybackRequest(url: target.url, title: entry.name, headers: target.headers)
+            } catch {
+                playMessage = (error as? NetworkShareError)?.message ?? NetworkShareError.unreachable.message
+            }
+        }
     }
 }
 

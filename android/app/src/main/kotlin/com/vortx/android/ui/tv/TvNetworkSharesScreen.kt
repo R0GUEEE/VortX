@@ -108,6 +108,9 @@ internal fun TvNetworkSharesScreen(onBack: () -> Unit, onPlay: (Playable) -> Uni
                         onClick = { browser.open(share) }, onLongClick = { removing = share })
                 }
             } else {
+                browser.playError?.let { message ->
+                    item { Text(message, style = VortXTheme.type.label.copy(color = VortXTheme.colors.danger)) }
+                }
                 val entries = browser.entries
                 val error = browser.error
                 when {
@@ -121,7 +124,7 @@ internal fun TvNetworkSharesScreen(onBack: () -> Unit, onPlay: (Playable) -> Uni
                     entries.isEmpty() -> item { TvShareNote("No folders or videos here.") }
                     else -> items(entries, key = { it.url }) { entry ->
                         if (entry.isFolder) TvShareRow(Icons.Filled.Folder, entry.name, null, onClick = { browser.enter(entry) })
-                        else TvShareRow(Icons.Filled.Movie, entry.name, entry.sizeLabel(), onClick = { browser.playable(entry)?.let(onPlay) })
+                        else TvShareRow(Icons.Filled.Movie, entry.name, entry.sizeLabel(), onClick = { browser.play(entry, onPlay) })
                     }
                 }
             }

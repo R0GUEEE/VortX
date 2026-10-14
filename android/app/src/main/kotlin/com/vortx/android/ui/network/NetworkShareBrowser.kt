@@ -32,6 +32,9 @@ class NetworkShareBrowserState internal constructor(val store: NetworkShareStore
         private set
     var error by mutableStateOf<String?>(null)
         private set
+    /** Why the last video could not start (for example, the share redirected it elsewhere). */
+    var playError by mutableStateOf<String?>(null)
+        private set
     private var job: Job? = null
 
     val current: Level? get() = stack.lastOrNull()
@@ -55,6 +58,7 @@ class NetworkShareBrowserState internal constructor(val store: NetworkShareStore
         job?.cancel()
         entries = null
         error = null
+        playError = null
         val level = current ?: return
         job = scope.launch {
             try {
@@ -69,9 +73,25 @@ class NetworkShareBrowserState internal constructor(val store: NetworkShareStore
         }
     }
 
-    fun playable(entry: NetworkShareEntry): Playable? {
-        val level = current ?: return null
-        return Playable(url = entry.url, title = entry.name, headers = store.playbackHeaders(level.share, entry.url))
+    /**
+     * Resolves [entry]'s final address first (redirects only within the share), then hands the player a Playable
+     * with the login attached only for that address. A refusal shows in [playError] instead.
+     */
+    fun play(entry: NetworkShareEntry, onPlay: (Playable) -> Unit) {
+        val level = current ?: return
+        playError = null
+        scope.launch {
+            try {
+                val (url, headers) = store.playbackTarget(level.share, entry.url)
+                onPlay(Playable(url = url, title = entry.name, headers = headers))
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: NetworkShareException) {
+                playError = failure.reason.message
+            } catch (_: Exception) {
+                playError = NetworkShareException.Reason.UNREACHABLE.message
+            }
+        }
     }
 
     private fun push(level: Level) {

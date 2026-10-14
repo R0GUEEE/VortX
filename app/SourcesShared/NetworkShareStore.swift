@@ -51,12 +51,14 @@ final class NetworkShareStore: ObservableObject {
         return try await NetworkShareClient.list(folder ?? root, kind: share.kind, root: root, login: login(for: share))
     }
 
-    /// What the player sends with a file from this share: the login, and only for a file inside it.
-    func playbackHeaders(_ share: NetworkShare, for url: URL) -> [String: String]? {
-        guard let root = share.rootURL else { return nil }
+    /// What the player opens for a file from this share: the final address after the server's own redirects
+    /// (followed only within the share), and the login only when that address is inside it.
+    func playbackTarget(_ share: NetworkShare, for url: URL) async throws -> (url: URL, headers: [String: String]?) {
+        guard let root = share.rootURL else { throw NetworkShareError.invalidAddress }
         let login = login(for: share)
-        let headers = NetworkSharePolicy.headers(for: url, root: root, username: login.username, password: login.password)
-        return headers.isEmpty ? nil : headers
+        let final = try await NetworkShareClient.resolveForPlayback(url, root: root, login: login)
+        let headers = NetworkSharePolicy.headers(for: final, root: root, username: login.username, password: login.password)
+        return (final, headers.isEmpty ? nil : headers)
     }
 
     private func login(for share: NetworkShare) -> NetworkShareClient.Login {

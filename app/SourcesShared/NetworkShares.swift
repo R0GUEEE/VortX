@@ -107,9 +107,16 @@ enum NetworkSharePolicy {
 
     /// The direct children of `directory` in a WebDAV multistatus response.
     static func parseWebDAV(_ data: Data, directory: URL, root: URL) -> [NetworkShareEntry]? {
+        // A multistatus body never needs a DOCTYPE; refusing one rules out entity expansion outright rather
+        // than relying on parser settings.
+        if let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
+           text.range(of: "<!DOCTYPE", options: .caseInsensitive) != nil || text.range(of: "<!ENTITY", options: .caseInsensitive) != nil {
+            return nil
+        }
         let reader = WebDAVReader()
         let parser = XMLParser(data: data)
         parser.shouldProcessNamespaces = true
+        parser.shouldResolveExternalEntities = false
         parser.delegate = reader
         guard parser.parse(), reader.sawMultistatus else { return nil }
         return reader.responses.compactMap { response in

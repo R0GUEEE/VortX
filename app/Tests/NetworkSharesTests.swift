@@ -80,6 +80,11 @@ enum NetworkSharesTests {
         let lowercase = """
         <multistatus xmlns="DAV:"><response><href>/video/Films/a.mkv</href><propstat><prop><resourcetype/></prop></propstat></response></multistatus>
         """
+        let entityBomb = """
+        <?xml version="1.0"?><!DOCTYPE m [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;">]><multistatus xmlns="DAV:"><response><href>&b;</href></response></multistatus>
+        """
+        check("a body with a DOCTYPE or entities is refused before parsing",
+              NetworkSharePolicy.parseWebDAV(Data(entityBomb.utf8), directory: directory, root: root) == nil)
         check("unprefixed DAV namespaces parse too",
               NetworkSharePolicy.parseWebDAV(Data(lowercase.utf8), directory: directory, root: root)?.map(\.name) == ["a.mkv"])
     }

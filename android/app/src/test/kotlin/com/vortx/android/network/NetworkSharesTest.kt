@@ -71,6 +71,7 @@ class NetworkSharesTest {
         assertEquals("https://nas.local:5006/video/Films/Raw%20Name%20%5B1080p%5D.mp4", shown[2].url)
         assertNull(NetworkSharePolicy.parseWebDav("<html><body>Login</body></html>", directory, root))
         assertNull(NetworkSharePolicy.parseWebDav("""<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><multistatus xmlns="DAV:">&e;</multistatus>""", directory, root))
+        assertNull(NetworkSharePolicy.parseWebDav("""<?xml version="1.0"?><!doctype m [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]><multistatus xmlns="DAV:"><response><href>&b;</href></response></multistatus>""", directory, root))
         val unprefixed = """<multistatus xmlns="DAV:"><response><href>/video/Films/a.mkv</href><propstat><prop><resourcetype/></prop></propstat></response></multistatus>"""
         assertEquals(listOf("a.mkv"), NetworkSharePolicy.parseWebDav(unprefixed, directory, root)?.map { it.name })
     }
@@ -136,8 +137,9 @@ class NetworkSharesTest {
         }
         repeat(headers["content-length"]?.toIntOrNull() ?: 0) { reader.read() }
         val (method, target) = requestLine.split(' ').let { it[0] to it[1] }
-        val (status, body, extra) = route(method, URLDecoder.decode(target.substringBefore('?'), "UTF-8"), headers["authorization"])
-        val bytes = body.toByteArray()
+        val (status, body, extra) = route(method, URLDecoder.decode(target.substringBefore('?'), "UTF-8"), headers["authorization"],
+            headers["range"])
+        val bytes = if (method == "HEAD") ByteArray(0) else body.toByteArray()
         val head = buildString {
             append("HTTP/1.1 $status X\r\n")
             extra.forEach { (k, v) -> append("$k: $v\r\n") }
@@ -146,7 +148,15 @@ class NetworkSharesTest {
         socket.getOutputStream().apply { write(head.toByteArray(Charsets.ISO_8859_1)); write(bytes); flush() }
     }
 
-    private fun route(method: String, path: String, authorization: String?): Triple<Int, String, Map<String, String>> {
+    private fun route(method: String, path: String, authorization: String?, range: String?): Triple<Int, String, Map<String, String>> {
+        // Video files for the playback probe; /dav/ refuses HEAD so the client falls back to a ranged GET.
+        if (path == "/web/moved.mkv") return Triple(302, "", mapOf("Location" to "/web/The%20Matrix%20(1999).mp4"))
+        if (path == "/web/go-away.mkv") return Triple(302, "", mapOf("Location" to "http://elsewhere.invalid/x.mkv"))
+        if (path == "/web/The Matrix (1999).mp4" || path == "/dav/Arrival (2016).mkv") {
+            if (authorization != auth) return Triple(401, "", emptyMap())
+            if (method == "HEAD" && path.startsWith("/dav/")) return Triple(405, "", emptyMap())
+            return if (range == "bytes=0-0") Triple(206, "0", emptyMap()) else Triple(200, "0123456789", emptyMap())
+        }
         if (path == "/dav/away/") return Triple(302, "", mapOf("Location" to "http://elsewhere.invalid/dav/"))
         if (path == "/web/hop/") return Triple(302, "", mapOf("Location" to "/web/Shows/"))
         val dav = path.startsWith("/dav/")
@@ -184,5 +194,16 @@ class NetworkSharesTest {
         assertEquals(listOf("S01E01.mkv"), client.list("${web}hop/", NetworkShareKind.HTTP, web, good).map { it.name })
         assertEquals(NetworkShareException.Reason.NOT_A_SHARE,
             runCatching { client.list("${dav}away/", NetworkShareKind.WEBDAV, dav, good) }.exceptionOrNull().let { (it as? NetworkShareException)?.reason })
+
+        // Playback: the player only ever gets an address inside the share.
+        val matrix = "${web}The%20Matrix%20(1999).mp4"
+        assertEquals(matrix, client.resolveForPlayback(matrix, web, good))
+        assertEquals(matrix, client.resolveForPlayback("${web}moved.mkv", web, good))
+        assertEquals(NetworkShareException.Reason.REDIRECTED_AWAY,
+            runCatching { client.resolveForPlayback("${web}go-away.mkv", web, good) }.exceptionOrNull().let { (it as? NetworkShareException)?.reason })
+        val arrival = "${dav}Arrival%20(2016).mkv"
+        assertEquals(arrival, client.resolveForPlayback(arrival, dav, good))
+        assertEquals(NetworkShareException.Reason.UNAUTHORIZED,
+            runCatching { client.resolveForPlayback(matrix, web, NetworkShareClient.Login("me", "nope")) }.exceptionOrNull().let { (it as? NetworkShareException)?.reason })
     }
 }

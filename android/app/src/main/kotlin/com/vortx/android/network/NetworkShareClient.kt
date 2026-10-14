@@ -16,6 +16,7 @@ class NetworkShareException(val reason: Reason) : Exception(reason.message) {
         UNAUTHORIZED("The share refused that username or password."),
         NOT_A_SHARE("That address answered, but not with a WebDAV share or a folder listing."),
         UNREACHABLE("Couldn't reach the share. Check the address and that this device is on the same network."),
+        REDIRECTED_AWAY("The share sent this video to another address, so VortX won't send your login there."),
         CREDENTIAL_STORAGE("Couldn't save the password securely on this device."),
     }
 }
@@ -62,6 +63,43 @@ class NetworkShareClient(private val http: OkHttpClient = DEFAULT_CLIENT) {
         }
     }
 
+    /**
+     * The address a player should open for [file]. The server's redirects are followed here, within the share only,
+     * so the player starts at the final address and never carries the login to another host. HEAD first; a server
+     * that refuses it gets a one-byte ranged GET whose body is never read.
+     */
+    suspend fun resolveForPlayback(file: String, root: String, login: Login): String = withContext(Dispatchers.IO) {
+        if (!NetworkSharePolicy.isInside(file, root)) throw NetworkShareException(NetworkShareException.Reason.REDIRECTED_AWAY)
+        var probe = probe(file, root, login, head = true)
+        if (probe.first == 405 || probe.first == 501) probe = probe(file, root, login, head = false)
+        when (probe.first) {
+            401, 403 -> throw NetworkShareException(NetworkShareException.Reason.UNAUTHORIZED)
+            in 300..399 -> throw NetworkShareException(NetworkShareException.Reason.REDIRECTED_AWAY)
+            in 200..299 -> probe.second
+            else -> throw NetworkShareException(NetworkShareException.Reason.UNREACHABLE)
+        }
+    }
+
+    /** (status, final URL) for [file], following redirects only within the share. */
+    private fun probe(file: String, root: String, login: Login, head: Boolean): Pair<Int, String> {
+        var url = file
+        repeat(MAX_REDIRECTS + 1) {
+            val builder = Request.Builder().url(url)
+            NetworkSharePolicy.headers(url, root, login.username, login.password).forEach { (name, value) -> builder.header(name, value) }
+            val request = if (head) builder.head().build() else builder.header("Range", "bytes=0-0").get().build()
+            val response = try { http.newCall(request).execute() } catch (_: IOException) {
+                throw NetworkShareException(NetworkShareException.Reason.UNREACHABLE)
+            }
+            response.use {
+                if (it.code !in 300..399) return it.code to url
+                val next = it.header("Location")?.let { location -> runCatching { java.net.URI(url).resolve(location).toASCIIString() }.getOrNull() }
+                if (next == null || !NetworkSharePolicy.isInside(next, root)) return it.code to url
+                url = next
+            }
+        }
+        return 310 to url
+    }
+
     private suspend fun propfind(folder: String, root: String, login: Login): Outcome =
         perform(folder, root, login, method = "PROPFIND") { body, status, url ->
             if (status != 207) null else NetworkSharePolicy.parseWebDav(body, url, root)
@@ -93,7 +131,9 @@ class NetworkShareClient(private val http: OkHttpClient = DEFAULT_CLIENT) {
                         url = next
                     }
                     else -> {
-                        val body = runCatching { it.body?.string() }.getOrNull() ?: return@withContext Outcome.Unreachable
+                        val raw = it.body ?: return@withContext Outcome.Unreachable
+                        val body = try { readCapped(raw) } catch (_: IOException) { return@withContext Outcome.Unreachable }
+                            ?: return@withContext Outcome.NotAListing
                         val entries = parse(body, it.code, url) ?: return@withContext Outcome.NotAListing
                         return@withContext Outcome.Listing(entries)
                     }
@@ -115,8 +155,17 @@ class NetworkShareClient(private val http: OkHttpClient = DEFAULT_CLIENT) {
         }
     }
 
+    /** The body as text, or null when it exceeds [MAX_LISTING_BYTES]; a listing is never held beyond that. */
+    private fun readCapped(body: okhttp3.ResponseBody): String? {
+        if (body.contentLength() > MAX_LISTING_BYTES) return null
+        val source = body.source()
+        if (source.request(MAX_LISTING_BYTES + 1)) return null
+        return source.buffer.readUtf8()
+    }
+
     companion object {
         private const val MAX_REDIRECTS = 5
+        private const val MAX_LISTING_BYTES = 8L * 1024 * 1024
 
         private val DEFAULT_CLIENT: OkHttpClient by lazy {
             OkHttpClient.Builder()

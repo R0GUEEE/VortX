@@ -54,10 +54,14 @@ private struct iOSNetworkFolderView: View {
     let onPlay: (iOSPlayerLaunch) -> Void
     @State private var entries: [NetworkShareEntry]?
     @State private var errorMessage: String?
+    @State private var playMessage: String?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                if let playMessage {
+                    Text(playMessage).font(Theme.Typography.label).foregroundStyle(Theme.Palette.danger)
+                }
                 if let errorMessage {
                     Text(errorMessage).font(Theme.Typography.body).foregroundStyle(Theme.Palette.textSecondary)
                     Button { Task { await load() } } label: { Label("Try again", systemImage: "arrow.clockwise") }
@@ -73,10 +77,7 @@ private struct iOSNetworkFolderView: View {
                             }
                             .buttonStyle(.plain)
                         } else {
-                            Button {
-                                onPlay(iOSPlayerLaunch(url: entry.url, title: entry.name,
-                                                       headers: NetworkShareStore.shared.playbackHeaders(share, for: entry.url)))
-                            } label: {
+                            Button { play(entry) } label: {
                                 iOSNetworkShareRow(icon: "play.rectangle.fill", title: entry.name,
                                                    detail: entry.size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) })
                             }
@@ -99,6 +100,20 @@ private struct iOSNetworkFolderView: View {
         errorMessage = nil
         do { entries = try await NetworkShareStore.shared.list(share, folder: folder) }
         catch { errorMessage = (error as? NetworkShareError)?.message ?? NetworkShareError.unreachable.message }
+    }
+
+    /// Resolves the file's final address first (redirects only within the share), so the player never takes
+    /// the login anywhere else.
+    private func play(_ entry: NetworkShareEntry) {
+        playMessage = nil
+        Task {
+            do {
+                let target = try await NetworkShareStore.shared.playbackTarget(share, for: entry.url)
+                onPlay(iOSPlayerLaunch(url: target.url, title: entry.name, headers: target.headers))
+            } catch {
+                playMessage = (error as? NetworkShareError)?.message ?? NetworkShareError.unreachable.message
+            }
+        }
     }
 }
 
