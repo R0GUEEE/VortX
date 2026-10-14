@@ -95,6 +95,12 @@ work = "2.10.0"
 # dependency first-party instead of leaning on a transitive. 4.12.0 also predates Kotlin 2.3.0 (it is
 # built on Kotlin 1.8/1.9-era metadata), so the pinned 2.2.10 compiler reads it with wide margin.
 okhttp = "4.12.0"
+# smbj: SMB network shares (com.vortx.android.network). Android's libmpv (dev.jdtech.mpv 1.0.0) is built
+# without SMB, unlike Apple's MPVKit-GPL FFmpeg, so browsing and the local playback relay read SMB through
+# this pure-Java client (Apache-2.0). It brings slf4j-api, bcprov-jdk18on (NTLM's MD4, absent from Android's
+# JCA), mbassador and asn-one. Server-root share listing would need smbj-rpc, which is not added: an
+# Android address names its share.
+smbj = "0.15.0"
 # Google Cast (the CAST lane: send the current stream to a Cast receiver -- Android's AirPlay equivalent).
 # play-services-cast-framework is a plain Google/AndroidX AAR with NO GPL native code (unlike libmpv), so
 # it is a licensing-boundary-SAFE plain `implementation` carried in BOTH the `full` and `play` flavors and
@@ -152,6 +158,7 @@ coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref 
 coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+smbj = { group = "com.hierynomus", name = "smbj", version.ref = "smbj" }
 
 # Google Cast lane (see the playServicesCast / mediarouter version notes above). Both are plain
 # `implementation` in BOTH flavors -- no GPL native code, so the `play` build stays GPL-clean.

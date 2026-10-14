@@ -97,7 +97,7 @@ internal fun TvNetworkSharesScreen(onBack: () -> Unit, onPlay: (Playable) -> Uni
             if (level == null) {
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm)) {
-                        Text("Play videos straight from a NAS or computer on your network. Add its WebDAV address, or a web server's folder listing.",
+                        Text("Play videos straight from a NAS or computer on your network: an SMB share (smb://nas/Movies), a WebDAV address, or a web server's folder listing.",
                             style = VortXTheme.type.body.copy(color = VortXTheme.colors.textSecondary))
                         TvFilterChip(label = "Add a share", selected = false, onClick = { adding = true }, leadingIcon = Icons.Filled.Add)
                         if (shares.isEmpty()) TvShareNote("No shares yet. On a Synology, QNAP or TrueNAS, turn on its WebDAV service and add that address here.")
@@ -147,7 +147,7 @@ private fun TvAddShareForm(store: NetworkShareStore, onDone: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm),
         ) {
             Text("Add a network share", style = VortXTheme.type.sectionTitle)
-            Text("For example 192.168.1.20:5005/video for a Synology WebDAV share. Leave the username empty if the share has no login.",
+            Text("For example smb://192.168.1.20/Movies for a shared folder, or 192.168.1.20:5005/video for a Synology WebDAV share. Leave the username empty if the share has no login.",
                 style = VortXTheme.type.label.copy(color = VortXTheme.colors.textSecondary))
             TvShareField("Address", address, { address = it }, KeyboardType.Uri)
             TvShareField("Name (optional)", name, { name = it }, KeyboardType.Text)

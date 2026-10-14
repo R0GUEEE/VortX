@@ -45,6 +45,122 @@ class NetworkSharesTest {
         assertTrue(NetworkSharePolicy.isInside("http://nas.local:80/v/a.mkv", "http://nas.local/v/"))
     }
 
+    // SMB
+
+    @Test fun `SMB addresses are normalized, Windows paths accepted and logins refused`() {
+        assertEquals("smb://nas.local/Movies/", NetworkSharePolicy.smbRootUrl(" smb://nas.local/Movies "))
+        assertEquals("smb://NAS/Movies/Kids/", NetworkSharePolicy.smbRootUrl("\\\\NAS\\Movies\\Kids"))
+        assertEquals("smb://nas:4455/My%20Movies/", NetworkSharePolicy.smbRootUrl("SMB://nas:4455/My Movies"))
+        assertEquals("smb://192.168.1.20/", NetworkSharePolicy.smbRootUrl("smb://192.168.1.20"))
+        for (refused in listOf("smb://me:secret@nas/Movies", "smb://me@nas/Movies", "http://nas/Movies", "nas/Movies", "smb:///Movies"))
+            assertNull(refused, NetworkSharePolicy.smbRootUrl(refused))
+        // As on Apple, "?" and "#" are escaped into the folder name, so an address never carries a query.
+        assertEquals("smb://nas/Movies%3Fx=1/", NetworkSharePolicy.smbRootUrl("smb://nas/Movies?x=1"))
+        assertNull(NetworkSharePolicy.rootUrl("smb://nas.local/Movies"))
+    }
+
+    @Test fun `SMB locations name the share and path, and listings stay inside the folder`() {
+        assertEquals(SmbLocation("nas", 445, "Movies", "Kids\\Up (2009).mkv"), NetworkSharePolicy.smbLocation("smb://nas/Movies/Kids/Up%20(2009).mkv"))
+        assertEquals(SmbLocation("nas", 4455, null, ""), NetworkSharePolicy.smbLocation("smb://nas:4455/"))
+        assertNull(NetworkSharePolicy.smbLocation("smb://nas/Movies/../Photos/"))
+        assertNull(NetworkSharePolicy.smbLocation("https://nas/Movies/"))
+        val directory = "smb://nas/Movies/Kids/"
+        val entries = NetworkSharePolicy.smbEntries(listOf("." to true, ".." to true, "Up (2009).mkv" to false, "Season 1" to true,
+            "a/b.mkv" to false, "50% off?.mp4" to false, "notes.txt" to false, ".hidden.mkv" to false), directory)
+        assertEquals(listOf("smb://nas/Movies/Kids/Up%20(2009).mkv", "smb://nas/Movies/Kids/Season%201/",
+            "smb://nas/Movies/Kids/50%25%20off%3F.mp4", "smb://nas/Movies/Kids/notes.txt", "smb://nas/Movies/Kids/.hidden.mkv"), entries.map { it.url })
+        assertEquals(listOf("Season 1", "50% off?.mp4", "Up (2009).mkv"), NetworkSharePolicy.visible(entries).map { it.name })
+        assertTrue(entries.all { NetworkSharePolicy.isInside(it.url, "smb://nas/Movies/") })
+        assertTrue(NetworkSharePolicy.isInside("smb://nas:445/Movies/a.mkv", "smb://nas/Movies/"))
+        assertFalse(NetworkSharePolicy.isInside("smb://nas:4455/Movies/a.mkv", "smb://nas/Movies/"))
+        assertFalse(NetworkSharePolicy.isInside("smb://other/Movies/a.mkv", "smb://nas/Movies/"))
+        assertEquals("SMB", NetworkShareKind.fromStorage("smb")?.label)
+    }
+
+    @Test fun `SMB logins never fall back to guest and split a domain`() {
+        assertTrue(NetworkShareSmbClient.authentication(NetworkShareClient.Login("", "")).isGuest)
+        val domain = NetworkShareSmbClient.authentication(NetworkShareClient.Login("HOME\\dad", "pw"))
+        assertEquals("dad", domain.username); assertEquals("HOME", domain.domain); assertEquals("pw", String(domain.password))
+        val plain = NetworkShareSmbClient.authentication(NetworkShareClient.Login("dad", "pw"))
+        assertEquals("dad", plain.username); assertFalse(plain.isGuest)
+    }
+
+    @Test fun `SMB byte ranges follow the HTTP rules players rely on`() {
+        assertEquals(0L until 100L, NetworkShareSmbRelay.byteRange(null, 100))
+        assertEquals(10L..19L, NetworkShareSmbRelay.byteRange("bytes=10-19", 100))
+        assertEquals(90L..99L, NetworkShareSmbRelay.byteRange("bytes=90-", 100))
+        assertEquals(95L..99L, NetworkShareSmbRelay.byteRange("bytes=-5", 100))
+        assertEquals(0L..99L, NetworkShareSmbRelay.byteRange("bytes=-500", 100))
+        assertEquals(50L..99L, NetworkShareSmbRelay.byteRange("bytes=50-5000", 100))
+        for (bad in listOf("bytes=100-", "bytes=20-10", "bytes=0-1,5-9", "items=0-1", "bytes=-0", "bytes=x-"))
+            assertNull(bad, NetworkShareSmbRelay.byteRange(bad, 100))
+        assertEquals("video/x-matroska", NetworkShareSmbRelay.contentType("Up.MKV"))
+    }
+
+    /** An in-memory SMB file that records whether every handle it gave out was closed. */
+    private class FakeFile(val bytes: ByteArray) : SmbFileSource {
+        @Volatile var closed = false
+        override val size: Long get() = bytes.size.toLong()
+        override fun read(offset: Long, buffer: ByteArray, length: Int): Int {
+            if (offset >= bytes.size) return -1
+            val count = minOf(length, bytes.size - offset.toInt())
+            System.arraycopy(bytes, offset.toInt(), buffer, 0, count)
+            return count
+        }
+        override fun close() { closed = true }
+    }
+
+    private fun relayRequest(address: String, method: String = "GET", range: String? = null): Triple<Int, Map<String, String>, ByteArray> {
+        val url = java.net.URL(address)
+        Socket(url.host, url.port).use { socket ->
+            val request = buildString {
+                append("$method ${url.path} HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+                range?.let { append("Range: $it\r\n") }
+                append("\r\n")
+            }
+            socket.getOutputStream().write(request.toByteArray())
+            val raw = socket.getInputStream().readBytes()
+            val split = (0 until raw.size - 3).first { raw[it] == '\r'.code.toByte() && raw[it + 1] == '\n'.code.toByte() && raw[it + 2] == '\r'.code.toByte() && raw[it + 3] == '\n'.code.toByte() }
+            val lines = String(raw, 0, split).split("\r\n")
+            val headers = lines.drop(1).associate { it.substringBefore(':').lowercase() to it.substringAfter(':').trim() }
+            return Triple(lines.first().split(' ')[1].toInt(), headers, raw.copyOfRange(split + 4, raw.size))
+        }
+    }
+
+    @Test fun `the SMB relay streams ranges on loopback behind an expiring token without the login`() {
+        val content = ByteArray(700_000) { (it % 251).toByte() }
+        val opened = mutableListOf<FakeFile>()
+        var clock = 1_000L
+        val relay = NetworkShareSmbRelay({ FakeFile(content).also { opened += it } }, now = { clock })
+        try {
+            val location = NetworkSharePolicy.smbLocation("smb://nas/Movies/Up%20(2009).mkv")!!
+            val address = relay.address(SmbTarget(location, NetworkShareClient.Login("dad", "s3cret"), "Up (2009).mkv"))!!
+            assertTrue(address, address.startsWith("http://127.0.0.1:") && address.endsWith("/Up%20(2009).mkv"))
+            assertFalse(address.contains("dad") || address.contains("s3cret"))
+
+            val whole = relayRequest(address)
+            assertEquals(200, whole.first); assertEquals("700000", whole.second["content-length"]); assertEquals("bytes", whole.second["accept-ranges"])
+            assertTrue(whole.third.contentEquals(content))
+            val part = relayRequest(address, range = "bytes=300000-300099")
+            assertEquals(206, part.first); assertEquals("bytes 300000-300099/700000", part.second["content-range"])
+            assertTrue(part.third.contentEquals(content.copyOfRange(300_000, 300_100)))
+            val tail = relayRequest(address, range = "bytes=-10")
+            assertTrue(tail.third.contentEquals(content.copyOfRange(699_990, 700_000)))
+            val head = relayRequest(address, "HEAD")
+            assertEquals(200, head.first); assertEquals("700000", head.second["content-length"]); assertEquals(0, head.third.size)
+            val beyond = relayRequest(address, range = "bytes=900000-")
+            assertEquals(416, beyond.first); assertEquals("bytes */700000", beyond.second["content-range"])
+            assertEquals(405, relayRequest(address, "POST").first)
+            assertEquals(404, relayRequest(address.replaceAfterLast(":", address.substringAfterLast(":").substringBefore('/') + "/" + "0".repeat(32) + "/x.mkv")).first)
+            Thread.sleep(50)
+            assertTrue("every opened file is closed", opened.isNotEmpty() && opened.all { it.closed })
+            clock += 13L * 60 * 60 * 1000
+            assertEquals("an expired token opens nothing", 404, relayRequest(address).first)
+        } finally {
+            relay.close()
+        }
+    }
+
     // Listings
 
     @Test fun `WebDAV listings keep only direct children inside the share`() {

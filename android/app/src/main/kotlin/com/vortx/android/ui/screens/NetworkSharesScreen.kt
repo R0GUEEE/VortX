@@ -56,7 +56,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Library > Network shares on phone and tablet (Apple `iOSNetworkSharesView`): the shares saved on this device,
- * adding one, and a folder browser that plays a video straight from the share (WebDAV or a web folder).
+ * adding one, and a folder browser that plays a video straight from the share (SMB, WebDAV or a web folder).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -80,7 +80,7 @@ fun NetworkSharesScreen(onBack: () -> Unit, onPlay: (Playable) -> Unit, modifier
             if (level == null) {
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm)) {
-                        Text("Play videos straight from a NAS or computer on your network. Add its WebDAV address, or a web server's folder listing.",
+                        Text("Play videos straight from a NAS or computer on your network: an SMB share (smb://nas/Movies), a WebDAV address, or a web server's folder listing.",
                             style = VortXTheme.type.body.copy(color = VortXTheme.colors.textSecondary))
                         Chip(label = "Add a share", selected = false, onClick = { adding = true }, leadingIcon = Icons.Filled.Add)
                         if (shares.isEmpty()) Note("No shares yet. On a Synology, QNAP or TrueNAS, turn on its WebDAV service and add that address here.")
@@ -146,7 +146,7 @@ private fun AddShareDialog(store: NetworkShareStore, onDone: () -> Unit) {
                 OutlinedTextField(password, { password = it }, label = { Text("Password") }, singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), modifier = Modifier.fillMaxWidth())
-                Text("For example 192.168.1.20:5005/video for a Synology WebDAV share. Leave the username empty if the share has no login.",
+                Text("For example smb://192.168.1.20/Movies for a shared folder, or 192.168.1.20:5005/video for a Synology WebDAV share. Leave the username empty if the share has no login.",
                     style = VortXTheme.type.label.copy(color = VortXTheme.colors.textSecondary))
                 error?.let { Text(it, style = VortXTheme.type.label.copy(color = VortXTheme.colors.danger)) }
             }

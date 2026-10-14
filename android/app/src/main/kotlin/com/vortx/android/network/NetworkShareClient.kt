@@ -18,6 +18,7 @@ class NetworkShareException(val reason: Reason) : Exception(reason.message) {
         UNREACHABLE("Couldn't reach the share. Check the address and that this device is on the same network."),
         REDIRECTED_AWAY("The share sent this video to another address, so VortX won't send your login there."),
         CREDENTIAL_STORAGE("Couldn't save the password securely on this device."),
+        SMB_SHARE_REQUIRED("Add the shared folder's name to the address, like smb://192.168.1.20/Movies."),
     }
 }
 

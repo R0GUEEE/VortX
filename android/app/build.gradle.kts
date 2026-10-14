@@ -369,6 +369,10 @@ dependencies {
     // (sync is not a licensing-boundary feature), so a plain `implementation`.
     implementation(libs.okhttp)
 
+    // smbj (network shares): browses SMB shares and feeds the loopback relay the player opens, since Android's
+    // libmpv has no SMB protocol. Both flavors; pure Java, Apache-2.0.
+    implementation(libs.smbj)
+
     // WorkManager (Round 5): the offline-downloads transport. com.vortx.android.downloads.DownloadWorker runs one
     // download as a foreground-service worker, which is what gives the Android port the two properties Apple gets
     // from its two URLSessions at once: the transfer survives process death (WorkManager persists the work and
