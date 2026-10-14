@@ -1847,16 +1847,21 @@ enum VortxLegacyBootstrapMaterial {
         try require(value <= maximum && value.rounded(.towardZero) == value, "Invalid count " + key)
         return Int64(value)
     }
+    // Built once: compiling the pattern and a formatter per row was over half the projection's time,
+    // and the projection runs on every open and sync. The formatter is shared only under its lock.
+    private static let lastWatchedPattern = try? NSRegularExpression(
+        pattern: "^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2})(?:\\.(\\d+))?(Z|[+-]\\d{2}:\\d{2})$")
+    nonisolated(unsafe) private static let lastWatchedFormatter = ISO8601DateFormatter()
+    private static let lastWatchedFormatterLock = NSLock()
     private static func lastWatched(_ root: [String: Any]) throws -> Double? {
         guard let raw = try optionalString(root, "lastWatched"), !raw.isEmpty else { return nil }
         // Parse whole seconds independently: ISO8601DateFormatter rounds fractional timestamps on
         // some OS versions. Add the original decimal fraction afterwards to preserve Double clocks.
-        let pattern = "^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2})(?:\\.(\\d+))?(Z|[+-]\\d{2}:\\d{2})$"
-        let regex = try NSRegularExpression(pattern: pattern)
-        guard let match = regex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
+        guard let regex = lastWatchedPattern,
+              let match = regex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
               let secondsRange = Range(match.range(at: 1), in: raw), let zoneRange = Range(match.range(at: 3), in: raw) else { throw fail("Invalid lastWatched clock") }
-        let formatter = ISO8601DateFormatter()
-        guard let date = formatter.date(from: String(raw[secondsRange]) + String(raw[zoneRange])) else { throw fail("Invalid lastWatched clock") }
+        let text = String(raw[secondsRange]) + String(raw[zoneRange])
+        guard let date = lastWatchedFormatterLock.withLock({ lastWatchedFormatter.date(from: text) }) else { throw fail("Invalid lastWatched clock") }
         let fraction = Range(match.range(at: 2), in: raw).flatMap { Double("0." + raw[$0]) } ?? 0
         let value = try validClock(date.timeIntervalSince1970 * 1000 + fraction * 1000, "lastWatched")
         return value > 0 ? value : nil
