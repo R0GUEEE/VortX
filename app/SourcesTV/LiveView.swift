@@ -6,8 +6,8 @@ import SwiftUI
 /// box-art, so a dedicated `ChannelTile` (not a forked `PosterCard`) carries the right shape. Focusing a
 /// tile feeds the same `BrowseHeroBackdrop` / `FocusedItemModel` that Home and Discover use; selecting one
 /// pushes the standard `DetailView`, which has a Live branch (backdrop + name + LIVE badge + source list,
-/// no VOD chrome) and plays through the player's live-tuned path. The screen reuses the engine + player
-/// wholesale: no EPG, no M3U import.
+/// no VOD chrome) and plays through the player's live-tuned path. The TV guide (`TVLiveGuideView`) shows the
+/// same channels against time, from the schedules their add-ons publish.
 ///
 /// Empty state: when no installed add-on exposes a live catalog there are no live rows, so the screen
 /// nudges the user to the Add-ons tab rather than showing a blank surface.
@@ -28,6 +28,12 @@ struct LiveView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
                         if !core.liveBoardRows.isEmpty {
+                            // The schedule view: every channel down the side, programmes across time.
+                            NavigationLink { TVLiveGuideView(channels: LiveGuideChannel.channels(from: core.liveBoardRows)) } label: {
+                                Label("TV guide", systemImage: "calendar")
+                            }
+                            .buttonStyle(ChipButtonStyle(selected: false))
+                            .padding(.horizontal, Theme.Space.screenEdge)
                             ForEach(core.liveBoardRows) { row in
                                 CoreChannelRowView(row: row, focusModel: focusModel)
                             }
