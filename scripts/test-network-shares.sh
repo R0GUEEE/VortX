@@ -49,3 +49,10 @@ xcrun swiftc -parse-as-library -import-objc-header app/SourcesShared/SMB/VortXSM
   app/SourcesShared/NetworkShareClient.swift app/SourcesShared/SMB/NetworkShareSMB.swift app/Tests/NetworkShareSMBLinkTests.swift \
   "${frameworks[@]}" -lresolv -liconv -lz -framework Security -framework CoreFoundation -o "$dir/smb-link"
 "$dir/smb-link"
+# Against a real Samba server when one is running (test/fixtures/smb-share.sh prints the address).
+if [[ -n "${VORTX_SMB_LIVE_SERVER:-}" ]]; then
+  xcrun swiftc -parse-as-library -import-objc-header app/SourcesShared/SMB/VortXSMBShim.h app/SourcesShared/NetworkShares.swift \
+    app/SourcesShared/NetworkShareClient.swift app/SourcesShared/SMB/NetworkShareSMB.swift app/Tests/NetworkShareSMBLiveTests.swift \
+    "${frameworks[@]}" -lresolv -liconv -lz -framework Security -framework CoreFoundation -o "$dir/smb-live"
+  "$dir/smb-live"
+fi
