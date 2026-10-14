@@ -2465,6 +2465,8 @@ struct PlayerScreen: View {
         .persistentSystemOverlays(.hidden)
         #endif
         .tint(Theme.Palette.accent)
+        // Mac: the window buttons show and auto-hide with these controls.
+        .macPlayerChromeVisible(controlsVisible && !isLocked)
         .onAppear {
             refreshAutoSkipSettings()
             playbackExited = false
@@ -11409,3 +11411,15 @@ private struct AirPlayPickerRepresentable: UIViewRepresentable {
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }
 #endif
+
+private extension View {
+    /// Mac: the window buttons show and hide with the player's controls (MacPlayerHost.chromeVisible).
+    @ViewBuilder func macPlayerChromeVisible(_ visible: Bool) -> some View {
+        #if os(macOS)
+        self.onAppear { MacPlayerHost.shared.chromeVisible = visible }
+            .onChange(of: visible) { _, now in MacPlayerHost.shared.chromeVisible = now }
+        #else
+        self
+        #endif
+    }
+}

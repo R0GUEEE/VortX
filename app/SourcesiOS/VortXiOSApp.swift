@@ -494,11 +494,11 @@ private struct MacWindowChrome: NSViewRepresentable {
         }
 
         @MainActor private func apply(to window: NSWindow) {
-            // The player hides the buttons' ancestor chain for its full-bleed cover. Keep that behavior
-            // and AppKit's native fullscreen hover chrome; windowed browsing uses the independent host.
-            guard !inFullScreenTransition, !window.styleMask.contains(.fullScreen),
-                  MacPlayerHost.shared.content == nil else { return }
-            MacWindowControls.restore(in: window)
+            // Keep AppKit's native fullscreen chrome. Windowed, the independent host keeps the buttons; while
+            // the player is up they follow its controls (shown with them, faded out when they hide).
+            guard !inFullScreenTransition, !window.styleMask.contains(.fullScreen) else { return }
+            let player = MacPlayerHost.shared
+            MacWindowControls.restore(in: window, visible: player.content == nil || player.chromeVisible)
         }
     }
 }
