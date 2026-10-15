@@ -552,19 +552,27 @@ struct AddonsView: View {
                     .buttonStyle(ChipButtonStyle(selected: false))
                     .fixedSize()
             }
-            // Per-profile on/off (local overlay). Distinct from Remove, which uninstalls account-wide.
-            Button { profiles.toggleAddon(base: addon.transportUrl) } label: {
-                Image(systemName: isOff ? "eye.slash" : "eye")
-            }
-            .buttonStyle(ChipButtonStyle(selected: !isOff))
-            .fixedSize()
-            .accessibilityLabel(isOff ? "Show \(addon.manifest.name) for this profile" : "Hide \(addon.manifest.name) for this profile")
+            visibilityToggle(addon, isOff: isOff)
             if !profiles.activeSharesMainAddons {
                 Button { core.uninstallAddon(addon) } label: { Label("Remove", systemImage: "trash") }
                     .buttonStyle(ChipButtonStyle(selected: true, accent: Theme.Palette.danger, accentText: Theme.Palette.danger))
                     .fixedSize()
             }
+        } else if isOff {
+            // A built-in add-on switched off elsewhere (another device, the web dashboard, an older version)
+            // always keeps a way back on, even though built-ins cannot be switched off here.
+            visibilityToggle(addon, isOff: isOff)
         }
+    }
+
+    /// Per-profile on/off (local overlay). Distinct from Remove, which uninstalls account-wide.
+    private func visibilityToggle(_ addon: CoreDescriptor, isOff: Bool) -> some View {
+        Button { profiles.toggleAddon(base: addon.transportUrl) } label: {
+            Image(systemName: isOff ? "eye.slash" : "eye")
+        }
+        .buttonStyle(ChipButtonStyle(selected: !isOff))
+        .fixedSize()
+        .accessibilityLabel(isOff ? "Show \(addon.manifest.name) for this profile" : "Hide \(addon.manifest.name) for this profile")
     }
 
     private func hint(_ text: String) -> some View {
