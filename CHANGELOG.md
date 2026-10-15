@@ -13,7 +13,7 @@ cards and a Trailers & Extras row, and the player answers the remote much faster
 ### Fixed
 
 - **A slow, glitchy player, most of all on Apple TV.** The player rebuilt its whole screen on every background update, including the progress it saves when you pause and every 20 seconds while you watch. That made the controls slow to appear when you paused and could make playback stutter. The player now redraws only for what it shows, on Apple TV, iPhone, iPad and Mac.
-- **Less work while you watch, most of all on Mac.** Each time VortX saved your place it wrote your whole account to disk, and during playback it did that twice per save. It now keeps your place in memory and writes it to disk at most every 30 seconds, and straight away when you pause, close the player, switch away from the app or quit. The Mac app also no longer reads a file from disk for every source in a list, which made long source lists and the player controls slow.
+- **Much less work while you watch, most of all on Mac.** Saving your place used to check and rewrite your whole account as often as every 5 seconds, twice per save, and upload all of it once a minute. VortX now saves your place every 20 seconds and writes it to disk at most every 30 seconds, and straight away when you pause, seek, close the player, switch away from the app or quit. While you keep watching, it uploads your place at most every 5 minutes, and within seconds once you pause or stop. Titles with thousands of sources no longer slow the player controls down.
 - **Built-in add-ons you switched off can be switched back on.** A built-in add-on switched off on another device, on the web or in an older version had no way back on. The eye button now shows for any add-on that is off, on every platform.
 - **Mac:** the window buttons show and hide together with the player controls.
 
@@ -27,7 +27,7 @@ cards and a Trailers & Extras row, and the player answers the remote much faster
 
 ### Android
 
-Android gets every rating with the services' marks on cards, title pages and episodes, ratings on landscape cards and Android TV backdrop cards (which showed none before), and the fix for switched-off built-in add-ons. The Android APK is still an early technical preview, so expect missing features and rough edges.
+Android gets every rating with the services' marks on cards, title pages and episodes, ratings on landscape cards and Android TV backdrop cards (which showed none before), the fix for switched-off built-in add-ons, and lighter saving while you watch: your place is written every 20 seconds instead of every 5. The Android APK is still an early technical preview, so expect missing features and rough edges.
 
 ## 0.5.2 - Up next, a new series page, For You, network shares and a TV guide
 

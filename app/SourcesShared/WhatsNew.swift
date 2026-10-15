@@ -8,7 +8,7 @@ enum WhatsNew {
     static let version = "0.5.3"
     static let highlights: [String] = [
         "The player answers the remote faster. It no longer rebuilds itself on every background update, which made the controls slow to appear on pause, most of all on Apple TV.",
-        "Less work while you watch, most of all on Mac: your place is saved at most every 30 seconds and straight away when you pause or leave, instead of rewriting your whole account on every save.",
+        "Much less work while you watch, most of all on Mac: your place is saved every 20 seconds and straight away when you pause or leave, instead of rewriting and uploading your whole account every few seconds.",
         "Every rating, everywhere: IMDb, Rotten Tomatoes, Popcornmeter, Metacritic, TMDB, Letterboxd, Trakt, SIMKL, MyAnimeList and Kitsu, each shown as the service's own mark.",
         "Episodes show their IMDb, TMDB and Trakt scores, and each season's best episode is marked Top rated.",
         "New episode cards with the full still, a frosted panel, Up next and progress. Season posters show on iPhone too.",
