@@ -2050,6 +2050,8 @@ struct TVPlayerView: View {
                         core.reportProgress(timeSeconds: currentTime, durationSeconds: duration,
                                             target: playbackMutationTarget)
                     }
+                    // The engine writes position ticks at most every 30 s; make this one durable now.
+                    core.flushNativeProgress()
                 } else if pendingBoundaryAdvanceAfterPlay {
                     pendingBoundaryAdvanceAfterPlay = false
                     autoAdvance()

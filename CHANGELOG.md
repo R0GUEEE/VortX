@@ -13,6 +13,7 @@ cards and a Trailers & Extras row, and the player answers the remote much faster
 ### Fixed
 
 - **A slow, glitchy player, most of all on Apple TV.** The player rebuilt its whole screen on every background update, including the progress it saves when you pause and every 20 seconds while you watch. That made the controls slow to appear when you paused and could make playback stutter. The player now redraws only for what it shows, on Apple TV, iPhone, iPad and Mac.
+- **Less work while you watch, most of all on Mac.** Each time VortX saved your place it wrote your whole account to disk, and during playback it did that twice per save. It now keeps your place in memory and writes it to disk at most every 30 seconds, and straight away when you pause, close the player, switch away from the app or quit. The Mac app also no longer reads a file from disk for every source in a list, which made long source lists and the player controls slow.
 - **Built-in add-ons you switched off can be switched back on.** A built-in add-on switched off on another device, on the web or in an older version had no way back on. The eye button now shows for any add-on that is off, on every platform.
 - **Mac:** the window buttons show and hide together with the player controls.
 

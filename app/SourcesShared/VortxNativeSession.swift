@@ -298,6 +298,16 @@ final class VortxEncryptedCheckpointStore: VortxCheckpointStore, @unchecked Send
     private let lock = NSLock()
     private static let migrationDraftLock = NSLock()
     private var bootstraps: [VortxAccountScope: Data] = [:]
+    /// The checkpoint this store last wrote or fully opened, per scope: the digest of the exact file bytes
+    /// and the parts a commit carries forward. While the file still hashes the same, a commit skips the full
+    /// decrypt and validation of it; a fresh store instance, or a file replaced underneath, opens it in full.
+    private struct Installed {
+        let digest: SHA256.Digest
+        let state: String
+        let bootstrap: Data?
+        let hostPreferences: Data?
+    }
+    private var installed: [VortxAccountScope: Installed] = [:]
     private struct AccountLocator: Codable {
         let format: String
         let scope: VortxAccountScope
@@ -491,9 +501,11 @@ final class VortxEncryptedCheckpointStore: VortxCheckpointStore, @unchecked Send
         let locator = try JSONDecoder().decode(AccountLocator.self, from: plain)
         guard locator.format == "vortx-native-account-locator-v1", locator.scope.account == account else { throw VortxNativeError.invalidSnapshot }
         try locator.scope.validate()
-        let envelope = try open(Data(contentsOf: url(locator.scope)), scope: locator.scope)
+        let stateBytes = try Data(contentsOf: url(locator.scope))
+        let envelope = try open(stateBytes, scope: locator.scope)
         guard let bootstrap = envelope.bootstrap else { throw VortxNativeError.invalidSnapshot }
         bootstraps[locator.scope] = bootstrap
+        remember(stateBytes, envelope, scope: locator.scope)
         return Recovery(scope: locator.scope, state: envelope.state, bootstrap: bootstrap)
     }
     /// A new cloud owner cannot reset a known account. Older unindexed checkpoints require
@@ -530,8 +542,10 @@ final class VortxEncryptedCheckpointStore: VortxCheckpointStore, @unchecked Send
         lock.lock(); defer { lock.unlock() }
         try scope.validate()
         do {
-            let envelope = try open(Data(contentsOf: url(scope)), scope: scope)
+            let bytes = try Data(contentsOf: url(scope))
+            let envelope = try open(bytes, scope: scope)
             if let retained = envelope.bootstrap { bootstraps[scope] = retained }
+            remember(bytes, envelope, scope: scope)
             return envelope.state
         }
         catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
@@ -564,6 +578,10 @@ final class VortxEncryptedCheckpointStore: VortxCheckpointStore, @unchecked Send
         try VortxNativeHostPreferences.validateSealed(hostPreferences, scope: scope)
         try commitSnapshot(snapshot, scope: scope, hostPreferences: hostPreferences)
     }
+    private func remember(_ bytes: Data, _ envelope: Envelope, scope: VortxAccountScope) {
+        installed[scope] = Installed(digest: SHA256.hash(data: bytes), state: envelope.state,
+                                     bootstrap: envelope.bootstrap, hostPreferences: envelope.hostPreferences)
+    }
     private func commitSnapshot(_ snapshot: String, scope: VortxAccountScope, hostPreferences: Data?) throws {
         lock.lock(); defer { lock.unlock() }
         var stage = VortxCheckpointDiagnostics.Stage.validate
@@ -571,30 +589,43 @@ final class VortxEncryptedCheckpointStore: VortxCheckpointStore, @unchecked Send
             try scope.validate(); _ = try scope.validateSnapshot(snapshot)
             var retainedHost = hostPreferences
             stage = .retainExisting
-            do {
-                // The first migration source is immutable, even for a fresh store instance making a
-                // later commit. A decode/read failure must not replace it with a newer/empty carrier.
-                let retained = try open(Data(contentsOf: url(scope)), scope: scope)
-                if let bootstrap = retained.bootstrap { bootstraps[scope] = bootstrap }
-                if retainedHost == nil { retainedHost = retained.hostPreferences }
-            } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {}
+            var existing: Data?
+            do { existing = try Data(contentsOf: url(scope)) }
+            catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {}
+            if let existing {
+                if let known = installed[scope], known.digest == SHA256.hash(data: existing) {
+                    // The exact bytes this store last wrote or fully opened: carry their parts forward.
+                    if let bootstrap = known.bootstrap { bootstraps[scope] = bootstrap }
+                    if retainedHost == nil { retainedHost = known.hostPreferences }
+                    // Nothing would change on disk, so there is nothing to write.
+                    if known.state == snapshot, known.hostPreferences == retainedHost, known.bootstrap == bootstraps[scope] { return }
+                } else {
+                    // The first migration source is immutable, even for a fresh store instance making a
+                    // later commit. A decode/read failure must not replace it with a newer/empty carrier.
+                    let retained = try open(existing, scope: scope)
+                    if let bootstrap = retained.bootstrap { bootstraps[scope] = bootstrap }
+                    if retainedHost == nil { retainedHost = retained.hostPreferences }
+                }
+            }
             let bootstrap = bootstraps[scope]
             let envelope = Envelope(format: "vortx-native-checkpoint-v1", state: snapshot, bootstrap: bootstrap, hostPreferences: retainedHost)
             stage = .seal
             let sealed = try AES.GCM.seal(JSONEncoder().encode(envelope), using: key, authenticating: scope.authenticatedData)
             guard let combined = sealed.combined else { throw VortxNativeError.invalidSnapshot }
+            let bytes = try indexedCiphertext(combined, scope: scope)
             stage = .createDirectory
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let staged = directory.appendingPathComponent(".native-checkpoint-\(UUID().uuidString).sealed")
             defer { try? FileManager.default.removeItem(at: staged) }
             stage = .stageWrite
-            try indexedCiphertext(combined, scope: scope).write(to: staged, options: [.withoutOverwriting, .completeFileProtection])
+            try bytes.write(to: staged, options: [.withoutOverwriting, .completeFileProtection])
             stage = .stageSync
             let file = try FileHandle(forWritingTo: staged); defer { try? file.close() }
             try file.synchronize()
+            // The sealed bytes come from parts validated above, so decoding them again proves nothing new.
+            // Byte equality proves the disk holds exactly what was sealed (as durableInstall checks).
             stage = .stageReadback
-            let stagedRead = try open(Data(contentsOf: staged), scope: scope)
-            guard stagedRead.state == snapshot, stagedRead.bootstrap == bootstrap, stagedRead.hostPreferences == retainedHost else { throw VortxNativeError.invalidSnapshot }
+            guard try Data(contentsOf: staged) == bytes else { throw VortxNativeError.invalidSnapshot }
             stage = .install
             guard Darwin.rename(staged.path, url(scope).path) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
             stage = .directorySync
@@ -603,9 +634,12 @@ final class VortxEncryptedCheckpointStore: VortxCheckpointStore, @unchecked Send
             defer { Darwin.close(directoryFD) }
             guard Darwin.fsync(directoryFD) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
             stage = .installedReadback
-            let installed = try open(Data(contentsOf: url(scope)), scope: scope)
-            guard installed.state == snapshot, installed.bootstrap == bootstrap, installed.hostPreferences == retainedHost else { throw VortxNativeError.invalidSnapshot }
+            guard try Data(contentsOf: url(scope)) == bytes else { throw VortxNativeError.invalidSnapshot }
+            installed[scope] = Installed(digest: SHA256.hash(data: bytes), state: snapshot, bootstrap: bootstrap,
+                                         hostPreferences: retainedHost)
         } catch {
+            // The file is uncertain now: the next commit opens it in full.
+            installed[scope] = nil
             VortxCheckpointDiagnostics.report(stage: stage, error: error)
             throw error
         }
@@ -790,6 +824,17 @@ actor VortxNativeSession {
     private let diagnostics: (@Sendable (String) -> Void)?
     private var closed = false
     private var persistenceFailed = false
+    // Playback position ticks are applied in memory at once but written to the sealed checkpoint at most
+    // every 30 s. Every other mutation writes immediately and carries the latest position with it, and
+    // flushPendingProgress writes a held-back position on pause, player close, background or quit. A crash
+    // can lose at most the last 30 s of watch position, never anything else.
+    private var pendingProgressCommit = false
+    private var lastDurableCommit: TimeInterval?
+    private var writeProgressUntil: TimeInterval = 0
+    static let progressCommitInterval: TimeInterval = 30
+    private static func isProgressAction(_ action: String) -> Bool {
+        (try? JSONDecoder().decode(VortxJSON.self, from: Data(action.utf8)))?["type"] == .string("report_progress")
+    }
     private var epoch = UUID()
     private var tickets: [String: UUID] = [:]
     private var bridges: [String: VortxResourceBridge] = [:]
@@ -1347,26 +1392,55 @@ actor VortxNativeSession {
         let updated = try candidate.stateJSON()
         let hasHostChanges = hostRemote != nil || !hostEdits.isEmpty || !legacyWatchlists.isEmpty || hasWebsiteWork || hasAddonWork || authenticatedSourceArchive != nil
         let encodedHost = hasHostChanges ? try candidateHost.encoded() : nil
-        do {
-            try lease.withActive {
-                func commit() throws {
-                    if let encodedHost { try store.commit(updated, scope: scope, hostPreferences: encodedHost) }
-                    else { try store.commit(updated, scope: scope) }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let progressOnly = !hasHostChanges && legacyMaterial == nil && sourceAuthority == nil && !actions.isEmpty
+            && actions.allSatisfy(Self.isProgressAction)
+        let holdBack = progressOnly && uptime >= writeProgressUntil
+            && lastDurableCommit.map { uptime - $0 < Self.progressCommitInterval } == true
+        if holdBack {
+            pendingProgressCommit = true
+        } else {
+            do {
+                try lease.withActive {
+                    func commit() throws {
+                        if let encodedHost { try store.commit(updated, scope: scope, hostPreferences: encodedHost) }
+                        else { try store.commit(updated, scope: scope) }
+                    }
+                    if let sourceAuthority { try sourceAuthority.withActive(commit) } else { try commit() }
                 }
-                if let sourceAuthority { try sourceAuthority.withActive(commit) } else { try commit() }
             }
-        }
-        catch VortxNativeError.closed { throw VortxNativeError.closed }
-        catch VortxNativeError.superseded { throw VortxNativeError.superseded }
-        catch {
-            // A rename may have succeeded before a readback/fsync failure. Do not overwrite that
-            // uncertain checkpoint with another transaction; reopen and validate it first.
-            VortxCheckpointDiagnostics.report(stage: .transactionCommit, error: error)
-            persistenceFailed = true; throw VortxNativeError.checkpointUncertain
+            catch VortxNativeError.closed { throw VortxNativeError.closed }
+            catch VortxNativeError.superseded { throw VortxNativeError.superseded }
+            catch {
+                // A rename may have succeeded before a readback/fsync failure. Do not overwrite that
+                // uncertain checkpoint with another transaction; reopen and validate it first.
+                VortxCheckpointDiagnostics.report(stage: .transactionCommit, error: error)
+                persistenceFailed = true; throw VortxNativeError.checkpointUncertain
+            }
+            pendingProgressCommit = false
+            lastDurableCommit = uptime
+            if progressOnly { writeProgressUntil = 0 }
         }
         let previous = runtime; runtime = candidate; hostPreferences = candidateHost; installed = true; previous.close()
         if try scope.validateSnapshot(old)["activeProfileId"] != state["activeProfileId"] { invalidateScreens() }
         return results
+    }
+    /// Write a position the 30 s coalescing held back, and write the next position report at once too (it may
+    /// still be on its way from the player). Failure is handled exactly like a failed commit in dispatch.
+    func flushPendingProgress() throws {
+        guard !closed else { throw VortxNativeError.closed }
+        writeProgressUntil = ProcessInfo.processInfo.systemUptime + 10
+        guard pendingProgressCommit else { return }
+        guard !persistenceFailed else { throw VortxNativeError.checkpointUncertain }
+        let current = try stateJSON()
+        do { try lease.withActive { try store.commit(current, scope: scope) } }
+        catch VortxNativeError.closed { throw VortxNativeError.closed }
+        catch {
+            VortxCheckpointDiagnostics.report(stage: .transactionCommit, error: error)
+            persistenceFailed = true; throw VortxNativeError.checkpointUncertain
+        }
+        pendingProgressCommit = false
+        lastDurableCommit = ProcessInfo.processInfo.systemUptime
     }
     func screen(_ name: String) -> VortxNativeScreenState? { screens[name] }
     private func begin(_ name: String, expectedProfileID: String? = nil) throws -> (VortxResourceBridge, UUID, UUID, String) {

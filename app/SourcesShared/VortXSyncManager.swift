@@ -5275,6 +5275,9 @@ final class VortXSyncManager: ObservableObject {
     /// macOS has no such API (and no jetsam on background), so it falls back to a plain push there. Called
     /// from BOTH app entry points (tvOS + iOS/Mac) for parity.
     func syncUpOnBackground() {
+        // Write playback progress the native session is holding back before the app may be suspended. It
+        // queues ahead of the push below, which therefore waits for it.
+        CoreBridge.shared.flushNativeProgress()
         let capture = credentialAuthority.capture()
         let capturedDataKey = dataKey
         #if canImport(UIKit) && !os(macOS)

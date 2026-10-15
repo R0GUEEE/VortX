@@ -6,6 +6,8 @@ private final class SessionABI: VortxRuntimeABI, @unchecked Sendable {
     private var next: UInt = 0
     private var states: [UInt: String] = [:]
     private var playbackUnavailable = false
+    private var progressCount = 0
+    var progressDispatches: Int { lock.withLock { progressCount } }
     func failPlaybackQueries() { lock.withLock { playbackUnavailable = true } }
     func create(ownerID: String, ownerName: String) -> UInt {
         hydrate("{\"roster\":{\"profiles\":{\"\(ownerID)\":{\"id\":\"\(ownerID)\",\"owner\":true,\"deleted\":false,\"addons\":\"own\"},\"kid\":{\"id\":\"kid\",\"owner\":false,\"addons\":\"share_primary\"}}},\"activeProfileId\":\"\(ownerID)\",\"libraries\":{\"kid\":{},\"\(ownerID)\":{\"watchContexts\":{\"episode\":{\"name\":\"Retain context\",\"durationMs\":1200001}}}}}")
@@ -18,6 +20,7 @@ private final class SessionABI: VortxRuntimeABI, @unchecked Sendable {
         guard var state = try? JSONSerialization.jsonObject(with: Data(states[handle]!.utf8)) as? [String: Any],
               let action = try? JSONSerialization.jsonObject(with: Data(action.utf8)) as? [String: Any] else { return nil }
         if action["type"] as? String == "fail" { return "{\"ok\":false}" }
+        if action["type"] as? String == "report_progress" { progressCount += 1 }
         if action["type"] as? String == "bind_sync_scope" {
             let roster = state["roster"] as! [String: Any]
             let profiles = roster["profiles"] as! [String: [String: Any]]
@@ -80,8 +83,11 @@ private final class SessionStore: VortxCheckpointStore, @unchecked Sendable {
     func commit(_ snapshot: String, scope: VortxAccountScope, hostPreferences: Data) throws {
         try commit(snapshot, scope: scope); lock.withLock { host = hostPreferences }
     }
+    private var commitCount = 0
+    var commits: Int { lock.withLock { commitCount } }
     func commit(_ snapshot: String, scope: VortxAccountScope) throws {
         lock.lock(); defer { lock.unlock() }
+        commitCount += 1
         if block { block = false; entered.signal(); precondition(release.wait(timeout: .now() + 5) == .success) }
         if !failure || installBeforeFailure { value = snapshot }
         if failure { throw VortxNativeError.unavailable }
@@ -679,8 +685,73 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         print("Actual packaged ABI hydration: unchanged native authority reconstitutes one derived context while preserving the retained context exactly; authenticated preparation passes")
     }
 #endif
+    /// Playback progress: the duplicate lane of one tick is dropped, position ticks are written at most every 30 s,
+    /// every other change writes at once with the latest position, and a flush writes what was held back.
+    static func progressWriteTests() async throws {
+        let abi = SessionABI(), store = SessionStore()
+        let scope = VortxAccountScope(account: "progress-writes", ownerProfileID: "owner")
+        let session = try VortxNativeSession(scope: scope, ownerName: "Owner", abi: abi, store: store, transport: SessionTransport(),
+                                             allowNewAccount: true)
+        func durable() throws -> Int? {
+            try JSONDecoder().decode(VortxJSON.self, from: Data(store.read(scope: scope)!.utf8))["fixtureMutation"]?.decode(Int.self)
+        }
+        func progress(_ value: Int) -> String { #"{"type":"report_progress","value":"# + "\(value)}" }
+        var commits = store.commits
+        _ = try await session.dispatch([progress(1)], now: 1)
+        check(try store.commits == commits + 1 && durable() == 1)                         // the first position writes
+        commits = store.commits
+        _ = try await session.dispatch([progress(2)], now: 2)
+        _ = try await session.dispatch([progress(3)], now: 3)
+        check(try store.commits == commits && durable() == 1)                             // later ticks stay in memory
+        let live = try JSONDecoder().decode(VortxJSON.self, from: Data(try await session.stateJSON().utf8))
+        check((try live["fixtureMutation"]?.decode(Int.self)) == 3)
+        _ = try await session.dispatch([#"{"type":"edit","value":4}"#], now: 4)
+        check(try store.commits == commits + 1 && durable() == 4)                         // any other change writes
+        _ = try await session.dispatch([progress(5)], now: 5)
+        check((try durable()) == 4)
+        try await session.flushPendingProgress()
+        check((try durable()) == 5)                                                        // a flush writes it
+        _ = try await session.dispatch([progress(6)], now: 6)
+        check((try durable()) == 6)                                                        // so does the next report
+        _ = try await session.dispatch([progress(7)], now: 7)
+        check((try durable()) == 6)
+        store.failWrites()
+        do { try await session.flushPendingProgress(); fatalError("failed progress flush reported success") }
+        catch VortxNativeError.checkpointUncertain {}
+        store.recover()
+        do { _ = try await session.dispatch([progress(8)], now: 8); fatalError("uncertain checkpoint accepted progress") }
+        catch VortxNativeError.checkpointUncertain {}
+        await session.close()
+
+        let laneABI = SessionABI()
+        let laneSession = try VortxNativeSession(scope: .init(account: "progress-lanes", ownerProfileID: "owner"), ownerName: "Owner",
+                                                 abi: laneABI, store: SessionStore(), transport: SessionTransport(), allowNewAccount: true)
+        let facade = try await VortxNativeCoreFacade.create(session: laneSession, registry: [], changed: { _ in })
+        func report(_ meta: String, _ video: String?, _ ms: UInt64) -> Bool {
+            var action: [String: VortxJSON] = ["type": .string("report_progress"), "metaId": .string(meta), "name": .string(meta),
+                                               "positionMs": .unsigned(ms), "durationMs": .unsigned(3_600_000)]
+            if let video { action["videoId"] = .string(video) }
+            return facade.dispatchForProfile(.object(action), profileID: "owner", expectedAccountGeneration: facade.accountGeneration)
+        }
+        let base = laneABI.progressDispatches
+        check(report("tt1", nil, 60_000) && report("tt1", "tt1", 60_400))                  // both lanes of one movie tick
+        await facade.settleNativeMutations()
+        check(laneABI.progressDispatches == base + 1)
+        check(report("tt1", nil, 65_000)); await facade.settleNativeMutations()
+        check(laneABI.progressDispatches == base + 2)                                      // a real move still reports
+        check(report("tt2", "tt2:1:1", 65_000)); await facade.settleNativeMutations()
+        check(laneABI.progressDispatches == base + 3)                                      // another title still reports
+        check(facade.dispatchForProfile(.object(["type": .string("mark_watched"), "metaId": .string("tt2"),
+                                                 "videoId": .string("tt2:1:1")]),
+                                        profileID: "owner", expectedAccountGeneration: facade.accountGeneration))
+        check(report("tt2", "tt2:1:1", 65_000)); await facade.settleNativeMutations()
+        check(laneABI.progressDispatches == base + 4)                                      // a watched change lets it through
+        await facade.shutdown()
+        print("Native progress writes: duplicate lane dropped, 30 s coalescing, immediate non-progress writes, flush and failure passed")
+    }
     static func main() async throws {
         try hydrationPreservationTests()
+        try await progressWriteTests()
 #if canImport(VortxEngine) && VORTX_ENGINE_STATE_BRIDGE
         try liveHydrationPreservationTests()
 #endif
@@ -947,6 +1018,17 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         check(try encrypted.read(scope: scope) == before)
         try encrypted.commit(before, scope: scope)
         check(try archived(Data(contentsOf: files[0])) == archive)
+        // A repeat commit of identical state writes nothing (the file keeps its exact bytes), and a file replaced
+        // underneath is opened in full again, so a corrupt replacement is refused, never overwritten.
+        let settledCheckpoint = try Data(contentsOf: files[0])
+        try encrypted.commit(before, scope: scope)
+        check(try Data(contentsOf: files[0]) == settledCheckpoint)
+        try Data("not a checkpoint".utf8).write(to: files[0], options: .atomic)
+        do { try encrypted.commit(before, scope: scope); fatalError("replaced checkpoint overwritten without a full open") } catch {}
+        check(try Data(contentsOf: files[0]) == Data("not a checkpoint".utf8))
+        try settledCheckpoint.write(to: files[0], options: .atomic)
+        try encrypted.commit(before, scope: scope)
+        check(try encrypted.read(scope: scope) == before)
         let wrongKey = try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(size: .bits256))
         do { _ = try wrongKey.recovery(account: scope.account); fatalError("wrong key recovered account locator") } catch {}
         do { _ = try VortxNativeSession(scope: scope, ownerName: "Owner", abi: abi, store: wrongKey, transport: transport, allowNewAccount: true); fatalError("decrypt failure seeded empty owner") }

@@ -33,6 +33,11 @@ enum NodeServer {
     // Endpoint readers must never wait for process launch/reaping on the lifecycle queue.
     private static let nativePublicationLock = NSLock()
     private static var nativePublication: (process: Process, receipt: String)?
+    /// The bound port of the current publication. Every stream URL asks for the base URL, so reading the receipt
+    /// file each time cost a disk read per source on every redraw. The port only changes when the child is
+    /// (re)published, which clears this; while still unbound the file is re-read at most every 0.5 s.
+    private static var nativeBoundPort: Int?
+    private static var nativeReceiptReadAt: TimeInterval = -1
 
     /// Serializes all access to the mutable child state (`process`, `started`, `exitCode`,
     /// `shutdownRequested`). startIfNeeded/restart dispatch their work to this queue ASYNC so neither
@@ -152,13 +157,16 @@ enum NodeServer {
     /// Node listener on 11470 cannot become the native endpoint while the child retries its bind.
     static var nativeBaseURL: String? {
         guard usingNativeServer else { return nil }
-        nativePublicationLock.lock()
-        let published = nativePublication
-        nativePublicationLock.unlock()
-        guard let published else { return nil }
+        nativePublicationLock.lock(); defer { nativePublicationLock.unlock() }
+        // A dead child drops to nil at once; the running check is cheap and stays on every call.
+        guard let published = nativePublication, published.process.isRunning else { return nil }
+        if let port = nativeBoundPort { return "http://127.0.0.1:\(port)" }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard nativeReceiptReadAt < 0 || now - nativeReceiptReadAt >= 0.5 else { return nil }
+        nativeReceiptReadAt = now
         let receipt = try? String(contentsOfFile: published.receipt, encoding: .utf8)
-        guard let port = NativeTransportPolicy.boundNativePort(processRunning: published.process.isRunning,
-                                                               receipt: receipt) else { return nil }
+        guard let port = NativeTransportPolicy.boundNativePort(processRunning: true, receipt: receipt) else { return nil }
+        nativeBoundPort = port
         return "http://127.0.0.1:\(port)"
     }
 
@@ -166,6 +174,7 @@ enum NodeServer {
         nativePublicationLock.lock()
         if let process, let receipt { nativePublication = (process, receipt) }
         else { nativePublication = nil }
+        nativeBoundPort = nil; nativeReceiptReadAt = -1
         nativePublicationLock.unlock()
     }
 

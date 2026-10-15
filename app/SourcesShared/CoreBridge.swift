@@ -1,6 +1,9 @@
 import Foundation
 import CoreFoundation
 import CryptoKit
+#if os(macOS)
+import AppKit
+#endif
 #if !VORTX_NATIVE_DATA_ENGINE
 import StremioXCore
 #endif
@@ -67,6 +70,9 @@ final class CoreBridge: ObservableObject {
     private var nativePublishedCredentialSlot: String?
     private var nativePublishedAccountGeneration: UUID?
     private var nativeFacade: VortxNativeCoreFacade? { nativeFacadeLock.withLock { nativeFacadeStorage } }
+    #if os(macOS)
+    private var quitProgressObserver: NSObjectProtocol?
+    #endif
     var nativeRegistryBinding: VortxNativeCoreFacade.RegistryBinding? { nativeFacade?.registryBinding }
     var hasNativeSession: Bool { nativeFacade?.isAvailable == true }
     var nativeCheckpointRequiresReopen: Bool { nativeFacade?.requiresCheckpointReopen == true }
@@ -1148,6 +1154,19 @@ final class CoreBridge: ObservableObject {
         return playerActiveSnapshotValue
     }
 
+    /// The native session writes playback position ticks at most every 30 s. Write a held-back position now:
+    /// on pause, when the player closes, and when the app goes to the background or quits. `waitUpTo` blocks
+    /// for at most that long, for quitting, where nothing runs after the notification returns.
+    func flushNativeProgress(waitUpTo timeout: TimeInterval? = nil) {
+#if VORTX_NATIVE_DATA_ENGINE
+        guard let facade = nativeFacade else { return }
+        guard let timeout else { facade.flushPendingProgress(); return }
+        let done = DispatchSemaphore(value: 0)
+        facade.flushPendingProgress { done.signal() }
+        _ = done.wait(timeout: .now() + timeout)
+#endif
+    }
+
     /// Increment/decrement the player-active depth on the MAIN actor and publish `playerActive`.
     /// Balanced calls from each player host's onAppear (+1) and onDisappear (-1); the depth counter
     /// keeps it true across a nested trailer→player mount and a teardown straddle.
@@ -1156,6 +1175,8 @@ final class CoreBridge: ObservableObject {
             guard let self else { return }
             self.playerActiveDepth = max(0, self.playerActiveDepth + (on ? 1 : -1))
             let active = self.playerActiveDepth > 0
+            // The last player closed: write the position the native session may still be holding back.
+            if !active, self.playerActive { self.flushNativeProgress() }
             if self.playerActive != active { self.playerActive = active }
             self.playerActiveSnapshotLock.lock()
             self.playerActiveSnapshotValue = active
@@ -1244,6 +1265,12 @@ final class CoreBridge: ObservableObject {
         guard !started else { return }
         started = true
 #if VORTX_NATIVE_DATA_ENGINE
+        #if os(macOS)
+        // Quitting does not background the Mac app first: write held-back playback progress on the way out.
+        quitProgressObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.flushNativeProgress(waitUpTo: 2) }
+        #endif
         // A compiled native lane cannot initialize Stremio, even when migration is not yet bound.
         Task {
             await RemoteConfig.shared.bootstrap()

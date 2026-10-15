@@ -339,6 +339,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                                  completion: (@Sendable (Result<VortxJSON, Error>) -> Void)? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }; guard !closed else { return false }
         guard !checkpointReopenRequired else { return fail("checkpoint_uncertain_reopen_required") }
+        if !admitProgress(type: type, raw: raw), completion == nil { return true }
         let predecessor = tasks["native_state"]
         let ticket = UUID(); generations["native_state"] = ticket
         let profileTransition = ["switch_profile", "delete_profile", "merge_native_sync", "patch_profile", "rebind_profile_account"].contains(type)
@@ -440,6 +441,55 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             }
         }
         return true
+    }
+    /// One playback tick reaches the engine through two lanes on Apple (the player's TimeChanged and the
+    /// account save) as two identical report_progress mutations, and each mutation rewrites the whole sealed
+    /// checkpoint. The second is dropped: same active profile and title (a movie's videoId equal to its metaId
+    /// counts as none), within 3 s and 1.5 s of position of the last admitted report. Any other mutation, a
+    /// different title or episode, or a real move still goes through. Caller holds `lock`.
+    private struct ProgressAdmission {
+        let profile: String, metaId: String, videoId: String?, positionMs: UInt64, at: TimeInterval
+    }
+    private var lastProgressAdmission: ProgressAdmission?
+    private static let progressDuplicateWindow: TimeInterval = 3
+    private static let progressDuplicateDistanceMs: UInt64 = 1_500
+    private func admitProgress(type: String, raw: String) -> Bool {
+        guard type == "report_progress",
+              let action = try? JSONDecoder().decode(VortxJSON.self, from: Data(raw.utf8)),
+              let metaId = string(action["metaId"]), let profile = string(values["native_state"]?["activeProfileId"]),
+              let position = try? action["positionMs"]?.decode(UInt64.self) else {
+            lastProgressAdmission = nil
+            return true
+        }
+        let videoId = string(action["videoId"]).flatMap { $0 == metaId ? nil : $0 }
+        let now = ProcessInfo.processInfo.systemUptime
+        if let last = lastProgressAdmission, last.profile == profile, last.metaId == metaId, last.videoId == videoId,
+           now - last.at < Self.progressDuplicateWindow,
+           (position > last.positionMs ? position - last.positionMs : last.positionMs - position) <= Self.progressDuplicateDistanceMs {
+            return false
+        }
+        lastProgressAdmission = ProgressAdmission(profile: profile, metaId: metaId, videoId: videoId, positionMs: position, at: now)
+        return true
+    }
+    /// Make progress the session held back durable now (player pause or close, app background or quit). It
+    /// queues behind every mutation already admitted, and the next progress report is also written at once,
+    /// so a save still on its way from the player is not held back either.
+    func flushPendingProgress(completion: (@Sendable () -> Void)? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed, !checkpointReopenRequired else { completion?(); return }
+        let predecessor = tasks["native_state"]
+        tasks["native_state"] = Task { [weak self] in
+            await predecessor?.value
+            guard let self else { completion?(); return }
+            do { try await self.session.flushPendingProgress() }
+            catch VortxNativeError.checkpointUncertain {
+                self.lock.withLock { self.checkpointReopenRequired = true }
+                _ = self.fail("checkpoint_uncertain_reopen_required")
+            } catch {
+                _ = self.fail("native_progress_flush_failed")
+            }
+            completion?()
+        }
     }
     /// Resource-backed public actions need a durable result, unlike synchronous UI wires whose
     /// Bool only reports admission.  In particular, a registry may change while this intent is

@@ -2716,7 +2716,7 @@ struct PlayerScreen: View {
             // Every playable source loaded for this title, newline-joined - handy for sending the whole
             // ranked list at once. Only shown when more than one source is actually loaded (a single
             // source is already covered by "Copy stream link").
-            if allSourceLinks.count > 1 {
+            if hasMultipleSourceLinks {
                 Button("Copy all source links") {
                     Haptics.tap()
                     let joined = allSourceLinks.joined(separator: "\n")
@@ -3501,6 +3501,8 @@ struct PlayerScreen: View {
             if let b = data as? Bool, b != isPaused {
                 isPaused = b
                 if b { localNNTPStallRecovery.suspend() }
+                // The engine writes position ticks at most every 30 s; make the latest one durable on pause.
+                if b { core.flushNativeProgress() }
                 #if os(iOS) || os(macOS)
                 if b {
                     suspendAVReplacementFirstFrameDeadline()
@@ -10647,6 +10649,20 @@ struct PlayerScreen: View {
             }
         }
         return out
+    }
+
+    /// Whether "Copy all source links" is worth offering: stops at the second distinct link instead of
+    /// building the whole de-duplicated list, which the dialog only needs once the action is tapped.
+    private var hasMultipleSourceLinks: Bool {
+        var first: String?
+        for group in currentSourceGroups {
+            for stream in group.streams {
+                guard let link = playableURL(for: stream)?.absoluteString else { continue }
+                if let first, first != link { return true }
+                if first == nil { first = link }
+            }
+        }
+        return false
     }
 
     /// More than one distinct resolution is available for the current title, so the Quality picker is worth
