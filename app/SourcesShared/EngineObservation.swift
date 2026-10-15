@@ -31,6 +31,35 @@ final class EngineChangeGate: ObservableObject {
     }
 }
 
+/// The player's engine observation. Every engine event bumps `CoreBridge.revision`, so a player observing the
+/// whole bridge rebuilt its entire screen on each one during playback (every progress save, every background
+/// load), which made the controls slow to appear on pause. This forwards only the changes the player draws,
+/// streams (`streamsEpoch`) and the loaded title (`metaDetails`), and every change while a panel that lists
+/// sources is open, so a source list filling in stays live.
+final class PlayerEngineChanges: ObservableObject {
+    private var subscriptions: [AnyCancellable] = []
+    private(set) var followsAll = false
+
+    init(core: CoreBridge = .shared) {
+        let drawn = Publishers.Merge(core.$streamsEpoch.dropFirst().map { _ in () },
+                                     core.$metaDetails.dropFirst().map { _ in () })
+        subscriptions = [
+            drawn.sink { [weak self] in self?.objectWillChange.send() },
+            core.objectWillChange.sink { [weak self] _ in
+                guard let self, self.followsAll else { return }
+                self.objectWillChange.send()
+            },
+        ]
+    }
+
+    /// Follow every engine change while a source list is on screen; turning it on catches up once.
+    func followAll(_ on: Bool) {
+        guard on != followsAll else { return }
+        followsAll = on
+        if on { objectWillChange.send() }
+    }
+}
+
 private struct EngineObservationActiveKey: EnvironmentKey {
     static let defaultValue = true
 }

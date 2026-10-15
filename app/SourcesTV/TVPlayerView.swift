@@ -409,7 +409,10 @@ struct TVPlayerView: View {
     }
 
     @EnvironmentObject private var account: StremioAccount
-    @EnvironmentObject private var core: CoreBridge
+    /// Read freely but observed narrowly (`PlayerEngineChanges`): observing the whole bridge rebuilt this screen
+    /// on every engine event, which made the controls slow to appear on pause.
+    private var core: CoreBridge { CoreBridge.shared }
+    @StateObject private var engineChanges = PlayerEngineChanges()
     @ReducedMotion private var accessibilityReduceMotion
     /// Episode-scoped auxiliary contributors owned by the player's preload generation. They are separate from
     /// the covered detail page so preparing E2 never mutates the E1 rows behind the player.
@@ -1337,6 +1340,8 @@ struct TVPlayerView: View {
             // Accepted source/episode replacement only; prewarm and engine remount keep this lease.
             if oldLease != newLease { oldLease?.close() }
         }
+        // The options panel and the failure screen list sources, so they follow every engine change.
+        .onChange(of: showOptions || loadFailed) { listsSources in engineChanges.followAll(listsSources) }
         .onChange(of: core.streamsEpoch) { _ in
             refreshSourceOptionCounts()
             establishSubtitleTimingScopeIfAvailable()

@@ -1352,10 +1352,12 @@ struct PlayerScreen: View {
     var onPlaybackIdentityCommitted: (PlaybackMeta) -> Void = { _ in }
     let onClose: () -> Void
 
-    // CoreBridge / account are injected at the iOS app root; the player reads them for in-player source
-    // switching (alternate loaded streams) and add-on subtitles - exactly as tvOS does. They are
-    // EnvironmentObjects, so no presenter (iOSDetailView / iOSRootView) needs to change to feed them.
-    @EnvironmentObject private var core: CoreBridge
+    // CoreBridge / account are read for in-player source switching (alternate loaded streams) and add-on
+    // subtitles, exactly as tvOS does. The account is injected at the iOS app root. The bridge is read freely
+    // but observed narrowly (`PlayerEngineChanges`): observing all of it rebuilt this screen on every engine
+    // event during playback.
+    private var core: CoreBridge { CoreBridge.shared }
+    @StateObject private var engineChanges = PlayerEngineChanges()
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var theme: ThemeManager      // observe accent + textScale so the chrome repaints live
     // Compact width (iPhone portrait/landscape) shrinks the inline volume slider so the top-bar icon cluster
@@ -2121,6 +2123,8 @@ struct PlayerScreen: View {
         // views unmount their looping libmpv clip on it, instead of decoding a 1080p trailer beneath the
         // whole movie (micro stutter + audio crackle on every stream).
         .onAppear { FullscreenPlaybackGate.shared.playerDidAppear(); LoopbackPlaybackAssertion.begin(for: url) }
+        // Panels and the failure screen list sources, so they follow every engine change.
+        .onChange(of: panel != nil || loadFailed) { listsSources in engineChanges.followAll(listsSources) }
         .onChange(of: core.streamsEpoch) { _ in
             establishSubtitleTimingScopeIfAvailable()
             if appliedAutoTracks {

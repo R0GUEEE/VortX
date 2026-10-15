@@ -7,6 +7,8 @@ import Foundation
 final class CoreBridge: ObservableObject {
     static let shared = CoreBridge()
     @Published var revision = 0
+    @Published var streamsEpoch = 0
+    @Published var metaDetails: String?
 }
 
 private var failures = 0
@@ -40,6 +42,27 @@ enum EngineChangeGateTests {
         core.revision += 1
         check("after a silent reopen changes flow again", heard == 3)
         withExtendedLifetime(subscription) {}
+
+        // The player hears only what it draws: no rebuild for the raw per-event revision bump.
+        let player = PlayerEngineChanges(core: core)
+        var redraws = 0
+        let playerSubscription = player.objectWillChange.sink { redraws += 1 }
+        core.revision += 1; core.revision += 1; core.revision += 1
+        check("the player ignores the per-event revision bump", redraws == 0)
+        core.streamsEpoch += 1
+        check("the player redraws when streams change", redraws == 1)
+        core.metaDetails = "tt0903747"
+        check("the player redraws when the loaded title changes", redraws == 2)
+        player.followAll(true)
+        check("opening a source list catches up once", redraws == 3)
+        core.revision += 1
+        check("with a source list open every engine change redraws", redraws == 4)
+        player.followAll(true)
+        check("following again sends nothing", redraws == 4)
+        player.followAll(false)
+        core.revision += 1
+        check("closing the source list stops the per-event redraws", redraws == 4)
+        withExtendedLifetime(playerSubscription) {}
         if failures > 0 { print("\n\(failures) check(s) failed"); exit(1) }
         print("\nAll engine gate checks passed")
     }
