@@ -491,15 +491,19 @@ private struct PlayerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
                 if isEnabled { shape.fill(Theme.Palette.accent.opacity(active ? 0.22 : 0.12)) }
             } else {
                 if #available(iOS 26.0, macOS 26.0, *) {
+                    // Clear Liquid Glass tinted with the profile accent, so the edges and refraction carry it.
                     shape.fill(.clear)
-                        .glassEffect(.regular.interactive(), in: shape)
+                        .glassEffect(.clear.tint(Theme.Palette.accent.opacity(active ? 0.45 : 0.30)).interactive(), in: shape)
                         .environment(\.colorScheme, .dark)
                 } else {
                     shape.fill(.ultraThinMaterial)
                         .environment(\.colorScheme, .dark)
                 }
-                shape.fill(Theme.Palette.accent.opacity(active ? 0.56 : 0.38))
+                shape.fill(Theme.Palette.accent.opacity(active ? 0.62 : 0.46))
                 shape.fill(neutral.opacity(0.58))
+                // Specular top light: the lit-glass sheen, kept off the lower half where the label sits.
+                shape.fill(LinearGradient(colors: [.white.opacity(0.13), .white.opacity(0)],
+                                          startPoint: .top, endPoint: .center))
             }
         }
         .clipShape(shape)
@@ -513,10 +517,11 @@ private struct PlayerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
     }
 
     private var border: LinearGradient {
-        let top = contrast == .increased ? 0.48 : active && isEnabled ? 0.48 : prominent ? 0.24 : 0.20
+        // A bright white rim at the top fading into the accent: the lit edge of Liquid Glass.
+        let top = contrast == .increased ? 0.48 : active && isEnabled ? 0.62 : prominent ? 0.46 : 0.40
         let tint: Color = contrast == .increased ? .white : Theme.Palette.accent
-        return LinearGradient(colors: [tint.opacity(active && isEnabled ? 0.60 : top),
-                                       tint.opacity(active && isEnabled ? 0.28 : top * 0.32)],
+        return LinearGradient(colors: [Color.white.opacity(top),
+                                       tint.opacity(active && isEnabled ? 0.40 : top * 0.45)],
                               startPoint: .top, endPoint: .bottom)
     }
 

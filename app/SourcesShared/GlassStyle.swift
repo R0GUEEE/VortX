@@ -123,13 +123,32 @@ enum VortXGlass {
     /// a faint warm hairline border (`1px solid rgba(242,236,226,~.14)`) toward the bottom. One gradient
     /// stroke reads as both, so a single `strokeBorder` gives the mockups' lit top edge.
     static func highlight(_ top: Double = 0.14) -> LinearGradient {
-        LinearGradient(
+        // Liquid Glass rim (2026-10-15 redesign): a brightly lit top edge that fades through the sides
+        // into the warm hairline, so every surface reads as lit glass rather than a dark plate.
+        let lit = min(0.42, top * 1.9)
+        return LinearGradient(
             colors: [
-                Color.white.opacity(top),
+                Color.white.opacity(lit),
+                Color.white.opacity(lit * 0.30),
                 Color(.sRGB, red: 0.949, green: 0.925, blue: 0.886, opacity: top * 0.42)
             ],
             startPoint: .top, endPoint: .bottom
         )
+    }
+
+    /// Over real Liquid Glass (OS 26) the warm fill is scaled down so the glass itself shows: a light tint
+    /// on surfaces over VortX's own chrome, and a stronger one where the surface must hold bright media back.
+    static func liquidFillScale(_ tone: Tone) -> Double {
+        switch tone {
+        case .lift: return 0.45
+        case .scrim: return 0.70
+        }
+    }
+
+    /// The specular sheen across the top of a glass surface.
+    static var sheen: LinearGradient {
+        LinearGradient(colors: [Color.white.opacity(0.09), Color.white.opacity(0)],
+                       startPoint: .top, endPoint: .center)
     }
 
     /// The ember active / selected fill for a nav item (mockups: `rgba(245,158,11,.16)`). The accent
@@ -463,6 +482,13 @@ private struct VortXGlassModifier<S: InsettableShape>: ViewModifier {
         #endif
     }
 
+    /// Apple's real Liquid Glass is the blur under this surface (OS 26, glass on, not a tight disc).
+    private var realLiquidGlass: Bool {
+        guard !hugsTightly, VisualEffects.glassEnabled else { return false }
+        if #available(iOS 26.0, tvOS 26.0, macOS 26.0, *) { return true }
+        return false
+    }
+
     private var glass: some View {
         ZStack {
             if let resolvedOpaqueTVFill {
@@ -480,8 +506,10 @@ private struct VortXGlassModifier<S: InsettableShape>: ViewModifier {
                     .opacity(reduceTransparency || forceOpaque ? 1 : materialOpacity)
                 // The warm-dark VortX tint over the blur is what makes Apple's neutral Liquid Glass read as
                 // VortX chrome. Skipped under Reduce Transparency, where `blurLayer` is already an opaque warm fill.
+                // Over real Liquid Glass it is lighter, so the glass shows through (the frosted look).
                 if !reduceTransparency && !forceOpaque {
-                    shape.fill(VortXGlass.fill(fillAlpha, tone: tone))
+                    shape.fill(VortXGlass.fill(fillAlpha * (realLiquidGlass ? VortXGlass.liquidFillScale(tone) : 1), tone: tone))
+                    shape.fill(VortXGlass.sheen)
                 }
                 // Ambient profile tint remains present in the opaque Reduce Transparency fallback as a
                 // low-alpha wash, preserving the themed surface without introducing an accent slab.

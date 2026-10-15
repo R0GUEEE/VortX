@@ -46,7 +46,7 @@ if ((macShell.match(/Form\s*\{/g) || []).length !== 1 ||
   throw new Error('Mac Settings typography modifier is not attached to the real Form body');
 }
 writeFileSync(`${dir}/ProductionPanelPresentation.swift`, `import SwiftUI
-struct ThemeManager {
+final class ThemeManager: ObservableObject, @unchecked Sendable {
   static let shared = ThemeManager()
   let textScale = 1.0
   let accent = Color(.sRGB, red: 0.851, green: 0.467, blue: 0.024)
