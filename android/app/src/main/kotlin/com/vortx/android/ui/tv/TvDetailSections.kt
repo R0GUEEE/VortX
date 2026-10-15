@@ -370,7 +370,6 @@ private fun TvEpisodeCard(
                     scores?.let {
                         com.vortx.android.ui.components.RatingScoresPlate(
                             it,
-                            glyphSize = 11,
                             textSize = 13,
                             modifier = Modifier.align(Alignment.TopStart).padding(8.dp).padding(end = 36.dp),
                         )

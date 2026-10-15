@@ -533,7 +533,6 @@ internal fun androidx.compose.foundation.layout.BoxScope.TvPosterArt(item: MetaI
                 id = item.id,
                 type = item.type.id,
                 active = PosterArtwork.badgesBackdrops,
-                glyphSize = 12,
                 textSize = 15,
                 modifier = Modifier.align(Alignment.TopStart).padding(10.dp).padding(end = 48.dp),
             )

@@ -24,22 +24,16 @@ import Foundation
 /// The audience and community scores (Popcorn, Letterboxd, Trakt, MyAnimeList) are app-only: the baked
 /// poster keeps the four headline scores, while cards and the detail row show every score present.
 enum RatingsFormat {
-    /// A single provider score as a label + value, e.g. ("RT", "84%"). `isIMDb` marks the primary score that
-    /// leads with a star glyph on the badges (its label is dropped there in favor of the star), while the
-    /// detail row prints the label verbatim.
+    /// A single provider score: which service (`kind`, drawn as that service's mark by `RatingLogo`), the
+    /// printed value ("84%"), the service's name for the spoken label, and the raw `score` the marks read
+    /// (Rotten Tomatoes turns rotten below 60, the Metacritic square takes its colour from the score).
     struct Token: Equatable {
+        enum Kind: Equatable { case imdb, rottenTomatoes, metacritic, tmdb, popcorn, letterboxd, trakt, myAnimeList }
+        let kind: Kind
         let label: String
         let value: String
-        let isIMDb: Bool
-        /// The short lettermark a small badge prints ("POP", "LBXD"); the detail row prints `label`.
-        var mark: String
-
-        init(label: String, value: String, isIMDb: Bool, mark: String? = nil) {
-            self.label = label
-            self.value = value
-            self.isIMDb = isIMDb
-            self.mark = mark ?? label
-        }
+        let score: Double
+        var isIMDb: Bool { kind == .imdb }
     }
 
     /// IMDb on its native 0-10 scale, one decimal ("8.3"). Matches the baked poster's `imdb.toFixed(1)`, so
@@ -61,22 +55,26 @@ enum RatingsFormat {
     /// construction: a title carrying only IMDb yields exactly one token, so it renders only IMDb.
     static func tokens(_ r: MDBListRatings, limit: Int? = nil) -> [Token] {
         var out: [Token] = []
-        if let v = r.imdb { out.append(Token(label: "IMDb", value: imdb(v), isIMDb: true)) }
-        if let v = r.rottenTomatoes { out.append(Token(label: "RT", value: "\(v)%", isIMDb: false)) }
-        if let v = r.metacritic { out.append(Token(label: "MC", value: "\(v)", isIMDb: false)) }
-        if let v = r.tmdb { out.append(Token(label: "TMDB", value: "\(v)%", isIMDb: false)) }
-        if let v = r.rtAudience { out.append(Token(label: "Popcorn", value: "\(v)%", isIMDb: false, mark: "POP")) }
-        if let v = r.letterboxd {
-            out.append(Token(label: "Letterboxd", value: String(format: "%.1f", v), isIMDb: false, mark: "LBXD"))
+        if let v = r.imdb { out.append(Token(kind: .imdb, label: "IMDb", value: imdb(v), score: v)) }
+        if let v = r.rottenTomatoes {
+            out.append(Token(kind: .rottenTomatoes, label: "Rotten Tomatoes", value: "\(v)%", score: Double(v)))
         }
-        if let v = r.trakt { out.append(Token(label: "Trakt", value: "\(v)%", isIMDb: false)) }
-        if let v = r.mal { out.append(Token(label: "MAL", value: String(format: "%.1f", v), isIMDb: false)) }
+        if let v = r.metacritic { out.append(Token(kind: .metacritic, label: "Metacritic", value: "\(v)", score: Double(v))) }
+        if let v = r.tmdb { out.append(Token(kind: .tmdb, label: "TMDB", value: "\(v)%", score: Double(v))) }
+        if let v = r.rtAudience { out.append(Token(kind: .popcorn, label: "Popcornmeter", value: "\(v)%", score: Double(v))) }
+        if let v = r.letterboxd {
+            out.append(Token(kind: .letterboxd, label: "Letterboxd", value: String(format: "%.1f", v), score: v))
+        }
+        if let v = r.trakt { out.append(Token(kind: .trakt, label: "Trakt", value: "\(v)%", score: Double(v))) }
+        if let v = r.mal {
+            out.append(Token(kind: .myAnimeList, label: "MyAnimeList", value: String(format: "%.1f", v), score: v))
+        }
         if let limit, limit >= 0, out.count > limit { return Array(out.prefix(limit)) }
         return out
     }
 
-    /// The joined detail-row string ("IMDb 8.3  ·  RT 84%  ·  MC 69  ·  TMDB 81%  ·  Popcorn 90%"), or nil
-    /// when no score is present. The one string every detail surface prints, so tvOS and iOS/Mac never diverge.
+    /// The joined text form ("IMDb 8.3  ·  Rotten Tomatoes 84%  ·  Metacritic 69"), or nil when no score is
+    /// present, for plain-text surfaces that cannot draw the service marks.
     static func joined(_ r: MDBListRatings) -> String? {
         let parts = tokens(r).map { "\($0.label) \($0.value)" }
         return parts.isEmpty ? nil : parts.joined(separator: "  \u{00B7}  ")

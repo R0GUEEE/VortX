@@ -51,6 +51,6 @@ ${ratingViews}
 NODE
 xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
   "$receipt/Fixture.swift" app/SourcesShared/GlassStyle.swift app/SourcesShared/VisualEffects.swift \
-  app/SourcesShared/RatingsFormat.swift app/SourcesShared/GlassEpisodeCard.swift \
+  app/SourcesShared/RatingsFormat.swift app/SourcesShared/RatingLogo.swift app/SourcesShared/GlassEpisodeCard.swift \
   app/Tests/GlassEpisodeCardRenderTests.swift -o "$receipt/render"
 "$receipt/render" "$receipt"

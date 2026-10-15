@@ -10,10 +10,15 @@ import java.util.Locale
 /// both the keyless VortX ratings service and a user's own MDBList key.
 object RatingsFormat {
 
-    /// A single provider score as a label + value, e.g. ("RT", "84%"). [isImdb] marks the primary score that
-    /// leads with the accent star (its label is dropped in favour of the star); every other token prints its
-    /// label verbatim. Mirrors Apple `RatingsFormat.Token`.
-    data class Token(val label: String, val value: String, val isImdb: Boolean, val mark: String = label)
+    /// A single provider score: which service ([kind], drawn as that service's mark), the printed value
+    /// ("84%"), the service's name for the spoken label, and the raw [score] the marks read (Rotten Tomatoes
+    /// turns rotten below 60, the Metacritic square takes its colour from the score). Mirrors Apple
+    /// `RatingsFormat.Token`.
+    enum class Kind { IMDB, ROTTEN_TOMATOES, METACRITIC, TMDB, POPCORN, LETTERBOXD, TRAKT, MY_ANIME_LIST }
+
+    data class Token(val kind: Kind, val label: String, val value: String, val score: Double) {
+        val isImdb: Boolean get() = kind == Kind.IMDB
+    }
 
     /// IMDb on its native 0-10 scale, one decimal ("8.3"). Locale-fixed (US) so the decimal separator matches
     /// the baked poster's `toFixed(1)` regardless of device locale. Mirrors Apple `RatingsFormat.imdb`.
@@ -33,20 +38,20 @@ object RatingsFormat {
     /// a title carrying only IMDb yields exactly one token. Mirrors Apple `RatingsFormat.tokens`.
     fun tokens(r: MdbListRatings, limit: Int? = null): List<Token> {
         val out = ArrayList<Token>(8)
-        r.imdb?.let { out += Token("IMDb", imdb(it), isImdb = true) }
-        r.rottenTomatoes?.let { out += Token("RT", "$it%", isImdb = false) }
-        r.metacritic?.let { out += Token("MC", "$it", isImdb = false) }
-        r.tmdb?.let { out += Token("TMDB", "$it%", isImdb = false) }
-        r.rtAudience?.let { out += Token("Popcorn", "$it%", isImdb = false, mark = "POP") }
-        r.letterboxd?.let { out += Token("Letterboxd", String.format(Locale.US, "%.1f", it), isImdb = false, mark = "LBXD") }
-        r.trakt?.let { out += Token("Trakt", "$it%", isImdb = false) }
-        r.mal?.let { out += Token("MAL", String.format(Locale.US, "%.1f", it), isImdb = false) }
+        r.imdb?.let { out += Token(Kind.IMDB, "IMDb", imdb(it), it) }
+        r.rottenTomatoes?.let { out += Token(Kind.ROTTEN_TOMATOES, "Rotten Tomatoes", "$it%", it.toDouble()) }
+        r.metacritic?.let { out += Token(Kind.METACRITIC, "Metacritic", "$it", it.toDouble()) }
+        r.tmdb?.let { out += Token(Kind.TMDB, "TMDB", "$it%", it.toDouble()) }
+        r.rtAudience?.let { out += Token(Kind.POPCORN, "Popcornmeter", "$it%", it.toDouble()) }
+        r.letterboxd?.let { out += Token(Kind.LETTERBOXD, "Letterboxd", String.format(Locale.US, "%.1f", it), it) }
+        r.trakt?.let { out += Token(Kind.TRAKT, "Trakt", "$it%", it.toDouble()) }
+        r.mal?.let { out += Token(Kind.MY_ANIME_LIST, "MyAnimeList", String.format(Locale.US, "%.1f", it), it) }
         if (limit != null && limit >= 0 && out.size > limit) return out.take(limit)
         return out
     }
 
-    /// The joined detail-row string ("IMDb 8.3  ·  RT 84%  ·  MC 69  ·  TMDB 81%"), or null when no score is
-    /// present. Mirrors Apple `RatingsFormat.joined`.
+    /// The joined text form ("IMDb 8.3  ·  Rotten Tomatoes 84%  ·  Metacritic 69"), or null when no score is
+    /// present, for plain-text surfaces that cannot draw the marks. Mirrors Apple `RatingsFormat.joined`.
     fun joined(r: MdbListRatings): String? {
         val parts = tokens(r).map { "${it.label} ${it.value}" }
         return if (parts.isEmpty()) null else parts.joinToString("  ·  ")

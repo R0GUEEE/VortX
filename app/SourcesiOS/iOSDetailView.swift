@@ -2003,15 +2003,9 @@ struct iOSDetailView: View {
 
     private func ratingTokens(_ tokens: [RatingsFormat.Token]) -> some View {
         ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
-            HStack(spacing: 3) {
-                if token.isIMDb {
-                    Image(systemName: "star.fill").foregroundStyle(Theme.Palette.accent)
-                } else {
-                    Text(token.label).foregroundStyle(Theme.Palette.textTertiary)
-                }
-                Text(token.value).foregroundStyle(Theme.Palette.textPrimary)
-            }
-            .fixedSize()
+            RatingScore(token: token, textSize: 13)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(token.label) \(token.value)")
         }
     }
 

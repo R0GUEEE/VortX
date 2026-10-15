@@ -85,11 +85,11 @@ struct GlassEpisodeCard: View {
             }
             Spacer(minLength: 0)
             if !tokens.isEmpty {
-                let glyph: CGFloat = tenFoot ? 12 : 9, text: CGFloat = tenFoot ? 15 : 11
+                let text: CGFloat = tenFoot ? 15 : 11
                 if fitScores {
-                    RatingBadgeFit(tokens: tokens, glyphSize: glyph, textSize: text)
+                    RatingBadgeFit(tokens: tokens, textSize: text)
                 } else {
-                    RatingBadgePlate(tokens: tokens, glyphSize: glyph, textSize: text)
+                    RatingBadgePlate(tokens: tokens, textSize: text)
                 }
             }
         }

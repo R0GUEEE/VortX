@@ -16,7 +16,7 @@ import SwiftUI
 /// only IMDb shows only IMDb (per-score fail-soft). Successful results are memoized per typed endpoint;
 /// concurrent cards coalesce one request, while an offline/transient miss can retry on a later appearance.
 ///
-/// The DRAWING lives in `RatingBadgePlate` below, which takes formatted tokens and nothing else. Splitting
+/// The DRAWING lives in `RatingBadgePlate` below (marks from `RatingLogo`), which takes formatted tokens and nothing else. Splitting
 /// it out is what lets the badge be rendered deterministically (a snapshot harness composes the real plate
 /// over sample artwork with no network and no ratings service), which is how its type was tuned.
 struct CardRatingBadge: View {
@@ -25,9 +25,7 @@ struct CardRatingBadge: View {
     /// Draw only when the ratings feature is on AND the visible art is not itself baked; the caller
     /// computes this so a genuinely baked poster is never double-badged.
     var active: Bool = true
-    /// Star glyph point size (the tvOS card is larger than the iOS/Mac tile).
-    var glyphSize: CGFloat = 8
-    /// Rating text point size.
+    /// Rating text point size (the tvOS card is larger than the iOS/Mac tile); the marks scale with it.
     var textSize: CGFloat = 10
     /// An outright cap on the score count; nil shows every score that FITS the card. The badge measures
     /// itself against the card width and drops scores from the end of the `RatingsFormat` priority order
@@ -50,7 +48,7 @@ struct CardRatingBadge: View {
             if active, let displayed = RatingPresentationPolicy.merged(
                 ratingsKey == requestKey ? ratings : nil, fallbackIMDb: fallbackIMDb),
                case let tokens = RatingsFormat.tokens(displayed, limit: maxScores), !tokens.isEmpty {
-                RatingBadgeFit(tokens: tokens, glyphSize: glyphSize, textSize: textSize)
+                RatingBadgeFit(tokens: tokens, textSize: textSize)
                     .padding(.trailing, reservedTrailing)
             }
         }
@@ -71,168 +69,49 @@ struct CardRatingBadge: View {
 }
 
 /// The plate at the largest score count that fits the width offered: every score when there is room, then
-/// one fewer from the end at a time, down to the IMDb star alone. `ViewThatFits` measures each candidate's
+/// one fewer from the end at a time, down to the first score alone. `ViewThatFits` measures each candidate's
 /// ideal width, so nothing is ever clipped or squeezed onto a second line.
 struct RatingBadgeFit: View {
     let tokens: [RatingsFormat.Token]
-    var glyphSize: CGFloat = 8
     var textSize: CGFloat = 10
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
             ForEach((1...max(tokens.count, 1)).reversed(), id: \.self) { count in
-                RatingBadgePlate(tokens: Array(tokens.prefix(count)), glyphSize: glyphSize, textSize: textSize)
+                RatingBadgePlate(tokens: Array(tokens.prefix(count)), textSize: textSize)
             }
         }
     }
 }
 
-/// The badge itself: ONE capsule of VortXGlass, sized tight to its scores, floating over the artwork.
-///
-/// It is deliberately the app's OWN material rather than a rounded rectangle with a fill, because a badge
-/// made of the same glass as the nav bar, the chips, and the player chrome reads as part of the product
-/// sitting on the art, not as a sticker printed on top of it. The baked poster
-/// (`cloudflare-poster/src/badges.ts`) draws the SAME composition server-side -- the same capsule, hairline
-/// divider, split decimal and tracked lettermarks, over a real Gaussian-blurred, warm-washed copy of the
-/// poster art -- so a landscape card and a portrait poster in the same rail are one idea rendered twice,
-/// not two badges that happen to show the same numbers.
-///
-/// Inside, hierarchy is carried by SIZE, TRACKING, CASE and INK, never by a second colour (the
-/// one-accent law in docs/DESIGN-SYSTEM.md: the accent star is the only coloured thing here):
-///   * the IMDb value is the ANCHOR, set a third larger, in `textPrimary`, with its DECIMAL dropped to
-///     ~76% and into `textSecondary`, so the number reads as one considered figure rather than three even
-///     digits;
-///   * a hairline divider -- not a gap, not a middot -- separates the anchor from the aggregators;
-///   * each provider is a tracked, uppercase lettermark in `textTertiary` (a LABEL) followed by its value
-///     in `textSecondary` (the DATA), so the eye sorts them without a second colour. Letterforms only: a
-///     third-party rating service's logo is never drawn or embedded here.
-/// Insets are optically asymmetric (a trailing digit or `%` sits closer to its own edge than a star does)
-/// and the gaps are not uniform (the divider owns more room than the gaps between aggregators), which is
-/// what keeps the capsule from reading as evenly-padded boilerplate. Digits are monospaced so a scrolling
-/// rail never reflows as values change width.
+/// The badge itself: ONE capsule of VortXGlass, sized tight to its scores, floating over the artwork. Each
+/// score is its service's mark beside the value (`RatingScore`), so the plate reads at a glance with no
+/// lettermarks to decode. The glass is the app's own material, the same as the chips and player chrome, so
+/// the badge sits on the art as part of the product rather than a sticker printed on it. Digits are
+/// monospaced so a scrolling rail never reflows as values change width.
 struct RatingBadgePlate: View {
     let tokens: [RatingsFormat.Token]
-    var glyphSize: CGFloat = 8
     var textSize: CGFloat = 10
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 0) {
-            ForEach(Array(tokens.enumerated()), id: \.offset) { index, token in
-                if index > 0 {
-                    if tokens[index - 1].isIMDb {
-                        divider.padding(.horizontal, dividerPad)
-                    } else {
-                        Spacer().frame(width: groupGap)
-                    }
-                }
-                if token.isIMDb {
-                    anchor(token)
-                } else {
-                    aggregator(token)
-                }
+        HStack(spacing: (textSize * 0.75).rounded()) {
+            ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
+                RatingScore(token: token, textSize: textSize)
             }
         }
-        // Never let a narrow card compress the row: without this SwiftUI would rather wrap the decimal onto
-        // a second line than let the badge exceed the cell it is overlaid on.
         .fixedSize()
-        .padding(.leading, leadInset)
-        .padding(.trailing, trailInset)
-        .padding(.vertical, vInset)
-        // The same on-art badge glass the portrait poster's rating badge and the resume timecode use: a
-        // warm near-black SCRIM plate (`badgeFillAlpha`) at the pill radius so the label holds contrast over
-        // any backdrop, with the 1px lit top edge raised a little above the chrome default because a capsule
-        // this small has very little edge to catch light with. `.scrim` because it sits ON the artwork; on
-        // tvOS this drops to a cheap opaque warm capsule automatically (see GlassStyle). The `.disc` shadow
-        // is the tight, close one the round player buttons use: enough to ground the capsule on bright
-        // artwork, too small to smear a halo around something this size.
+        .padding(.leading, (textSize * 0.4).rounded())
+        .padding(.trailing, (textSize * 0.7).rounded())
+        .padding(.vertical, (textSize * 0.36).rounded())
+        // The on-art badge glass: a warm near-black SCRIM plate so the values hold contrast over any
+        // backdrop, with a lit top edge. On tvOS this drops to a cheap opaque capsule (see GlassStyle).
         .vortxGlass(in: Capsule(style: .continuous),
                     fillAlpha: VortXGlass.badgeFillAlpha,
                     highlight: 0.20,
                     shadow: .disc,
                     tone: .scrim)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityText)
-    }
-
-    /// The IMDb anchor: the accent star, then the value with its decimal set apart. The star is seated on
-    /// the figure's optical centre rather than on the text baseline, so it reads as a mark ON the number
-    /// instead of a bullet beside it.
-    private func anchor(_ token: RatingsFormat.Token) -> some View {
-        let parts = Self.splitDecimal(token.value)
-        let starBaseline = glyphSize * 0.5 + figureSize * 0.24
-        return HStack(alignment: .firstTextBaseline, spacing: starGap) {
-            Image(systemName: "star.fill")
-                .font(.system(size: glyphSize, weight: .semibold))
-                .foregroundStyle(Theme.Palette.accent)
-                .alignmentGuide(.firstTextBaseline) { _ in starBaseline }
-            HStack(alignment: .firstTextBaseline, spacing: 0) {
-                Text(parts.head)
-                    .font(.system(size: figureSize, weight: .semibold).monospacedDigit())
-                    .tracking(-0.4)
-                    .foregroundStyle(Theme.Palette.textPrimary)
-                if !parts.tail.isEmpty {
-                    Text(parts.tail)
-                        .font(.system(size: decimalSize, weight: .semibold).monospacedDigit())
-                        .tracking(-0.2)
-                        .foregroundStyle(Theme.Palette.textSecondary)
-                }
-            }
-        }
-    }
-
-    /// One aggregator: a tracked uppercase lettermark, then its value. Near enough the same optical size,
-    /// but different tracking / case / ink, so the label never competes with the number it labels.
-    private func aggregator(_ token: RatingsFormat.Token) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: markGap) {
-            Text(token.mark)
-                .font(.system(size: markSize, weight: .semibold))
-                .tracking(markSize * 0.14)
-                .textCase(.uppercase)
-                .foregroundStyle(Theme.Palette.textTertiary)
-            Text(token.value)
-                .font(.system(size: valueSize, weight: .semibold).monospacedDigit())
-                .foregroundStyle(Theme.Palette.textSecondary)
-        }
-    }
-
-    /// The hairline that sets the anchor apart from the rest. Its baseline guide is set by hand so it
-    /// centres on the figure rather than hanging off the row's text baseline.
-    private var divider: some View {
-        let dividerBaseline = figureSize * 0.72
-        return Capsule(style: .continuous)
-            .fill(Theme.Palette.textPrimary.opacity(0.22))
-            .frame(width: 1, height: figureSize * 0.86)
-            .alignmentGuide(.firstTextBaseline) { _ in dividerBaseline }
-    }
-
-    // MARK: Layout (all derived from the caller's text size, so ONE badge scales from an iOS tile to a
-    // tvOS card without a magic constant per platform)
-
-    /// The anchor is set a third larger than the aggregators: the whole point of the composition is that
-    /// one number leads and the rest support it.
-    private var figureSize: CGFloat { (textSize * 1.3).rounded() }
-    private var decimalSize: CGFloat { (figureSize * 0.76).rounded() }
-    private var valueSize: CGFloat { max((textSize * 0.88).rounded(), 9) }
-    private var markSize: CGFloat { max((textSize * 0.72).rounded(), 8) }
-    private var starGap: CGFloat { (textSize * 0.3).rounded() }
-    private var markGap: CGFloat { max((textSize * 0.2).rounded(), 2) }
-    private var groupGap: CGFloat { (textSize * 0.6).rounded() }
-    private var dividerPad: CGFloat { (textSize * 0.62).rounded() }
-    private var leadInset: CGFloat { (textSize * 0.62).rounded() }
-    /// Optically, not numerically, symmetric: the row ends on a digit or a `%`, which sits closer to its
-    /// own edge than the star does, so the trailing inset is set wider to make the capsule LOOK even.
-    private var trailInset: CGFloat { (textSize * 0.78).rounded() }
-    private var vInset: CGFloat { (textSize * 0.34).rounded() }
-
-    /// "8.3" -> ("8", ".3"); a percentage or a bare metascore comes back whole, so one call site handles
-    /// every provider.
-    static func splitDecimal(_ v: String) -> (head: String, tail: String) {
-        guard let dot = v.firstIndex(of: ".") else { return (v, "") }
-        return (String(v[v.startIndex..<dot]), String(v[dot...]))
-    }
-
-    private var accessibilityText: String {
-        "Rating " + tokens.map { "\($0.label) \($0.value)" }.joined(separator: ", ")
+        .accessibilityLabel("Ratings: " + tokens.map { "\($0.label) \($0.value)" }.joined(separator: ", "))
     }
 }
 

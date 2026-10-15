@@ -69,7 +69,7 @@ import AppKit
 
         // The episode plate (IMDb + TMDB + Trakt) fits beside the Up next chip on a phone card, so no score drops.
         let episodeTokens = RatingsFormat.tokens(upNext.scores!)
-        let plate = render(RatingBadgePlate(tokens: episodeTokens, glyphSize: 9, textSize: 11), "episode-plate", into: dir)
+        let plate = render(RatingBadgePlate(tokens: episodeTokens, textSize: 11), "episode-plate", into: dir)
         let upNextChip = render(GlassChip(text: "Up next", prominent: true), "up-next-chip", into: dir)
         let compactWatched = render(GlassChip(text: "", systemImage: "checkmark"), "watched-compact", into: dir)
         check(plate.width + compactWatched.width + 8 + 20 <= 300, "episode scores fit beside the Watched check at 300pt")
@@ -79,23 +79,40 @@ import AppKit
         let all = MDBListRatings(imdb: 8.7, rottenTomatoes: 93, metacritic: 92, tmdb: 85,
                                  rtAudience: 97, letterboxd: 4.5, trakt: 86, mal: 8.6)
         let tokens = RatingsFormat.tokens(all)
-        check(tokens.map(\.label) == ["IMDb", "RT", "MC", "TMDB", "Popcorn", "Letterboxd", "Trakt", "MAL"], "provider order")
-        check(tokens.map(\.mark) == ["IMDb", "RT", "MC", "TMDB", "POP", "LBXD", "Trakt", "MAL"], "badge marks")
+        check(tokens.map(\.kind) == [.imdb, .rottenTomatoes, .metacritic, .tmdb, .popcorn, .letterboxd, .trakt, .myAnimeList],
+              "service order")
+        check(tokens.map(\.label) == ["IMDb", "Rotten Tomatoes", "Metacritic", "TMDB", "Popcornmeter", "Letterboxd",
+                                       "Trakt", "MyAnimeList"], "spoken names")
         check(tokens.map(\.value) == ["8.7", "93%", "92", "85%", "97%", "4.5", "86%", "8.6"], "values")
         check(RatingsFormat.scaled(88, max: 5) == 4.4 && RatingsFormat.scaled(4.4, max: 5) == 4.4
               && RatingsFormat.scaled(0, max: 10) == nil, "small-scale scores normalize")
         check(RatingsFormat.joined(MDBListRatings(imdb: nil, rottenTomatoes: nil, metacritic: nil, tmdb: nil)) == nil,
               "no scores, no row")
         // How many title scores a landscape card carries at common widths (phone tile, Mac tile, Apple TV card).
-        for (width, glyph, text) in [(170.0, 8.0, 10.0), (240.0, 8.0, 10.0), (420.0, 12.0, 15.0)] {
+        for (width, text) in [(170.0, 10.0), (240.0, 10.0), (420.0, 15.0)] as [(CGFloat, CGFloat)] {
             let widths = (1...tokens.count).map { count in
-                render(RatingBadgePlate(tokens: Array(tokens.prefix(count)), glyphSize: glyph, textSize: text),
+                render(RatingBadgePlate(tokens: Array(tokens.prefix(count)), textSize: text),
                        "title-plate-\(Int(width))-\(count)", into: dir).width
             }
             let fits = widths.lastIndex { $0 <= width - 12 }.map { $0 + 1 } ?? 0
             check(fits >= 2, "a \(Int(width))pt card shows at least IMDb + one more (\(fits))")
             print("  \(Int(width))pt card fits \(fits) of \(tokens.count) scores")
         }
+        // Every service mark, fresh and rotten, on art at the phone, episode and TV sizes (for a visual check).
+        let rotten = MDBListRatings(imdb: 5.9, rottenTomatoes: 42, metacritic: 38, tmdb: 61,
+                                    rtAudience: 35, letterboxd: 2.6, trakt: 58, mal: 6.1)
+        let mixed = MDBListRatings(imdb: 7.1, rottenTomatoes: 64, metacritic: 55, tmdb: 70)
+        let showcase = VStack(alignment: .leading, spacing: 18) {
+            ForEach([10.0, 11.0, 15.0] as [CGFloat], id: \.self) { size in
+                RatingBadgePlate(tokens: RatingsFormat.tokens(all), textSize: size)
+                RatingBadgePlate(tokens: RatingsFormat.tokens(rotten), textSize: size)
+                RatingBadgePlate(tokens: RatingsFormat.tokens(mixed), textSize: size)
+            }
+        }
+        .padding(24)
+        .background(art(0.05))
+        let showcaseSize = render(showcase, "rating-marks", into: dir)
+        check(showcaseSize.width > 300, "the mark showcase renders: \(showcaseSize)")
         check(EpisodeAirDate.short("2025-01-31T08:00:00.000Z") != nil, "ISO air dates format")
         check(EpisodeAirDate.short("soon") == nil && EpisodeAirDate.short(nil) == nil, "unknown air dates are left out")
         print("GlassEpisodeCardRenderTests: \(checks) checks passed; PNGs in \(dir.path)")

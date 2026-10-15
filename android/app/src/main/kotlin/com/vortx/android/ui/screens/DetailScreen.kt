@@ -6,6 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.semantics.semantics
+import com.vortx.android.ui.components.RatingScore
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.produceState
@@ -1121,31 +1123,13 @@ private fun RatingsTokenStrip(ratings: MdbListRatings, modifier: Modifier = Modi
         verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.xs),
     ) {
         tokens.forEach { token ->
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (token.isImdb) {
-                    Icon(
-                        VortXIcons.starFill,
-                        contentDescription = null,
-                        tint = VortXTheme.colors.accentBright,
-                        modifier = Modifier.size(14.dp),
-                    )
-                } else {
-                    Text(
-                        text = token.label,
-                        style = VortXTheme.type.eyebrow.copy(color = VortXTheme.colors.textTertiary),
-                    )
-                }
-                Text(
-                    text = token.value,
-                    style = VortXTheme.type.label.copy(
-                        color = VortXTheme.colors.textPrimary,
-                        fontWeight = FontWeight.SemiBold,
-                    ),
-                )
-            }
+            RatingScore(
+                token,
+                textSize = 13,
+                modifier = Modifier.semantics(mergeDescendants = true) {
+                    contentDescription = "${token.label} ${token.value}"
+                },
+            )
         }
     }
 }
