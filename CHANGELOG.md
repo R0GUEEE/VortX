@@ -4,6 +4,30 @@ All notable changes to VortX, newest first. VortX is Apple TV first, with an iPh
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
+## 0.5.3 - Every rating, new episode cards and a quicker player
+
+Build **272** across Apple and Android. Ratings now come from every major service and show as
+each service's logo on cards, title pages, episodes and posters. Series pages get new episode
+cards and a Trailers & Extras row, and the player answers the remote much faster.
+
+### Fixed
+
+- **A slow, glitchy player, most of all on Apple TV.** The player rebuilt its whole screen on every background update, including the progress it saves when you pause and every 20 seconds while you watch. That made the controls slow to appear when you paused and could make playback stutter. The player now redraws only for what it shows, on Apple TV, iPhone, iPad and Mac.
+- **Built-in add-ons you switched off can be switched back on.** A built-in add-on switched off on another device, on the web or in an older version had no way back on. The eye button now shows for any add-on that is off, on every platform.
+- **Mac:** the window buttons show and hide together with the player controls.
+
+### New
+
+- **Every rating, everywhere.** IMDb, Rotten Tomatoes, the Popcornmeter, Metacritic, TMDB, Letterboxd, Trakt, SIMKL, MyAnimeList and Kitsu, on Home, Library, Discover, title pages and posters. Each score shows the service's own mark: the IMDb tag, a tomato that turns into a green splat below 60%, Metacritic's coloured score square and so on. Cards show as many scores as they fit, and the title page shows all of them. Some titles gain more scores over the next days as they are collected.
+- **Episode ratings.** Each episode shows its IMDb, TMDB and Trakt scores, and a season's best episode is marked Top rated.
+- **New episode cards on iPhone, iPad, Mac and Apple TV.** The full episode still with a frosted panel below for the number, title, synopsis, runtime and air date, plus Up next, Watched and progress. Season posters now show on iPhone too.
+- **Trailers & Extras on Apple.** Title pages list trailers, teasers, clips and featurettes from TMDB, ready to play.
+- **Frosted glass player controls** tinted with your accent colour on iOS 26 and macOS 26.
+
+### Android
+
+Android gets every rating with the services' marks on cards, title pages and episodes, ratings on landscape cards and Android TV backdrop cards (which showed none before), and the fix for switched-off built-in add-ons. The Android APK is still an early technical preview, so expect missing features and rough edges.
+
 ## 0.5.2 - Up next, a new series page, For You, network shares and a TV guide
 
 Build **271** across Apple and Android. This release fixes accounts that would not load after

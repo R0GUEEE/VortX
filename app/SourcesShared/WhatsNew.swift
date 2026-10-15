@@ -5,20 +5,16 @@ import Foundation
 /// The in-app "What's New" screen (Settings > What's New) renders the full bundled CHANGELOG.md and only falls
 /// back to these highlights when that resource is absent. Pure logic so it compiles on every target.
 enum WhatsNew {
-    static let version = "0.5.2"
+    static let version = "0.5.3"
     static let highlights: [String] = [
-        "Accounts that would not load after updating from 0.4 load again. One unusual item saved by an older version no longer stops the whole account, and converting older account data is about twice as fast.",
-        "Finishing an episode keeps the series in Continue Watching as Up next, and choosing it opens the next unwatched episode. A series leaves only when you remove it or mark it watched or unwatched.",
-        "Everything you watch or start stays in your Library until you remove it. Watching it again brings it back.",
-        "Source rows from add-ons such as Debridio show the file name and size again.",
-        "A new series page on Mac, iPad and Apple TV: seasons as posters, episodes as a grid, and Trailer beside Play.",
-        "Actor pages with photo, biography and filmography, from the cast list or from search.",
-        "For You rows built from what each profile likes, plus smart collections by genre, cast, year or rating.",
-        "Network shares: browse and play from a NAS or computer over SMB, WebDAV or a web folder.",
-        "A TV guide for live channels whose add-on publishes a schedule.",
-        "Infuse hands your place back to VortX when you stop.",
-        "Effects and performance controls on Apple TV, and a quicker response to the remote.",
-        "Next episodes keep your chosen quality, and usenet can download ahead to storage."
+        "The player answers the remote faster. It no longer rebuilds itself on every background update, which made the controls slow to appear on pause, most of all on Apple TV.",
+        "Every rating, everywhere: IMDb, Rotten Tomatoes, Popcornmeter, Metacritic, TMDB, Letterboxd, Trakt, SIMKL, MyAnimeList and Kitsu, each shown as the service's own mark.",
+        "Episodes show their IMDb, TMDB and Trakt scores, and each season's best episode is marked Top rated.",
+        "New episode cards with the full still, a frosted panel, Up next and progress. Season posters show on iPhone too.",
+        "Trailers & Extras on title pages, ready to play.",
+        "Frosted glass player controls tinted with your accent colour on iOS 26 and macOS 26.",
+        "A built-in add-on switched off elsewhere can always be switched back on with its eye button.",
+        "On Mac, the window buttons show and hide with the player controls."
     ]
 
     // Kept as release-history fallback text for older bundled changelogs. The current screen uses
