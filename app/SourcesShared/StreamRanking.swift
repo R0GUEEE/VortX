@@ -57,6 +57,9 @@ enum StreamRanking {
     private static let cacheLock = NSLock()
     private static var regexCache: [String: NSRegularExpression] = [:]
     private static var textCache: [Int: String] = [:]
+    /// `qualityLabel` per stream key. The label is a pure function of the cached text, but computing it runs
+    /// several regexes; the player's Quality button asked for it on every render across thousands of sources.
+    private static var labelCache: [Int: String] = [:]
     private static var scoreCache: [Int: Int] = [:]
 
     private static func regex(_ pattern: String) -> NSRegularExpression? {
@@ -1281,7 +1284,19 @@ enum StreamRanking {
     /// not the best one.) A bare "4k"/"uhd" tag is only trusted when the file size isn't implausibly
     /// small for 4K, so a low-res file that merely carries a 4k tag isn't promoted to the 4K bucket.
     static func qualityLabel(_ s: CoreStream) -> String {
-        let t = qualityText(s)
+        let key = streamKey(s)
+        cacheLock.lock()
+        if let hit = labelCache[key] { cacheLock.unlock(); return hit }
+        cacheLock.unlock()
+        let label = uncachedQualityLabel(qualityText(s))
+        cacheLock.lock()
+        if labelCache.count > 32_768 { labelCache.removeAll() }   // same bound as textCache
+        labelCache[key] = label
+        cacheLock.unlock()
+        return label
+    }
+
+    private static func uncachedQualityLabel(_ t: String) -> String {
         if let r = explicitResolution(t) {
             // Even an explicit "2160p" token is only badged 4K when the file size isn't implausibly
             // small for 4K, so a 720p file carrying a "2160p" tag isn't shown as 4K.

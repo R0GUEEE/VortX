@@ -32,14 +32,15 @@ enum NativeForegroundSyncPolicy {
     /// A transport ACK covers only the edit generation captured before that upload. A failure
     /// or an edit accepted while the request suspends must remain queued for another export.
     ///
-    /// Playback reports progress every few seconds, and every upload rebuilds and re-encrypts the
-    /// whole account document. Progress-only work therefore waits until playback goes quiet
-    /// (pause/exit) or `progressMaxWait` passes. Any other edit keeps the immediate cadence.
+    /// Playback reports progress every few seconds, and every upload pulls, re-merges and re-encrypts
+    /// the whole account document (megabytes, seconds of CPU). Progress-only work therefore waits until
+    /// playback goes quiet (pause/exit) or `progressMaxWait` passes: other devices may see a position up
+    /// to five minutes old while this one is still playing. Any other edit keeps the immediate cadence.
     struct PushQueue: Equatable {
         static let urgentDelay: TimeInterval = 2.5
         static let maxFailureBackoff: TimeInterval = 30
         static let progressQuiet: TimeInterval = 15
-        static let progressMaxWait: TimeInterval = 60
+        static let progressMaxWait: TimeInterval = 300
 
         private(set) var generation: UInt64 = 0
         private(set) var hasPendingPush = false

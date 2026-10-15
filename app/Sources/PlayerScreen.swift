@@ -3372,7 +3372,9 @@ struct PlayerScreen: View {
                     // wall-clock of the buffer, and persisting it would make a later open seek into a
                     // bogus offset (or drop a fake Continue-Watching entry).
                     if assetSanityAccepted, !effectivelyLive,
-                       duration > 0, d - lastReported >= 5 {   // push progress ~every 5s
+                       duration > 0, d - lastReported >= 20 {   // push progress ~every 20s, the tvOS cadence
+                        // Each report is a full native-engine transaction (state hydrate + validation), so a
+                        // 5 s cadence kept a core busy during playback. Pause, seek and exit still report at once.
                         lastReported = d
                         reportProgress(d)
                     }

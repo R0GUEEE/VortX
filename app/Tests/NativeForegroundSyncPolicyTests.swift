@@ -114,10 +114,11 @@ enum NativeForegroundSyncPolicyTests {
         playing.request(progressOnly: true, at: t0)
         precondition(playing.nextUploadDelay(now: t0, failureBackoff: nil) == Queue.progressQuiet)
         // Continuous reports every 6s keep extending the quiet window but never past the cap.
-        for second in stride(from: 6.0, through: 54.0, by: 6.0) {
+        let lastReport = Queue.progressMaxWait - 6
+        for second in stride(from: 6.0, through: lastReport, by: 6.0) {
             playing.request(progressOnly: true, at: t0.addingTimeInterval(second))
         }
-        precondition(playing.nextUploadDelay(now: t0.addingTimeInterval(54), failureBackoff: nil) == Queue.progressMaxWait - 54)
+        precondition(playing.nextUploadDelay(now: t0.addingTimeInterval(lastReport), failureBackoff: nil) == Queue.progressMaxWait - lastReport)
         // Pause/exit: no further reports, so the quiet window decides.
         var paused = Queue()
         paused.request(progressOnly: true, at: t0)
