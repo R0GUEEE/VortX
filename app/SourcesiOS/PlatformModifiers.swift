@@ -250,13 +250,16 @@ private struct MacPlayerChromeHider: NSViewRepresentable {
         var titlebarObserver: NSObjectProtocol?
         var chromeSubscription: AnyCancellable?
 
-        /// Windowed: fade the window buttons with the player's controls.
-        func follow(_ window: NSWindow) {
+        /// Windowed: fade the window buttons with the player's controls. Called from the main-queue block in
+        /// makeNSView; the subscription delivers on the main queue too, so both reach the main-actor controls.
+        @MainActor func follow(_ window: NSWindow) {
             MacWindowControls.restore(in: window, visible: MacPlayerHost.shared.chromeVisible)
             chromeSubscription = MacPlayerHost.shared.$chromeVisible.removeDuplicates().receive(on: DispatchQueue.main)
                 .sink { [weak self, weak window] visible in
-                    guard let self, !self.cancelled, let window, !window.styleMask.contains(.fullScreen) else { return }
-                    MacWindowControls.setVisible(visible, in: window)
+                    MainActor.assumeIsolated {
+                        guard let self, !self.cancelled, let window, !window.styleMask.contains(.fullScreen) else { return }
+                        MacWindowControls.setVisible(visible, in: window)
+                    }
                 }
         }
 
