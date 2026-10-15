@@ -39,6 +39,7 @@ const receipt = {baselineRef, sourcePath: path, note: 'Actual production declara
 for (const [label, source] of [['Baseline', baseline], ['Current', current]]) {
   const methods = markers.map(marker => block(source, marker));
   if (source.includes('private func stableDescendingStreams<')) methods.push(block(source, 'private func stableDescendingStreams<'));
+  if (source.includes('static func windowTakes(')) methods.push(block(source, 'static func windowTakes('));
   const expressions = consumers.map(([name, marker]) => {
     const body = block(source, marker);
     const match = body.match(/states:\s*([^\n]+),\s*\n\s*sourcesSettled:/);

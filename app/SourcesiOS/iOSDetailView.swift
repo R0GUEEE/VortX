@@ -316,7 +316,7 @@ struct iOSDetailView: View {
     var initialTraktSessionID: TraktSessionID? = nil
     var initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil
     @State private var resumeHintOpenedAt = Date()
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var theme: ThemeManager   // observe textScale so Theme.Typography repaints live
     @EnvironmentObject private var profiles: ProfileStore   // per-profile watched set + episode progress
@@ -5039,7 +5039,7 @@ struct iOSEpisodeStreams: View {
     /// Set only by the Cinema quick-view route. It reuses this page's settled ranked Watch command; the
     /// ordinary episode-detail route remains source-list-first unless Smart Source Selection is enabled.
     var autoPlayOnAppear: Bool = false
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var theme: ThemeManager
     @EnvironmentObject private var profiles: ProfileStore   // engine-vs-overlay resume source for the binge re-anchor
@@ -6909,17 +6909,18 @@ struct iOSSourceList: View {
     /// per-row string work stays capped. `expandable` is the count of rows that COULD still render (visible +
     /// not collapsed), so "Show more" is offered only when growing the window actually reveals more rows.
     private var windowedPlan: (groups: [WindowedGroup], shown: Int, expandable: Int) {
-        var budget = renderLimit
+        let groups = visibleGroups
+        let takes = Self.windowTakes(counts: groups.map { collapsed.contains($0.addon) ? nil : $0.streams.count },
+                                     limit: renderLimit)
         var shown = 0
         var expandable = 0
         var out: [WindowedGroup] = []
-        for group in visibleGroups {
-            if collapsed.contains(group.addon) {
+        for (group, take) in zip(groups, takes) {
+            guard let take else {
                 out.append(WindowedGroup(id: group.addon, group: group, rows: []))
                 continue
             }
             expandable += group.streams.count
-            let take = min(budget, group.streams.count)   // budget is never negative: take <= budget each step
             // Keep every header, but do no per-stream parsing/sorting once this group's row budget is zero.
             let streams = take > 0 ? sortedStreams(group) : []
             var seen: [String: Int] = [:]
@@ -6929,10 +6930,32 @@ struct iOSSourceList: View {
                 return SourceRow(id: "\(base)#\(n)", addon: group.addon, stream: s)
             }
             out.append(WindowedGroup(id: group.addon, group: group, rows: Array(rows)))
-            budget -= take
             shown += take
         }
         return (out, shown, expandable)
+    }
+
+    /// Rows each expanded group shows within `limit` (nil for a collapsed group). Every group first gets an
+    /// equal share, so under All an add-on with hundreds of sources can no longer use the whole window and
+    /// leave every later add-on as an empty header; what the share leaves over goes to groups in order.
+    static func windowTakes(counts: [Int?], limit: Int) -> [Int?] {
+        let expanded = counts.compactMap { $0 }.filter { $0 > 0 }.count
+        guard expanded > 0 else { return counts.map { $0.map { _ in 0 } } }
+        let share = max(1, limit / expanded)
+        var budget = limit
+        var takes = counts.map { count -> Int? in
+            guard let count else { return nil }
+            let take = min(count, share, budget)
+            budget -= take
+            return take
+        }
+        for index in takes.indices where budget > 0 {
+            guard let take = takes[index], let count = counts[index], count > take else { continue }
+            let extra = min(count - take, budget)
+            takes[index] = take + extra
+            budget -= extra
+        }
+        return takes
     }
 
     /// Empty result, told apart by CAUSE. If one or more add-ons actually ERRORED (fetch / timeout /
@@ -7776,7 +7799,7 @@ private struct iOSEmptyRow: View {
 private struct iOSLibraryChip: View {
     let expectedID: String
     let expectedType: String
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var profiles: ProfileStore
     @StateObject private var libraryAction = ProfileMutationPresentation()
 
@@ -7832,7 +7855,7 @@ private struct iOSLibraryChip: View {
 /// plumbing; a synthetic magnet / paste-a-link title (no tt / tmdb id) hides the chip since it can't be
 /// watchlisted. The touch/Mac twin of the tvOS `WatchlistChip`.
 private struct iOSWatchlistChip: View {
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var profiles: ProfileStore
     @State private var isWatchlisted = false
     @StateObject private var watchlistAction = ProfileMutationPresentation()

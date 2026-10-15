@@ -329,6 +329,9 @@ struct iOSRootView: View {
 
     private var shellWithTabPreferenceRouting: some View {
         shellWithConnectivityRouting
+        // A playing title covers the whole shell. Screens on `@VisibleCore` (the detail page under the player)
+        // stop re-rendering on every engine event until it closes, then catch up in one pass.
+        .environment(\.engineObservationActive, !playbackGate.playerActive)
         .onChange(of: hideLiveTab) { hidden in
             if hidden, tab == .live { tab = .home }   // never leave the bar pointing at a hidden screen
         }

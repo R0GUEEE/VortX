@@ -94,6 +94,7 @@ enum NativeForegroundSyncPolicyTests {
         precondition(dirty["layout"] == 2)
         print("PASS failed transport/newer checkpoint edit remains pending; exact dirty stamp survives older ACK")
         progressCadence()
+        legacyConversionSkip()
 
         try await twoDeviceColdHydration()
         try causalRollbackRepair()
@@ -102,6 +103,22 @@ enum NativeForegroundSyncPolicyTests {
 
     /// Playback progress (every few seconds) must not export the whole account each time, yet a
     /// real edit keeps its immediate cadence and progress still lands within the bounded window.
+    static func legacyConversionSkip() {
+        typealias Record = NativeForegroundSyncPolicy.LegacyConversionRecord
+        let t0 = Date(timeIntervalSince1970: 80_000)
+        let record = Record(digest: "a", convertedAt: t0)
+        precondition(Record.decide(nil, digest: "a", hasLinkedAccounts: false, now: t0) == .first)
+        precondition(Record.decide(record, digest: nil, hasLinkedAccounts: false, now: t0) == .first)
+        precondition(Record.decide(record, digest: "a", hasLinkedAccounts: false, now: t0.addingTimeInterval(3600)) == .skip)
+        precondition(Record.decide(record, digest: "b", hasLinkedAccounts: false, now: t0.addingTimeInterval(1)) == .changed)
+        precondition(Record.decide(record, digest: "a", hasLinkedAccounts: true, now: t0.addingTimeInterval(Record.linkedRefresh - 1)) == .skip)
+        precondition(Record.decide(record, digest: "a", hasLinkedAccounts: true, now: t0.addingTimeInterval(Record.linkedRefresh)) == .refresh)
+        precondition(Record.decide(record, digest: "a", hasLinkedAccounts: false, now: t0.addingTimeInterval(Record.safetyRefresh)) == .refresh)
+        // A clock that moved backwards never extends a skip.
+        precondition(Record.decide(record, digest: "a", hasLinkedAccounts: false, now: t0.addingTimeInterval(-5)) == .refresh)
+        print("PASS 0.4 conversion skips only while its fingerprint matches; linked accounts refresh every 30 min, others daily")
+    }
+
     static func progressCadence() {
         typealias Queue = NativeForegroundSyncPolicy.PushQueue
         let t0 = Date(timeIntervalSince1970: 50_000)

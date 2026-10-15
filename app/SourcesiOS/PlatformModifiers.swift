@@ -56,7 +56,8 @@ extension View {
     @ViewBuilder func platformFullScreenPlayerCover<Item: Identifiable, C: View>(
         item: Binding<Item?>, @ViewBuilder content: @escaping (Item) -> C) -> some View {
         #if os(iOS)
-        self.fullScreenCover(item: item, content: content)
+        // The player and anything it presents are on screen: never inherit the covered shell's closed gate.
+        self.fullScreenCover(item: item) { content($0).environment(\.engineObservationActive, true) }
         #else
         // macOS has no fullScreenCover, and a .sheet renders as a separate, mis-positioned window that
         // floats OUTSIDE the app (titlebar + nav chrome leak above the video, controls under the Dock).

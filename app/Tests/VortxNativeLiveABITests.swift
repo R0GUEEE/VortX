@@ -252,6 +252,8 @@ private final class NativeFieldNotifications: @unchecked Sendable {
         try dispatch(["action": "Player", "args": ["action": "TimeChanged", "args": ["time": 120000, "duration": 1200001]]], field: "player")
         await facade.settled()
         check(try field("native_state")["libraries"]?["fixture-owner"]?["watchContexts"]?["tt-fixture:1:2"]?["durationMs"] == .integer(1200001))
+        // Position ticks reach disk at most every 30 s; pause, close, background and quit flush them.
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in facade.flushPendingProgress { done.resume() } }
         let durable = try JSONDecoder().decode(VortxJSON.self, from: Data(checkpoint.read(scope: scope)!.utf8))
         check(try durable == field("native_state"))
         check(!facade.dispatch(data: Data(#"{"action":"Ctx","args":{"action":"LoginWithToken","args":"not-a-real-token"}}"#.utf8), field: nil))

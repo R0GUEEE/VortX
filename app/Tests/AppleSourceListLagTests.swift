@@ -130,12 +130,21 @@ private final class ProductionDiagnosticConsumers {
             check(plan.shown == 100 && plan.expandable == 2_040, "\(mode) row and expandable budgets")
             check(plan.groups.map(\.id) == ["One", "Two", "Three"], "\(mode) keeps budget-exhausted headers")
             check(plan.groups.map { $0.group.id } == groups.map(\.id), "\(mode) preserves transport identities")
-            check(plan.groups[1].rows.isEmpty && plan.groups[2].rows.isEmpty, "\(mode) leaves exhausted groups unrendered")
-            check(plan.groups[0].rows.map { $0.stream.token } == Array(expected(first, mode: mode).prefix(100)), "\(mode) descending order and stable ties")
-            check(Set(plan.groups[0].rows.map(\.id)).count == 100, "\(mode) repeated content IDs retain distinct row suffixes")
+            // Under All every add-on shows its top rows: an equal share each, the remainder to the first.
+            check(plan.groups.map(\.rows.count) == [34, 33, 33], "\(mode) shares the window across add-ons")
+            check(zip(plan.groups, [first, later, streams("third", count: 300)]).allSatisfy { group, source in
+                group.rows.map { $0.stream.token } == Array(expected(source, mode: mode).prefix(group.rows.count))
+            }, "\(mode) descending order and stable ties")
+            check(plan.groups.allSatisfy { Set($0.rows.map(\.id)).count == $0.rows.count }, "\(mode) repeated content IDs retain distinct row suffixes")
             let reads = mode == .size ? StreamRanking.sizeReads : StreamRanking.seederReads
-            check(reads.keys.allSatisfy { $0.hasPrefix("first-") }, "\(mode) no parsing after exhausted budget")
-            check(mode == .best ? reads.isEmpty : reads.count == first.count && reads.values.allSatisfy { $0 == 1 }, "\(mode) comparator keys parsed once per stream")
+            check(mode == .best ? reads.isEmpty : reads.count == 2_040 && reads.values.allSatisfy { $0 == 1 }, "\(mode) comparator keys parsed once per stream")
+
+            list.renderLimit = 2
+            StreamRanking.reset()
+            let tight = list.plan()
+            let tightReads = mode == .size ? StreamRanking.sizeReads : StreamRanking.seederReads
+            check(tight.groups.map(\.rows.count) == [1, 1, 0] && tightReads.keys.allSatisfy { !$0.hasPrefix("third-") },
+                  "\(mode) no parsing after exhausted budget")
 
             list.renderLimit = 0
             StreamRanking.reset()
@@ -148,7 +157,8 @@ private final class ProductionDiagnosticConsumers {
             StreamRanking.reset()
             let collapsed = list.plan()
             check(collapsed.groups[0].rows.isEmpty && collapsed.shown == 100 && collapsed.expandable == 1_900, "\(mode) collapsed header spends no rows")
-            check(collapsed.groups[1].rows.map { $0.stream.token } == Array(expected(later, mode: mode).prefix(100)), "\(mode) next expanded group fills window")
+            check(collapsed.groups[1].rows.map { $0.stream.token } == Array(expected(later, mode: mode).prefix(50))
+                  && collapsed.groups[2].rows.count == 50, "\(mode) expanded groups share the window")
 
             list.sourceFilter = "Three"
             let filtered = list.plan()

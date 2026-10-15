@@ -920,6 +920,47 @@ final class VortXSyncManager: ObservableObject {
         let authority: VortxNativeOwnAccountProducer.Authority?
         let sourceArchive: Data?
     }
+    /// Keys this device's own native export writes; a change in them is never a 0.4 change.
+    private static let nativeExportKeys = ["nativeSync", "nativeHostPreferences", "profileEditResults",
+                                           "nativeProviderCredentials", "apiKeys"]
+    /// Fingerprint of what the 0.4 conversion reads: the document's legacy fields (credential-free) and the
+    /// peer receipt and account bindings in its native carrier. Nil when the document cannot be read, which
+    /// always converts. See `NativeForegroundSyncPolicy.LegacyConversionRecord`.
+    private func nativeLegacyConversionDigest(_ document: [String: Any]) -> String? {
+        var legacy = document
+        for key in Self.nativeExportKeys { legacy.removeValue(forKey: key) }
+        guard let body = try? VortxNativeBootstrapArchive.credentialFreeDocument(legacy) else { return nil }
+        var hasher = SHA256()
+        hasher.update(data: body)
+        if let native = document["nativeSync"] as? [String: Any] {
+            var read = native.filter { ["schemaVersion", "legacyImport", "accountSlots"].contains($0.key) }
+            if let profiles = native["profiles"] as? [String: Any] {
+                read["profileAccounts"] = profiles.compactMapValues { (($0 as? [String: Any])?["profile"] as? [String: Any])?["account"] }
+            }
+            guard let bytes = try? JSONSerialization.data(withJSONObject: read, options: [.sortedKeys, .withoutEscapingSlashes]) else { return nil }
+            hasher.update(data: bytes)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+    private func nativeLegacyConversionKey(_ capture: CredentialScopeRegistry.Capture) -> String {
+        "vortx.native.legacyConversion." + SHA256.hash(data: Data(capture.namespace.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+    /// Whether this sync must convert the 0.4 data again, and the fingerprint to record once it has.
+    private func nativeLegacyConversionDecision(_ document: [String: Any], capture: CredentialScopeRegistry.Capture)
+        -> (convert: Bool, digest: String?) {
+        let digest = nativeLegacyConversionDigest(document)
+        let record = UserDefaults.standard.data(forKey: nativeLegacyConversionKey(capture))
+            .flatMap { try? JSONDecoder().decode(NativeForegroundSyncPolicy.LegacyConversionRecord.self, from: $0) }
+        let linked = Self.resolveRoster(from: document, fullOnly: true)?.profiles.contains { !$0.isOwner && $0.usesOwnAccount } ?? true
+        let decision = NativeForegroundSyncPolicy.LegacyConversionRecord.decide(record, digest: digest, hasLinkedAccounts: linked, now: Date())
+        if decision != .skip { DiagnosticsLog.log("native-profiles", "legacy_conversion run reason=\(decision.rawValue)") }
+        return (decision != .skip, digest)
+    }
+    private func recordNativeLegacyConversion(_ digest: String?, capture: CredentialScopeRegistry.Capture) {
+        guard let digest, isCurrent(capture),
+              let data = try? JSONEncoder().encode(NativeForegroundSyncPolicy.LegacyConversionRecord(digest: digest, convertedAt: Date())) else { return }
+        UserDefaults.standard.set(data, forKey: nativeLegacyConversionKey(capture))
+    }
     func updateNativeOwnAccountAvailability(missing: [UUID], profiles: [UserProfile], capture: CredentialScopeRegistry.Capture) {
         guard isCurrent(capture) else { return }
         let ownIDs = Set(profiles.filter { !$0.isOwner && $0.usesOwnAccount }.map(\.id))
@@ -1487,6 +1528,7 @@ final class VortXSyncManager: ObservableObject {
                     try await CoreBridge.shared.installNativeSession(session, registry: registry, capture: capture, hostProfiles: roster.profiles)
                     guard self.isCurrent(capture), !Task.isCancelled, self.nativeCheckpointGeneration == generation,
                           ProfileStore.shared.activeID == installationProfile else { throw VortxNativeError.superseded }
+                    self.recordNativeLegacyConversion(self.nativeLegacyConversionDigest(document), capture: capture)
                     self.applyNativeGlobals(acceptedHost)
                     try self.publishNativeWebsiteOutcome(websiteOutcome, capture: capture)
                     // Upload only the new nativeSync carrier. The archive never enters the wire,
@@ -3700,7 +3742,9 @@ final class VortXSyncManager: ObservableObject {
         do {
             var providers = try mergedNativeProviderState(doc, capture: capture)
             exportStage = "legacy_prepare"
-            let prepared = try await prepareNativeLegacyMaterial(doc, capture: capture)
+            let conversion = nativeLegacyConversionDecision(doc, capture: capture)
+            var prepared: NativeLegacyPreparation?
+            if conversion.convert { prepared = try await prepareNativeLegacyMaterial(doc, capture: capture) }
             guard isCurrent(capture), sourceIsCurrent() else { return nil }
             let remote = try doc["nativeSync"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
             let hostRemote = try doc["nativeHostPreferences"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
@@ -3709,9 +3753,10 @@ final class VortXSyncManager: ObservableObject {
             exportedDirtySettings = nativeDirtySettingsForExport(globalEdits, snapshot: exportedDirtySettings)
             exportStage = "native_merge"
             var merged = try await CoreBridge.shared.mergeNativeAccountDocument(remote, hostRemote: hostRemote, capture: capture,
-                                                                               legacyMaterial: prepared.material, hostEdits: globalEdits, websiteEvents: Self.nativeWebsiteEvents(doc), websiteAddonEvents: Self.nativeWebsiteAddonEvents(doc), legacyWatchlists: self.nativeLegacyWatchlists(doc),
-                                                                               sourceAuthority: prepared.authority, authenticatedSourceArchive: prepared.sourceArchive)
+                                                                               legacyMaterial: prepared?.material, hostEdits: globalEdits, websiteEvents: Self.nativeWebsiteEvents(doc), websiteAddonEvents: Self.nativeWebsiteAddonEvents(doc), legacyWatchlists: self.nativeLegacyWatchlists(doc),
+                                                                               sourceAuthority: prepared?.authority, authenticatedSourceArchive: prepared?.sourceArchive)
             guard isCurrent(capture), sourceIsCurrent() else { return nil }
+            if prepared != nil { recordNativeLegacyConversion(conversion.digest, capture: capture) }
             exportStage = "preference_replay"
             let replayed = await replayNativePreferenceIntents(capture: capture)
             guard isCurrent(capture), sourceIsCurrent() else { return nil }
@@ -3725,8 +3770,8 @@ final class VortXSyncManager: ObservableObject {
                 exportedDirtySettings = nativeDirtySettingsForExport(globalEdits, snapshot: exportedDirtySettings)
                 exportStage = "native_remerge"
                 merged = try await CoreBridge.shared.mergeNativeAccountDocument(nil, hostRemote: nil, capture: capture,
-                    legacyMaterial: prepared.material, hostEdits: globalEdits, websiteEvents: [], websiteAddonEvents: [],
-                    legacyWatchlists: [:], sourceAuthority: prepared.authority, authenticatedSourceArchive: prepared.sourceArchive)
+                    legacyMaterial: prepared?.material, hostEdits: globalEdits, websiteEvents: [], websiteAddonEvents: [],
+                    legacyWatchlists: [:], sourceAuthority: prepared?.authority, authenticatedSourceArchive: prepared?.sourceArchive)
                 guard isCurrent(capture), sourceIsCurrent() else { return nil }
             }
             exportStage = "export_projection"
@@ -3997,15 +4042,18 @@ final class VortXSyncManager: ObservableObject {
               case .native(let initialBinding?) = CoreBridge.shared.captureNativePlaybackTarget() else {
             throw VortxNativeError.superseded
         }
-        let prepared = try await prepareNativeLegacyMaterial(doc, capture: capture)
+        let conversion = nativeLegacyConversionDecision(doc, capture: capture)
+        var prepared: NativeLegacyPreparation?
+        if conversion.convert { prepared = try await prepareNativeLegacyMaterial(doc, capture: capture) }
         guard isCurrent(capture), ProfileStore.shared.activeID == profileID,
               CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: profileID) else { throw VortxNativeError.superseded }
         let remote = try doc["nativeSync"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
         let hostRemote = try doc["nativeHostPreferences"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
         let merged = try await CoreBridge.shared.mergeNativeAccountDocument(remote, hostRemote: hostRemote, capture: capture,
-            legacyMaterial: prepared.material, websiteEvents: Self.nativeWebsiteEvents(doc), websiteAddonEvents: Self.nativeWebsiteAddonEvents(doc),
-            legacyWatchlists: nativeLegacyWatchlists(doc), sourceAuthority: prepared.authority, authenticatedSourceArchive: prepared.sourceArchive)
+            legacyMaterial: prepared?.material, websiteEvents: Self.nativeWebsiteEvents(doc), websiteAddonEvents: Self.nativeWebsiteAddonEvents(doc),
+            legacyWatchlists: nativeLegacyWatchlists(doc), sourceAuthority: prepared?.authority, authenticatedSourceArchive: prepared?.sourceArchive)
         guard isCurrent(capture), ProfileStore.shared.activeID == profileID else { throw VortxNativeError.superseded }
+        if prepared != nil { recordNativeLegacyConversion(conversion.digest, capture: capture) }
         applyNativeGlobals(merged["nativeHostPreferences"]!)
         try publishNativeWebsiteOutcome(merged["profileEditResults"]!, capture: capture)
         guard let joinedNative = merged["nativeSync"], let joinedHost = merged["nativeHostPreferences"] else {

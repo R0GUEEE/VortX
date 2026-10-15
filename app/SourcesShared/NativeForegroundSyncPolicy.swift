@@ -92,6 +92,30 @@ enum NativeForegroundSyncPolicy {
         }
     }
 
+    /// Converting the account's 0.4 data into the native engine (re-reading each linked Stremio account,
+    /// rebuilding the import material, replaying it through the engine) took seconds on every sync. Once a
+    /// conversion completes this device remembers a fingerprint of its inputs and later syncs skip it while
+    /// they still match: a change from an old app or the website flips it back on. A linked Stremio account
+    /// changes outside the document, so with one present it is re-read after `linkedRefresh`; otherwise a
+    /// `safetyRefresh` re-runs it once a day.
+    struct LegacyConversionRecord: Codable, Equatable {
+        static let linkedRefresh: TimeInterval = 30 * 60
+        static let safetyRefresh: TimeInterval = 24 * 60 * 60
+
+        let digest: String
+        let convertedAt: Date
+
+        enum Decision: String { case skip, first, changed, refresh }
+
+        static func decide(_ record: LegacyConversionRecord?, digest: String?, hasLinkedAccounts: Bool, now: Date) -> Decision {
+            guard let record, let digest else { return .first }
+            guard record.digest == digest else { return .changed }
+            let age = now.timeIntervalSince(record.convertedAt)
+            guard age >= 0, age < (hasLinkedAccounts ? linkedRefresh : safetyRefresh) else { return .refresh }
+            return .skip
+        }
+    }
+
     @MainActor
     static func ensureSession(isCurrent: () -> Bool, hasCertifiedSession: () -> Bool,
                               settleResident: () async -> Void,
