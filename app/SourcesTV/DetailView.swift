@@ -49,6 +49,8 @@ struct DetailView: View {
     @ReducedMotion private var reduceMotion
 
     @State private var similarItems: [MetaPreview] = []
+    /// The title's trailers, featurettes, clips and behind-the-scenes videos (Trailers & Extras).
+    @State private var titleVideos: [TMDBClient.TitleVideo] = []
     /// Franchise/collection this movie belongs to (TMDB belongs_to_collection -> parts, in release order),
     /// rendered as the "Part of the … Collection" rail JUST ABOVE More Like This. Nil for a standalone film /
     /// series / any miss, which hides the row. `collectionKey` de-dupes the fetch per imdb id.
@@ -836,6 +838,52 @@ struct DetailView: View {
         }
     }
 
+    /// Trailers & Extras: every video TMDB lists for the title, played in VortX's own player like the Trailer
+    /// chip, with the YouTube app as the rescue if the in-app load fails.
+    private var extrasSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            if !titleVideos.isEmpty {
+                RailHeader(title: "Trailers & Extras")
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(alignment: .top, spacing: Theme.Space.lg) {
+                        ForEach(titleVideos) { video in
+                            Button { playExtra(video) } label: {
+                                TitleExtraCard(video: video, width: 520,
+                                               artwork: AnyView(EpisodeThumbImage(url: video.thumbnail?.absoluteString)),
+                                               tenFoot: true)
+                            }
+                            .buttonStyle(CardFocusStyle(scale: 1.04))
+                        }
+                    }
+                    .padding(.horizontal, Theme.Space.screenEdge)
+                    .padding(.vertical, Theme.Space.lg)
+                }
+            }
+        }
+        .task(id: LiveTypes.contains(type) ? nil : id) {
+            titleVideos = []
+            guard !LiveTypes.contains(type) else { return }
+            let requested = id
+            let videos = await TMDBClient.titleVideos(metaID: requested, type: effectiveType)
+            guard !Task.isCancelled, id == requested else { return }
+            titleVideos = videos
+        }
+    }
+
+    @MainActor private func playExtra(_ video: TMDBClient.TitleVideo) {
+        let label = "\(core.metaDetails?.meta?.name ?? id) · \(video.name)"
+        Task { @MainActor in
+            if let resolved = await YouTubeDirectResolver.resolve(videoID: video.key, maxHeight: 1080) {
+                presenter.request = PlaybackRequest(url: resolved.videoURL, title: label, isTrailer: true,
+                                                    trailerYouTubeID: video.key, audioSidecarURL: resolved.audioURL)
+                return
+            }
+            guard let url = TrailerRequest(title: label, youTubeID: video.key, directURL: nil)
+                .nativeFullTrailerURL(languageCode: TMDBClient.trailerLanguageBaseCode) else { return }
+            presenter.request = PlaybackRequest(url: url, title: label, isTrailer: true, trailerYouTubeID: video.key)
+        }
+    }
+
     @ViewBuilder private var moreLikeThisSection: some View {
         if !similarItems.isEmpty {
             VStack(alignment: .leading, spacing: Theme.Space.md) {
@@ -1066,6 +1114,8 @@ struct DetailView: View {
                             .onMoveCommand { handleDetailMove($0, from: .lower, using: proxy) }
                         collectionChronologySection
                             .onMoveCommand { handleDetailMove($0, from: .lower, using: proxy) }
+                        extrasSection
+                            .onMoveCommand { handleDetailMove($0, from: .lower, using: proxy) }
                         moreLikeThisSection
                             .onMoveCommand { handleDetailMove($0, from: .lower, using: proxy) }
                     }
@@ -1179,6 +1229,8 @@ struct DetailView: View {
                         relationsSection
                             .onMoveCommand { handleDetailMove($0, from: .lower, using: proxy) }
                         collectionChronologySection
+                            .onMoveCommand { handleDetailMove($0, from: .lower, using: proxy) }
+                        extrasSection
                             .onMoveCommand { handleDetailMove($0, from: .lower, using: proxy) }
                         moreLikeThisSection
                             .onMoveCommand { handleDetailMove($0, from: .lower, using: proxy) }
@@ -1647,16 +1699,28 @@ struct DetailView: View {
         }
     }
 
+    /// Ratings and facts share one line when they fit; with every provider's score present the ratings
+    /// move to their own wrapping line above the facts instead of pushing the facts off the hero.
     private func metaRow(_ m: CoreMetaItem) -> some View {
-        HStack(spacing: Theme.Space.md) {
-            primaryRatings(m)
-            if let r = m.releaseInfo { Text(r) }
-            if let rt = m.runtime { Text(rt) }
-            let genres = m.genres
-            if !genres.isEmpty { Text(genres.prefix(3).joined(separator: " · ")).lineLimit(1) }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: Theme.Space.md) {
+                primaryRatings(m, wrapping: false)
+                metaFacts(m)
+            }
+            VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                primaryRatings(m, wrapping: true)
+                HStack(spacing: Theme.Space.md) { metaFacts(m) }
+            }
         }
         .font(Theme.Typography.label)
         .foregroundStyle(Theme.Palette.textSecondary)
+    }
+
+    @ViewBuilder private func metaFacts(_ m: CoreMetaItem) -> some View {
+        if let r = m.releaseInfo { Text(r) }
+        if let rt = m.runtime { Text(rt) }
+        let genres = m.genres
+        if !genres.isEmpty { Text(genres.prefix(3).joined(separator: " · ")).lineLimit(1) }
     }
 
     /// The PRIMARY rating position on the tvOS hero. VortX hosts the ratings backend, so this shows the FULL
@@ -1664,22 +1728,29 @@ struct DetailView: View {
     /// VortX ratings service resolves, and the engine metadata's IMDb rating INSTANTLY until then so the row
     /// never blanks. Both branches lead with the same accent star, so the extra scores fade in beside it with
     /// no reflow. Per-score fail-soft: a title with only IMDb keeps showing only IMDb.
-    @ViewBuilder private func primaryRatings(_ m: CoreMetaItem) -> some View {
+    @ViewBuilder private func primaryRatings(_ m: CoreMetaItem, wrapping: Bool) -> some View {
         if let r = RatingPresentationPolicy.merged(ratingsKey == currentRatingsRequest ? mdbRatings : nil,
                                                    fallbackIMDb: m.imdbRating),
            case let tokens = RatingsFormat.tokens(r), !tokens.isEmpty {
-            HStack(spacing: Theme.Space.md) {
-                ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
-                    HStack(spacing: 5) {
-                        if token.isIMDb {
-                            Image(systemName: "star.fill").foregroundStyle(Theme.Palette.accent)
-                        } else {
-                            Text(token.label).foregroundStyle(Theme.Palette.textTertiary)
-                        }
-                        Text(token.value).foregroundStyle(Theme.Palette.textPrimary)
-                    }
-                }
+            if wrapping {
+                FlowLayout(spacing: Theme.Space.md) { ratingTokens(tokens) }
+            } else {
+                HStack(spacing: Theme.Space.md) { ratingTokens(tokens) }
             }
+        }
+    }
+
+    private func ratingTokens(_ tokens: [RatingsFormat.Token]) -> some View {
+        ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
+            HStack(spacing: 5) {
+                if token.isIMDb {
+                    Image(systemName: "star.fill").foregroundStyle(Theme.Palette.accent)
+                } else {
+                    Text(token.label).foregroundStyle(Theme.Palette.textTertiary)
+                }
+                Text(token.value).foregroundStyle(Theme.Palette.textPrimary)
+            }
+            .fixedSize()
         }
     }
 
@@ -1882,8 +1953,13 @@ struct CoreSeasonedEpisodes: View {
     @State private var eligibleEpisodeIDs: Set<String> = []
     /// TMDB season poster art for the season selector, keyed by season number (0 = Specials).
     @State private var seasonPosters: [Int: String] = [:]
+    /// TMDB ratings for the season on screen (episode number to rating) and its Top rated episodes.
+    private struct EpisodeRatingsState: Equatable { var season: Int? = nil; var byEpisode: [Int: EpisodeScores] = [:]; var top: Set<Int> = [] }
+    @State private var episodeRatings = EpisodeRatingsState()
     /// The episode grid's column count; the first row owns the Up escape to the season posters.
     static let episodeColumns = 4
+    /// Four glass cards across the 1920pt screen inside the screen edges.
+    static let episodeCardWidth: CGFloat = (1920 - 2 * Theme.Space.screenEdge - 3 * Theme.Space.lg) / 4
     private static let seasonPosterWidth: CGFloat = 150
     private var detailTarget: LibraryWatchedMutationPolicy.DetailTarget {
         .init(id: meta.id, type: meta.type)
@@ -2082,7 +2158,7 @@ struct CoreSeasonedEpisodes: View {
             // cap or lazily build). Spacing, padding and per-row focus binding are unchanged; the `.id` is
             // added so a programmatic focus request can scroll its row into existence first.
             ScrollViewReader { rows in
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Theme.Space.lg, alignment: .top),
+                LazyVGrid(columns: Array(repeating: GridItem(.fixed(Self.episodeCardWidth), spacing: Theme.Space.lg, alignment: .top),
                                          count: Self.episodeColumns),
                           alignment: .leading, spacing: Theme.Space.lg) {
                     ForEach(Array(episodes.enumerated()), id: \.element.id) { index, v in
@@ -2140,6 +2216,14 @@ struct CoreSeasonedEpisodes: View {
             let posters = await TMDBClient.seasonPosters(metaID: id)
             guard !Task.isCancelled, meta.id == id else { return }
             seasonPosters = posters
+        }
+        // Per-episode scores (IMDb, TMDB, Trakt) for the season on screen: the card's plate and Top rated.
+        .task(id: "\(meta.id)#\(season)") {
+            let id = meta.id, shown = season
+            let scores = await TMDBClient.seasonEpisodeScores(metaID: id, season: shown)
+            guard !Task.isCancelled, meta.id == id, season == shown else { return }
+            episodeRatings = EpisodeRatingsState(season: shown, byEpisode: scores,
+                                                 top: TMDBClient.topRatedEpisodes(scores.compactMapValues(\.headline)))
         }
         .task(id: initialPositionRequest) {
             let request = initialPositionRequest
@@ -2314,38 +2398,27 @@ struct CoreSeasonedEpisodes: View {
             // destination is built eagerly for every row on every body evaluation. ALL seasons → cross-season auto-advance.
             CoreEpisodeStreams(meta: meta, video: v, season: v.season ?? season, episodes: orderedEpisodes)
         } label: {
-            // A grid card: the still across the full card width, then the number + title, date and synopsis.
-            VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                thumbnail(v, isWatched: isWatched, progress: progress)
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        if isWatched {
-                            Image(systemName: "checkmark.circle.fill").font(.callout).foregroundStyle(Theme.Palette.accent)
-                        }
-                        Text("\(v.episode ?? 0). \(episodeTitle(v))")
-                            .font(Theme.Typography.cardTitle)
-                            .foregroundStyle(isWatched ? Theme.Palette.textTertiary : Theme.Palette.textPrimary)
-                            .lineLimit(2)
-                    }
-                    if let released = v.released, released.count >= 10 {
-                        Text(String(released.prefix(10))).font(.system(size: 16)).foregroundStyle(Theme.Palette.textTertiary)
-                    }
-                    if spoilerVeiled(v, isWatched: isWatched) {
-                        // Synopsis withheld until this row is focused (spoiler-safe mode). Focusing the row
-                        // reveals it (below); peripheral rows read as hidden.
-                        Label("Focus to reveal", systemImage: "eye.slash")
-                            .font(.system(size: 18)).foregroundStyle(Theme.Palette.textTertiary)
-                            .accessibilityLabel("Description hidden")
-                    } else if let overview = v.overview, !overview.isEmpty {
-                        Text(overview).font(.system(size: 18)).foregroundStyle(Theme.Palette.textSecondary)
-                            .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                    }
-                }
+            // The glass episode card (2026-10-15): the still, glass chips, the frosted panel below.
+            let hidden = spoilerVeiled(v, isWatched: isWatched)
+            let number = v.episode ?? 0
+            let rated = episodeRatings.season == (v.season ?? season)
+            GlassEpisodeCard(
+                model: .init(number: number, title: episodeTitle(v),
+                             overview: hidden ? nil : v.overview,
+                             spoilerHint: hidden ? String(localized: "Focus to reveal") : nil,
+                             runtime: meta.runtime, aired: EpisodeAirDate.short(v.released),
+                             isWatched: isWatched, isUpNext: v.id == upNextEpisodeID, progress: progress,
+                             scores: rated ? episodeRatings.byEpisode[number]?.ratings : nil,
+                             topRated: rated && episodeRatings.top.contains(number)),
+                width: Self.episodeCardWidth,
+                artwork: AnyView(thumbnail(v, isWatched: isWatched, progress: progress, cardArt: true)),
+                tenFoot: true)
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(Theme.Palette.accent, lineWidth: focusedEpisode == v.id ? 4 : 0)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(Theme.Space.sm)
         }
-        .buttonStyle(RowFocusStyle())
+        .buttonStyle(CardFocusStyle(scale: 1.04))
         .contextMenu {
             Button(isWatched ? "Mark as Unwatched" : "Mark as Watched") {
                 markEpisodeWatched(v, isWatched: isWatched)
@@ -2379,11 +2452,21 @@ struct CoreSeasonedEpisodes: View {
         #endif
     }
 
-    private func thumbnail(_ v: CoreVideo, isWatched: Bool, progress: Double) -> some View {
+    /// The episode the page's Play target points at: the engine's current episode while unwatched, else the
+    /// next unwatched one after it (a finished episode keeps its series as up next).
+    private var upNextEpisodeID: String? {
+        let ordered = orderedEpisodes.isEmpty ? episodes : orderedEpisodes
+        guard let current = resumeVideoId else { return ordered.first { ($0.season ?? 1) > 0 && !watched.contains($0.id) }?.id }
+        if !watched.contains(current) { return current }
+        guard let index = ordered.firstIndex(where: { $0.id == current }) else { return nil }
+        return ordered[ordered.index(after: index)...].first { !watched.contains($0.id) }?.id
+    }
+
+    @ViewBuilder private func thumbnail(_ v: CoreVideo, isWatched: Bool, progress: Double, cardArt: Bool = false) -> some View {
         // Effective spoiler-blur: the user's explicit setting wins; else the RemoteConfig fleet default
         // (`features.spoilerBlur`); else baked true, identical to shipping when no remote config is present.
-        // `_ = spoilerBlur` keeps the view observing the @AppStorage so a Settings toggle triggers a redraw.
-        _ = spoilerBlur
+        // `let _ = spoilerBlur` keeps the view observing the @AppStorage so a Settings toggle triggers a redraw.
+        let _ = spoilerBlur
         // Hide future-episode imagery until watched OR revealed. On tvOS the reveal is FOCUS, and only in the
         // new spoiler-safe mode: gating focus-reveal on `spoilerSafe` keeps the legacy thumbnail-blur setting
         // behaving exactly as shipped (blurred regardless of focus) when the new mode is off.
@@ -2393,7 +2476,18 @@ struct CoreSeasonedEpisodes: View {
         // uncompressed) on the main thread and keeps it at full resolution behind a 300x170 frame. Shared
         // through PosterImageLoader instead: bounded concurrency, its own big URLCache, and an off-main
         // ImageIO downsample straight to the on-screen size, so only the pixels actually drawn are resident.
-        return EpisodeThumbImage(url: v.thumbnail, fallbackURLs: [meta.background, meta.poster])
+        if cardArt {
+            // The glass card draws its own chips, progress bar and clip: only the art, spoiler-blurred.
+            EpisodeThumbImage(url: v.thumbnail, fallbackURLs: [meta.background, meta.poster])
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .blur(radius: blurArt ? 20 : 0)
+                .overlay {
+                    if blurArt {
+                        Image(systemName: "eye.slash.fill").font(.title2).foregroundStyle(.white.opacity(0.85)).shadow(radius: 3)
+                    }
+                }
+        } else {
+        EpisodeThumbImage(url: v.thumbnail, fallbackURLs: [meta.background, meta.poster])
         .frame(maxWidth: .infinity)
         .aspectRatio(16 / 9, contentMode: .fit)
         .blur(radius: blurArt ? 20 : 0)
@@ -2414,7 +2508,7 @@ struct CoreSeasonedEpisodes: View {
                 ProgressStripe(value: progress).padding(Theme.Space.xs)
             }
         }
-        .opacity(isWatched ? 0.55 : 1)
+        .opacity(isWatched ? 0.55 : 1)        }
     }
 
     private func episodeProgress(_ v: CoreVideo) -> Double {

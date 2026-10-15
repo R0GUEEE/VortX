@@ -49,7 +49,7 @@ for (const [platform, path] of [['IOS', 'app/SourcesiOS/iOSDetailView.swift'], [
 NODE
 xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
   "$receipt/ProductionRatingStore.swift" "$receipt/ProductionIOSDetailRatings.swift" \
-  "$receipt/ProductionTVDetailRatings.swift" app/SourcesShared/VortXRatings.swift \
+  "$receipt/ProductionTVDetailRatings.swift" app/SourcesShared/VortXRatings.swift app/SourcesShared/RatingsFormat.swift \
   app/SourcesShared/EpisodeRailInitialPositionPolicy.swift app/Tests/RatingsFreshnessAndEpisodeRailTests.swift \
   -o "$receipt/refinement-tests"
 "$receipt/refinement-tests"

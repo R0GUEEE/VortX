@@ -30,7 +30,11 @@ enum RatingPresentationPolicy {
             imdb: primary?.imdb ?? secondary?.imdb ?? imdb(fallbackIMDb),
             rottenTomatoes: primary?.rottenTomatoes ?? secondary?.rottenTomatoes,
             metacritic: primary?.metacritic ?? secondary?.metacritic,
-            tmdb: primary?.tmdb ?? secondary?.tmdb)
+            tmdb: primary?.tmdb ?? secondary?.tmdb,
+            rtAudience: primary?.rtAudience ?? secondary?.rtAudience,
+            letterboxd: primary?.letterboxd ?? secondary?.letterboxd,
+            trakt: primary?.trakt ?? secondary?.trakt,
+            mal: primary?.mal ?? secondary?.mal)
         return result.hasAny ? result : nil
     }
 
@@ -50,6 +54,20 @@ enum RatingPresentationPolicy {
         parts.insert(token, at: min(index, parts.count))
         return parts.joined(separator: "  ·  ")
     }
+}
+
+/// One episode's scores: IMDb on its 0-10 scale, TMDB and Trakt as 0-100, the same scales the title scores use.
+struct EpisodeScores: Equatable, Sendable {
+    var imdb: Double?
+    var tmdb: Int?
+    var trakt: Int?
+
+    var ratings: MDBListRatings {
+        MDBListRatings(imdb: imdb, rottenTomatoes: nil, metacritic: nil, tmdb: tmdb, trakt: trakt)
+    }
+
+    /// The score a season's "Top rated" pick ranks by, on a 0-10 scale: IMDb, else TMDB, else Trakt.
+    var headline: Double? { imdb ?? tmdb.map { Double($0) / 10 } ?? trakt.map { Double($0) / 10 } }
 }
 
 /// VortX's own ratings service (https://ratings.vortx.tv): cross-provider ratings with NO user key
@@ -88,15 +106,46 @@ enum VortXRatingsClient {
             let (data, resp) = try await URLSession.shared.data(for: request)
             guard !Task.isCancelled, (resp as? HTTPURLResponse)?.statusCode == 200,
                   let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
-            // The VortX service returns IMDb on its native 0-10 scale and RT / Metacritic / TMDB as 0-100,
-            // matching the MDBListRatings model the detail row already renders.
+            // The VortX service returns IMDb, MyAnimeList (0-10) and Letterboxd (0-5) on their native scales
+            // and the rest as 0-100, matching the MDBListRatings model every rating surface renders.
             let r = MDBListRatings(
                 imdb: numeric(root["imdb"]),
                 rottenTomatoes: numeric(root["rt"]).map { Int($0.rounded()) },
                 metacritic: numeric(root["metacritic"]).map { Int($0.rounded()) },
-                tmdb: numeric(root["tmdb"]).map { Int($0.rounded()) }
+                tmdb: numeric(root["tmdb"]).map { Int($0.rounded()) },
+                rtAudience: numeric(root["rtAudience"]).map { Int($0.rounded()) },
+                letterboxd: numeric(root["letterboxd"]).flatMap { RatingsFormat.scaled($0, max: 5) },
+                trakt: numeric(root["trakt"]).map { Int($0.rounded()) },
+                mal: numeric(root["mal"]).flatMap { RatingsFormat.scaled($0, max: 10) }
             )
             return r.hasAny ? r : nil
+        } catch { return nil }
+    }
+
+    /// Per-episode scores for one season of a series (`/v1/episodes/{tt}/{season}`): IMDb, TMDB and Trakt for
+    /// every episode the service has scored. nil when disabled, the id is not an IMDb id, or the request fails,
+    /// so the caller can fall back to TMDB directly.
+    static func episodes(seriesID: String, season: Int) async -> [Int: EpisodeScores]? {
+        guard isEnabled, seriesID.hasPrefix("tt"), !seriesID.dropFirst(2).isEmpty,
+              seriesID.dropFirst(2).allSatisfy(\.isNumber), (0...999).contains(season), !Task.isCancelled,
+              let url = URL(string: "\(base)/v1/episodes/\(seriesID)/\(season)") else { return nil }
+        do {
+            var request = URLRequest(url: url)
+            VortXEdgeAuth.sign(&request)
+            let (data, resp) = try await URLSession.shared.data(for: request)
+            guard !Task.isCancelled, (resp as? HTTPURLResponse)?.statusCode == 200,
+                  let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let rows = root["episodes"] as? [String: Any] else { return nil }
+            var out: [Int: EpisodeScores] = [:]
+            for (key, value) in rows {
+                guard let number = Int(key), let row = value as? [String: Any] else { continue }
+                let scores = EpisodeScores(
+                    imdb: numeric(row["imdb"]).flatMap { $0 > 0 && $0 <= 10 ? $0 : nil },
+                    tmdb: numeric(row["tmdb"]).map { Int($0.rounded()) },
+                    trakt: numeric(row["trakt"]).map { Int($0.rounded()) })
+                if scores.ratings.hasAny { out[number] = scores }
+            }
+            return out
         } catch { return nil }
     }
 

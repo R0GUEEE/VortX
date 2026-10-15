@@ -620,6 +620,8 @@ struct iOSDetailView: View {
     #endif
     @State private var torrentPrime: Task<Void, Never>?  // outstanding torrent /create retry loop, cancelled on disappear / new pick
     @State private var similarItems: [MetaPreview] = []
+    /// The title's trailers, featurettes, clips and behind-the-scenes videos (Trailers & Extras).
+    @State private var titleVideos: [TMDBClient.TitleVideo] = []
     /// Franchise/collection this movie belongs to (TMDB belongs_to_collection -> parts, in release order),
     /// rendered as the "Part of the … Collection" rail. Nil for a standalone film / series / any miss, which
     /// hides the row. `collectionKey` de-dupes the fetch per imdb id.
@@ -871,6 +873,7 @@ struct iOSDetailView: View {
                                 collectionSection
                                 relationsSection
                                 collectionChronologySection
+                                extrasSection
                                 moreLikeThisSection
                             }
                         }
@@ -1409,6 +1412,7 @@ struct iOSDetailView: View {
                     collectionSection
                     relationsSection
                     collectionChronologySection
+                    extrasSection
                     moreLikeThisSection
                 }
                 .padding(.bottom, Theme.Space.xl)
@@ -1957,14 +1961,21 @@ struct iOSDetailView: View {
         if let rt = m?.runtime { facts.append(rt) }
         let genres = m?.genres ?? []
         if !genres.isEmpty { facts.append(genres.prefix(3).joined(separator: " · ")) }
-        return HStack(spacing: 8) {
-            primaryRatings
-            // Facts collapse into ONE truncating line. A row of separate non-truncating Texts had a
-            // minimum width near the iPhone's portrait width, so it forced the hero wider than the screen
-            // and the right edge clipped even with the GeometryReader cap. A single tail-truncating Text
-            // keeps the row's minimum width tiny, so it always fits and the genres just truncate.
-            if !facts.isEmpty {
-                Text(facts.joined(separator: "  ·  ")).lineLimit(1).truncationMode(.tail)
+        // Facts collapse into ONE truncating line. A row of separate non-truncating Texts had a minimum
+        // width near the iPhone's portrait width, so it forced the hero wider than the screen and the right
+        // edge clipped even with the GeometryReader cap. A single tail-truncating Text keeps the row's
+        // minimum width tiny, so it always fits and the genres just truncate. With every provider's score
+        // the ratings can outgrow one line too, so they move to their own wrapping line above the facts
+        // whenever ratings and facts do not fit side by side.
+        let factsLine = facts.isEmpty ? nil : facts.joined(separator: "  ·  ")
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                primaryRatings(wrapping: false)
+                if let factsLine { Text(factsLine).lineLimit(1).truncationMode(.tail) }
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                primaryRatings(wrapping: true)
+                if let factsLine { Text(factsLine).lineLimit(1).truncationMode(.tail) }
             }
         }
         .font(Theme.Typography.label)
@@ -1978,22 +1989,29 @@ struct iOSDetailView: View {
     /// INSTANTLY so the row never blanks; both branches lead with the same accent star, so when the full set
     /// arrives the star stays put and the extra scores simply appear beside it (no vertical reflow / jank).
     /// Per-score fail-soft: a title carrying only IMDb keeps showing only IMDb.
-    @ViewBuilder private var primaryRatings: some View {
+    @ViewBuilder private func primaryRatings(wrapping: Bool) -> some View {
         if let r = RatingPresentationPolicy.merged(ratingsKey == currentRatingsRequest ? mdbRatings : nil,
                                                    fallbackIMDb: meta?.imdbRating),
            case let tokens = RatingsFormat.tokens(r), !tokens.isEmpty {
-            HStack(spacing: 8) {
-                ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
-                    HStack(spacing: 3) {
-                        if token.isIMDb {
-                            Image(systemName: "star.fill").foregroundStyle(Theme.Palette.accent)
-                        } else {
-                            Text(token.label).foregroundStyle(Theme.Palette.textTertiary)
-                        }
-                        Text(token.value).foregroundStyle(Theme.Palette.textPrimary)
-                    }
-                }
+            if wrapping {
+                FlowLayout(spacing: 8) { ratingTokens(tokens) }
+            } else {
+                HStack(spacing: 8) { ratingTokens(tokens) }
             }
+        }
+    }
+
+    private func ratingTokens(_ tokens: [RatingsFormat.Token]) -> some View {
+        ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
+            HStack(spacing: 3) {
+                if token.isIMDb {
+                    Image(systemName: "star.fill").foregroundStyle(Theme.Palette.accent)
+                } else {
+                    Text(token.label).foregroundStyle(Theme.Palette.textTertiary)
+                }
+                Text(token.value).foregroundStyle(Theme.Palette.textPrimary)
+            }
+            .fixedSize()
         }
     }
 
@@ -3783,8 +3801,11 @@ struct iOSDetailView: View {
     /// get a card just under the viewport so the next episode peeks into the rail; regular iPad layouts
     /// get a wider card without making the horizontal focus path needlessly long.
     @State private var episodeRailFirstVisible = 0
-    /// TMDB season poster art for the wide season selector, keyed by season number.
+    /// TMDB season poster art for the season selector, keyed by season number.
     @State private var seasonPosters: [Int: String] = [:]
+    /// TMDB ratings for the season on screen (episode number to rating), and its Top rated episodes.
+    struct EpisodeRatings: Equatable { var season: Int? = nil; var byEpisode: [Int: EpisodeScores] = [:]; var top: Set<Int> = [] }
+    @State private var episodeRatings = EpisodeRatings()
     @State private var episodeRailInitialPosition = EpisodeRailInitialPositionPolicy()
     @StateObject private var manualWatchedAction = ProfileMutationPresentation()
 
@@ -3854,20 +3875,8 @@ struct iOSDetailView: View {
                                 .fixedSize()
                         }
                         #endif
-                        if wideDetailLayout {
-                            seasonPosterStrip(seasons, watched: watched)
-                        } else {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: Theme.Space.sm) {
-                                    ForEach(seasons, id: \.self) { s in
-                                        Button { season = s } label: { Text(seasonLabel(s)) }
-                                            .buttonStyle(ChipButtonStyle(selected: season == s))
-                                            .contextMenu { seasonContextMenu(s) }
-                                    }
-                                }
-                                .padding(.vertical, Theme.Space.xs)
-                            }
-                        }
+                        // Season posters on every device (2026-10-15), the phone included.
+                        seasonPosterStrip(seasons, watched: watched)
                     }
                 }
 
@@ -3911,7 +3920,7 @@ struct iOSDetailView: View {
                                     ForEach(visibleEpisodes, id: \.id) { v in
                                         episodeRow(v, isWatched: watched.contains(v.id), progress: episodeProgress(v),
                                                    cardWidth: cardWidth)
-                                            .overlay(alignment: .topTrailing) {
+                                            .overlay(alignment: .bottomTrailing) {
                                                 episodeActionsOverlay(v, isWatched: watched.contains(v.id))
                                             }
                                             .id(v.id)
@@ -3975,12 +3984,21 @@ struct iOSDetailView: View {
             }
             .padding(.horizontal, Theme.Space.md)
             // Season poster art for the wide selector; the series poster stands in until (or unless) it lands.
-            .task(id: wideDetailLayout ? meta?.id : nil) {
+            .task(id: meta?.id) {
                 seasonPosters = [:]
-                guard wideDetailLayout, let id = meta?.id else { return }
+                guard let id = meta?.id else { return }
                 let posters = await TMDBClient.seasonPosters(metaID: id)
                 guard !Task.isCancelled, meta?.id == id else { return }
                 seasonPosters = posters
+            }
+            // Per-episode scores (IMDb, TMDB, Trakt) for the season on screen: the card's plate and Top rated.
+            .task(id: "\(meta?.id ?? "")#\(season)") {
+                guard let id = meta?.id else { return }
+                let shown = season
+                let scores = await TMDBClient.seasonEpisodeScores(metaID: id, season: shown)
+                guard !Task.isCancelled, meta?.id == id, season == shown else { return }
+                episodeRatings = EpisodeRatings(season: shown, byEpisode: scores,
+                                                top: TMDBClient.topRatedEpisodes(scores.compactMapValues(\.headline)))
             }
             // Initial season = the season you were LAST watching (Continue Watching), else first-unwatched,
             // else the first non-special, else 1, matching the tvOS rule. Re-applies when a large series'
@@ -4009,12 +4027,13 @@ struct iOSDetailView: View {
                 episodeActions(v, isWatched: isWatched)
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 18, weight: .semibold))
-                    .frame(width: 44, height: 44)
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 38, height: 38)
                     .vortxGlassDisc()
             }
             .buttonStyle(.plain)
-            .padding(Theme.Space.sm)
+            .padding(.trailing, 12)
+            .padding(.bottom, 10)
             .accessibilityLabel("Actions for \(episodeCoordinate(v))")
         }
     }
@@ -4030,7 +4049,7 @@ struct iOSDetailView: View {
             ForEach(episodes, id: \.id) { v in
                 episodeRow(v, isWatched: watched.contains(v.id), progress: episodeProgress(v),
                            cardWidth: grid.cardWidth)
-                    .overlay(alignment: .topTrailing) {
+                    .overlay(alignment: .bottomTrailing) {
                         episodeActionsOverlay(v, isWatched: watched.contains(v.id))
                     }
                     .id(v.id)
@@ -4279,19 +4298,26 @@ struct iOSDetailView: View {
 
     private func episodeRowLabel(_ v: CoreVideo, isWatched: Bool, progress: Double,
                                  cardWidth: CGFloat) -> some View {
-        let imageWidth = max(1, cardWidth - Theme.Space.md * 2)
-        let imageHeight = imageWidth * 9 / 16
-        return CinemaEpisodeRailCard(
-            video: v,
+        let hidden = spoilerVeiled(v, isWatched: isWatched)
+        let model = GlassEpisodeCard.Model(
+            number: v.episodeNumber,
+            title: v.episodeTitle,
+            overview: hidden ? nil : v.overview,
+            spoilerHint: hidden ? String(localized: "Tap to reveal") : nil,
+            runtime: [episodeRuntimeLabel(v), episodeQualityLabel(v)].compactMap { $0 }.joined(separator: " · "),
+            aired: EpisodeAirDate.short(v.released),
             isWatched: isWatched,
+            isUpNext: v.id == upNextEpisodeID,
             progress: progress,
-            cardWidth: cardWidth,
-            spoilerHidden: spoilerVeiled(v, isWatched: isWatched),
-            runtimeLabel: episodeRuntimeLabel(v),
-            qualityLabel: episodeQualityLabel(v),
+            remaining: episodeRemainingLabel(v, progress: progress),
+            scores: episodeRatings.season == (v.season ?? season) ? episodeRatings.byEpisode[v.episodeNumber]?.ratings : nil,
+            topRated: episodeRatings.season == (v.season ?? season) && episodeRatings.top.contains(v.episodeNumber))
+        return GlassEpisodeCard(
+            model: model,
+            width: cardWidth,
             artwork: AnyView(
                 episodeThumbnail(v, isWatched: isWatched, progress: progress,
-                                 width: imageWidth, height: imageHeight)
+                                 width: cardWidth, height: cardWidth * 9 / 16, cardArt: true)
             ),
             trailingStatus: AnyView(
                 Group {
@@ -4303,6 +4329,28 @@ struct iOSDetailView: View {
                 }
             )
         )
+    }
+
+    /// The episode the page's Play target points at (resume or next unwatched): the card's Up next chip.
+    private var upNextEpisodeID: String? {
+        guard let videos = meta?.videos, !videos.isEmpty else { return nil }
+        return seriesPrimaryEpisode(videos)?.video.id
+    }
+
+    /// "21m left" for a started episode, only when its real duration is known.
+    private func episodeRemainingLabel(_ v: CoreVideo, progress: Double) -> String? {
+        guard progress > 0.01, progress < 0.99, let m = meta else { return nil }
+        let duration: Double? = {
+            if !profiles.activeUsesEngineHistory {
+                guard let entry = profiles.watch[m.id], entry.videoId == v.id else { return nil }
+                return Double(entry.durationMs)
+            }
+            guard let item = core.metaDetails?.libraryItem, item.state.videoId == v.id else { return nil }
+            return item.state.duration
+        }()
+        guard let duration, duration.isFinite, (60_000...86_400_000).contains(duration) else { return nil }
+        let minutes = Int((duration * (1 - progress) / 60_000).rounded())
+        return minutes > 0 ? String(localized: "\(minutes)m left") : nil
     }
 
     private func episodeRuntimeLabel(_ video: CoreVideo) -> String? {
@@ -4501,12 +4549,12 @@ struct iOSDetailView: View {
     }
     #endif
 
-    private func episodeThumbnail(_ v: CoreVideo, isWatched: Bool, progress: Double,
-                                 width: CGFloat = 132, height: CGFloat = 74) -> some View {
+    @ViewBuilder private func episodeThumbnail(_ v: CoreVideo, isWatched: Bool, progress: Double,
+                                 width: CGFloat = 132, height: CGFloat = 74, cardArt: Bool = false) -> some View {
         // Effective spoiler-blur: the user's explicit setting wins; else the RemoteConfig fleet default
-        // (`features.spoilerBlur`); else baked true. `_ = spoilerBlur` keeps the view observing the
+        // (`features.spoilerBlur`); else baked true. `let _ = spoilerBlur` keeps the view observing the
         // @AppStorage so a Settings toggle triggers a redraw.
-        _ = spoilerBlur
+        let _ = spoilerBlur
         // Hide future-episode imagery until you have watched OR revealed it. The blur fires under the new
         // spoiler-safe mode OR the legacy thumbnail-blur setting; either way a per-episode reveal (a tap on the
         // row, tracked in revealedEpisodeIds) clears it, so revealing an episode always shows its art.
@@ -4516,7 +4564,19 @@ struct iOSDetailView: View {
         // uncompressed) on the main thread and keeps it at full resolution behind a 132x74 frame. Shared
         // through PosterImageLoader instead: bounded concurrency, its own big URLCache, and an off-main
         // ImageIO downsample straight to the on-screen size (tvOS twin: EpisodeThumbImage in DetailView).
-        return iOSEpisodeThumbImage(url: v.thumbnail, fallbackURLs: [meta?.background, meta?.poster])
+        if cardArt {
+            // The glass episode card draws its own chips, progress and clip: just the art, spoiler-blurred.
+            iOSEpisodeThumbImage(url: v.thumbnail, fallbackURLs: [meta?.background, meta?.poster])
+                .frame(width: width, height: height)
+                .blur(radius: blurArt ? 14 : 0)
+                .overlay {
+                    if blurArt {
+                        Image(systemName: "eye.slash.fill").font(.title3)
+                            .foregroundStyle(.white.opacity(0.85)).shadow(radius: 2).accessibilityHidden(true)
+                    }
+                }
+        } else {
+        iOSEpisodeThumbImage(url: v.thumbnail, fallbackURLs: [meta?.background, meta?.poster])
         .frame(width: width, height: height)
         .blur(radius: blurArt ? 14 : 0)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.chip, style: .continuous))
@@ -4537,6 +4597,7 @@ struct iOSDetailView: View {
             if !isWatched, progress > 0.01 {
                 iOSProgressStripe(value: progress).padding(4)
             }
+        }
         }
     }
 
@@ -4684,6 +4745,66 @@ struct iOSDetailView: View {
                     .padding(.horizontal, Theme.Space.md)
                 }
             }
+        }
+    }
+
+    // MARK: Trailers & Extras
+
+    /// Every video TMDB lists for the title, each playing in VortX's own player like the Trailer button.
+    private var extrasSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            if !titleVideos.isEmpty {
+                iOSRailHeader(eyebrow: "\(titleVideos.count) video\(titleVideos.count == 1 ? "" : "s")",
+                              title: "Trailers & Extras")
+                    .padding(.horizontal, Theme.Space.md)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(alignment: .top, spacing: Theme.Space.md) {
+                        ForEach(titleVideos) { video in
+                            Button { playExtra(video) } label: {
+                                TitleExtraCard(video: video, width: extraCardWidth,
+                                               artwork: AnyView(iOSEpisodeThumbImage(url: video.thumbnail?.absoluteString)))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, Theme.Space.md)
+                    .padding(.vertical, Theme.Space.xs)
+                }
+            }
+        }
+        .task(id: LiveTypes.contains(type) ? nil : metaRequestID) {
+            titleVideos = []
+            guard !LiveTypes.contains(type) else { return }
+            let id = metaRequestID
+            let videos = await TMDBClient.titleVideos(metaID: id, type: type)
+            guard !Task.isCancelled, metaRequestID == id else { return }
+            titleVideos = videos
+        }
+    }
+
+    private var extraCardWidth: CGFloat {
+        #if os(macOS)
+        return 340
+        #else
+        return wideDetailLayout ? 320 : 290
+        #endif
+    }
+
+    /// Plays one extra the same way the Trailer button plays a trailer: device-direct first, then the /yt
+    /// worker, then (Lite, no server) the embed.
+    private func playExtra(_ video: TMDBClient.TitleVideo) {
+        let label = "\(meta?.name ?? title) · \(video.name)"
+        Task { @MainActor in
+            if let resolved = await YouTubeDirectResolver.resolve(videoID: video.key, maxHeight: 1080) {
+                presentation = .trailerPlayer(url: resolved.videoURL, title: label, audioSidecar: resolved.audioURL)
+                return
+            }
+            if let native = TrailerRequest(title: label, youTubeID: video.key, directURL: nil)
+                .nativeFullTrailerURL(languageCode: TMDBClient.trailerLanguageBaseCode) {
+                presentation = .trailerPlayer(url: native, title: label, audioSidecar: nil)
+                return
+            }
+            presentation = .trailerEmbed(youTubeID: video.key, title: label)
         }
     }
 

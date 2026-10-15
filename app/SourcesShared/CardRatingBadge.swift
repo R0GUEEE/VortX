@@ -29,9 +29,12 @@ struct CardRatingBadge: View {
     var glyphSize: CGFloat = 8
     /// Rating text point size.
     var textSize: CGFloat = 10
-    /// How many scores this card size can carry legibly. A small iOS tile shows the two most salient (the
-    /// star + one more, typically RT); a larger tvOS card asks for all four. Capped in `RatingsFormat`.
-    var maxScores: Int = 2
+    /// An outright cap on the score count; nil shows every score that FITS the card. The badge measures
+    /// itself against the card width and drops scores from the end of the `RatingsFormat` priority order
+    /// (headline scores first), so a phone tile and a TV card both show as many as they can hold.
+    var maxScores: Int? = nil
+    /// Width kept clear at the trailing edge for the watched checkmark that owns the top-trailing corner.
+    var reservedTrailing: CGFloat = 0
     var fallbackIMDb: String? = nil
 
     @State private var ratings: MDBListRatings?
@@ -47,7 +50,8 @@ struct CardRatingBadge: View {
             if active, let displayed = RatingPresentationPolicy.merged(
                 ratingsKey == requestKey ? ratings : nil, fallbackIMDb: fallbackIMDb),
                case let tokens = RatingsFormat.tokens(displayed, limit: maxScores), !tokens.isEmpty {
-                RatingBadgePlate(tokens: tokens, glyphSize: glyphSize, textSize: textSize)
+                RatingBadgeFit(tokens: tokens, glyphSize: glyphSize, textSize: textSize)
+                    .padding(.trailing, reservedTrailing)
             }
         }
         // Key on id AND active so the lookup (re)runs when the card recycles to a new id and when `active`
@@ -64,6 +68,23 @@ struct CardRatingBadge: View {
     }
 
     private struct BadgeKey: Equatable { let request: RatingRequestKey; let active: Bool }
+}
+
+/// The plate at the largest score count that fits the width offered: every score when there is room, then
+/// one fewer from the end at a time, down to the IMDb star alone. `ViewThatFits` measures each candidate's
+/// ideal width, so nothing is ever clipped or squeezed onto a second line.
+struct RatingBadgeFit: View {
+    let tokens: [RatingsFormat.Token]
+    var glyphSize: CGFloat = 8
+    var textSize: CGFloat = 10
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            ForEach((1...max(tokens.count, 1)).reversed(), id: \.self) { count in
+                RatingBadgePlate(tokens: Array(tokens.prefix(count)), glyphSize: glyphSize, textSize: textSize)
+            }
+        }
+    }
 }
 
 /// The badge itself: ONE capsule of VortXGlass, sized tight to its scores, floating over the artwork.
@@ -138,11 +159,12 @@ struct RatingBadgePlate: View {
     /// instead of a bullet beside it.
     private func anchor(_ token: RatingsFormat.Token) -> some View {
         let parts = Self.splitDecimal(token.value)
+        let starBaseline = glyphSize * 0.5 + figureSize * 0.24
         return HStack(alignment: .firstTextBaseline, spacing: starGap) {
             Image(systemName: "star.fill")
                 .font(.system(size: glyphSize, weight: .semibold))
                 .foregroundStyle(Theme.Palette.accent)
-                .alignmentGuide(.firstTextBaseline) { _ in glyphSize * 0.5 + figureSize * 0.24 }
+                .alignmentGuide(.firstTextBaseline) { _ in starBaseline }
             HStack(alignment: .firstTextBaseline, spacing: 0) {
                 Text(parts.head)
                     .font(.system(size: figureSize, weight: .semibold).monospacedDigit())
@@ -162,7 +184,7 @@ struct RatingBadgePlate: View {
     /// but different tracking / case / ink, so the label never competes with the number it labels.
     private func aggregator(_ token: RatingsFormat.Token) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: markGap) {
-            Text(token.label)
+            Text(token.mark)
                 .font(.system(size: markSize, weight: .semibold))
                 .tracking(markSize * 0.14)
                 .textCase(.uppercase)
@@ -176,10 +198,11 @@ struct RatingBadgePlate: View {
     /// The hairline that sets the anchor apart from the rest. Its baseline guide is set by hand so it
     /// centres on the figure rather than hanging off the row's text baseline.
     private var divider: some View {
-        Capsule(style: .continuous)
+        let dividerBaseline = figureSize * 0.72
+        return Capsule(style: .continuous)
             .fill(Theme.Palette.textPrimary.opacity(0.22))
             .frame(width: 1, height: figureSize * 0.86)
-            .alignmentGuide(.firstTextBaseline) { _ in figureSize * 0.72 }
+            .alignmentGuide(.firstTextBaseline) { _ in dividerBaseline }
     }
 
     // MARK: Layout (all derived from the caller's text size, so ONE badge scales from an iOS tile to a
