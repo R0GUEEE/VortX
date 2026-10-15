@@ -77,13 +77,13 @@ import AppKit
 
         // Every provider, in priority order, with short marks for badges and full labels for the detail row.
         let all = MDBListRatings(imdb: 8.7, rottenTomatoes: 93, metacritic: 92, tmdb: 85,
-                                 rtAudience: 97, letterboxd: 4.5, trakt: 86, mal: 8.6)
+                                 rtAudience: 97, letterboxd: 4.5, trakt: 86, mal: 8.6, simkl: 8.4, kitsu: 84)
         let tokens = RatingsFormat.tokens(all)
-        check(tokens.map(\.kind) == [.imdb, .rottenTomatoes, .metacritic, .tmdb, .popcorn, .letterboxd, .trakt, .myAnimeList],
-              "service order")
-        check(tokens.map(\.label) == ["IMDb", "Rotten Tomatoes", "Metacritic", "TMDB", "Popcornmeter", "Letterboxd",
-                                       "Trakt", "MyAnimeList"], "spoken names")
-        check(tokens.map(\.value) == ["8.7", "93%", "92", "85%", "97%", "4.5", "86%", "8.6"], "values")
+        check(tokens.map(\.kind) == [.imdb, .rottenTomatoes, .metacritic, .tmdb, .myAnimeList, .kitsu, .popcorn,
+                                      .letterboxd, .trakt, .simkl], "service order")
+        check(tokens.map(\.label) == ["IMDb", "Rotten Tomatoes", "Metacritic", "TMDB", "MyAnimeList", "Kitsu",
+                                       "Popcornmeter", "Letterboxd", "Trakt", "SIMKL"], "spoken names")
+        check(tokens.map(\.value) == ["8.7", "93%", "92", "85%", "8.6", "84%", "97%", "4.5", "86%", "8.4"], "values")
         check(RatingsFormat.scaled(88, max: 5) == 4.4 && RatingsFormat.scaled(4.4, max: 5) == 4.4
               && RatingsFormat.scaled(0, max: 10) == nil, "small-scale scores normalize")
         check(RatingsFormat.joined(MDBListRatings(imdb: nil, rottenTomatoes: nil, metacritic: nil, tmdb: nil)) == nil,
@@ -100,7 +100,7 @@ import AppKit
         }
         // Every service mark, fresh and rotten, on art at the phone, episode and TV sizes (for a visual check).
         let rotten = MDBListRatings(imdb: 5.9, rottenTomatoes: 42, metacritic: 38, tmdb: 61,
-                                    rtAudience: 35, letterboxd: 2.6, trakt: 58, mal: 6.1)
+                                    rtAudience: 35, letterboxd: 2.6, trakt: 58, mal: 6.1, simkl: 6.0, kitsu: 61)
         let mixed = MDBListRatings(imdb: 7.1, rottenTomatoes: 64, metacritic: 55, tmdb: 70)
         let showcase = VStack(alignment: .leading, spacing: 18) {
             ForEach([10.0, 11.0, 15.0] as [CGFloat], id: \.self) { size in

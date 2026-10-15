@@ -28,7 +28,7 @@ enum RatingsFormat {
     /// printed value ("84%"), the service's name for the spoken label, and the raw `score` the marks read
     /// (Rotten Tomatoes turns rotten below 60, the Metacritic square takes its colour from the score).
     struct Token: Equatable {
-        enum Kind: Equatable { case imdb, rottenTomatoes, metacritic, tmdb, popcorn, letterboxd, trakt, myAnimeList }
+        enum Kind: Equatable { case imdb, rottenTomatoes, metacritic, tmdb, myAnimeList, kitsu, popcorn, letterboxd, trakt, simkl }
         let kind: Kind
         let label: String
         let value: String
@@ -48,8 +48,9 @@ enum RatingsFormat {
         return (native * 10).rounded() / 10
     }
 
-    /// Ordered tokens for every score present: the four headline scores first (IMDb -> RT -> MC -> TMDB),
-    /// then the audience and community scores (Popcorn -> Letterboxd -> Trakt -> MAL). Empty when nothing is
+    /// Ordered tokens for every score present: the four headline scores first (IMDb -> RT -> MC -> TMDB), the
+    /// anime scores next so an anime card keeps them (MAL -> Kitsu), then the audience and community scores
+    /// (Popcorn -> Letterboxd -> Trakt -> SIMKL). Empty when nothing is
     /// present. A card badge drops tokens from the END when its card is too narrow, so the order is also
     /// the priority. `limit` caps the count outright for a surface that wants fewer. Per-score fail-soft by
     /// construction: a title carrying only IMDb yields exactly one token, so it renders only IMDb.
@@ -61,14 +62,16 @@ enum RatingsFormat {
         }
         if let v = r.metacritic { out.append(Token(kind: .metacritic, label: "Metacritic", value: "\(v)", score: Double(v))) }
         if let v = r.tmdb { out.append(Token(kind: .tmdb, label: "TMDB", value: "\(v)%", score: Double(v))) }
+        if let v = r.mal {
+            out.append(Token(kind: .myAnimeList, label: "MyAnimeList", value: String(format: "%.1f", v), score: v))
+        }
+        if let v = r.kitsu { out.append(Token(kind: .kitsu, label: "Kitsu", value: "\(v)%", score: Double(v))) }
         if let v = r.rtAudience { out.append(Token(kind: .popcorn, label: "Popcornmeter", value: "\(v)%", score: Double(v))) }
         if let v = r.letterboxd {
             out.append(Token(kind: .letterboxd, label: "Letterboxd", value: String(format: "%.1f", v), score: v))
         }
         if let v = r.trakt { out.append(Token(kind: .trakt, label: "Trakt", value: "\(v)%", score: Double(v))) }
-        if let v = r.mal {
-            out.append(Token(kind: .myAnimeList, label: "MyAnimeList", value: String(format: "%.1f", v), score: v))
-        }
+        if let v = r.simkl { out.append(Token(kind: .simkl, label: "SIMKL", value: String(format: "%.1f", v), score: v)) }
         if let limit, limit >= 0, out.count > limit { return Array(out.prefix(limit)) }
         return out
     }

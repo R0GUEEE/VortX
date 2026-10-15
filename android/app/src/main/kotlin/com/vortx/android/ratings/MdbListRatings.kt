@@ -17,12 +17,16 @@ data class MdbListRatings(
     val trakt: Int? = null,
     /// MyAnimeList score on its native 0-10 scale, for anime.
     val mal: Double? = null,
+    /// SIMKL community score on its native 0-10 scale.
+    val simkl: Double? = null,
+    /// Kitsu average percentage 0-100, for anime.
+    val kitsu: Int? = null,
 ) {
     /// True when at least one provider returned a score, so a fully-empty result is dropped (returns null)
     /// rather than rendering an empty ratings row. Mirrors Apple `MDBListRatings.hasAny`.
     val hasAny: Boolean
         get() = imdb != null || rottenTomatoes != null || metacritic != null || tmdb != null ||
-            rtAudience != null || letterboxd != null || trakt != null || mal != null
+            rtAudience != null || letterboxd != null || trakt != null || mal != null || simkl != null || kitsu != null
 }
 
 /// One episode's scores: IMDb on its 0-10 scale, TMDB and Trakt as 0-100. Mirrors Apple `EpisodeScores`.

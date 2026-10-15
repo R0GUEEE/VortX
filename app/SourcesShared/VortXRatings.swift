@@ -34,7 +34,9 @@ enum RatingPresentationPolicy {
             rtAudience: primary?.rtAudience ?? secondary?.rtAudience,
             letterboxd: primary?.letterboxd ?? secondary?.letterboxd,
             trakt: primary?.trakt ?? secondary?.trakt,
-            mal: primary?.mal ?? secondary?.mal)
+            mal: primary?.mal ?? secondary?.mal,
+            simkl: primary?.simkl ?? secondary?.simkl,
+            kitsu: primary?.kitsu ?? secondary?.kitsu)
         return result.hasAny ? result : nil
     }
 
@@ -116,7 +118,9 @@ enum VortXRatingsClient {
                 rtAudience: numeric(root["rtAudience"]).map { Int($0.rounded()) },
                 letterboxd: numeric(root["letterboxd"]).flatMap { RatingsFormat.scaled($0, max: 5) },
                 trakt: numeric(root["trakt"]).map { Int($0.rounded()) },
-                mal: numeric(root["mal"]).flatMap { RatingsFormat.scaled($0, max: 10) }
+                mal: numeric(root["mal"]).flatMap { RatingsFormat.scaled($0, max: 10) },
+                simkl: numeric(root["simkl"]).flatMap { RatingsFormat.scaled($0, max: 10) },
+                kitsu: numeric(root["kitsu"]).map { Int($0.rounded()) }
             )
             return r.hasAny ? r : nil
         } catch { return nil }

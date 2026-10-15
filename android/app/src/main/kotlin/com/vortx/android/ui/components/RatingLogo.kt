@@ -2,6 +2,7 @@ package com.vortx.android.ui.components
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -85,6 +86,12 @@ fun RatingLogo(kind: RatingsFormat.Kind, score: Double, height: Dp) {
         RatingsFormat.Kind.MY_ANIME_LIST ->
             Wordmark("MAL", SolidColor(RatingMarkColors.malBlue),
                 Color.White, height, aspect = 1.9f, corner = 0.2f, scale = 0.62f)
+        RatingsFormat.Kind.KITSU ->
+            Wordmark("KITSU", SolidColor(RatingMarkColors.kitsuCoral),
+                Color.White, height, aspect = 2.5f, corner = 0.2f, scale = 0.52f)
+        RatingsFormat.Kind.SIMKL ->
+            Wordmark("SIMKL", SolidColor(RatingMarkColors.simklInk),
+                Color.White, height, aspect = 2.5f, corner = 0.2f, scale = 0.52f, edge = Color.White.copy(alpha = 0.45f))
         RatingsFormat.Kind.METACRITIC -> MetascoreSquare("", score, height)
         RatingsFormat.Kind.ROTTEN_TOMATOES ->
             Canvas(Modifier.size(height)) { if (score >= 60) drawTomato() else drawSplat() }
@@ -106,13 +113,16 @@ private fun Wordmark(
     aspect: Float,
     corner: Float,
     scale: Float,
+    edge: Color? = null,
 ) {
+    val shape = RoundedCornerShape(height * corner)
     Box(
         modifier = Modifier
             .width(height * aspect)
             .height(height)
-            .clip(RoundedCornerShape(height * corner))
-            .background(fill),
+            .clip(shape)
+            .background(fill)
+            .then(if (edge != null) Modifier.border(maxOf(1.dp, height * 0.06f), edge, shape) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -163,6 +173,8 @@ private object RatingMarkColors {
     val tmdbBlue = Color(0xFF01B4E4)
     val tmdbNavy = Color(0xFF0D253F)
     val malBlue = Color(0xFF2E51A2)
+    val kitsuCoral = Color(0xFFF75239)
+    val simklInk = Color(0xFF0B0F10)
     val tomatoRed = Color(0xFFFA320A)
     val tomatoLeaf = Color(0xFF00912D)
     val rottenGreen = Color(0xFF0AC855)

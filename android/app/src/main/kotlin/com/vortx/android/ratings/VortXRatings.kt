@@ -56,6 +56,8 @@ object VortXRatingsClient {
             letterboxd = numeric(root, "letterboxd")?.let { RatingsFormat.scaled(it, 5.0) },
             trakt = numeric(root, "trakt")?.roundToInt(),
             mal = numeric(root, "mal")?.let { RatingsFormat.scaled(it, 10.0) },
+            simkl = numeric(root, "simkl")?.let { RatingsFormat.scaled(it, 10.0) },
+            kitsu = numeric(root, "kitsu")?.roundToInt(),
         )
         return if (r.hasAny) r else null
     }

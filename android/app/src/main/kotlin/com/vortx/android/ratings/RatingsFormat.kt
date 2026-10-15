@@ -14,7 +14,7 @@ object RatingsFormat {
     /// ("84%"), the service's name for the spoken label, and the raw [score] the marks read (Rotten Tomatoes
     /// turns rotten below 60, the Metacritic square takes its colour from the score). Mirrors Apple
     /// `RatingsFormat.Token`.
-    enum class Kind { IMDB, ROTTEN_TOMATOES, METACRITIC, TMDB, POPCORN, LETTERBOXD, TRAKT, MY_ANIME_LIST }
+    enum class Kind { IMDB, ROTTEN_TOMATOES, METACRITIC, TMDB, MY_ANIME_LIST, KITSU, POPCORN, LETTERBOXD, TRAKT, SIMKL }
 
     data class Token(val kind: Kind, val label: String, val value: String, val score: Double) {
         val isImdb: Boolean get() = kind == Kind.IMDB
@@ -32,20 +32,23 @@ object RatingsFormat {
         return Math.round(native * 10) / 10.0
     }
 
-    /// Ordered tokens for every score present: the four headline scores first (IMDb -> RT -> MC -> TMDB),
-    /// then Popcorn -> Letterboxd -> Trakt -> MAL. A card badge drops tokens from the END when its card is
-    /// too narrow, so the order is also the priority. [limit] caps the count outright. Per-score fail-soft:
-    /// a title carrying only IMDb yields exactly one token. Mirrors Apple `RatingsFormat.tokens`.
+    /// Ordered tokens for every score present: the four headline scores first (IMDb -> RT -> MC -> TMDB), the anime
+    /// scores next (MAL -> Kitsu), then Popcorn -> Letterboxd -> Trakt -> SIMKL. A card badge drops tokens from the
+    /// END when its card is too narrow, so the order is also the priority. [limit] caps the count outright.
+    /// Per-score fail-soft: a title carrying only IMDb yields exactly one token. Mirrors Apple
+    /// `RatingsFormat.tokens`.
     fun tokens(r: MdbListRatings, limit: Int? = null): List<Token> {
         val out = ArrayList<Token>(8)
         r.imdb?.let { out += Token(Kind.IMDB, "IMDb", imdb(it), it) }
         r.rottenTomatoes?.let { out += Token(Kind.ROTTEN_TOMATOES, "Rotten Tomatoes", "$it%", it.toDouble()) }
         r.metacritic?.let { out += Token(Kind.METACRITIC, "Metacritic", "$it", it.toDouble()) }
         r.tmdb?.let { out += Token(Kind.TMDB, "TMDB", "$it%", it.toDouble()) }
+        r.mal?.let { out += Token(Kind.MY_ANIME_LIST, "MyAnimeList", String.format(Locale.US, "%.1f", it), it) }
+        r.kitsu?.let { out += Token(Kind.KITSU, "Kitsu", "$it%", it.toDouble()) }
         r.rtAudience?.let { out += Token(Kind.POPCORN, "Popcornmeter", "$it%", it.toDouble()) }
         r.letterboxd?.let { out += Token(Kind.LETTERBOXD, "Letterboxd", String.format(Locale.US, "%.1f", it), it) }
         r.trakt?.let { out += Token(Kind.TRAKT, "Trakt", "$it%", it.toDouble()) }
-        r.mal?.let { out += Token(Kind.MY_ANIME_LIST, "MyAnimeList", String.format(Locale.US, "%.1f", it), it) }
+        r.simkl?.let { out += Token(Kind.SIMKL, "SIMKL", String.format(Locale.US, "%.1f", it), it) }
         if (limit != null && limit >= 0 && out.size > limit) return out.take(limit)
         return out
     }

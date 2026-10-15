@@ -43,6 +43,14 @@ struct RatingLogo: View {
                      ink: RatingMarkColors.tmdbNavy, aspect: 2.3, corner: 0.5, scale: 0.58)
         case .myAnimeList:
             wordmark("MAL", fill: RatingMarkColors.malBlue, ink: .white, aspect: 1.9, corner: 0.2, scale: 0.62)
+        case .kitsu:
+            wordmark("KITSU", fill: RatingMarkColors.kitsuCoral, ink: .white, aspect: 2.5, corner: 0.2, scale: 0.52)
+        case .simkl:
+            wordmark("SIMKL", fill: RatingMarkColors.simklInk, ink: .white, aspect: 2.5, corner: 0.2, scale: 0.52)
+                .overlay {
+                    RoundedRectangle(cornerRadius: height * 0.2, style: .continuous)
+                        .strokeBorder(.white.opacity(0.45), lineWidth: max(1, height * 0.06))
+                }
         case .metacritic:
             MetascoreSquare(value: "", score: score, height: height)
         case .rottenTomatoes:
@@ -109,6 +117,8 @@ enum RatingMarkColors {
     static let tmdbBlue = Color(.sRGB, red: 0.004, green: 0.706, blue: 0.894)
     static let tmdbNavy = Color(.sRGB, red: 0.051, green: 0.145, blue: 0.247)
     static let malBlue = Color(.sRGB, red: 0.180, green: 0.318, blue: 0.635)
+    static let kitsuCoral = Color(.sRGB, red: 0.969, green: 0.322, blue: 0.224)
+    static let simklInk = Color(.sRGB, red: 0.043, green: 0.059, blue: 0.063)
     static let tomatoRed = Color(.sRGB, red: 0.980, green: 0.196, blue: 0.039)
     static let tomatoLeaf = Color(.sRGB, red: 0.0, green: 0.569, blue: 0.176)
     static let rottenGreen = Color(.sRGB, red: 0.039, green: 0.784, blue: 0.333)
