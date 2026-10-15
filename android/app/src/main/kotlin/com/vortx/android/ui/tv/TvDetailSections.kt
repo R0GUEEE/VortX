@@ -1,5 +1,8 @@
 package com.vortx.android.ui.tv
 
+import com.vortx.android.ratings.VortXRatingsClient
+import com.vortx.android.ratings.MdbListRatings
+import com.vortx.android.ratings.EpisodeScores
 import androidx.compose.foundation.BorderStroke
 import com.vortx.android.person.TMDBPersonClient
 import androidx.compose.ui.graphics.Brush
@@ -173,6 +176,11 @@ fun TvSeasonEpisodeSection(
                 )
             }
         }
+        // Per-episode scores (IMDb, TMDB, Trakt) for the season on screen, from the VortX ratings service.
+        val episodeScores by produceState<Map<Int, EpisodeScores>>(emptyMap(), detail.id, activeSeason) {
+            value = emptyMap()
+            value = VortXRatingsClient.episodes(detail.id, activeSeason) ?: emptyMap()
+        }
         Column(
             modifier = Modifier.padding(horizontal = TvDimens.edge),
             verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.lg),
@@ -193,6 +201,7 @@ fun TvSeasonEpisodeSection(
                             // keep native grid navigation.
                             upFocusRequester = if (rowIndex == 0) seasonFocus else FocusRequester.Default,
                             modifier = Modifier.weight(1f),
+                            scores = episodeScores[episode.episode]?.ratings,
                         )
                     }
                     repeat(TV_EPISODE_COLUMNS - row.size) { Spacer(Modifier.weight(1f)) }
@@ -305,6 +314,7 @@ private fun TvEpisodeCard(
     focusRequester: FocusRequester,
     upFocusRequester: FocusRequester,
     modifier: Modifier = Modifier.width(288.dp),
+    scores: MdbListRatings? = null,
 ) {
     val colors = VortXTheme.colors
     Column(
@@ -355,6 +365,14 @@ private fun TvEpisodeCard(
                             contentDescription = "Watched",
                             tint = colors.accentBright,
                             modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).size(24.dp),
+                        )
+                    }
+                    scores?.let {
+                        com.vortx.android.ui.components.RatingScoresPlate(
+                            it,
+                            glyphSize = 11,
+                            textSize = 13,
+                            modifier = Modifier.align(Alignment.TopStart).padding(8.dp).padding(end = 36.dp),
                         )
                     }
                     if (isCurrent) {

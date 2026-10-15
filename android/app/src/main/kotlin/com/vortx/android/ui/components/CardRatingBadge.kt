@@ -20,6 +20,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.Placeable
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -42,8 +45,8 @@ import com.vortx.android.ui.theme.vortxGlass
  * passes `!PosterArtwork.bakesRatings(forId = id)`), i.e. when the art is clean.
  *
  * It renders the SAME cross-provider set the detail row and the baked poster do (IMDb + RT + MC + TMDB,
- * formatted once in [RatingsFormat]), capped by [maxScores]. Values are looked up by id from VortX's own
- * keyless ratings service (the SAME numbers the baker uses), async and fail-soft via the process-memoized
+ * formatted once in [RatingsFormat]), as many as fit the card's width ([maxScores] caps it outright).
+ * Values are looked up by id from VortX's own keyless ratings service (the SAME numbers the baker uses), async and fail-soft via the process-memoized
  * [CardRatingStore]: nothing shows until a rating resolves, a miss (non-`tt` id, offline, or no rating)
  * shows nothing, and a title carrying only IMDb shows only IMDb. Results are memoized per id so scrolling a
  * rail never refetches.
@@ -55,7 +58,7 @@ fun CardRatingBadge(
     active: Boolean = true,
     glyphSize: Int = 8,
     textSize: Int = 10,
-    maxScores: Int = 2,
+    maxScores: Int? = null,
     modifier: Modifier = Modifier,
 ) {
     var ratings by remember(id) { mutableStateOf<MdbListRatings?>(null) }
@@ -69,6 +72,22 @@ fun CardRatingBadge(
     val resolved = ratings
     if (!active || resolved == null) return
     val tokens = RatingsFormat.tokens(resolved, limit = maxScores)
+    if (tokens.isEmpty()) return
+    RatingBadgePlate(tokens = tokens, glyphSize = glyphSize, textSize = textSize, modifier = modifier)
+}
+
+/**
+ * The plate for scores already in hand (an episode's IMDb / TMDB / Trakt), with the same fit-to-width
+ * behaviour as [CardRatingBadge].
+ */
+@Composable
+fun RatingScoresPlate(
+    ratings: MdbListRatings,
+    glyphSize: Int = 9,
+    textSize: Int = 11,
+    modifier: Modifier = Modifier,
+) {
+    val tokens = RatingsFormat.tokens(ratings)
     if (tokens.isEmpty()) return
     RatingBadgePlate(tokens = tokens, glyphSize = glyphSize, textSize = textSize, modifier = modifier)
 }
@@ -92,7 +111,9 @@ private fun RatingBadgePlate(
     val valueSize = maxOf(textSize * 0.88f, 9f)
     val markSize = maxOf(textSize * 0.72f, 8f)
 
-    Row(
+    // Every score at its natural size, then as many as the card's width holds, in priority order (the
+    // headline scores first). The first score always shows; nothing is squeezed or wrapped.
+    Layout(
         modifier = modifier
             .clip(VortXShapes.pill)
             .vortxGlass(
@@ -101,27 +122,47 @@ private fun RatingBadgePlate(
                 shadow = VortXGlass.Shadow.disc,
             )
             .padding(horizontal = 7.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        tokens.forEachIndexed { index, token ->
-            if (index > 0) {
-                if (tokens[index - 1].isImdb) {
-                    // Hairline divider that sets the anchor apart from the aggregators (Apple `divider`).
-                    Box(
-                        modifier = Modifier
-                            .padding(horizontal = 5.dp)
-                            .size(width = 1.dp, height = (figure * 0.72f).dp)
-                            .clip(VortXShapes.pill)
-                            .background(colors.textPrimary.copy(alpha = 0.22f)),
-                    )
-                } else {
-                    Spacer(Modifier.width((textSize * 0.5f).dp))
+        content = {
+            tokens.forEachIndexed { index, token ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (index > 0) {
+                        if (tokens[index - 1].isImdb) {
+                            // Hairline divider that sets the anchor apart from the aggregators (Apple `divider`).
+                            Box(
+                                modifier = Modifier
+                                    .padding(horizontal = 5.dp)
+                                    .size(width = 1.dp, height = (figure * 0.72f).dp)
+                                    .clip(VortXShapes.pill)
+                                    .background(colors.textPrimary.copy(alpha = 0.22f)),
+                            )
+                        } else {
+                            Spacer(Modifier.width((textSize * 0.5f).dp))
+                        }
+                    }
+                    if (token.isImdb) {
+                        Anchor(token, colors.accent, colors.textPrimary, colors.textSecondary, figure, decimal, glyphSize)
+                    } else {
+                        Aggregator(token, colors.textTertiary, colors.textSecondary, markSize, valueSize)
+                    }
                 }
             }
-            if (token.isImdb) {
-                Anchor(token, colors.accent, colors.textPrimary, colors.textSecondary, figure, decimal, glyphSize)
-            } else {
-                Aggregator(token, colors.textTertiary, colors.textSecondary, markSize, valueSize)
+        },
+    ) { measurables, constraints ->
+        val placed = ArrayList<Placeable>(measurables.size)
+        var width = 0
+        var height = 0
+        for (measurable in measurables) {
+            val placeable = measurable.measure(Constraints())
+            if (placed.isNotEmpty() && width + placeable.width > constraints.maxWidth) break
+            placed += placeable
+            width += placeable.width
+            height = maxOf(height, placeable.height)
+        }
+        layout(width, height) {
+            var x = 0
+            for (placeable in placed) {
+                placeable.placeRelative(x, (height - placeable.height) / 2)
+                x += placeable.width
             }
         }
     }
@@ -182,7 +223,7 @@ private fun Aggregator(
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         Text(
-            text = token.label.uppercase(),
+            text = token.mark.uppercase(),
             color = labelColor,
             fontWeight = FontWeight.SemiBold,
             fontSize = markSize.sp,

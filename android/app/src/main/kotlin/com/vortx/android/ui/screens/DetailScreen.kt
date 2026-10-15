@@ -110,6 +110,7 @@ import com.vortx.android.player.PlayerLaunchPolicy
 import com.vortx.android.metadata.PosterArtwork
 import com.vortx.android.metadata.rememberBackdropTint
 import com.vortx.android.ratings.MdbListClient
+import com.vortx.android.ratings.EpisodeScores
 import com.vortx.android.ratings.MdbListRatings
 import com.vortx.android.ratings.RatingsFormat
 import com.vortx.android.ratings.VortXRatingsClient
@@ -500,6 +501,15 @@ fun DetailScreen(
     val screenWidthDp = LocalConfiguration.current.screenWidthDp
     val wideDetail = screenWidthDp >= 600
     val episodeColumns = ((screenWidthDp - 40 + 16) / (260 + 16)).coerceAtLeast(1)
+    // Per-episode scores (IMDb, TMDB, Trakt) for the season on screen, from the VortX ratings service.
+    val seriesForScores = (metaState as? UiState.Success)?.data?.takeIf { it.type == MediaType.SERIES }
+    val seasonForScores = selectedSeason ?: seriesForScores?.videos?.firstOrNull()?.season
+    val episodeScores by produceState<Map<Int, EpisodeScores>>(emptyMap(), seriesForScores?.id, seasonForScores) {
+        value = emptyMap()
+        val id = seriesForScores?.id ?: return@produceState
+        val season = seasonForScores ?: return@produceState
+        value = VortXRatingsClient.episodes(id, season) ?: emptyMap()
+    }
     Box(modifier.fillMaxSize().background(VortXTheme.colors.canvas)) {
         when (val m = metaState) {
             // A non-`tt` catalog id that neither an add-on nor the one-shot recovery could resolve sits in
@@ -689,6 +699,7 @@ fun DetailScreen(
                                     ?.let(StreamRanking::tiers)?.filter { it != "Others" }?.joinToString(" / ")
                             } else null,
                             focusRequester = episodeFocus,
+                            scores = episodeScores[episode.episode]?.ratings?.takeIf { episode.season == seasonForScores },
                             thumb = { EpisodeThumb(episode, veiled = veiled, fallbackUrls = listOf(m.data.background, m.data.poster)) },
                             modifier = cardModifier.then(
                                 if (currentForSources) {
@@ -1095,17 +1106,19 @@ private fun MetaText(text: String) {
 }
 
 /// DET ratings token strip ([RatingsFormat]): the cross-provider set led by the accent star (IMDb, whose
-/// label is dropped in favour of the star), then RT / MC / TMDB, each `label value`. ONE formatting shared
-/// with the rest of VortX so the number and order never drift. The caller already dropped a fully-empty
-/// result; a title carrying only IMDb renders exactly one token.
+/// label is dropped in favour of the star), then RT / MC / TMDB / Popcorn / Letterboxd / Trakt / MAL, each
+/// `label value`. ONE formatting shared with the rest of VortX so the number and order never drift. The
+/// caller already dropped a fully-empty result; a title carrying only IMDb renders exactly one token.
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun RatingsTokenStrip(ratings: MdbListRatings, modifier: Modifier = Modifier) {
     val tokens = RatingsFormat.tokens(ratings)
     if (tokens.isEmpty()) return
-    Row(
+    // Every provider's score can outgrow a phone's width, so the strip wraps onto a second line.
+    FlowRow(
         modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.md),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.xs),
     ) {
         tokens.forEach { token ->
             Row(

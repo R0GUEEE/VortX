@@ -24,6 +24,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,6 +61,10 @@ enum class PosterCardMenu {
     CATALOG,
     CONTINUE_WATCHING,
 }
+
+/// True while a [PosterCard] draws its art at 16:9. A portrait poster cropped to 16:9 loses the baked rating
+/// block at its foot, so [PosterArt] then shows the clean poster with the live rating badge instead.
+val LocalPosterCardLandscape = staticCompositionLocalOf { false }
 
 /// The canonical poster card (DESIGN-SYSTEM.md §3 "Poster card"): 2:3 art, card radius, `rest` shadow,
 /// title below in label style. Press/focus: lift + scale(~1.03) + glow + title brightens to
@@ -161,7 +167,7 @@ fun PosterCard(
                     ) else Modifier,
                 ),
         ) {
-            art()
+            CompositionLocalProvider(LocalPosterCardLandscape provides (landscape ?: posterStyle.landscape)) { art() }
             if (watched) {
                 Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)))
                 Icon(

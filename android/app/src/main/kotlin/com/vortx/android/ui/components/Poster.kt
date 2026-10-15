@@ -64,7 +64,8 @@ fun BoxScope.PosterArt(
     val l10nEntries by LocalizedMetadataStore.entries.collectAsStateWithLifecycle()
     val localizedPoster = remember(id, l10nEntries) { id?.let { LocalizedMetadataStore.poster(it) } }
     val base = localizedPoster ?: posterUrl
-    val resolved = if (id != null) PosterArtwork.poster(id, base) else base
+    val landscapeCard = LocalPosterCardLandscape.current
+    val resolved = if (id != null && !landscapeCard) PosterArtwork.poster(id, base) else base
 
     if (resolved.isNullOrBlank()) {
         DefaultPosterArt(title)
@@ -83,8 +84,8 @@ fun BoxScope.PosterArt(
         CardRatingBadge(
             id = id,
             type = type,
-            active = !PosterArtwork.bakesRatings(forId = id),
-            modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
+            active = if (landscapeCard) PosterArtwork.bakesRatings else !PosterArtwork.bakesRatings(forId = id),
+            modifier = Modifier.align(Alignment.TopStart).padding(6.dp).padding(end = 28.dp),
         )
     }
 }
@@ -106,6 +107,15 @@ fun BoxScope.CinemaLandscapeArt(item: MetaItem) {
     }
     item.resumeLabel?.let { label ->
         Badge(label, modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp))
+    }
+    // The wide art here is never baked, so the title's scores ride on it as the live badge.
+    if (item.id.startsWith("tt")) {
+        CardRatingBadge(
+            id = item.id,
+            type = item.type.id,
+            active = PosterArtwork.badgesBackdrops,
+            modifier = Modifier.align(Alignment.TopStart).padding(6.dp).padding(end = 28.dp),
+        )
     }
 }
 

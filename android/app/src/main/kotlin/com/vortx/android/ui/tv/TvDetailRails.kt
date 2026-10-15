@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -46,20 +48,26 @@ import com.vortx.android.ui.theme.VortXTheme
 /// mirroring the phone `isLiveType` / Apple's `LiveTypes` guard.
 fun tvIsLiveType(type: MediaType): Boolean = type == MediaType.CHANNEL || type == MediaType.TV
 
-/// The VortX cross-provider ratings token strip: Rotten Tomatoes / Metacritic / TMDB critic scores from the
-/// keyless `VortXRatingsClient`, as compact score tokens. IMDb already shows in the hero meta line, so this
-/// surfaces the three critic providers the engine meta does not carry, mirroring the phone `RatingsRow`. The
-/// caller renders it only when [MdbListRatings.hasAny], so it never leaves an empty strip.
+/// The VortX cross-provider ratings token strip: Rotten Tomatoes / Metacritic / TMDB, then Popcorn /
+/// Letterboxd / Trakt / MyAnimeList when present, from the keyless `VortXRatingsClient`, as compact score
+/// tokens. IMDb already shows in the hero meta line, so this surfaces every other provider the engine meta
+/// does not carry, wrapping to a second line when needed. The caller renders it only when
+/// [MdbListRatings.hasAny], so it never leaves an empty strip.
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TvRatingsStrip(ratings: MdbListRatings, modifier: Modifier = Modifier) {
-    Row(
+    FlowRow(
         modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.xl),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm),
     ) {
         ratings.rottenTomatoes?.let { TvRatingToken("Rotten Tomatoes", "$it%") }
         ratings.metacritic?.let { TvRatingToken("Metacritic", it.toString()) }
         ratings.tmdb?.let { TvRatingToken("TMDB", "$it%") }
+        ratings.rtAudience?.let { TvRatingToken("Popcorn", "$it%") }
+        ratings.letterboxd?.let { TvRatingToken("Letterboxd", String.format(java.util.Locale.US, "%.1f", it)) }
+        ratings.trakt?.let { TvRatingToken("Trakt", "$it%") }
+        ratings.mal?.let { TvRatingToken("MyAnimeList", String.format(java.util.Locale.US, "%.1f", it)) }
     }
 }
 
