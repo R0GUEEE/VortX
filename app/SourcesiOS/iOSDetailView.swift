@@ -1862,7 +1862,10 @@ struct iOSDetailView: View {
                 // muted, so a video-only adaptive pick needs no audio sidecar). The clip mounts only after the
                 // attempt lands so a late resolve never remounts it; a miss mounts the /yt worker URL. A meta
                 // with a real direct (non-YouTube) trailer stream has no ambientYouTubeID and mounts at once.
-                Group {
+                // The clear base keeps this container non-empty before the attempt lands: SwiftUI never starts a
+                // `.task` on an empty view, so a YouTube trailer's attempt never ran and its clip never mounted.
+                ZStack {
+                    Color.clear
                     if let yt = detailAmbientYouTubeID {
                         if let attempt = detailAmbientDirect, attempt.ytID == yt {
                             InHeroTrailerView(url: attempt.url ?? native, height: height, window: nil)
@@ -1871,6 +1874,7 @@ struct iOSDetailView: View {
                         InHeroTrailerView(url: native, height: height, window: nil)
                     }
                 }
+                .allowsHitTesting(false)
                 .task(id: detailAmbientYouTubeID) { await resolveDetailAmbientDirect() }
             } else if let yt = detailTrailerYouTubeID {
                 // Fallback (iOS/Mac only, no server): the FULL YouTube trailer muted + looping via the keyless

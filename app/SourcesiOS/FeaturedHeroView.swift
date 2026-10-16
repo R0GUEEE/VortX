@@ -156,9 +156,11 @@ struct FeaturedHeroView: View {
             // (#44) only paints OVER it when a trailer id resolves, so a missing / slow / blocked embed
             // never leaves the band black; the artwork always shows through. Reduce-motion skips the
             // clip entirely.
+            // The gate line rides the always-present backdrop: on the clip itself it never ran when the gate was
+            // closed, since an empty view starts no task.
             backdrop
-            heroClip
                 .task(id: model.hero?.id) { logHeroTrailerGate() }
+            heroClip
             if let hero = model.hero {
                 content(hero)
                     .padding(.horizontal, Theme.Space.md)
@@ -259,14 +261,18 @@ struct FeaturedHeroView: View {
             // yt-direct: try the DEVICE-DIRECT stream first (resolved on the user's own IP; the clip is
             // muted, so a video-only adaptive pick needs no audio sidecar). The clip mounts only after the
             // attempt lands so a late resolve never remounts it; a miss mounts the /yt worker URL.
-            Group {
+            // The clear base keeps this container non-empty before the attempt lands: SwiftUI never starts a
+            // `.task` on an empty view, so with only the conditional clip inside, the attempt never ran and no
+            // Home clip ever mounted (0.5.4 Mac log: no Home trailer lines at all).
+            ZStack {
+                Color.clear
                 if let attempt = heroClipDirect, attempt.heroID == hero.id {
                     InHeroTrailerView(url: attempt.url ?? clip, height: heroHeight, window: nil)
-                        .allowsHitTesting(false)
                         .id("hero-clip-\(hero.id)")    // reload the clip for each new featured item / rotation
                         .transition(reduceMotion ? .identity : .opacity)
                 }
             }
+            .allowsHitTesting(false)
             .task(id: hero.id) { await resolveHeroClipDirect(hero) }
         }
     }

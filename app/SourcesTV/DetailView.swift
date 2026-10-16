@@ -1547,11 +1547,15 @@ struct DetailView: View {
             // yt-direct: try the DEVICE-DIRECT stream first (resolved on the user's own IP; the hero is muted,
             // so a video-only adaptive pick needs no audio sidecar). The layer mounts only after the attempt
             // lands so a late resolve never remounts a clip mid-play; a miss mounts the /yt worker URL.
-            Group {
+            // The clear base keeps this container non-empty before the attempt lands: SwiftUI never starts a
+            // `.task` on an empty view, so with only the conditional clip inside, the attempt never ran.
+            ZStack {
+                Color.clear
                 if let attempt = heroDirectTrailer, attempt.metaID == m.id {
                     TVInHeroTrailerView(url: attempt.url ?? url, window: nil)
                 }
             }
+            .allowsHitTesting(false)
             .task(id: m.id) { await resolveHeroDirectTrailer(m) }
         }
     }
