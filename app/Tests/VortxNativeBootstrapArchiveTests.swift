@@ -69,6 +69,8 @@ import Foundation
                 "00000000-0000-0000-0000-00000000A11C": [hashThatLooksStructured: hashThatLooksStructured]]]]])
         let hashArchive = try VortxNativeBootstrapArchive.encode(document: evidence)
         try VortxNativeBootstrapArchive.validate(hashArchive)
+        try ownAccountSlotSourceHistory()
+        try archiveInspectionDiagnostics()
         let unchangedArchive = try JSONSerialization.jsonObject(with: VortxNativeBootstrapArchive.encode(document: data(["future": unchanged]))) as! [String: Any]
         check((unchangedArchive["hostDocument"] as! [String: String])["future"] == unchanged)
         let malformedBackup = try data(["format": "vortx-backup", "schema": 1, "payloadBase64": "opaque"]).base64EncodedString()
@@ -90,6 +92,75 @@ import Foundation
         do { try VortxNativeBootstrapArchive.validate(data(injected)); fatalError("unknown archive root persisted") } catch {}
         try membershipReceiptRetention()
         print("Native bootstrap archive: exact fractional material, full noncredential settings/unknown fields, nested credential exclusions and ambiguity fences passed")
+    }
+
+    static func ownAccountSlotSourceHistory() throws {
+        // Exact schema-4 slot identifiers and source fingerprint from the website carrier fixture.
+        // A typed SHA-256 fingerprint can decode to a leading brace under base64 probing.
+        let profile = "00000000-0000-0000-0000-00000000B22C"
+        let slot = "own:86d5e2a3d69627f41d23a87c36f06a5351a97392d06e62b9fc1e429889ea5a47"
+        let sourceDigest = "7b04ac2853c664a15255369c5424b2099df38715a43d56b80feb9edd1824d7e5"
+        let fingerprints = ["e563698769b687e82770b9150d5b655c0c4b7e3cbee814d75f58b512157336d7",
+                            "e9" + String(repeating: "0", count: 62)]
+        for fingerprint in fingerprints {
+            let document: [String: Any] = ["nativeSync": ["schemaVersion": 4, "accountSlots": [profile: ["slots": [slot: [
+                "sourceHistory": [sourceDigest: fingerprint], "future": ["token": "fixture-hidden", "keep": true]
+            ]]]]]]
+            let clean: Data
+            do { clean = try VortxNativeBootstrapArchive.credentialFreeDocument(document) }
+            catch { preconditionFailure("Valid native own-account slot sourceHistory fingerprint rejected: \(error)") }
+            func checkHistory(_ host: [String: Any]) {
+                let native = host["nativeSync"] as! [String: Any]
+                let accounts = native["accountSlots"] as! [String: Any]
+                let slots = (accounts[profile] as! [String: Any])["slots"] as! [String: Any]
+                let account = slots[slot] as! [String: Any]
+                check((account["sourceHistory"] as! [String: String])[sourceDigest] == fingerprint)
+                let future = account["future"] as! [String: Any]
+                check(future["token"] == nil && future["keep"] as? Bool == true)
+            }
+            checkHistory(try JSONSerialization.jsonObject(with: clean) as! [String: Any])
+            let archive = try VortxNativeBootstrapArchive.encode(document: data(document))
+            try VortxNativeBootstrapArchive.validate(archive)
+            checkHistory((try JSONSerialization.jsonObject(with: archive) as! [String: Any])["hostDocument"] as! [String: Any])
+            let retained = try VortxNativeBootstrapArchive.encode(document: data([:]), authenticatedSourceArchive: archive)
+            try VortxNativeBootstrapArchive.validate(retained)
+            checkHistory((try JSONSerialization.jsonObject(with: retained) as! [String: Any])["authenticatedSourceArchive"] as! [String: Any])
+            // The protocol exemption must not make an arbitrary digest-shaped carrier opaque.
+            do {
+                _ = try VortxNativeBootstrapArchive.credentialFreeDocument(["future": ["sourceHistory": [sourceDigest: fingerprint]]])
+                preconditionFailure("Nonprotocol sourceHistory fingerprint skipped credential inspection")
+            } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+        }
+    }
+
+    static func archiveInspectionDiagnostics() throws {
+        var messages: [String] = []
+        _ = try VortxNativeBootstrapArchive.credentialFreeDocument(["library": [["name": "Fixture title"]]],
+                                                                 diagnostics: { messages.append($0) })
+        check(messages.isEmpty)
+
+        func rejected(_ source: [String: Any], field: String) throws {
+            messages = []
+            do {
+                _ = try VortxNativeBootstrapArchive.credentialFreeDocument(source, diagnostics: { messages.append($0) })
+                preconditionFailure("Opaque source unexpectedly accepted")
+            } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+            check(messages == ["archive_inspection result=failed reason=opaque_preference field=" + field])
+        }
+        try rejected(["settings": "fixture-private-malformed-settings"], field: "/settings")
+
+        let privateKey = "https://private-user.example/Personal/manifest.json?key=fixture-private-value"
+        let preferences = try PropertyListSerialization.data(fromPropertyList: [privateKey: Data([0, 255, 0])], format: .binary, options: 0)
+        let backup = try data(["format": "vortx-backup", "schema": 1, "payloadBase64": preferences.base64EncodedString()])
+        try rejected(["settings": backup.base64EncodedString()], field: "/settings/payloadBase64/*")
+
+        let profile = "00000000-0000-0000-0000-00000000B22C"
+        let sourceDigest = String(repeating: "a", count: 64)
+        try rejected(["nativeSync": ["accountSlots": [profile: ["slots": [privateKey: [
+            "sourceHistory": [sourceDigest: Data([0, 255, 0])]
+        ]]]]]], field: "/nativeSync/accountSlots/*/slots/*/sourceHistory/*")
+        try rejected(["private-personal-field": ["sourceHistory": [sourceDigest: "e9" + String(repeating: "0", count: 62)]]],
+                     field: "/*/sourceHistory/*")
     }
 
     static func membershipReceiptRetention() throws {

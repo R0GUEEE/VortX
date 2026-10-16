@@ -14,6 +14,7 @@ on:
       - "scripts/test-hls-startup-reservation.sh"
       - "scripts/test-mpv-seek-settlement.sh"
       - "scripts/test-sync-derived-document-revisions.sh"
+      - "scripts/test-native-bootstrap-archive.sh"
       - "scripts/test-profile-roster-propagation.sh"
       - "scripts/test-cw-service-selection.sh"
       - "scripts/test-home-cw-selection.sh"
@@ -49,6 +50,7 @@ on:
       - "scripts/test-hls-startup-reservation.sh"
       - "scripts/test-mpv-seek-settlement.sh"
       - "scripts/test-sync-derived-document-revisions.sh"
+      - "scripts/test-native-bootstrap-archive.sh"
       - "scripts/test-profile-roster-propagation.sh"
       - "scripts/test-cw-service-selection.sh"
       - "scripts/test-home-cw-selection.sh"
@@ -104,6 +106,7 @@ jobs:
       - run: bash scripts/test-hls-startup-reservation.sh
       - run: bash scripts/test-mpv-seek-settlement.sh
       - run: bash scripts/test-sync-derived-document-revisions.sh
+      - run: bash scripts/test-native-bootstrap-archive.sh
       - run: bash scripts/test-profile-roster-propagation.sh
       - name: Fetch immutable public Continue Watching regression baselines
         run: |

@@ -29,9 +29,7 @@ xcrun swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors 
   "$native_test_dir/SearchPublication.swift" app/Tests/CoreSearchPublicationFenceTests.swift \
   -o "$native_test_dir/search-publication"
 "$native_test_dir/search-publication"
-xcrun swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors \
-  app/SourcesShared/VortxNativeBootstrapArchive.swift app/Tests/VortxNativeBootstrapArchiveTests.swift -o "$native_test_dir/bootstrap-archive"
-"$native_test_dir/bootstrap-archive"
+bash scripts/test-native-bootstrap-archive.sh
 xcrun swiftc -warnings-as-errors app/Tests/CoreBridgePublicationFenceContractTests.swift -o "$native_test_dir/publication-contract"
 "$native_test_dir/publication-contract"
 xcrun swiftc -warnings-as-errors app/SourcesShared/PlaybackMutationOwnershipPolicy.swift \

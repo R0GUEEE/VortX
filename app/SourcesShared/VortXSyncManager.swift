@@ -1079,7 +1079,9 @@ final class VortXSyncManager: ObservableObject {
                 }
             }
         }
-        let documentBytes = try VortxNativeBootstrapArchive.credentialFreeDocument(document)
+        let documentBytes = try VortxNativeBootstrapArchive.credentialFreeDocument(document, diagnostics: {
+            DiagnosticsLog.log("native-profiles", $0)
+        })
         let sourceDocument = try JSONDecoder().decode(VortxJSON.self, from: documentBytes)
         func hasAttribution(_ profileID: UUID) throws -> Bool {
             try VortxNativeOwnAccountProducer.hasOverlayAttribution(proof: preferredSources[profileID.uuidString],
