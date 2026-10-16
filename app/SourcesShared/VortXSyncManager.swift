@@ -947,29 +947,29 @@ final class VortXSyncManager: ObservableObject {
         if logging, decision != .skip { DiagnosticsLog.log("native-profiles", "legacy_conversion run reason=\(decision.rawValue)") }
         return (decision != .skip, digest)
     }
-    /// The background half of a fast open: the account is already showing from its checkpoint, so the 0.4
-    /// conversion runs as an ordinary pulled-document commit once the first screen has had a moment to draw.
-    /// It holds, records and republishes exactly like a sync; a newer pull or sync that converts first leaves
-    /// this one to find the fingerprint already recorded.
+    /// The second half of a fast open: the conversion started at launch while the account opened from its
+    /// checkpoint; once it finishes it is applied as an ordinary pulled-document commit, so it holds, records and
+    /// republishes exactly like a sync.
     private var deferredLegacyConversion: Task<Void, Never>?
-    private static let deferredLegacyConversionDelay: UInt64 = 1_500_000_000
     /// Bumped whenever a pulled or merged account document starts committing. The deferred launch conversion
     /// holds the launch document; if a newer one starts committing first, that sync runs its own conversion
     /// decision on the newer document and the deferred one stands down instead of merging older 0.4 data.
     private var nativeDocumentCommitGeneration: UInt64 = 0
-    private func startDeferredNativeLegacyConversion(_ document: [String: Any], capture: CredentialScopeRegistry.Capture) {
+    private func applyLaunchNativeLegacyConversion(_ conversion: Task<NativeLegacyPreparation, Error>,
+                                                   document: [String: Any], capture: CredentialScopeRegistry.Capture) {
         deferredLegacyConversion?.cancel()
-        DiagnosticsLog.log("native-profiles", "legacy_conversion deferred stage=restore")
+        DiagnosticsLog.log("native-profiles", "legacy_conversion opened_before_finish stage=launch")
         let generation = nativeDocumentCommitGeneration
         deferredLegacyConversion = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.deferredLegacyConversionDelay)
-            guard let self, !Task.isCancelled, self.isCurrent(capture) else { return }
-            guard self.nativeDocumentCommitGeneration == generation else {
-                DiagnosticsLog.log("native-profiles", "legacy_conversion result=superseded stage=deferred")
-                return
-            }
             do {
-                _ = try await self.commitNativePulledDocument(document, capture: capture, standDownIfSuperseded: true)
+                let prepared = try await conversion.value
+                guard let self, !Task.isCancelled, self.isCurrent(capture) else { return }
+                guard self.nativeDocumentCommitGeneration == generation else {
+                    DiagnosticsLog.log("native-profiles", "legacy_conversion result=superseded stage=deferred")
+                    return
+                }
+                _ = try await self.commitNativePulledDocument(document, capture: capture, preparedAtLaunch: prepared,
+                                                              standDownIfSuperseded: true)
                 DiagnosticsLog.log("native-profiles", "legacy_conversion result=done stage=deferred")
             } catch {
                 // A failed or superseded pass records no fingerprint, so the next sync that commits a document converts.
@@ -1462,15 +1462,20 @@ final class VortXSyncManager: ObservableObject {
                 // Every open checks the complete legacy projection, including pending web edits.
                 // Native authority cannot silently ignore a later old-client membership/watch edit.
                 stage = "legacy_preparation"
-                // A device that already holds this account opens it from its checkpoint, which keeps the original
-                // 0.4 copy a commit never replaces, and converts the 0.4 data afterwards in the background when it
-                // is due (see startDeferredNativeLegacyConversion). Only a first open, or a checkpoint without that
-                // copy, converts before the account can open.
-                var deferConversion = false
-                if hadCheckpoint { deferConversion = try probe.readLegacyMaterial(scope: scope) != nil }
+                // A device that already holds this account never waits for the conversion: when one is due it starts
+                // right now, alongside opening the account from its checkpoint (which keeps the original 0.4 copy a
+                // commit never replaces), and is applied as soon as both are done (applyLaunchNativeLegacyConversion).
+                // Only a first open, or a checkpoint without that copy, converts before the account can open.
+                var openFromCheckpoint = false
+                if hadCheckpoint { openFromCheckpoint = try probe.readLegacyMaterial(scope: scope) != nil }
                 var prepared: NativeLegacyPreparation?
-                if !deferConversion {
+                var launchConversion: Task<NativeLegacyPreparation, Error>?
+                if !openFromCheckpoint {
                     prepared = try await self.prepareNativeLegacyMaterial(document, capture: capture, enforceMountedFence: false)
+                } else if self.nativeLegacyConversionDecision(document, capture: capture).convert {
+                    launchConversion = Task { @MainActor in
+                        try await self.prepareNativeLegacyMaterial(document, capture: capture, enforceMountedFence: false)
+                    }
                 }
                 guard self.isCurrent(capture), !Task.isCancelled, self.nativeCheckpointGeneration == generation,
                       ProfileStore.shared.activeID == selectedProfile else { throw VortxNativeError.superseded }
@@ -1560,9 +1565,7 @@ final class VortXSyncManager: ObservableObject {
                     guard self.isCurrent(capture), !Task.isCancelled, self.nativeCheckpointGeneration == generation,
                           ProfileStore.shared.activeID == installationProfile else { throw VortxNativeError.superseded }
                     if prepared != nil { self.recordNativeLegacyConversion(self.nativeLegacyConversionDigest(document), capture: capture) }
-                    else if self.nativeLegacyConversionDecision(document, capture: capture, logging: false).convert {
-                        self.startDeferredNativeLegacyConversion(document, capture: capture)
-                    }
+                    else if let launchConversion { self.applyLaunchNativeLegacyConversion(launchConversion, document: document, capture: capture) }
                     self.applyNativeGlobals(acceptedHost)
                     try self.publishNativeWebsiteOutcome(websiteOutcome, capture: capture)
                     // Upload only the new nativeSync carrier. The archive never enters the wire,
@@ -4072,6 +4075,7 @@ final class VortXSyncManager: ObservableObject {
     /// current profile/credential receipt, durably commit, and publish the accepted host projections.
     @discardableResult
     private func commitNativePulledDocument(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture,
+                                            preparedAtLaunch: NativeLegacyPreparation? = nil,
                                             standDownIfSuperseded: Bool = false) async throws -> PlaybackMutationTarget {
         let profileID = ProfileStore.shared.activeID
         guard isCurrent(capture), CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: profileID),
@@ -4080,9 +4084,10 @@ final class VortXSyncManager: ObservableObject {
         }
         nativeDocumentCommitGeneration &+= 1
         let commitGeneration = nativeDocumentCommitGeneration
-        let conversion = nativeLegacyConversionDecision(doc, capture: capture)
-        var prepared: NativeLegacyPreparation?
-        if conversion.convert { prepared = try await prepareNativeLegacyMaterial(doc, capture: capture) }
+        let conversion = preparedAtLaunch == nil ? nativeLegacyConversionDecision(doc, capture: capture)
+            : (convert: true, digest: nativeLegacyConversionDigest(doc))
+        var prepared = preparedAtLaunch
+        if prepared == nil, conversion.convert { prepared = try await prepareNativeLegacyMaterial(doc, capture: capture) }
         guard isCurrent(capture), ProfileStore.shared.activeID == profileID,
               CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: profileID) else { throw VortxNativeError.superseded }
         if standDownIfSuperseded, nativeDocumentCommitGeneration != commitGeneration { throw VortxNativeError.superseded }
