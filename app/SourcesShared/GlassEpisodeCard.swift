@@ -39,6 +39,8 @@ struct GlassEpisodeCard: View {
     /// A watched episode reads as done at a glance: the whole card dims and its art loses most of its colour,
     /// as the episode rows did before the glass cards. Focus (tvOS) lifts it back so it stays readable there.
     private var dulled: Bool { model.isWatched && !isFocused }
+    private static let watchedSaturation: Double = 0.15
+    private static let watchedShade: Double = 0.58
 
     private var artHeight: CGFloat { width * 9 / 16 }
     private var radius: CGFloat { tenFoot ? 24 : 22 }
@@ -51,7 +53,6 @@ struct GlassEpisodeCard: View {
                 .clipped()
                 .overlay(alignment: .top) { chips }
                 .overlay(alignment: .bottom) { progressBar }
-                .saturation(dulled ? 0.35 : 1)
             panel
         }
         .frame(width: width, alignment: .leading)
@@ -61,7 +62,17 @@ struct GlassEpisodeCard: View {
             RoundedRectangle(cornerRadius: radius, style: .continuous)
                 .strokeBorder(VortXGlass.highlight(0.16), lineWidth: 1)
         }
-        .opacity(dulled ? 0.55 : 1)
+        // Dimmed as one opaque card: art and panel lose their colour together and one shade darkens them evenly.
+        // Fading the card's opacity instead let the oversized blurred art behind the panel show through the
+        // sharp art above it, a smeared double image, and left the panel's blur in full colour.
+        .saturation(dulled ? Self.watchedSaturation : 1)
+        .overlay {
+            if dulled {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(Color.black.opacity(Self.watchedShade))
+                    .allowsHitTesting(false)
+            }
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Episode \(model.number): \(model.title)")
         .accessibilityValue(accessibilityStatus)

@@ -877,7 +877,7 @@ struct iOSDetailView: View {
                                 // source-heavy content to a readable column and center it (long lines hurt
                                 // readability). iPhone (and any narrow width) stays full-width as before.
                                 if isEpisodic {
-                                    episodeList(viewportWidth: geo.size.width)
+                                    episodeList(viewportWidth: geo.size.width, pageProxy: proxy)
                                 } else {
                                     sourceSection.id(Self.sourcesAnchor)
                                         .frame(maxWidth: geo.size.width > Theme.Space.wideLayoutMinWidth ? Theme.Space.contentColumn : .infinity)
@@ -1449,7 +1449,7 @@ struct iOSDetailView: View {
                     heroBelow(width: geo.size.width) { withAnimation { proxy.scrollTo(Self.sourcesAnchor, anchor: .top) } }
                     // #9: cap the source-heavy content to a readable column and center it on a wide window.
                     if isEpisodic {
-                        episodeList(viewportWidth: geo.size.width)
+                        episodeList(viewportWidth: geo.size.width, pageProxy: proxy)
                     } else {
                         sourceSection.id(Self.sourcesAnchor)
                             .frame(maxWidth: geo.size.width > Theme.Space.wideLayoutMinWidth ? Theme.Space.contentColumn : .infinity)
@@ -3926,7 +3926,7 @@ struct iOSDetailView: View {
         }
     }
 
-    @ViewBuilder private func episodeList(viewportWidth: CGFloat) -> some View {
+    @ViewBuilder private func episodeList(viewportWidth: CGFloat, pageProxy: ScrollViewProxy) -> some View {
         if let videos = meta?.videos, !videos.isEmpty {
             let seasons = Array(Set(videos.compactMap { $0.season })).sorted()
             let watched = watchedSet
@@ -4003,6 +4003,19 @@ struct iOSDetailView: View {
                 // Mac / iPad: the whole season as a grid of the same cards, read top to bottom with the page.
                 if wideDetailLayout {
                     episodeGrid(visibleEpisodes, watched: watched, viewportWidth: viewportWidth)
+                        // The grid's counterpart of the rail's opening scroll: the page opens on the episode the
+                        // viewer is on (Naruto opened on episode 1 on Mac). Same one-shot claim per season, so a
+                        // late history update never moves the page again; episode 1 keeps the hero in view.
+                        .task(id: focusRequest) {
+                            await Task.yield()
+                            guard !Task.isCancelled, season == focusRequest.season,
+                                  episodeRailScope == focusRequest.scope,
+                                  let index = episodeRailInitialPosition.claim(
+                                    scope: focusRequest.scope, season: focusRequest.season, ids: focusRequest.ids,
+                                    watched: focusRequest.watched, ready: focusRequest.ready,
+                                    preferred: focusRequest.preferred), index > 0 else { return }
+                            pageProxy.scrollTo(focusRequest.ids[index], anchor: .center)
+                        }
                     Color.clear
                         .frame(height: 1)
                         .background {
