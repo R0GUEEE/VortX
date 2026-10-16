@@ -106,7 +106,8 @@ class AndroidRealtimeSyncTest {
         var replyTag: String? = null
         var unsolicited304 = false
         var beforeConditionalReply: (() -> Unit)? = null
-        val realtime = VortXSyncRealtime(manager, work, "wss://fixture.invalid/v1/sync/connect") { request, listener ->
+        val realtime = VortXSyncRealtime(manager, work, "wss://fixture.invalid/v1/sync/connect",
+                                         clockMs = { scheduler.currentTime }) { request, listener ->
             Socket(request, listener).also(sockets::add)
         }
         init {
@@ -617,6 +618,34 @@ class AndroidRealtimeSyncTest {
             assertEquals(3, f.gets); assertEquals(13L, f.manager.lastAppliedVersion())
             assertTrue(f.gateway.carrier.getJSONObject("facts").getBoolean("missed-broadcast"))
             assertEquals(0, f.puts)
+        } finally { f.close() }
+    }
+
+    @Test fun `fallback poll waits five minutes behind a live socket and resumes when it goes silent`() = test {
+        val f = Fixture(testScheduler)
+        try {
+            // The worker answers each 30 s keep-alive; mirror that while time passes.
+            fun live(ms: Long) {
+                var left = ms
+                while (left > 0) {
+                    f.sockets.single().message("pong")
+                    val step = minOf(left, 30_000L); advanceTimeBy(step); runCurrent(); left -= step
+                }
+            }
+            f.manager.setRealtimeForeground(true); runCurrent()
+            assertTrue(f.realtime.isActive()); assertEquals(1, f.gets)
+            live(3_001)
+            assertEquals(2, f.gets) // the first poll after opening always pulls
+            f.version = 11; f.cloud.getJSONObject("nativeSync").getJSONObject("facts").put("missed-broadcast", true)
+            live(290_000)
+            assertEquals(2, f.gets) // a live socket holds the poll off
+            live(12_000)
+            assertEquals(3, f.gets); assertEquals(11L, f.manager.lastAppliedVersion()) // five minutes on, it pulls
+            f.version = 12; f.cloud.getJSONObject("nativeSync").getJSONObject("facts").put("after-silence", true)
+            advanceTimeBy(VortXSyncRealtime.SOCKET_SILENCE_LIMIT_MS + 3_001); runCurrent()
+            assertTrue(f.gets > 3); assertEquals(12L, f.manager.lastAppliedVersion()) // a silent socket: every tick
+            assertTrue(VortXSyncRealtime.shouldPoll(1_000, 2_000, 900)) // a clock that moved back never holds off
+            assertTrue(VortXSyncRealtime.shouldPoll(1_000, 900, 2_000))
         } finally { f.close() }
     }
 

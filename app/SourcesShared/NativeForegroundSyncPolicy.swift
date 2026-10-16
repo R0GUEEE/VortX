@@ -132,6 +132,24 @@ enum NativeForegroundSyncPolicy {
         }
     }
 
+    /// The while-active poll backs up the live sync socket, which announces another device's change as it lands.
+    /// While the socket is answering (the worker replies to every 30 s keep-alive) a pull is due only every five
+    /// minutes (owner, 2026-10-17). Each pull of a newer revision downloads and merges the whole account, and the
+    /// device's own uploads (every progress save while watching) made the next poll do that again. Once the
+    /// socket has been silent past two missed replies, every tick pulls as before so changes still flow.
+    enum ActivePoll {
+        static let liveSocketInterval: TimeInterval = 5 * 60
+        static let socketSilenceLimit: TimeInterval = 75
+
+        static func shouldPull(now: Date, lastPull: Date?, socketHeardAt: Date?) -> Bool {
+            guard let socketHeardAt else { return true }
+            let silence = now.timeIntervalSince(socketHeardAt)
+            guard silence >= 0, silence < socketSilenceLimit, let lastPull else { return true }
+            let since = now.timeIntervalSince(lastPull)
+            return since < 0 || since >= liveSocketInterval
+        }
+    }
+
     @MainActor
     static func ensureSession(isCurrent: () -> Bool, hasCertifiedSession: () -> Bool,
                               settleResident: () async -> Void,

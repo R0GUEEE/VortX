@@ -19,13 +19,15 @@ import okio.ByteString
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-/** Account-captured SyncRoom channel, foreground-only 3s fallback, and coalesced catch-up pulls.
+/** Account-captured SyncRoom channel, foreground-only fallback poll, and coalesced catch-up pulls.
  * Socket identity AND the exact authenticated session generation fence every callback/task.
  * No bearer is logged or stored independently of that immutable session lease. */
 internal class VortXSyncRealtime(
     private val manager: VortXSyncManager,
     private val scope: CoroutineScope,
     private val wssUrl: String,
+    /** Monotonic milliseconds for the fallback poll's spacing; tests pass virtual time. */
+    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000 },
     private val socketFactory: ((Request, WebSocketListener) -> WebSocket)? = null,
 ) {
     private val client by lazy {
@@ -39,6 +41,8 @@ internal class VortXSyncRealtime(
         var reconnect: Job? = null
         var poll: Job? = null
         var backoffSeconds = 1L
+        var heardAtMs: Long? = null // last frame from this socket (the worker answers each ping)
+        var lastPollMs: Long? = null
     }
     private var channel: Channel? = null
 
@@ -98,6 +102,7 @@ internal class VortXSyncRealtime(
         synchronized(this) {
             if (channel !== expected || expected.socket !== socket) return
             expected.backoffSeconds = 1L
+            expected.heardAtMs = clockMs()
         }
         val obj = runCatching { JSONObject(text) }.getOrNull() ?: return // pong
         if (obj.optString("type") != "updated") return
@@ -118,6 +123,7 @@ internal class VortXSyncRealtime(
         synchronized(this) {
             if (channel !== expected || expected.socket !== failed) return
             expected.socket = null
+            expected.heardAtMs = null
             failed.cancel()
             expected.keepAlive?.cancel(); expected.keepAlive = null
             val waitMs = expected.backoffSeconds * 1_000
@@ -157,12 +163,33 @@ internal class VortXSyncRealtime(
             while (isActive) {
                 delay(ACTIVE_POLL_INTERVAL_MS)
                 if (!isActive || !current(expected)) return@launch
-                queuePull(expected)
+                val now = clockMs()
+                val due = synchronized(this@VortXSyncRealtime) {
+                    val heard = if (expected.socket != null) expected.heardAtMs else null
+                    shouldPoll(now, expected.lastPollMs, heard).also { if (it) expected.lastPollMs = now }
+                }
+                if (due) queuePull(expected)
             }
         }
     }
 
     internal companion object {
         const val ACTIVE_POLL_INTERVAL_MS = 3_000L
+        const val LIVE_SOCKET_POLL_INTERVAL_MS = 5 * 60_000L
+        const val SOCKET_SILENCE_LIMIT_MS = 75_000L
+
+        /** The poll backs up the socket, which announces another device's change as it lands. While the socket
+         * answers, a pull is due every five minutes (owner, 2026-10-17), since each pull of a newer revision
+         * downloads and merges the whole account and this device's own uploads made the next tick do that
+         * again. Silent past two missed keep-alive replies, every tick pulls. Same rule as Apple's
+         * NativeForegroundSyncPolicy.ActivePoll. */
+        fun shouldPoll(nowMs: Long, lastPollMs: Long?, socketHeardAtMs: Long?): Boolean {
+            val heard = socketHeardAtMs ?: return true
+            val silence = nowMs - heard
+            if (silence < 0 || silence >= SOCKET_SILENCE_LIMIT_MS) return true
+            val last = lastPollMs ?: return true
+            val since = nowMs - last
+            return since < 0 || since >= LIVE_SOCKET_POLL_INTERVAL_MS
+        }
     }
 }

@@ -119,6 +119,25 @@ enum NativeForegroundSyncPolicyTests {
         precondition(Record.decide(record, digest: "a", hasLinkedAccounts: true, now: t0.addingTimeInterval(-5)) == .refresh)
         print("PASS 0.4 conversion skips while its fingerprint matches; only linked accounts re-read, every 30 min")
         legacyConversionDigestIsStable()
+        activePollBacksUpTheSocket()
+    }
+
+    static func activePollBacksUpTheSocket() {
+        typealias Poll = NativeForegroundSyncPolicy.ActivePoll
+        let t0 = Date(timeIntervalSince1970: 90_000)
+        // No socket, or one silent past two missed keep-alive replies: every tick pulls.
+        precondition(Poll.shouldPull(now: t0, lastPull: t0.addingTimeInterval(-3), socketHeardAt: nil))
+        precondition(Poll.shouldPull(now: t0, lastPull: t0.addingTimeInterval(-3), socketHeardAt: t0.addingTimeInterval(-Poll.socketSilenceLimit)))
+        // A live socket: the poll waits five minutes between pulls.
+        let live = t0.addingTimeInterval(-20)
+        precondition(!Poll.shouldPull(now: t0, lastPull: t0.addingTimeInterval(-3), socketHeardAt: live))
+        precondition(!Poll.shouldPull(now: t0, lastPull: t0.addingTimeInterval(-Poll.liveSocketInterval + 1), socketHeardAt: live))
+        precondition(Poll.shouldPull(now: t0, lastPull: t0.addingTimeInterval(-Poll.liveSocketInterval), socketHeardAt: live))
+        precondition(Poll.shouldPull(now: t0, lastPull: nil, socketHeardAt: live))
+        // A clock that moved backwards never holds pulls off.
+        precondition(Poll.shouldPull(now: t0, lastPull: t0.addingTimeInterval(30), socketHeardAt: live))
+        precondition(Poll.shouldPull(now: t0, lastPull: t0.addingTimeInterval(-3), socketHeardAt: t0.addingTimeInterval(30)))
+        print("PASS the active poll pulls every five minutes behind a live socket and every tick without one")
     }
 
     /// 0.5.4 Mac log, 2026-10-16: `legacy_conversion run reason=changed` 32 times in 6 minutes on an account

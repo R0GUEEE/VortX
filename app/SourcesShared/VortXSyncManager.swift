@@ -2124,6 +2124,8 @@ final class VortXSyncManager: ObservableObject {
     private var wsReconnect: Task<Void, Never>?      // pending reconnect attempt
     private var wsKeepAlive: Task<Void, Never>?      // periodic "ping" so the room never idles us out
     private var pollTask: Task<Void, Never>?         // while-active fallback poll
+    private var wsHeardAt: Date?                     // last frame from the live socket (pongs every 30 s)
+    private var lastPollPullAt: Date?                // last pull the while-active poll made
 #if VORTX_NATIVE_DATA_ENGINE
     /// A process-local receipt for a fully published receive, never a websocket or PUT version.
     private struct NativeReceiveReceipt {
@@ -5784,6 +5786,7 @@ final class VortXSyncManager: ObservableObject {
         ws?.cancel(with: .goingAway, reason: nil)
         ws = nil
         wsCapture = nil
+        wsHeardAt = nil
     }
 
     private func connectWebSocket() {
@@ -5797,6 +5800,7 @@ final class VortXSyncManager: ObservableObject {
         let task = URLSession.shared.webSocketTask(with: req)
         ws = task
         wsCapture = capture
+        wsHeardAt = nil   // a new socket counts as live only once it answers
         task.resume()
         startKeepAlive()
         receiveNext()
@@ -5811,6 +5815,7 @@ final class VortXSyncManager: ObservableObject {
                 guard let self, self.ws === task, self.wsCapture == capture, self.isCurrent(capture) else { return }
                 switch result {
                 case .success(let message):
+                    self.wsHeardAt = Date()
                     self.handle(message, credentialCapture: capture)
                     self.wsBackoff = 1   // a clean message means the link is healthy; reset backoff
                     self.receiveNext()
@@ -5844,6 +5849,7 @@ final class VortXSyncManager: ObservableObject {
         guard let capture = wsCapture, isCurrent(capture) else { return }
         ws?.cancel(with: .abnormalClosure, reason: nil)
         ws = nil
+        wsHeardAt = nil
         wsKeepAlive?.cancel(); wsKeepAlive = nil
         guard realtimeActive, isSignedIn else { return }
         let delay = wsBackoff
@@ -5878,8 +5884,8 @@ final class VortXSyncManager: ObservableObject {
         }
     }
 
-    /// Lightweight fallback: while active, pull every ~3s (native) / ~10s (legacy), even if the
-    /// WebSocket is unavailable. Cheap (the version guard skips no-op pulls) and cancelled on background.
+    /// Lightweight fallback: while active, pull every ~3s (native) / ~10s (legacy) when the WebSocket is down,
+    /// and every five minutes while it answers (`NativeForegroundSyncPolicy.ActivePoll`). Cancelled on background.
     private func startPoll() {
         let capture = credentialAuthority.capture()
         pollTask?.cancel()
@@ -5888,6 +5894,10 @@ final class VortXSyncManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: self?.pollIntervalNanos ?? 3_000_000_000)
                 if Task.isCancelled { return }
                 guard let self, self.isCurrent(capture) else { return }
+                let now = Date()
+                guard NativeForegroundSyncPolicy.ActivePoll.shouldPull(now: now, lastPull: self.lastPollPullAt,
+                                                                      socketHeardAt: self.ws == nil ? nil : self.wsHeardAt) else { continue }
+                self.lastPollPullAt = now
                 await self.syncDown(credentialCapture: capture, routineReceive: true)
             }
         }
