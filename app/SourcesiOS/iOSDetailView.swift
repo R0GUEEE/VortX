@@ -1433,6 +1433,7 @@ struct iOSDetailView: View {
                 // shows. Mounted ONLY for VOD with a resolved YouTube id and when motion is allowed; the
                 // still backdrop underneath is the permanent fallback. Live channels never get a trailer.
                 .overlay { heroTrailerClip(height: band) }
+                .task(id: detailTrailerGateKey) { logDetailTrailerGate() }
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
                 titleOrLogo
                 metaRow
@@ -1650,17 +1651,21 @@ struct iOSDetailView: View {
         // Keep the image request in a child view: the detail body observes a large, frequently changing
         // state surface while sources settle, but backdrop loading should only restart when the artwork or
         // its decoded-size budget changes. The child also rejects a late completion from a previous title.
-        return iOSCinematicBackdropImage(
-            url: bg,
-            contentMode: (effectiveType == "series" && (meta?.background?.isEmpty ?? true)) ? .fit : .fill
-        )
-        .frame(height: height, alignment: .top)
-        // The backdrop is the ZStack's WIDTH ANCHOR: it greedily takes the full viewport width and
-        // pins to the leading edge, so the ZStack's leading edge is the screen's leading edge. Before
-        // this, the oversized serif hero title made the ZStack wider than the screen and `.bottomLeading`
-        // pushed the whole block to a negative x, clipping the title / Watch / synopsis off the left.
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .clipped()
+        // The band (a clear rectangle) is the ZStack's WIDTH ANCHOR: exactly the offered width, so the ZStack's
+        // leading edge is the screen's. Before this, the oversized serif hero title made the ZStack wider than
+        // the screen and `.bottomLeading` pushed the whole block to a negative x. The art is an overlay centred
+        // across that band and top-aligned: a fill image sized by height is far wider than a phone, and drawing
+        // it as the band itself left it pinned leading, showing only its left side.
+        return Color.clear
+            .frame(height: height)
+            .frame(maxWidth: .infinity)
+            .overlay(alignment: .top) {
+                iOSCinematicBackdropImage(
+                    url: bg,
+                    contentMode: (effectiveType == "series" && (meta?.background?.isEmpty ?? true)) ? .fit : .fill
+                )
+            }
+            .clipped()
         // A smoother multi-stop vertical fade: the art stays crisp up top and dissolves cleanly into the
         // dark canvas so the title/meta block reads without a hard seam (the cinematic reference look).
         .overlay(
@@ -1787,6 +1792,20 @@ struct iOSDetailView: View {
     ///      muted + looping, for the rare case branch 1's language-preferred resolution has not populated yet.
     /// The clip fades in a beat after the backdrop shows; the still art underneath is the permanent fallback, so
     /// a missing / slow / blocked trailer never blanks the band, and no error is ever surfaced.
+    /// Re-logged when the title or its trailer resolution changes, never per render.
+    private var detailTrailerGateKey: String {
+        "\(id)|\(detailNativeTrailerURL != nil)|\(detailTrailerYouTubeID != nil)|\(detailTrailerClipURL != nil)"
+    }
+    /// One diagnostics line per detail title: whether the muted hero trailer could mount, and if not which gate
+    /// stopped it. No title identity is logged.
+    private func logDetailTrailerGate() {
+        let reason = !autoplayTrailers ? "autoplay_off"
+            : reduceMotion ? "reduce_motion"
+            : LiveTypes.contains(type) ? "live"
+            : (detailNativeTrailerURL == nil && detailTrailerYouTubeID == nil && detailTrailerClipURL == nil) ? "no_trailer" : nil
+        DiagnosticsLog.log("trailer", "hero surface=detail result=" + (reason.map { "skip reason=\($0)" } ?? "mount"))
+    }
+
     @ViewBuilder private func heroTrailerClip(height: CGFloat) -> some View {
         if autoplayTrailers, !reduceMotion, !LiveTypes.contains(type) {
             if let native = detailNativeTrailerURL {
@@ -5650,11 +5669,12 @@ struct iOSEpisodeStreams: View {
     private var backdrop: some View { backdrop(height: backdropHeight) }
 
     private func backdrop(height: CGFloat) -> some View {
-        FallbackArtwork(urls: [shownVideo.thumbnail, meta.background, meta.poster])
-        .frame(height: height)
-        // Width anchor for the episode hero ZStack, full viewport width, pinned leading (see iOSDetailView.backdrop).
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .clipped()
+        // Width anchor for the episode hero ZStack with the art centred across it (see iOSDetailView.backdrop).
+        Color.clear
+            .frame(height: height)
+            .frame(maxWidth: .infinity)
+            .overlay(alignment: .top) { FallbackArtwork(urls: [shownVideo.thumbnail, meta.background, meta.poster]) }
+            .clipped()
         .overlay(
             LinearGradient(stops: [
                 .init(color: .clear, location: 0.0),

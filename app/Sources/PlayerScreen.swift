@@ -1549,6 +1549,8 @@ struct PlayerScreen: View {
     @State private var duration = 0.0
     @State private var completionEvidence = PlaybackCompletionEvidence<PlayerLoadToken>()
     @State private var bufferedTime = 0.0   // buffered-ahead edge (seconds) for the YouTube-style grey scrubber band
+    /// This screen's identity in FullscreenPlaybackGate, so a repeated onAppear counts it once.
+    @State private var playbackGateToken = UUID()
     @State private var lastReported = -1.0     // last whole-second progress pushed to stremio-core
     @State private var isPaused = false
     @State private var speed = 1.0
@@ -2122,7 +2124,7 @@ struct PlayerScreen: View {
         // fullscreen player, so signal "a player is up" for as long as this screen is mounted - the hero
         // views unmount their looping libmpv clip on it, instead of decoding a 1080p trailer beneath the
         // whole movie (micro stutter + audio crackle on every stream).
-        .onAppear { FullscreenPlaybackGate.shared.playerDidAppear(); LoopbackPlaybackAssertion.begin(for: url) }
+        .onAppear { FullscreenPlaybackGate.shared.playerDidAppear(playbackGateToken); LoopbackPlaybackAssertion.begin(for: url) }
         // Panels and the failure screen list sources, so they follow every engine change.
         .onChange(of: panel != nil || loadFailed) { listsSources in engineChanges.followAll(listsSources) }
         .onChange(of: core.streamsEpoch) { _ in
@@ -2141,7 +2143,7 @@ struct PlayerScreen: View {
             episodeInventoryUnavailable = false
             hydrateDirectResumeSeriesInventory()
         }
-        .onDisappear { FullscreenPlaybackGate.shared.playerDidDisappear(); LoopbackPlaybackAssertion.end() }
+        .onDisappear { FullscreenPlaybackGate.shared.playerDidDisappear(playbackGateToken); LoopbackPlaybackAssertion.end() }
     }
 
     #if os(iOS) || os(macOS)

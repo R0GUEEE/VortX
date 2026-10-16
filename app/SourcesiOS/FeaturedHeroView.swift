@@ -158,6 +158,7 @@ struct FeaturedHeroView: View {
             // clip entirely.
             backdrop
             heroClip
+                .task(id: model.hero?.id) { logHeroTrailerGate() }
             if let hero = model.hero {
                 content(hero)
                     .padding(.horizontal, Theme.Space.md)
@@ -268,6 +269,17 @@ struct FeaturedHeroView: View {
             }
             .task(id: hero.id) { await resolveHeroClipDirect(hero) }
         }
+    }
+
+    /// One diagnostics line per featured title: whether the ambient trailer was allowed to mount, and if not
+    /// which gate stopped it. No title identity is logged.
+    private func logHeroTrailerGate() {
+        guard let hero = model.hero else { return }
+        let reason = !autoplayTrailers ? "autoplay_off"
+            : !RemoteConfig.snapshot.isFeatureOn("trailers", default: true) ? "remote_off"
+            : reduceMotion ? "reduce_motion"
+            : hero.ambientTrailerURL == nil ? "no_trailer" : nil
+        DiagnosticsLog.log("trailer", "hero surface=home result=" + (reason.map { "skip reason=\($0)" } ?? "mount"))
     }
 
     /// yt-direct: one attempt per featured item at resolving the ambient clip on the user's own IP.
