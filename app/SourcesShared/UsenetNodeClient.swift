@@ -21,6 +21,8 @@ enum UsenetNodeClient {
         "invalid_request", "unsupported_archive_or_encoding", "article_integrity_failed", "provider_timeout",
         "session_closed", "resource_limit", "provider_unavailable", "selection_unmatched", "selection_ambiguous",
         "selection_unsupported", "invalid_selector", "operation_cancelled", "operation_reused",
+        // The NZB link answered with an indexer refusal (limits, key) or with something that is not an NZB.
+        "nzb_indexer_error", "nzb_unreadable",
     ]
 
     /// Only fixed reason labels/numeric codes may reach diagnostics. Error descriptions and provider
