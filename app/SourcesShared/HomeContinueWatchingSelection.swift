@@ -61,6 +61,24 @@ enum HomeContinueWatchingSelection {
             }
         }
     }
+    /// A captured native intent that went stale only because its account/session generation moved on (each sync
+    /// merge republishes the binding) while the same account, profile, settings and service session remain. The
+    /// next history publication re-captures it; a presenter may keep this profile's last row until then.
+    static func awaitsRecapture(_ intent: Intent, core: CoreBridge = .shared, profiles: ProfileStore = .shared) -> Bool {
+        let context = intent.context
+        guard context.usesNativeProfileState, core.usesNativeProfileState,
+              let profileID = context.profileID, profiles.activeID == profileID,
+              profiles.activeUsesEngineHistory == context.usesEngineHistory,
+              context.preferences == ContinueWatchingPreferences.current(),
+              context.preferenceEpoch == ContinueWatchingPreferences.selectionEpoch,
+              case .native(let binding?) = context.nativeTarget, binding.profileID == profileID,
+              CredentialScopeRegistry.shared.isCurrent(binding.credential) else { return false }
+        switch intent.source {
+        case .local: return intent.traktSessionID == nil && intent.simklSessionID == nil
+        case .trakt: return intent.traktSessionID != nil && TraktAuth.storedSessionID == intent.traktSessionID
+        case .simkl: return intent.simklSessionID != nil && SIMKLAuth.storedSessionID == intent.simklSessionID
+        }
+    }
     static func refreshCurrent(core: CoreBridge = .shared, profiles: ProfileStore = .shared) {
         let snapshot = current(core: core, profiles: profiles)
         if snapshot.context.preferences.source == .simkl { SIMKLContinueWatchingShadow.shared.refresh(context: snapshot.context) }

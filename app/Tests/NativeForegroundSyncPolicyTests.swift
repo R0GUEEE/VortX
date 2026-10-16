@@ -113,10 +113,11 @@ enum NativeForegroundSyncPolicyTests {
         precondition(Record.decide(record, digest: "b", hasLinkedAccounts: false, now: t0.addingTimeInterval(1)) == .changed)
         precondition(Record.decide(record, digest: "a", hasLinkedAccounts: true, now: t0.addingTimeInterval(Record.linkedRefresh - 1)) == .skip)
         precondition(Record.decide(record, digest: "a", hasLinkedAccounts: true, now: t0.addingTimeInterval(Record.linkedRefresh)) == .refresh)
-        precondition(Record.decide(record, digest: "a", hasLinkedAccounts: false, now: t0.addingTimeInterval(Record.safetyRefresh)) == .refresh)
-        // A clock that moved backwards never extends a skip.
-        precondition(Record.decide(record, digest: "a", hasLinkedAccounts: false, now: t0.addingTimeInterval(-5)) == .refresh)
-        print("PASS 0.4 conversion skips only while its fingerprint matches; linked accounts refresh every 30 min, others daily")
+        // Without a linked account the document is the only input: a match skips for good.
+        precondition(Record.decide(record, digest: "a", hasLinkedAccounts: false, now: t0.addingTimeInterval(400 * 24 * 3600)) == .skip)
+        // A clock that moved backwards never extends a linked account's skip.
+        precondition(Record.decide(record, digest: "a", hasLinkedAccounts: true, now: t0.addingTimeInterval(-5)) == .refresh)
+        print("PASS 0.4 conversion skips while its fingerprint matches; only linked accounts re-read, every 30 min")
     }
 
     static func progressCadence() {

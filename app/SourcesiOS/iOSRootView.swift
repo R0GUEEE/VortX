@@ -329,7 +329,7 @@ struct iOSRootView: View {
 
     private var shellWithTabPreferenceRouting: some View {
         shellWithConnectivityRouting
-        // A playing title covers the whole shell. Screens on `@VisibleCore` (the detail page under the player)
+        // A playing title covers the whole shell. Screens on `@VisibleCore` (the tabs and the detail page under it)
         // stop re-rendering on every engine event until it closes, then catch up in one pass.
         .environment(\.engineObservationActive, !playbackGate.playerActive)
         .onChange(of: hideLiveTab) { hidden in
@@ -1133,7 +1133,7 @@ struct iOSHomeView: View {
     var onBrowse: (() -> Void)? = nil
     var onNavigationDepthChanged: ((Int) -> Void)? = nil
     @Environment(\.scenePhase) private var scenePhase
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected
     @EnvironmentObject private var theme: ThemeManager   // observe textScale so Theme.Typography repaints live
@@ -1198,6 +1198,12 @@ struct iOSHomeView: View {
     private var continueWatchingRenderSnapshot: iOSCWRenderSnapshot {
         if let cached = cachedContinueWatching {
             guard cached.selection.intent.isCurrent(core: core, profiles: profiles) else {
+                // Every sync merge republishes the native account binding, and the next history publication
+                // re-captures it. Until then the same profile keeps its row instead of flashing empty; any other
+                // profile, source or session change still blanks it.
+                if HomeContinueWatchingSelection.awaitsRecapture(cached.selection.intent, core: core, profiles: profiles) {
+                    return cached.render
+                }
                 return iOSCWRenderSnapshot(items: [], provenance: cached.render.provenance,
                                           status: "Waiting for this profile's acknowledged account and Continue Watching settings…")
             }
@@ -2499,7 +2505,7 @@ private enum LibrarySmartFilter: String, CaseIterable, Identifiable {
 struct iOSLibraryView: View {
     /// True only when this is the visible tab; gates the macOS window-titlebar wordmark (#46).
     var isActive: Bool = true
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var theme: ThemeManager   // observe textScale so Theme.Typography repaints live
     @EnvironmentObject private var profiles: ProfileStore   // gate the Library on the active profile's own history
     @EnvironmentObject private var account: StremioAccount  // progress-recording wiring for play-from-local (#30)
@@ -3293,7 +3299,7 @@ struct iOSLibraryDownloadsPill: View {
 /// local-file player.
 struct iOSDownloadsScreen: View {
     @EnvironmentObject private var account: StremioAccount
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @State private var downloadPlayer: iOSPlayerLaunch?
     @State private var downloadLaunchTask: Task<Void, Never>?
     @State private var downloadLaunchRequest: UUID?
@@ -3858,7 +3864,7 @@ struct iOSDiscoverView: View {
     /// True only when this is the visible tab; gates the macOS window-titlebar wordmark (#46).
     var isActive: Bool = true
     var onNavigationDepthChanged: ((Int) -> Void)? = nil
-    @EnvironmentObject private var core: CoreBridge
+    @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var vortxSync: VortXSyncManager   // VortX-primary front door: a VortX sign-in unlocks the tabs even with no Stremio account connected
     @EnvironmentObject private var theme: ThemeManager   // observe textScale so Theme.Typography repaints live

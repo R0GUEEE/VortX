@@ -923,24 +923,15 @@ final class VortXSyncManager: ObservableObject {
     /// Keys this device's own native export writes; a change in them is never a 0.4 change.
     private static let nativeExportKeys = ["nativeSync", "nativeHostPreferences", "profileEditResults",
                                            "nativeProviderCredentials", "apiKeys"]
-    /// Fingerprint of what the 0.4 conversion reads: the document's legacy fields (credential-free) and the
-    /// peer receipt and account bindings in its native carrier. Nil when the document cannot be read, which
-    /// always converts. See `NativeForegroundSyncPolicy.LegacyConversionRecord`.
+    /// Fingerprint of the document's 0.4 fields (credential-free), the conversion's only input besides linked
+    /// Stremio accounts. The native carrier is left out: every device's merge rewrites it, so including it made
+    /// each sync look changed and re-converted forever. Nil when the document cannot be read, which always
+    /// converts. See `NativeForegroundSyncPolicy.LegacyConversionRecord`.
     private func nativeLegacyConversionDigest(_ document: [String: Any]) -> String? {
         var legacy = document
         for key in Self.nativeExportKeys { legacy.removeValue(forKey: key) }
         guard let body = try? VortxNativeBootstrapArchive.credentialFreeDocument(legacy) else { return nil }
-        var hasher = SHA256()
-        hasher.update(data: body)
-        if let native = document["nativeSync"] as? [String: Any] {
-            var read = native.filter { ["schemaVersion", "legacyImport", "accountSlots"].contains($0.key) }
-            if let profiles = native["profiles"] as? [String: Any] {
-                read["profileAccounts"] = profiles.compactMapValues { (($0 as? [String: Any])?["profile"] as? [String: Any])?["account"] }
-            }
-            guard let bytes = try? JSONSerialization.data(withJSONObject: read, options: [.sortedKeys, .withoutEscapingSlashes]) else { return nil }
-            hasher.update(data: bytes)
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
     }
     private func nativeLegacyConversionKey(_ capture: CredentialScopeRegistry.Capture) -> String {
         "vortx.native.legacyConversion." + SHA256.hash(data: Data(capture.namespace.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
@@ -1441,16 +1432,27 @@ final class VortXSyncManager: ObservableObject {
                 // Every open checks the complete legacy projection, including pending web edits.
                 // Native authority cannot silently ignore a later old-client membership/watch edit.
                 stage = "legacy_preparation"
-                let prepared = try await self.prepareNativeLegacyMaterial(document, capture: capture, enforceMountedFence: false)
+                // A device that already holds this account skips the conversion while the document's 0.4 fields
+                // still match its last one (NativeForegroundSyncPolicy.LegacyConversionRecord); its checkpoint keeps
+                // the original 0.4 copy, which a commit never replaces. A linked Stremio account still converts at
+                // every open, rebuilding its availability and pending relink state for this launch.
+                var skipConversion = false
+                if hadCheckpoint, !roster.profiles.contains(where: { !$0.isOwner && $0.usesOwnAccount }),
+                   !self.nativeLegacyConversionDecision(document, capture: capture).convert {
+                    skipConversion = try probe.readLegacyMaterial(scope: scope) != nil
+                }
+                var prepared: NativeLegacyPreparation?
+                if skipConversion { DiagnosticsLog.log("native-profiles", "legacy_conversion skipped stage=restore") }
+                else { prepared = try await self.prepareNativeLegacyMaterial(document, capture: capture, enforceMountedFence: false) }
                 guard self.isCurrent(capture), !Task.isCancelled, self.nativeCheckpointGeneration == generation,
                       ProfileStore.shared.activeID == selectedProfile else { throw VortxNativeError.superseded }
                 guard try probe.authenticatedCheckpoint(scope: scope) == checkpoint,
                       try probe.readHostPreferences(scope: scope) == preparationHost else { throw VortxNativeError.superseded }
-                let material = prepared.material
+                let material = prepared?.material
                 let remoteNative = try document["nativeSync"].map {
                     try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0))
                 }
-                if hadCheckpoint || remoteNative != nil {
+                if let material, hadCheckpoint || remoteNative != nil {
                     stage = "legacy_compatibility"
                     let reconciliation = try VortxNativeSession.validateLegacyCompatibility(scope: scope, ownerName: owners[0].name,
                                                                        snapshot: checkpoint, nativeSync: remoteNative,
@@ -1461,6 +1463,7 @@ final class VortXSyncManager: ObservableObject {
                 let didImportLegacy = !hadCheckpoint && remoteNative == nil
                 var initialActions: [String] = []
                 if !hadCheckpoint {
+                    guard let material else { throw VortxNativeError.invalidSnapshot }   // a first open always converts
                     let initial: VortxJSON
                     if let native = remoteNative {
                         initial = .object(["type": .string("merge_native_sync"), "document": native])
@@ -1471,7 +1474,7 @@ final class VortXSyncManager: ObservableObject {
                     }
                     initialActions = [String(decoding: try JSONEncoder().encode(initial), as: UTF8.self)]
                 }
-                let archive = try VortxNativeBootstrapArchive.encode(document: documentBytes, material: material, authenticatedSourceArchive: prepared.sourceArchive)
+                let archive = try material.map { try VortxNativeBootstrapArchive.encode(document: documentBytes, material: $0, authenticatedSourceArchive: prepared?.sourceArchive) }
                 // Keep an already validated session visible while authentication/source parsing
                 // is pending or fails. Only retire it once the replacement has passed preflight.
                 stage = "session_replacement"
@@ -1491,8 +1494,8 @@ final class VortXSyncManager: ObservableObject {
                 stage = "session_creation"
                 let session = try VortxNativeSession(scope: scope, ownerName: owners[0].name, abi: VortxCABI(), store: store,
                                                     transport: VortxCResourceTransport(), allowNewAccount: !hadCheckpoint, initialActions: initialActions,
-                                                    hostActor: self.nativeHostActor(capture: capture), sourceAuthority: prepared.authority,
-                                                    authenticatedSourceArchive: !hadCheckpoint ? prepared.sourceArchive : nil,
+                                                    hostActor: self.nativeHostActor(capture: capture), sourceAuthority: prepared?.authority,
+                                                    authenticatedSourceArchive: !hadCheckpoint ? prepared?.sourceArchive : nil,
                                                     initialLegacyMaterial: !hadCheckpoint && remoteNative != nil ? material : nil,
                                                     diagnostics: { DiagnosticsLog.log("native-profiles", $0) })
                 do {
@@ -1505,7 +1508,7 @@ final class VortXSyncManager: ObservableObject {
                         let action = remoteNative.map { VortxJSON.object(["type": .string("merge_native_sync"), "document": $0]) } ?? .object(["type": .string("get_state")])
                         _ = try await session.dispatch([String(decoding: JSONEncoder().encode(action), as: UTF8.self)], now: UInt64(Date().timeIntervalSince1970), legacyMaterial: material, hostRemote: hostRemote,
                             legacyWatchlists: watchlists, websiteEvents: websiteEvents, websiteAddonEvents: websiteAddonEvents, websiteBaseline: VortxNativeProfileEditHost.baselines(roster.profiles),
-                            sourceAuthority: prepared.authority, authenticatedSourceArchive: prepared.sourceArchive)
+                            sourceAuthority: prepared?.authority, authenticatedSourceArchive: prepared?.sourceArchive)
                     }
                     guard self.isCurrent(capture), !Task.isCancelled, ProfileStore.shared.activeID == selectedProfile else { throw VortxNativeError.superseded }
                     let state = try JSONDecoder().decode(VortxJSON.self, from: Data(try await session.stateJSON().utf8))
@@ -1528,7 +1531,7 @@ final class VortXSyncManager: ObservableObject {
                     try await CoreBridge.shared.installNativeSession(session, registry: registry, capture: capture, hostProfiles: roster.profiles)
                     guard self.isCurrent(capture), !Task.isCancelled, self.nativeCheckpointGeneration == generation,
                           ProfileStore.shared.activeID == installationProfile else { throw VortxNativeError.superseded }
-                    self.recordNativeLegacyConversion(self.nativeLegacyConversionDigest(document), capture: capture)
+                    if prepared != nil { self.recordNativeLegacyConversion(self.nativeLegacyConversionDigest(document), capture: capture) }
                     self.applyNativeGlobals(acceptedHost)
                     try self.publishNativeWebsiteOutcome(websiteOutcome, capture: capture)
                     // Upload only the new nativeSync carrier. The archive never enters the wire,
