@@ -4,6 +4,28 @@ All notable changes to VortX, newest first. VortX is Apple TV first, with an iPh
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
+## 0.5.5 - Smooth for real, hero trailers and your next episode
+
+Build **274** across Apple and Android. 0.5.4 still converted your 0.4 data again on every sync, every
+ten seconds or so, on every Apple device. This release stops that for good, starts hero trailers again
+and opens a series on your episode on Mac and iPad.
+
+### Fixed
+
+- **Lag, stutter and slow taps on every Apple device.** The check that decides whether your 0.4 data has changed gave a different answer each time it ran, even when nothing had changed. So 0.5.4 converted everything again on every sync, about every 11 seconds, and uploaded the whole account each time: 895 times in three hours on one Mac. The check now gives the same answer for the same data, so the conversion runs once after updating and then stays skipped. The splash screen is shorter too, since the same conversion was competing with opening your account.
+- **Hero trailers never started** on Home and title pages on iPhone, iPad and Mac, or on title pages on Apple TV. The clip waited for a step that never ran. It runs now.
+- **Mac and iPad open a series on your episode.** A long season opened on episode 1. The episode grid now scrolls to the episode in progress, or the next one after the episode you last played.
+- **Watched episode cards** are dimmer and clean: the whole card darkens and loses its colour evenly instead of fading into a smeared double image.
+
+### Changed
+
+- **Less background syncing.** Changes from your other devices still arrive the moment they happen over the live sync connection. While that connection is up, the backup check runs every five minutes instead of every 3 seconds; if it drops, the check runs every few seconds again.
+- **A bigger Home billboard on Mac**, running down to just above Customize.
+
+### Android
+
+Android checks for missed changes every five minutes while its live sync connection is up, instead of every 3 seconds. The Android APK is still an early technical preview, so expect missing features and rough edges.
+
 ## 0.5.4 - A smoother app, a faster start and better episode lists
 
 Build **273** across Apple and Android. This release fixes accounts that still would not open

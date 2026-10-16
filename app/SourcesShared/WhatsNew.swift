@@ -5,16 +5,14 @@ import Foundation
 /// The in-app "What's New" screen (Settings > What's New) renders the full bundled CHANGELOG.md and only falls
 /// back to these highlights when that resource is absent. Pure logic so it compiles on every target.
 enum WhatsNew {
-    static let version = "0.5.4"
+    static let version = "0.5.5"
     static let highlights: [String] = [
-        "Accounts that still would not open after updating from 0.4 open again. A safety check mistook normal data from a Stremio-connected profile for hidden data and stopped the whole account.",
-        "Much smoother, most of all on Apple TV. VortX kept converting your 0.4 data again in the background every minute or so, which froze menus, Settings and the remote. It now converts once and leaves it alone.",
-        "A faster start: an account this device already holds opens straight away, and any conversion still due finishes in the background.",
-        "Syncing no longer redraws every screen, and Continue Watching no longer blanks out while the app syncs.",
-        "Watched episodes are dimmed again, and on iPhone, iPad and Mac opening a series takes you to its next episode.",
-        "On Mac and iPad the season posters stay pinned at the top while you scroll the episodes.",
-        "On phones, title and episode artwork is centred instead of showing only its left side.",
-        "Usenet reads more indexer and NZB responses: http links, older text encodings and gzipped NZBs. Anime finds the right episode by its absolute number."
+        "Smooth for real. 0.5.4 still converted your 0.4 data again on every sync, every few seconds, which made the app lag and taps slow. It now converts once and stays quiet, and the splash screen is shorter.",
+        "Hero trailers start again on Home and title pages.",
+        "On Mac and iPad, opening a series takes you to your episode instead of episode 1.",
+        "Watched episodes are dimmer and no longer look smeared.",
+        "Less background syncing. Changes from your other devices still arrive the moment they happen.",
+        "On Mac, the Home billboard is bigger."
     ]
 
     // Kept as release-history fallback text for older bundled changelogs. The current screen uses
