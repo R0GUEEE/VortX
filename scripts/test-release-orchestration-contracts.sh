@@ -71,7 +71,7 @@ require_grep "signed candidate APK and AAB both verify complete engine ABIs" \
     <(printf '%s\n' "$candidate_signing_step")
 ok "Apple and both Android lanes use one exact wrapper revision"
 native_pin="$(awk '/^      NORMAL_NATIVE_REVISION:/{print $2}' "$APPLE_RELEASE_WF")"
-[[ "$native_pin" = 51f4afceb9bd81e6c84af7700f418cccd5e364eb ]] || fail "Apple normal native pin differs from the reviewed revision"
+[[ "$native_pin" = af29b22e4c45740a1f5b6cb415b81f8430f55b9f ]] || fail "Apple normal native pin differs from the reviewed revision"
 apple_native_ref="$(awk '/repository: VortXTV\/vortx-core/{active=1; next}
     active && /^[[:space:]]+ref:/{sub(/^[[:space:]]+ref: /, ""); print; exit}' "$APPLE_RELEASE_WF")"
 [[ "$apple_native_ref" = '${{ steps.native_source.outputs.revision }}' ]] || fail "Apple checkout must consume the authenticated source selection"
