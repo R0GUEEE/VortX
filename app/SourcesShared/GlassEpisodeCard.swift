@@ -35,6 +35,10 @@ struct GlassEpisodeCard: View {
 
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.isFocused) private var isFocused
+    /// A watched episode reads as done at a glance: the whole card dims and its art loses most of its colour,
+    /// as the episode rows did before the glass cards. Focus (tvOS) lifts it back so it stays readable there.
+    private var dulled: Bool { model.isWatched && !isFocused }
 
     private var artHeight: CGFloat { width * 9 / 16 }
     private var radius: CGFloat { tenFoot ? 24 : 22 }
@@ -47,7 +51,7 @@ struct GlassEpisodeCard: View {
                 .clipped()
                 .overlay(alignment: .top) { chips }
                 .overlay(alignment: .bottom) { progressBar }
-                .opacity(model.isWatched ? 0.78 : 1)
+                .saturation(dulled ? 0.35 : 1)
             panel
         }
         .frame(width: width, alignment: .leading)
@@ -57,6 +61,7 @@ struct GlassEpisodeCard: View {
             RoundedRectangle(cornerRadius: radius, style: .continuous)
                 .strokeBorder(VortXGlass.highlight(0.16), lineWidth: 1)
         }
+        .opacity(dulled ? 0.55 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Episode \(model.number): \(model.title)")
         .accessibilityValue(accessibilityStatus)

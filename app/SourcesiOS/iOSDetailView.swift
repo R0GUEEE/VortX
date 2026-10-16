@@ -283,6 +283,18 @@ private struct EpisodeTopOffsetPreferenceKey: PreferenceKey {
     }
 }
 
+/// Where the episode grid ends in the page scroll, so the pinned season strip lets go once it has passed.
+private struct EpisodeBottomOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// The season poster strip's height, which the pinned copy takes over at the top of the page.
+private struct SeasonStripHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 /// Touch / Mac detail page. Loads meta through the shared engine, then presents the same cinematic
 /// composition the tvOS `DetailView` uses, a full-bleed backdrop from `meta.background` with a dark
 /// gradient scrim, the hero (logo or title, year · runtime · genres · rating, synopsis) over it, a
@@ -591,6 +603,8 @@ struct iOSDetailView: View {
     @State private var season = 1
     @State private var didApplySeason = false   // once the initial-season hint lands (or the user taps a season), stop re-applying it
     @State private var episodeTopOffset: CGFloat = .greatestFiniteMagnitude
+    @State private var episodeBottomOffset: CGFloat = .greatestFiniteMagnitude
+    @State private var seasonStripHeight: CGFloat = 0
     @State private var sourceRefreshDebounce: Task<Void, Never>? = nil
     private static let sourceRefreshDebounceMs = 400     // trailing settle for the movie/live add-on load storm
     // Debrid cache AWARENESS for the movie/live source list: which raw torrents the user's debrid account
@@ -936,7 +950,10 @@ struct iOSDetailView: View {
                 }
                 #endif
                 }
+                .overlay(alignment: .top) { pinnedSeasonStrip(proxy: proxy) }
                 .onPreferenceChange(EpisodeTopOffsetPreferenceKey.self) { episodeTopOffset = $0 }
+                .onPreferenceChange(EpisodeBottomOffsetPreferenceKey.self) { episodeBottomOffset = $0 }
+                .onPreferenceChange(SeasonStripHeightPreferenceKey.self) { seasonStripHeight = $0 }
                 .environment(\.cinemaSourceJump, { anchor in
                     withAnimation(reduceMotion ? nil : Theme.Motion.state) { proxy.scrollTo(anchor, anchor: .top) }
                 })
@@ -1359,6 +1376,7 @@ struct iOSDetailView: View {
     /// Scroll-anchor id for the source section, so the hero's "Sources" action can jump to it.
     private static let sourcesAnchor = "iOSDetailSources"
     private static let episodesTopAnchor = "iOSDetailEpisodesTop"
+    private static let seasonStripAnchor = "iOSDetailSeasonStrip"
     private static let detailScrollSpace = "iOSDetailScrollSpace"
     private static let episodeScrollThreshold = 12
 
@@ -1368,6 +1386,35 @@ struct iOSDetailView: View {
     }
 
     private var showEpisodeScrollToTop: Bool { episodeTopOffset < -80 }
+
+    /// Mac / iPad: once the season posters reach the top of the page they stay pinned there and the episode
+    /// grid scrolls underneath, until the grid itself has gone past. It is one page scroll with the same strip
+    /// drawn over it, never a nested scroll view (a pointer over the grid would then trap the page scroll).
+    /// Picking a season from the pinned copy brings that season's first episodes back to the top.
+    @ViewBuilder private func pinnedSeasonStrip(proxy: ScrollViewProxy) -> some View {
+        #if !os(tvOS)
+        if wideDetailLayout, isEpisodic, seasonStripHeight > 0, let videos = meta?.videos,
+           episodeTopOffset <= seasonStripHeight, episodeBottomOffset > seasonStripHeight + Theme.Space.xl {
+            let seasons = Array(Set(videos.compactMap { $0.season })).sorted()
+            if seasons.count > 1 {
+                seasonPosterStrip(seasons, watched: watchedSet)
+                    .padding(.horizontal, Theme.Space.md)
+                    .padding(.vertical, Theme.Space.xs)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background {
+                        Theme.Palette.canvas.opacity(0.94)
+                            .overlay(alignment: .bottom) { Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1) }
+                    }
+                    .onChange(of: season) { _ in
+                        withAnimation(reduceMotion ? nil : Theme.Motion.state) {
+                            proxy.scrollTo(Self.seasonStripAnchor, anchor: .top)
+                        }
+                    }
+                    .transition(.opacity)
+            }
+        }
+        #endif
+    }
 
     /// Hero: full-bleed backdrop + scrim + title / meta / action row / synopsis. `scrollToSources`
     /// is wired into the movie action row's "Sources" button (the tvOS 3-action twin).
@@ -2396,6 +2443,25 @@ struct iOSDetailView: View {
         }
     }
 
+    /// The episode the list opens on: one in progress, else the first unwatched from the episode last played
+    /// onwards (so finishing a season moves on to the next), else the first unwatched anywhere, specials last.
+    /// Nil once everything is watched.
+    private func episodeListTarget(_ videos: [CoreVideo]) -> CoreVideo? {
+        let sorted = sortedEpisodes(videos)
+        let watched = watchedSet
+        if let primary = seriesPrimaryEpisode(videos), primary.isResume { return primary.video }
+        if let last = lastPlayedVideoID, let index = sorted.firstIndex(where: { $0.id == last }),
+           let next = sorted[index...].first(where: { !watched.contains($0.id) }) { return next }
+        return sorted.first { !watched.contains($0.id) && ($0.season ?? 1) > 0 } ?? sorted.first { !watched.contains($0.id) }
+    }
+
+    /// The episode last played: the Continue Watching / newer playback identity, else the saved resume entry.
+    private var lastPlayedVideoID: String? {
+        if let id = newerPlaybackVideoID ?? validInitialVideoID { return id }
+        guard let m = meta else { return nil }
+        return profiles.activeUsesEngineHistory ? core.metaDetails?.libraryItem?.state.videoId : profiles.watch[m.id]?.videoId
+    }
+
     /// First-unwatched season in air order, used for the initial season selection.
     private var firstUnwatchedSeason: Int? {
         guard let videos = meta?.videos else { return nil }
@@ -2410,9 +2476,12 @@ struct iOSDetailView: View {
     /// appears still opens on the season you were last watching. Mirrors the tvOS CoreSeasonedEpisodes resolver.
     private func applyEpisodeSeason(_ seasons: [Int]) {
         guard let videos = meta?.videos else { return }
-        if !didApplySeason {
-            let preferred = resumeSeasonHint(videos) ?? firstUnwatchedSeason ?? seasons.first { $0 > 0 } ?? seasons.first ?? 1
-            if seasons.contains(preferred) { season = preferred }   // triggers onChange(season) -> didApplySeason = true
+        // Wait for the watch history: choosing before it lands would lock the page onto a finished season.
+        if !didApplySeason, episodeRailHistoryReady {
+            let preferred = episodeListTarget(videos)?.season ?? resumeSeasonHint(videos) ?? firstUnwatchedSeason
+                ?? seasons.first { $0 > 0 } ?? seasons.first ?? 1
+            // Chosen once, with the history in hand; a later mark never moves the page to another season.
+            if seasons.contains(preferred) { season = preferred; didApplySeason = true }
         }
         if !seasons.contains(season) { season = seasons.first { $0 > 0 } ?? seasons.first ?? 1 }
     }
@@ -3843,6 +3912,7 @@ struct iOSDetailView: View {
         let ids: [String]
         let watched: Set<String>
         let ready: Bool
+        let preferred: String?
     }
 
     private struct EpisodeRailPositions: PreferenceKey {
@@ -3858,7 +3928,8 @@ struct iOSDetailView: View {
             let watched = watchedSet
             let visibleEpisodes = episodes(videos)
             let focusRequest = EpisodeRailFocusRequest(scope: episodeRailScope, season: season,
-                ids: visibleEpisodes.map(\.id), watched: localWatchedSet, ready: episodeRailHistoryReady)
+                ids: visibleEpisodes.map(\.id), watched: localWatchedSet, ready: episodeRailHistoryReady,
+                preferred: episodeListTarget(videos)?.id)
             let cardWidth = CinemaRailLayout.episodeWidth(viewport: viewportWidth,
                                                          inset: Theme.Space.md, spacing: Theme.Space.md)
             let pageSize = CinemaRailLayout.visibleEpisodes(viewport: viewportWidth, cardWidth: cardWidth,
@@ -3891,6 +3962,12 @@ struct iOSDetailView: View {
                         // Season posters on every device (2026-10-15), the phone included.
                         seasonPosterStrip(seasons, watched: watched)
                     }
+                    .id(Self.seasonStripAnchor)
+                    .background {
+                        GeometryReader { stripGeo in
+                            Color.clear.preference(key: SeasonStripHeightPreferenceKey.self, value: stripGeo.size.height)
+                        }
+                    }
                 }
 
                 #if !os(tvOS)
@@ -3922,6 +3999,15 @@ struct iOSDetailView: View {
                 // Mac / iPad: the whole season as a grid of the same cards, read top to bottom with the page.
                 if wideDetailLayout {
                     episodeGrid(visibleEpisodes, watched: watched, viewportWidth: viewportWidth)
+                    Color.clear
+                        .frame(height: 1)
+                        .background {
+                            GeometryReader { endGeo in
+                                Color.clear.preference(key: EpisodeBottomOffsetPreferenceKey.self,
+                                                       value: endGeo.frame(in: .named(Self.detailScrollSpace)).minY)
+                            }
+                        }
+                        .accessibilityHidden(true)
                 } else {
                     // Phone: keep the episode rail horizontal so one large cinematic card owns the reader's attention.
                     // LazyHStack still bounds thumbnail construction for long seasons; the parent detail scroll
@@ -3986,7 +4072,8 @@ struct iOSDetailView: View {
                                   episodeRailScope == focusRequest.scope,
                                   let index = episodeRailInitialPosition.claim(
                                     scope: focusRequest.scope, season: focusRequest.season, ids: focusRequest.ids,
-                                    watched: focusRequest.watched, ready: focusRequest.ready) else { return }
+                                    watched: focusRequest.watched, ready: focusRequest.ready,
+                                    preferred: focusRequest.preferred) else { return }
                             episodeRailFirstVisible = index
                             railProxy.scrollTo(focusRequest.ids[index], anchor: .leading)
                         }
@@ -4023,7 +4110,11 @@ struct iOSDetailView: View {
                 applyEpisodeSeason(Array(Set(videos.compactMap { $0.season })).sorted())
                 publishSeriesWatchRollup()
             }
-            .onChange(of: watched) { _ in publishSeriesWatchRollup() }   // a mark flips the show-level badge (#143)
+            .onChange(of: watched) { _ in
+                publishSeriesWatchRollup()   // a mark flips the show-level badge (#143)
+                applyEpisodeSeason(seasons)  // the opening season waits for this history
+            }
+            .onChange(of: episodeRailHistoryReady) { _ in applyEpisodeSeason(seasons) }
             .onChange(of: season) { _ in
                 didApplySeason = true
                 episodeRailFirstVisible = 0   // the fresh season rail starts at its first episode
