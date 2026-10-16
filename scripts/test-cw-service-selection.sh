@@ -49,6 +49,8 @@ enum FixturePreferenceGroup { case playback, discovery, theme }
     private var nativeProjectionTarget: PlaybackMutationTarget?
     private var nativePublishedPlayback: UserProfile.PlaybackPrefs?
     private var nativePublishedDiscovery: ProfileDiscoveryPreferences?
+    ${block(profiles, 'private struct NativeSwitchPreferenceCapture')}
+    private var nativeSwitchPreferenceCapture: NativeSwitchPreferenceCapture?
     ${block(profiles, 'private struct NativePlaybackProjectionSource')}
     ${block(profiles, 'private struct NativeDiscoveryProjectionSource')}
     private var nativePublishedPlaybackSource: NativePlaybackProjectionSource?
@@ -63,7 +65,8 @@ enum FixturePreferenceGroup { case playback, discovery, theme }
     var failSave = false; var suspendSave = false; var saveCount = 0
     var saving: CheckedContinuation<Void, Never>?
     init(profiles: [UserProfile], activeID: UUID?) { self.profiles = profiles; self.activeID = activeID }
-    func persist(touch: Bool = true) {}
+    var persistCount = 0
+    func persist(touch: Bool = true) { persistCount += 1 }
     func applyTheme(_ profile: UserProfile) {}
     func applyPlayback(_ profile: UserProfile, resetUnset: Bool) {}
     func currentPlaybackPrefs() -> UserProfile.PlaybackPrefs { .init() }

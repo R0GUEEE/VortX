@@ -458,12 +458,10 @@ struct iOSSettingsView: View {
                     updates.presentAvailableIfNeeded(force: true)
                 }
             }
-            .onAppear { SettingsChangeLog.prime() }   // I-settings: baseline the [settings] change log for this visit
             // I-settings: ONE centralized hook records every preference write on the [settings] channel (see
-            // SettingsChangeLog), covering all the @AppStorage controls without a scattered .onChange per control.
-            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
-                SettingsChangeLog.logChanges()
-            }
+            // SettingsChangeLog) while this screen is on view, covering all the @AppStorage controls without a
+            // scattered .onChange per control.
+            .modifier(SettingsChangeRecorder())
     }
 
     // MARK: Settings search
@@ -2279,9 +2277,19 @@ struct iOSSettingsView: View {
 
     // MARK: Engine diagnostics (the FFI smoke check kept off the Home page)
 
+    /// The bundled VortX core build, from the provenance the release generator stamps into Info.plist.
+    private var nativeEngineLabel: String {
+        let revision = Bundle.main.object(forInfoDictionaryKey: "VortXEngineSourceRevision") as? String ?? ""
+        return revision.isEmpty ? "VortX core" : "VortX core (\(revision.prefix(8)))"
+    }
+
     @ViewBuilder private var engineSection: some View {
         Section("Engine") {
+#if VORTX_NATIVE_DATA_ENGINE
+            LabeledContent("Data engine", value: nativeEngineLabel)
+#else
             LabeledContent("stremio-core schema", value: "\(core.schemaVersion)")
+#endif
             LabeledContent("Home rows", value: "\(core.boardRows.count)")
         }
     }
@@ -2359,7 +2367,7 @@ private enum SettingsSearchSection: CaseIterable {
         case .advanced: return ["mpv", "custom options", "diagnostic logging", "diagnostic log", "export log"]
         case .backup: return ["backup", "restore", "export library", "import library"]
         case .about: return ["version", "player", "what's new", "update", "libmpv", "mpvkit"]
-        case .engine: return ["stremio-core", "schema", "home rows", "diagnostics", "ffi"]
+        case .engine: return ["data engine", "vortx core", "engine", "home rows", "diagnostics"]
         }
     }
 }

@@ -221,14 +221,11 @@ struct SettingsView: View {
         .onChange(of: sourcePrefs.rankingSignature) { ProfileStore.shared.capturePlayback() }
         .onAppear {
             refreshExternalPlayerChoices()   // six canOpenURL IPC probes, once per appearance
-            SettingsChangeLog.prime()        // I-settings: baseline the [settings] change log for this visit
         }
         // I-settings: ONE centralized hook records every preference write on the [settings] channel (see
-        // SettingsChangeLog). This covers all the @AppStorage controls without ~120 scattered .onChange
-        // modifiers, which would also blow this body's type-check budget (see the rankingSignature note above).
-        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
-            SettingsChangeLog.logChanges()
-        }
+        // SettingsChangeLog), only while this tab is on screen. This covers all the @AppStorage controls without
+        // ~120 scattered .onChange modifiers, which would also blow this body's type-check budget.
+        .modifier(SettingsChangeRecorder())
         .task {
             // Live server monitor that NEVER gives up. The embedded server cold-starts well after
             // launch on a real Apple TV (node boots while the engine and sync are also busy), and

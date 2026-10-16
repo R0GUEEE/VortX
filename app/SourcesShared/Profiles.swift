@@ -383,6 +383,11 @@ final class ProfileStore: ObservableObject {
             // migration fields before dirty-value comparison; never replace another queued edit.
             ProfileDiscoveryPreferencesStore.applyContinueWatching(incomingActive?.discovery, resetUnset: true)
         }
+        // Every sync merge republishes the acknowledged roster, mostly unchanged. Re-projecting an identical roster to
+        // the same installation rewrote the 95 KB roster and every profile preference default and republished this
+        // store, so every screen redrew once or twice per sync (Apple TV log, 2026-10-16). A pending migration
+        // witness still takes the full path so its retry runs.
+        if sameInstallation, nativeProfileError == nil, continueWatchingMigration == nil, incoming == profiles { return }
         let flatPlayback = currentPlaybackPrefs(), flatDiscovery = currentDiscoveryPrefs(), flatTheme = currentNativeThemeProjection()
         // A settings edit made while a switch's outgoing save awaits ACK cannot capture a new
         // native target yet. Preserve even a revert to the old published value until that save

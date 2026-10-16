@@ -318,7 +318,7 @@ struct TrackPreferences: Equatable {
 enum SettingsChangeLog {
     private static let lock = NSLock()
     private static var last: [String: String] = [:]
-    private static var primed = false
+    private static var watching = false
 
     /// Brand prefixes that identify one of the app's own preference keys. Everything else in UserDefaults
     /// (framework and system state) is ignored so the `[settings]` channel stays a clean record of deliberate
@@ -337,20 +337,21 @@ enum SettingsChangeLog {
         return out
     }
 
-    /// Re-baseline the tracked keys. Called when a settings screen appears so the first edit after opening is
-    /// logged and a change made elsewhere while settings was closed is not replayed as a stale diff.
-    static func prime() {
+    /// Start (baseline the tracked keys) or stop recording. Recording runs only while a Settings screen is on view:
+    /// Apple TV keeps its Settings tab alive for the whole session, and every preference write anywhere in the app
+    /// used to snapshot the whole preferences store here on the main thread (Apple TV log, 2026-10-16). A change
+    /// made while Settings was off screen is never replayed as a stale diff.
+    static func setWatching(_ on: Bool) {
         lock.lock(); defer { lock.unlock() }
-        last = snapshot()
-        primed = true
+        watching = on
+        last = on ? snapshot() : [:]
     }
 
-    /// Log any tracked preference key that changed since the last snapshot. If not yet primed (no appear ran),
-    /// prime silently rather than reporting the resident values as changes.
+    /// Log any tracked preference key that changed since the last snapshot, while Settings is on view.
     static func logChanges() {
         lock.lock(); defer { lock.unlock() }
+        guard watching else { return }
         let current = snapshot()
-        guard primed else { primed = true; last = current; return }
         for (key, value) in current where last[key] != value {
             DiagnosticsLog.log("settings", "key=\(key) value=\(VXProbeRedaction.scrub(value))")
         }

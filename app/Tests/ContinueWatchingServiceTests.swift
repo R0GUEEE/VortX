@@ -50,6 +50,7 @@ struct ContinueWatchingServiceTests {
         pickerBindingEpochsAndWiring()
         traktPublicationEpochs()
         await nativeMigration()
+        unchangedRosterProjection()
         legacySourceMethodWindow()
         #endif
         if !failures.isEmpty { failures.forEach { print("FAIL: \($0)") }; exit(1) }
@@ -411,6 +412,27 @@ struct ContinueWatchingServiceTests {
         unauthenticated.applyNativeProfiles([profile], activeID: profileA); await unauthenticated.drain()
         require(unauthenticated.saveCount == 0, "unacknowledged original account cannot qualify startup legacy witness")
         CredentialScopeRegistry.shared.eligible = true
+    }
+    /// A sync that republishes the same roster to the same installation is not projected again (no roster
+    /// write, no preference re-apply, no store republish). A changed roster or another installation still is.
+    static func unchangedRosterProjection() {
+        configure(source: "local"); UserDefaults.standard.reset()
+        CoreBridge.shared.nativeBinding = .init(profileID: profileA, credential: CredentialScopeRegistry.shared.capture(),
+            sessionGeneration: UUID(), accountGeneration: UUID())
+        let target = CoreBridge.shared.captureNativePlaybackTarget()
+        let profile = UserProfile(id: profileA)
+        let store = MigrationFixtureProfileStore(profiles: [], activeID: nil)
+        store.applyNativeProfiles([profile], activeID: profileA, projectionTarget: target)
+        require(store.persistCount == 1, "first projection writes the roster")
+        store.applyNativeProfiles([profile], activeID: profileA, projectionTarget: target)
+        require(store.persistCount == 1, "identical roster to the same installation is not projected again")
+        var edited = profile; edited.accentID = "ocean"
+        store.applyNativeProfiles([edited], activeID: profileA, projectionTarget: target)
+        require(store.persistCount == 2 && store.active?.accentID == "ocean", "a changed roster is projected")
+        CoreBridge.shared.nativeBinding = .init(profileID: profileA, credential: CredentialScopeRegistry.shared.capture(),
+            sessionGeneration: UUID(), accountGeneration: UUID())
+        store.applyNativeProfiles([edited], activeID: profileA, projectionTarget: CoreBridge.shared.captureNativePlaybackTarget())
+        require(store.persistCount == 3, "the same roster on a new installation is projected")
     }
     static func legacySourceMethodWindow() {
         configure(source: "local", window: "100", eligible: false)

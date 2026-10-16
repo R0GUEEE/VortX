@@ -64,7 +64,7 @@ final class ProfileStore {
     var cwItems: [CoreCWItem] = []
     var active: UserProfile?
 }
-struct UserProfile {
+struct UserProfile: Equatable {   // Equatable like the real profile (applyNativeProfiles compares rosters)
     struct PlaybackPrefs: Equatable {}
     let id: UUID
     var usesEngineHistory: Bool = true
