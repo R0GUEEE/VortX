@@ -1429,14 +1429,24 @@ struct iOSHomeView: View {
     private var homeAmbientCanvas: some View {
         HomeCinemaAtmosphere(tint: homeHeroTint?.value(for: homeHeroTintKey) ?? Theme.Palette.accent,
                              reduceTransparency: reduceTransparency, highContrast: accessibilityContrast == .increased,
-                             reach: FeaturedHeroView.heroHeight + 180)
+                             reach: FeaturedHeroView.heroHeight + Self.homeHeroExtension + 180)
     }
+
+    #if os(macOS)
+    /// Mac Home: the hero runs down to just above the Customize row (owner, 2026-10-16), which sits `xs` under
+    /// it. The hero takes over the rest of the two stack gaps (with the 1pt back-to-top marker between them)
+    /// that used to separate them, so Customize and everything below it keep their place on screen.
+    private static let homeCustomizeGap = Theme.Space.xs
+    private static let homeHeroExtension = Theme.Space.lg * 2 + 1 - homeCustomizeGap
+    #else
+    private static let homeHeroExtension: CGFloat = 0
+    #endif
 
     /// The shared hero owns its contained card geometry on every touch/desktop page.
     @ViewBuilder
     private var homeFeaturedHero: some View {
         FeaturedHeroView(model: hero, onOpen: { path.append($0) }, eyebrow: String(localized: "Featured"),
-                         onTintChange: acceptHomeHeroTint)
+                         onTintChange: acceptHomeHeroTint, extraHeight: Self.homeHeroExtension)
     }
 
     @ViewBuilder
@@ -1463,22 +1473,29 @@ struct iOSHomeView: View {
                     // Once this marker (just below the hero) scrolls out of view, the floating
                     // back-to-top button appears; it hides again when you return to the top (#8).
                     // `active: isActive` keeps a hidden (opacity-switched) Home from writing stale state.
-                    Color.clear.frame(height: 0).backToTopMarker(key: TabScrollKeys.home, active: isActive)
                     // Discover already has either a Home switch or its own tab; no duplicate entry card.
                     #if os(macOS)
                     // macOS has no navigation-bar toolbar on Home (custom chrome), and this app's shared
                     // NSToolbar is fragile (see the Sign In toolbar note below), so the "Customize Home"
                     // entry lives inline here as a subtle trailing button rather than in a toolbar.
-                    HStack {
-                        Spacer()
-                        Button { showCustomizeHome = true } label: {
-                            Label(String(localized: "Customize"), systemImage: "slider.horizontal.3")
-                                .font(Theme.Typography.label)
+                    // The marker shares this stack child so it adds no second gap; the row sits
+                    // `homeCustomizeGap` under the hero, which grows into the reclaimed space.
+                    VStack(spacing: 0) {
+                        Color.clear.frame(height: 0).backToTopMarker(key: TabScrollKeys.home, active: isActive)
+                        HStack {
+                            Spacer()
+                            Button { showCustomizeHome = true } label: {
+                                Label(String(localized: "Customize"), systemImage: "slider.horizontal.3")
+                                    .font(Theme.Typography.label)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Theme.Palette.textSecondary)
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Theme.Palette.textSecondary)
                     }
                     .padding(.horizontal, Theme.Space.md)
+                    .padding(.top, Self.homeCustomizeGap - Theme.Space.lg - 1)
+                    #else
+                    Color.clear.frame(height: 0).backToTopMarker(key: TabScrollKeys.home, active: isActive)
                     #endif
                     if !renderedContinueWatching.items.isEmpty {
                         // Continue Watching is PINNED first (not part of HomeRailPreferences): it is a resume

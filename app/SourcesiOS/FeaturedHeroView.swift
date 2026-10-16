@@ -52,6 +52,9 @@ struct FeaturedHeroView: View {
     /// Home alone continues the existing cached art tint into its upper canvas. Other heroes
     /// leave this nil; no image loading or analysis is added by the surrounding page.
     var onTintChange: (@MainActor (FeaturedHeroTintSnapshot<Color>) -> Void)? = nil
+    /// Height added to the shared band. Mac Home passes the space it reclaims above its Customize row so the
+    /// billboard runs down to just above it; every other hero leaves it 0.
+    var extraHeight: CGFloat = 0
 
     @ObservedObject private var l10n = LocalizedMetadataStore.shared   // localized hero title/logo override
     @EnvironmentObject private var theme: ThemeManager
@@ -141,7 +144,7 @@ struct FeaturedHeroView: View {
         #endif
     }
 
-    private var heroHeight: CGFloat { Self.heroHeight }
+    private var heroHeight: CGFloat { Self.heroHeight + extraHeight }
 
     var body: some View {
         confinedHero
