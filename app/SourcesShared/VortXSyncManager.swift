@@ -937,15 +937,35 @@ final class VortXSyncManager: ObservableObject {
         "vortx.native.legacyConversion." + SHA256.hash(data: Data(capture.namespace.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
     }
     /// Whether this sync must convert the 0.4 data again, and the fingerprint to record once it has.
-    private func nativeLegacyConversionDecision(_ document: [String: Any], capture: CredentialScopeRegistry.Capture)
-        -> (convert: Bool, digest: String?) {
+    private func nativeLegacyConversionDecision(_ document: [String: Any], capture: CredentialScopeRegistry.Capture,
+                                                logging: Bool = true) -> (convert: Bool, digest: String?) {
         let digest = nativeLegacyConversionDigest(document)
         let record = UserDefaults.standard.data(forKey: nativeLegacyConversionKey(capture))
             .flatMap { try? JSONDecoder().decode(NativeForegroundSyncPolicy.LegacyConversionRecord.self, from: $0) }
         let linked = Self.resolveRoster(from: document, fullOnly: true)?.profiles.contains { !$0.isOwner && $0.usesOwnAccount } ?? true
         let decision = NativeForegroundSyncPolicy.LegacyConversionRecord.decide(record, digest: digest, hasLinkedAccounts: linked, now: Date())
-        if decision != .skip { DiagnosticsLog.log("native-profiles", "legacy_conversion run reason=\(decision.rawValue)") }
+        if logging, decision != .skip { DiagnosticsLog.log("native-profiles", "legacy_conversion run reason=\(decision.rawValue)") }
         return (decision != .skip, digest)
+    }
+    /// The background half of a fast open: the account is already showing from its checkpoint, so the 0.4
+    /// conversion runs as an ordinary pulled-document commit once the first screen has had a moment to draw.
+    /// It holds, records and republishes exactly like a sync; a newer pull or sync that converts first leaves
+    /// this one to find the fingerprint already recorded.
+    private var deferredLegacyConversion: Task<Void, Never>?
+    private static let deferredLegacyConversionDelay: UInt64 = 1_500_000_000
+    private func startDeferredNativeLegacyConversion(_ document: [String: Any], capture: CredentialScopeRegistry.Capture) {
+        deferredLegacyConversion?.cancel()
+        DiagnosticsLog.log("native-profiles", "legacy_conversion deferred stage=restore")
+        deferredLegacyConversion = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.deferredLegacyConversionDelay)
+            guard let self, !Task.isCancelled, self.isCurrent(capture) else { return }
+            do {
+                _ = try await self.commitNativePulledDocument(document, capture: capture)
+                DiagnosticsLog.log("native-profiles", "legacy_conversion result=done stage=deferred")
+            } catch {
+                DiagnosticsLog.log("native-profiles", "legacy_conversion result=failed stage=deferred reason=\(VortxNativeError.diagnosticCode(error))")
+            }
+        }
     }
     private func recordNativeLegacyConversion(_ digest: String?, capture: CredentialScopeRegistry.Capture) {
         guard let digest, isCurrent(capture),
@@ -1432,18 +1452,16 @@ final class VortXSyncManager: ObservableObject {
                 // Every open checks the complete legacy projection, including pending web edits.
                 // Native authority cannot silently ignore a later old-client membership/watch edit.
                 stage = "legacy_preparation"
-                // A device that already holds this account skips the conversion while the document's 0.4 fields
-                // still match its last one (NativeForegroundSyncPolicy.LegacyConversionRecord); its checkpoint keeps
-                // the original 0.4 copy, which a commit never replaces. A linked Stremio account still converts at
-                // every open, rebuilding its availability and pending relink state for this launch.
-                var skipConversion = false
-                if hadCheckpoint, !roster.profiles.contains(where: { !$0.isOwner && $0.usesOwnAccount }),
-                   !self.nativeLegacyConversionDecision(document, capture: capture).convert {
-                    skipConversion = try probe.readLegacyMaterial(scope: scope) != nil
-                }
+                // A device that already holds this account opens it from its checkpoint, which keeps the original
+                // 0.4 copy a commit never replaces, and converts the 0.4 data afterwards in the background when it
+                // is due (see startDeferredNativeLegacyConversion). Only a first open, or a checkpoint without that
+                // copy, converts before the account can open.
+                var deferConversion = false
+                if hadCheckpoint { deferConversion = try probe.readLegacyMaterial(scope: scope) != nil }
                 var prepared: NativeLegacyPreparation?
-                if skipConversion { DiagnosticsLog.log("native-profiles", "legacy_conversion skipped stage=restore") }
-                else { prepared = try await self.prepareNativeLegacyMaterial(document, capture: capture, enforceMountedFence: false) }
+                if !deferConversion {
+                    prepared = try await self.prepareNativeLegacyMaterial(document, capture: capture, enforceMountedFence: false)
+                }
                 guard self.isCurrent(capture), !Task.isCancelled, self.nativeCheckpointGeneration == generation,
                       ProfileStore.shared.activeID == selectedProfile else { throw VortxNativeError.superseded }
                 guard try probe.authenticatedCheckpoint(scope: scope) == checkpoint,
@@ -1532,6 +1550,9 @@ final class VortXSyncManager: ObservableObject {
                     guard self.isCurrent(capture), !Task.isCancelled, self.nativeCheckpointGeneration == generation,
                           ProfileStore.shared.activeID == installationProfile else { throw VortxNativeError.superseded }
                     if prepared != nil { self.recordNativeLegacyConversion(self.nativeLegacyConversionDigest(document), capture: capture) }
+                    else if self.nativeLegacyConversionDecision(document, capture: capture, logging: false).convert {
+                        self.startDeferredNativeLegacyConversion(document, capture: capture)
+                    }
                     self.applyNativeGlobals(acceptedHost)
                     try self.publishNativeWebsiteOutcome(websiteOutcome, capture: capture)
                     // Upload only the new nativeSync carrier. The archive never enters the wire,
