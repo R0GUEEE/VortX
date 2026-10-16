@@ -953,16 +953,26 @@ final class VortXSyncManager: ObservableObject {
     /// this one to find the fingerprint already recorded.
     private var deferredLegacyConversion: Task<Void, Never>?
     private static let deferredLegacyConversionDelay: UInt64 = 1_500_000_000
+    /// Bumped whenever a pulled or merged account document starts committing. The deferred launch conversion
+    /// holds the launch document; if a newer one starts committing first, that sync runs its own conversion
+    /// decision on the newer document and the deferred one stands down instead of merging older 0.4 data.
+    private var nativeDocumentCommitGeneration: UInt64 = 0
     private func startDeferredNativeLegacyConversion(_ document: [String: Any], capture: CredentialScopeRegistry.Capture) {
         deferredLegacyConversion?.cancel()
         DiagnosticsLog.log("native-profiles", "legacy_conversion deferred stage=restore")
+        let generation = nativeDocumentCommitGeneration
         deferredLegacyConversion = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: Self.deferredLegacyConversionDelay)
             guard let self, !Task.isCancelled, self.isCurrent(capture) else { return }
+            guard self.nativeDocumentCommitGeneration == generation else {
+                DiagnosticsLog.log("native-profiles", "legacy_conversion result=superseded stage=deferred")
+                return
+            }
             do {
-                _ = try await self.commitNativePulledDocument(document, capture: capture)
+                _ = try await self.commitNativePulledDocument(document, capture: capture, standDownIfSuperseded: true)
                 DiagnosticsLog.log("native-profiles", "legacy_conversion result=done stage=deferred")
             } catch {
+                // A failed or superseded pass records no fingerprint, so the next sync that commits a document converts.
                 DiagnosticsLog.log("native-profiles", "legacy_conversion result=failed stage=deferred reason=\(VortxNativeError.diagnosticCode(error))")
             }
         }
@@ -3766,6 +3776,7 @@ final class VortXSyncManager: ObservableObject {
         do {
             var providers = try mergedNativeProviderState(doc, capture: capture)
             exportStage = "legacy_prepare"
+            nativeDocumentCommitGeneration &+= 1
             let conversion = nativeLegacyConversionDecision(doc, capture: capture)
             var prepared: NativeLegacyPreparation?
             if conversion.convert { prepared = try await prepareNativeLegacyMaterial(doc, capture: capture) }
@@ -4060,17 +4071,21 @@ final class VortXSyncManager: ObservableObject {
     /// A mount alone cannot acknowledge a pulled document. Merge both carriers against its exact
     /// current profile/credential receipt, durably commit, and publish the accepted host projections.
     @discardableResult
-    private func commitNativePulledDocument(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) async throws -> PlaybackMutationTarget {
+    private func commitNativePulledDocument(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture,
+                                            standDownIfSuperseded: Bool = false) async throws -> PlaybackMutationTarget {
         let profileID = ProfileStore.shared.activeID
         guard isCurrent(capture), CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: profileID),
               case .native(let initialBinding?) = CoreBridge.shared.captureNativePlaybackTarget() else {
             throw VortxNativeError.superseded
         }
+        nativeDocumentCommitGeneration &+= 1
+        let commitGeneration = nativeDocumentCommitGeneration
         let conversion = nativeLegacyConversionDecision(doc, capture: capture)
         var prepared: NativeLegacyPreparation?
         if conversion.convert { prepared = try await prepareNativeLegacyMaterial(doc, capture: capture) }
         guard isCurrent(capture), ProfileStore.shared.activeID == profileID,
               CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: profileID) else { throw VortxNativeError.superseded }
+        if standDownIfSuperseded, nativeDocumentCommitGeneration != commitGeneration { throw VortxNativeError.superseded }
         let remote = try doc["nativeSync"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
         let hostRemote = try doc["nativeHostPreferences"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
         let merged = try await CoreBridge.shared.mergeNativeAccountDocument(remote, hostRemote: hostRemote, capture: capture,
