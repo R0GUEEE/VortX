@@ -5,18 +5,15 @@ import Foundation
 /// The in-app "What's New" screen (Settings > What's New) renders the full bundled CHANGELOG.md and only falls
 /// back to these highlights when that resource is absent. Pure logic so it compiles on every target.
 enum WhatsNew {
-    static let version = "0.5.3"
+    static let version = "0.5.4"
     static let highlights: [String] = [
-        "The player answers the remote faster. It no longer rebuilds itself on every background update, which made the controls slow to appear on pause, most of all on Apple TV.",
-        "Much less work while you watch, most of all on Mac: your place is saved every 20 seconds and straight away when you pause or leave, instead of rewriting and uploading your whole account every few seconds.",
-        "All sources shows every add-on again: each one lists its top sources instead of only the first add-on filling the list.",
-        "Every rating, everywhere: IMDb, Rotten Tomatoes, Popcornmeter, Metacritic, TMDB, Letterboxd, Trakt, SIMKL, MyAnimeList and Kitsu, each shown as the service's own mark.",
-        "Episodes show their IMDb, TMDB and Trakt scores, and each season's best episode is marked Top rated.",
-        "New episode cards with the full still, a frosted panel, Up next and progress. Season posters show on iPhone too.",
-        "Trailers & Extras on title pages, ready to play.",
-        "Frosted glass player controls tinted with your accent colour on iOS 26 and macOS 26.",
-        "A built-in add-on switched off elsewhere can always be switched back on with its eye button.",
-        "On Mac, the window buttons show and hide with the player controls."
+        "Much smoother, most of all on Apple TV. VortX kept converting your 0.4 data again in the background every minute or so, which froze menus, Settings and the remote. It now converts once and leaves it alone.",
+        "A faster start: an account this device already holds opens straight away, and any conversion still due finishes in the background.",
+        "Syncing no longer redraws every screen, and Continue Watching no longer blanks out while the app syncs.",
+        "Watched episodes are dimmed again, and on iPhone, iPad and Mac opening a series takes you to its next episode.",
+        "On Mac and iPad the season posters stay pinned at the top while you scroll the episodes.",
+        "On phones, title and episode artwork is centred instead of showing only its left side.",
+        "Usenet reads more indexer and NZB responses: http links, older text encodings and gzipped NZBs. Anime finds the right episode by its absolute number."
     ]
 
     // Kept as release-history fallback text for older bundled changelogs. The current screen uses

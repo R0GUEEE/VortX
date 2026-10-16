@@ -4,6 +4,31 @@ All notable changes to VortX, newest first. VortX is Apple TV first, with an iPh
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
+## 0.5.4 - A smoother app, a faster start and better episode lists
+
+Build **273** across Apple and Android. This release removes the background work that made
+0.5.3 freeze every minute or so, most of all on Apple TV, opens your account faster, and
+brings back dimmed watched episodes, with a series opening on its next episode on iPhone, iPad and Mac.
+
+### Fixed
+
+- **Freezing and lag across the app, most of all on Apple TV.** VortX checks whether the data carried over from 0.4 has changed before converting it again, but that check also counted the 0.5 data every sync rewrites, so it always looked changed. Every sync converted everything again, which took up to half a minute on Apple TV and froze menus, Settings and the remote every minute or so. The check now looks only at the 0.4 data, so the conversion runs once and then stays skipped.
+- **A slow start.** An account this device already holds now opens straight from what is saved on the device, and any conversion still due runs in the background and is applied when it finishes. A first sign-in still converts before it opens.
+- **Every screen redrawing on each sync.** Each sync re-applied the same profiles, rewrote every profile setting and redrew every screen, even under the player. Nothing is re-applied when nothing changed. On Apple TV, Settings also stopped slowing the app down while it sits open in the background.
+- **Continue Watching blanking out** for a moment while the app synced.
+- **Artwork on phones** on title and episode pages showed only the left side of the picture. It is centred now.
+- **Usenet:** gzipped NZBs and NZBs saved in older text encodings play, indexers that link to their NZBs over http work, results without a download link fall back to the item's link, and when an indexer refuses an NZB the error says so instead of reporting a damaged file. Anime episodes that indexers number by absolute episode are found.
+- **Settings > Engine** on iPhone, iPad and Mac names the VortX core build instead of an outdated schema number.
+
+### New
+
+- **Dimmed watched episodes** are back on every Apple platform, and on iPhone, iPad and Mac opening a series scrolls to its next episode.
+- **Pinned season posters on Mac and iPad.** The season posters stay at the top while the episodes scroll beneath them.
+
+### Android
+
+Android gets the usenet fixes that live in the shared engine: gzipped and older-encoding NZBs play, and indexer refusals are named. The Android APK is still an early technical preview, so expect missing features and rough edges.
+
 ## 0.5.3 - Every rating, new episode cards and a quicker player
 
 Build **272** across Apple and Android. Ratings now come from every major service and show as
