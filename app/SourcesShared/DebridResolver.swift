@@ -1927,13 +1927,21 @@ extension DebridCoordinator {
                 nativeFallbackOwner = nativeOwner.requiresNativeAuthority ? nativeOwner : nil
                 do {
                     let nativeOwnerIsCurrent = nativeOwner.isCurrent
+                    // The resident title's episode list gives the absolute number for the anime retry.
+                    let absoluteEpisode = await MainActor.run {
+                        selectionEpisode.flatMap { requested in
+                            UsenetNodeClient.Selection.absoluteEpisode(season: requested.season, episode: requested.episode,
+                                                                       in: UsenetNodeClient.Selection.residentEpisodeNumbers())
+                        }
+                    }
                     let local = try await runProvider(capture: usenetCapture, revision: usenetRevision) {
                         try await UsenetLocalResolver.resolveRouted(
                             nzbURLs: stream.usenetURLs, servers: stream.usenetServers,
                             savedServers: usenetSavedServers,
                             waitForNode: waitForLocalUsenetNode, excluding: excludingUsenetRoutes,
                             selection: .init(fileIdx: stream.fileIdx, fileMustInclude: stream.fileMustInclude,
-                                             episode: selectionEpisode.map { .init(season: $0.season, episode: $0.episode) }),
+                                             episode: selectionEpisode.map { .init(season: $0.season, episode: $0.episode) },
+                                             absoluteEpisode: absoluteEpisode),
                             onAttempt: { route, outcome, elapsed in
                                 DebridProbe.log("usenet-local", "route=\(route.rawValue) outcome=\(outcome) elapsed=\(elapsed)ms")
                             },

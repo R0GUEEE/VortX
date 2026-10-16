@@ -270,14 +270,22 @@ enum UsenetLocalResolver {
                 let result: UsenetNodeClient.CreatedStream
                 do {
                     result = try await create(selection)
-                } catch UsenetNodeClient.ClientError.selectionUnmatched {
-                    // Our episode numbers matched no file. Follow the add-on's own file pattern instead
-                    // (its episode mapping, e.g. an anime pack numbered differently from the catalogue).
-                    guard let addonOnly = selection.addonPatternOnly else {
-                        throw UsenetNodeClient.ClientError.selectionUnmatched
+                } catch let miss as UsenetNodeClient.ClientError where miss.isEpisodeSelectionMiss {
+                    // Our episode numbers matched no file. Follow the add-on's own file pattern first (its
+                    // episode mapping, e.g. an anime pack numbered differently from the catalogue), then the
+                    // episode's absolute number, which is how most anime is released.
+                    var retried: UsenetNodeClient.CreatedStream?
+                    if miss == .selectionUnmatched, let addonOnly = selection.addonPatternOnly {
+                        onAttempt(attempt.route, "selection_unmatched_retry_addon_pattern", elapsed())
+                        do { retried = try await create(addonOnly) }
+                        catch let again as UsenetNodeClient.ClientError where again.isEpisodeSelectionMiss { retried = nil }
                     }
-                    onAttempt(attempt.route, "selection_unmatched_retry_addon_pattern", elapsed())
-                    result = try await create(addonOnly)
+                    if retried == nil, let absolute = selection.absoluteNumberRetry {
+                        onAttempt(attempt.route, "selection_retry_absolute_episode", elapsed())
+                        retried = try await create(absolute)
+                    }
+                    guard let retried else { throw miss }
+                    result = retried
                 }
                 onAttempt(attempt.route, "ready", elapsed())
                 return result

@@ -7,6 +7,12 @@ enum UsenetNodeClient {
         case selectionUnmatched, nativeRejected
         /// A native refusal whose body carried one of the engine's fixed reason codes (never free text).
         case nativeFailed(Int, String)
+
+        /// No file could be chosen for the requested episode: names tagged with another episode, or names
+        /// with no episode tag at all and no pattern to follow.
+        var isEpisodeSelectionMiss: Bool {
+            self == .selectionUnmatched || self == .nativeFailed(422, "selection_unsupported")
+        }
     }
 
     /// The native engine's fixed failure vocabulary. Only these exact codes are ever surfaced; any other
@@ -48,6 +54,36 @@ enum UsenetNodeClient {
         var fileIdx: Int? = nil
         var fileMustInclude: String? = nil
         var episode: Episode? = nil
+        /// The requested episode's absolute number across the series (season 1 onwards, specials excluded).
+        var absoluteEpisode: Int? = nil
+
+        /// Anime is often released by absolute number ("Show - 061", "Show.S01E61") while the catalogue counts
+        /// per season (S02E05). This last attempt asks for that number: as S01E<n> for names carrying a tag, and
+        /// as an exact-number pattern for names without one (the engine applies the pattern only when a name
+        /// has no tag, and still rejects a pattern that matches more than one file). The regex avoids
+        /// look-around, which the engine's regex engine does not support.
+        var absoluteNumberRetry: Selection? {
+            guard let absolute = absoluteEpisode, let episode, episode.season != 1 || episode.episode != absolute else { return nil }
+            return Selection(fileIdx: nil, fileMustInclude: "(?:^|[^0-9])0*\(absolute)(?:[^0-9]|$)",
+                             episode: Episode(season: 1, episode: absolute))
+        }
+
+        /// The resident title's episode numbers for the absolute-number retry. CoreBridge installs the provider
+        /// at start; anywhere it is not installed the list is empty and the retry never runs.
+        @MainActor static var residentEpisodeNumbers: () -> [(season: Int?, episode: Int?)] = { [] }
+
+        /// The absolute number of `season`x`episode` in this episode list, or nil when it is not in it.
+        static func absoluteEpisode(season: Int, episode: Int, in videos: [(season: Int?, episode: Int?)]) -> Int? {
+            struct Number: Hashable, Comparable {
+                let season: Int, episode: Int
+                static func < (a: Number, b: Number) -> Bool { (a.season, a.episode) < (b.season, b.episode) }
+            }
+            let numbers = Set(videos.compactMap { video -> Number? in
+                guard let s = video.season, let e = video.episode, s >= 1, e >= 1 else { return nil }
+                return Number(season: s, episode: e)
+            }).sorted()
+            return numbers.firstIndex(of: Number(season: season, episode: episode)).map { $0 + 1 }
+        }
 
         /// The second, add-on-trusting attempt after a strict selection matched nothing: only the add-on's
         /// own `fileMustInclude`, without VortX's season/episode numbers or a `fileIdx` whose order may be the

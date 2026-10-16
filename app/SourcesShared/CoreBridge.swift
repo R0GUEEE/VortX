@@ -1264,6 +1264,12 @@ final class CoreBridge: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        // The usenet anime retry reads the resident title's episode numbers through this provider.
+        Task { @MainActor in
+            UsenetNodeClient.Selection.residentEpisodeNumbers = {
+                (CoreBridge.shared.metaDetails?.meta?.videos ?? []).map { ($0.season, $0.episode) }
+            }
+        }
 #if VORTX_NATIVE_DATA_ENGINE
         #if os(macOS)
         // Quitting does not background the Mac app first: write held-back playback progress on the way out.
