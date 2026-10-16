@@ -135,9 +135,12 @@ enum NZBIndexerClient {
     static func parseCounting(data: Data, indexerHost: String?) throws -> (releases: [Release], unlinked: Int) {
         guard data.count <= maxResponseBytes else { throw Failure.tooLarge }
         // Internal entities can expand far beyond the received byte cap. RSS/Newznab does not need
-        // document type declarations; reject them, including UTF-16 encodings, before XML parsing. Older
-        // Newznab servers answer in ISO-8859-1, which the XML parser reads from its declaration.
-        guard let xml = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
+        // document type declarations; reject them before XML parsing. UTF-16/32 documents (which hide the
+        // declaration from this text check) always carry NUL bytes and are refused outright; the parser
+        // also aborts on any declaration it meets. Older Newznab servers answer in ISO-8859-1, which the
+        // XML parser reads from its declaration.
+        guard !data.contains(0),
+              let xml = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
               !xml.localizedCaseInsensitiveContains("<!DOCTYPE"),
               !xml.localizedCaseInsensitiveContains("<!ENTITY") else { throw Failure.malformed }
         let parser = NewznabXMLParser(indexerHost: indexerHost); guard parser.parse(data) else { throw Failure.malformed }
@@ -187,10 +190,18 @@ private final class NewznabXMLParser: NSObject, XMLParserDelegate {
     private var inItem = false
     private var validRoot = false
     private var sawRoot = false
+    private var sawDeclaration = false
     func parse(_ data: Data) -> Bool {
         let parser = XMLParser(data: data); parser.delegate = self; parser.shouldResolveExternalEntities = false
-        return parser.parse() && validRoot
+        return parser.parse() && validRoot && !sawDeclaration
     }
+    /// A Newznab response never declares a DTD; stop at the first declaration, before any entity expands.
+    private func refuseDeclaration(_ parser: XMLParser) { sawDeclaration = true; parser.abortParsing() }
+    func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) { refuseDeclaration(parser) }
+    func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) { refuseDeclaration(parser) }
+    func parser(_ parser: XMLParser, foundElementDeclarationWithName elementName: String, model: String) { refuseDeclaration(parser) }
+    func parser(_ parser: XMLParser, foundAttributeDeclarationWithName attributeName: String, forElement elementName: String,
+                type: String?, defaultValue: String?) { refuseDeclaration(parser) }
     func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String : String] = [:]) {
         let n = name.lowercased()
         if !sawRoot { sawRoot = true; validRoot = n == "rss" || n == "error" }
