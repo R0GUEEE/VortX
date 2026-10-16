@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p app/build
 archive_test_dir=$(mktemp -d app/build/native-bootstrap-archive.XXXXXX)
+trap 'rm -rf "$archive_test_dir"' EXIT
 if command -v xcrun >/dev/null 2>&1; then
     compiler=(xcrun swiftc)
 else

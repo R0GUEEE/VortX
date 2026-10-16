@@ -6,12 +6,14 @@ What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or rep
 
 ## 0.5.4 - A smoother app, a faster start and better episode lists
 
-Build **273** across Apple and Android. This release removes the background work that made
-0.5.3 freeze every minute or so, most of all on Apple TV, opens your account faster, and
+Build **273** across Apple and Android. This release fixes accounts that still would not open
+after updating from 0.4, removes the background work that made 0.5.3 freeze every minute or
+so, most of all on Apple TV, opens your account faster, and
 brings back dimmed watched episodes, with a series opening on its next episode on iPhone, iPad and Mac.
 
 ### Fixed
 
+- **Accounts that still would not open after updating from 0.4 ([#262](https://github.com/VortXTV/VortX/issues/262)).** Before it converts your account, VortX checks the saved copy for anything that looks like hidden data, so a password can never slip through. On accounts where a profile is connected to a Stremio account, it could mistake the normal fingerprints of that profile's Stremio data for hidden data and stop the whole account, so profiles, add-ons and the Stremio connection all failed together. Those fingerprints are recognised now, and every other field is still checked. If an account still fails, the diagnostics log now names the part of the account that was refused, without its contents.
 - **Freezing and lag across the app, most of all on Apple TV.** VortX checks whether the data carried over from 0.4 has changed before converting it again, but that check also counted the 0.5 data every sync rewrites, so it always looked changed. Every sync converted everything again, which took up to half a minute on Apple TV and froze menus, Settings and the remote every minute or so. The check now looks only at the 0.4 data, so the conversion runs once and then stays skipped.
 - **A slow start.** An account this device already holds now opens straight from what is saved on the device, and any conversion still due runs in the background and is applied when it finishes. A first sign-in still converts before it opens.
 - **Every screen redrawing on each sync.** Each sync re-applied the same profiles, rewrote every profile setting and redrew every screen, even under the player. Nothing is re-applied when nothing changed. On Apple TV, Settings also stopped slowing the app down while it sits open in the background.

@@ -7,6 +7,7 @@ import Foundation
 enum WhatsNew {
     static let version = "0.5.4"
     static let highlights: [String] = [
+        "Accounts that still would not open after updating from 0.4 open again. A safety check mistook normal data from a Stremio-connected profile for hidden data and stopped the whole account.",
         "Much smoother, most of all on Apple TV. VortX kept converting your 0.4 data again in the background every minute or so, which froze menus, Settings and the remote. It now converts once and leaves it alone.",
         "A faster start: an account this device already holds opens straight away, and any conversion still due finishes in the background.",
         "Syncing no longer redraws every screen, and Continue Watching no longer blanks out while the app syncs.",
