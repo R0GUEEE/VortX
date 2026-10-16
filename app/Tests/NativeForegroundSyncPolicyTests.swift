@@ -118,6 +118,37 @@ enum NativeForegroundSyncPolicyTests {
         // A clock that moved backwards never extends a linked account's skip.
         precondition(Record.decide(record, digest: "a", hasLinkedAccounts: true, now: t0.addingTimeInterval(-5)) == .refresh)
         print("PASS 0.4 conversion skips while its fingerprint matches; only linked accounts re-read, every 30 min")
+        legacyConversionDigestIsStable()
+    }
+
+    /// 0.5.4 Mac log, 2026-10-16: `legacy_conversion run reason=changed` 32 times in 6 minutes on an account
+    /// nothing was editing. The fingerprint re-encoded the settings backup's preference plist from a dictionary,
+    /// whose order differs per decode, so each pull of the SAME document hashed differently.
+    static func legacyConversionDigestIsStable() {
+        typealias Record = NativeForegroundSyncPolicy.LegacyConversionRecord
+        let native = ["nativeSync", "nativeHostPreferences", "profileEditResults", "nativeProviderCredentials", "apiKeys"]
+        let preferences = Dictionary(uniqueKeysWithValues: (0..<60).map { ("stremiox.pref.\($0)", "value-\($0)") })
+        let plist = try! PropertyListSerialization.data(fromPropertyList: preferences, format: .binary, options: 0)
+        func pulled(native marker: Int = 1, watched: String = "tt0988824") -> [String: Any] {
+            let source: [String: Any] = [
+                "settings": ["format": "vortx-backup", "schema": 1, "payloadBase64": plist.base64EncodedString()],
+                "library": ["items": (0..<40).map { ["id": "tt\($0)", "name": "Title \($0)", "watched": $0 % 2 == 0] }],
+                "watched": [watched], "addonOrder": ["https://example.invalid/manifest.json"],
+                "nativeSync": ["clock": marker], "apiKeys": ["tmdb": "k\(marker)"],
+            ]
+            // Every pull decodes a fresh dictionary from the wire, as the app does.
+            return try! JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: source)) as! [String: Any]
+        }
+        let first = Record.digest(of: pulled(), excluding: native)
+        precondition(first != nil)
+        for _ in 0..<40 { precondition(Record.digest(of: pulled(), excluding: native) == first) }
+        // This device's own export rewrites only the native carriers, never a 0.4 change.
+        precondition(Record.digest(of: pulled(native: 2), excluding: native) == first)
+        // A real 0.4 edit (an old app, the website) still converts.
+        precondition(Record.digest(of: pulled(watched: "tt0417299"), excluding: native) != first)
+        // Unreadable fields convert rather than skip.
+        precondition(Record.digest(of: ["library": Date()], excluding: native) == nil)
+        print("PASS the same pulled 0.4 fields always fingerprint the same; native carriers never count as a 0.4 change")
     }
 
     static func progressCadence() {

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Foreground catch-up may merge a newer account document without replacing a certified
 /// resident session. A failed pull is not permission to retire its resource selections.
@@ -105,6 +106,21 @@ enum NativeForegroundSyncPolicy {
         let convertedAt: Date
 
         enum Decision: String { case skip, first, changed, refresh }
+
+        /// Fingerprint of the document's 0.4 fields exactly as pulled: every key but `excluded` (the carriers this
+        /// device's own export rewrites), as sorted-key JSON. Those fields reach the device byte-for-byte as their
+        /// writer left them, so the same account always hashes the same. The previous fingerprint hashed the
+        /// credential-free archive, which re-encodes the settings backup's preference plist from a dictionary; its
+        /// order differs per decode, so every pull looked changed and re-converted (0.5.4 Mac log: 32 conversions
+        /// in 6 minutes, each also re-uploading the account). Nil when the fields are not JSON, which converts.
+        static func digest(of document: [String: Any], excluding excluded: [String]) -> String? {
+            var legacy = document
+            for key in excluded { legacy.removeValue(forKey: key) }
+            guard JSONSerialization.isValidJSONObject(legacy),
+                  let body = try? JSONSerialization.data(withJSONObject: legacy, options: [.sortedKeys, .withoutEscapingSlashes])
+            else { return nil }
+            return SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+        }
 
         static func decide(_ record: LegacyConversionRecord?, digest: String?, hasLinkedAccounts: Bool, now: Date) -> Decision {
             guard let record, let digest else { return .first }

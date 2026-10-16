@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 source scripts/native-watched-swift-inputs.sh
 mkdir -p app/build
 foreground_dir=$(mktemp -d "$PWD/app/build/native-foreground-sync.XXXXXX")
+trap 'rm -rf "$foreground_dir"' EXIT
 sed -n '1,/^\/\/\/ The profile roster and the active selection\./{ /^\/\/\/ The profile roster and the active selection\./!p; }' app/SourcesShared/Profiles.swift > "$foreground_dir/UserProfile.swift"
 { printf '%s\n' 'import Foundation'; sed -n '/^struct ProfileDiscoveryPreferences: /,/^}$/p' app/SourcesShared/ProfileDiscoveryPreferences.swift; } > "$foreground_dir/Discovery.swift"
 xcrun swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors \

@@ -923,15 +923,12 @@ final class VortXSyncManager: ObservableObject {
     /// Keys this device's own native export writes; a change in them is never a 0.4 change.
     private static let nativeExportKeys = ["nativeSync", "nativeHostPreferences", "profileEditResults",
                                            "nativeProviderCredentials", "apiKeys"]
-    /// Fingerprint of the document's 0.4 fields (credential-free), the conversion's only input besides linked
-    /// Stremio accounts. The native carrier is left out: every device's merge rewrites it, so including it made
-    /// each sync look changed and re-converted forever. Nil when the document cannot be read, which always
-    /// converts. See `NativeForegroundSyncPolicy.LegacyConversionRecord`.
+    /// Fingerprint of the document's 0.4 fields, the conversion's only input besides linked Stremio accounts.
+    /// The native carrier is left out: every device's merge rewrites it, so including it made each sync look
+    /// changed and re-converted forever. Nil when the document cannot be read, which always converts. See
+    /// `NativeForegroundSyncPolicy.LegacyConversionRecord.digest`.
     private func nativeLegacyConversionDigest(_ document: [String: Any]) -> String? {
-        var legacy = document
-        for key in Self.nativeExportKeys { legacy.removeValue(forKey: key) }
-        guard let body = try? VortxNativeBootstrapArchive.credentialFreeDocument(legacy) else { return nil }
-        return SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+        NativeForegroundSyncPolicy.LegacyConversionRecord.digest(of: document, excluding: Self.nativeExportKeys)
     }
     private func nativeLegacyConversionKey(_ capture: CredentialScopeRegistry.Capture) -> String {
         "vortx.native.legacyConversion." + SHA256.hash(data: Data(capture.namespace.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
