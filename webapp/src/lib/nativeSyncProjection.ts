@@ -116,7 +116,8 @@ function members(raw: unknown, kind: "addon" | "library"): { entries: NativeAddo
   });
   const byKey = new Map(entries.map((entry) => [entry.identity, entry]));
   const ordered = [...new Set((order.ids ?? []) as string[])].filter((key) => byKey.get(key)?.live);
-  ordered.push(...entries.filter((entry) => entry.live && !ordered.includes(entry.identity))
+  const explicitlyOrdered = new Set(ordered);
+  ordered.push(...entries.filter((entry) => entry.live && !explicitlyOrdered.has(entry.identity))
     .sort((a, b) => a.addedAt - b.addedAt || nativeStringCompare(a.identity, b.identity)).map((entry) => entry.identity));
   return { entries, order: ordered };
 }
@@ -199,6 +200,33 @@ function playback(raw: unknown, saved: NativeMediaItem[]): NativeMediaItem[] {
     const episode = /^(.*)(:\d+:\d+)$/.exec(rawId);
     return episode && aliases.has(episode[1]) ? aliases.get(episode[1])! + episode[2] : rawId;
   };
+  // Index lookups once while preserving entry order and lazy validation of unused contexts.
+  const contextGroups = new Map<string, unknown[]>(), resolvedContexts = new Map<string, ObjectValue | null>();
+  for (const [key, value] of Object.entries(contexts)) {
+    const canonicalKey = canonical(key), group = contextGroups.get(canonicalKey);
+    if (group) group.push(value); else contextGroups.set(canonicalKey, [value]);
+  }
+  const savedIds = new Set(saved.map((item) => item.id)), savedByCanonical = new Map<string, NativeMediaItem>();
+  for (const item of saved) {
+    const canonicalId = canonical(item.id);
+    if (!savedByCanonical.has(canonicalId)) savedByCanonical.set(canonicalId, item);
+  }
+  const savedIdLengths = new Set<number>();
+  let maximumSavedIdLength = 0;
+  for (const item of saved) {
+    savedIdLengths.add(item.id.length);
+    maximumSavedIdLength = Math.max(maximumSavedIdLength, item.id.length);
+  }
+  const savedTitle = (key: string): string | undefined => {
+    if (!savedIds.size) return undefined;
+    // Colon-heavy identifiers must not cause hashing of every ever-longer prefix.
+    // Candidate lengths come only from saved IDs, bounding hashed bytes by saved input.
+    for (let separator = key.lastIndexOf(":", maximumSavedIdLength); separator >= 0; separator = key.lastIndexOf(":", separator - 1)) {
+      if (savedIdLengths.has(separator) && savedIds.has(key.slice(0, separator))) return key.slice(0, separator);
+      if (separator === 0) break;
+    }
+    return undefined;
+  };
   const units = new Map<string, WatchUnit>();
   for (const [key, rawState] of Object.entries(log)) {
     const state = object(rawState) ?? error();
@@ -206,13 +234,17 @@ function playback(raw: unknown, saved: NativeMediaItem[]): NativeMediaItem[] {
     for (const field of ["resume_ms", "resume_at", "watched_at", "times_watched", "reset_at", "removed_at"]) values[field] = clock(state[field]);
     let context = object(contexts[key]);
     if (!context) {
-      const candidates = Object.entries(contexts).filter(([candidate]) => canonical(candidate) === canonical(key)).map(([, value]) => object(value) ?? error());
-      context = candidates.sort((a, b) => contextCompare(b, a))[0] ?? null;
+      const unitKey = canonical(key);
+      if (!resolvedContexts.has(unitKey)) {
+        const candidates = (contextGroups.get(unitKey) ?? []).map((value) => object(value) ?? error());
+        resolvedContexts.set(unitKey, candidates.sort((a, b) => contextCompare(b, a))[0] ?? null);
+      }
+      context = resolvedContexts.get(unitKey)!;
     }
     if (!context) {
-      const title = saved.filter((item) => key.startsWith(item.id + ":")).sort((a, b) => b.id.length - a.id.length)[0]?.id
+      const title = savedTitle(key)
         ?? (/^(tt\d+):\d+:\d+$/.exec(key)?.[1]) ?? (/^(kitsu:\d+):\d+$/.exec(key)?.[1]) ?? key;
-      const descriptor = saved.find((item) => canonical(item.id) === canonical(title));
+      const descriptor = savedByCanonical.get(canonical(title));
       context = { metaId: title, name: descriptor?.name ?? title, ...(descriptor?.type ? { type: descriptor.type } : {}), ...(descriptor?.poster ? { poster: descriptor.poster } : {}), durationMs: 0, updatedAt: 0 };
     }
     if (typeof context.metaId !== "string" || !context.metaId || (context.name !== undefined && typeof context.name !== "string")
@@ -228,13 +260,17 @@ function playback(raw: unknown, saved: NativeMediaItem[]): NativeMediaItem[] {
     } else units.set(unitKey, { key: unitKey, state: values, context });
   }
   const titles = new Map<string, WatchUnit[]>();
-  for (const unit of units.values()) { const title = canonical(unit.context.metaId); titles.set(title, [...(titles.get(title) ?? []), unit]); }
+  for (const unit of units.values()) {
+    const title = canonical(unit.context.metaId), group = titles.get(title);
+    if (group) group.push(unit); else titles.set(title, [unit]);
+  }
   const rows: (NativeMediaItem & { updatedAt: number })[] = [];
   const watched = (state: ObjectValue) => state.watched_at > 0 && state.watched_at >= state.reset_at;
   for (const [title, values] of titles) {
     values.sort((a, b) => Math.max(b.state.resume_at, b.state.watched_at, b.state.reset_at) - Math.max(a.state.resume_at, a.state.watched_at, a.state.reset_at) || nativeStringCompare(b.key, a.key));
     const latest = values[0], state = latest.state, context = latest.context;
-    const activity = Math.max(...values.map((unit) => Math.max(unit.state.resume_at, unit.state.watched_at)));
+    let activity = 0;
+    for (const unit of values) activity = Math.max(activity, unit.state.resume_at, unit.state.watched_at);
     const whole = values.find((unit) => unit.key === title);
     if (whole && (watched(whole.state) || whole.state.removed_at > activity)) continue;
     if (watched(state) || state.removed_at > Math.max(state.resume_at, state.watched_at) || (state.reset_at > 0 && state.reset_at >= state.resume_at) || state.resume_at <= 0) continue;
@@ -329,7 +365,8 @@ export function projectNativeSync(doc: ObjectValue, expectedScope?: string): Nat
     addonOrderByProfile[profileId] = addonBucket.order;
     if (addonBucket.entries.some((entry) => entry.live && typeof entry.addon?.transportUrl === "string" && !/^https:\/\//i.test(entry.addon.transportUrl))) unsupported = true;
     const membership = members(buckets.library, "library");
-    const saved = membership.order.map((key) => membership.entries.find((entry) => entry.identity === key)!)
+    const membershipById = new Map(membership.entries.map((entry) => [entry.identity, entry]));
+    const saved = membership.order.map((key) => membershipById.get(key)!)
       .map((entry) => ({ id: entry.addon!.id, type: entry.addon!.kind === "standard" ? entry.addon!.type : entry.addon!.kind,
         name: entry.addon!.name ?? entry.addon!.id, poster: entry.addon!.poster, source: "vortx" }));
     if (saved.some((item) => item.type === "native_magnet" || item.type === "torrent_playlist")) unsupported = true;

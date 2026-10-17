@@ -346,11 +346,13 @@ function dismissSplash(): void {
   const splash = document.getElementById("splash");
   if (!splash) return;
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (reduced || sessionStorage.getItem("vx-splash")) {
+  let seen = false;
+  try { seen = !!sessionStorage.getItem("vx-splash"); } catch { /* the splash cannot block startup when storage is denied */ }
+  if (reduced || seen) {
     splash.remove();
     return;
   }
-  sessionStorage.setItem("vx-splash", "1");
+  try { sessionStorage.setItem("vx-splash", "1"); } catch { /* optional once-per-tab hint */ }
   window.setTimeout(() => splash.remove(), 3000);
 }
 

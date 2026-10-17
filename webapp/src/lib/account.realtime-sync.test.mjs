@@ -206,6 +206,7 @@ test("automatic encrypted account sync uses sockets, clocks, network and durable
     assert.ok(![...local.values(), ...session.values()].some((v) => v.includes("/v1/sync/connect")), "socket URL is transient");
     const release = server.holdGet();
     await server.remote(legacyDoc("ocean")); socket.update(21);
+    await until(() => server.requests.length === 2, "the first hinted GET must snapshot its document/version before the next remote write");
     await server.remote(legacyDoc("royal"));
     for (let i = 0; i < 8; i++) socket.update(22);
     assert.equal(server.maxGets, 1, "only one receive GET may be active");

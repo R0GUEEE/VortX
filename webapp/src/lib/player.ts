@@ -193,6 +193,7 @@ async function mountAndLoad(
   // to a newer source); it must ignore its advance request once its generation is stale so it can't skip past
   // the source now playing. See sourceGen.
   const myGen = ++sourceGen;
+  const isCurrentSource = () => myToken === playToken && myGen === sourceGen;
   const hasNext = sessionIndex < sessionFallbacks.length - 1;
   controller = mountControls(host, vid, {
     title,
@@ -245,25 +246,27 @@ async function mountAndLoad(
     !!vid.canPlayType("application/vnd.apple.mpegurl");
   if (!preferNative) {
     const mod = await import("hls.js");
-    if (myToken !== playToken) return; // closed / new source while hls.js was loading
+    if (!isCurrentSource()) return; // closed or source fallback while the lazy import was pending
     const HlsCtor = mod.default;
     if (HlsCtor.isSupported()) {
-      hls = new HlsCtor({ enableWorker: true, lowLatencyMode: false });
-      hls.loadSource(url);
-      hls.attachMedia(vid);
-      controller.setHls(hls); // wire the Quality + Audio-track menus from the hls levels
-      hls.on(HlsCtor.Events.MEDIA_ATTACHED, () => startPlayback(vid));
-      hls.on(HlsCtor.Events.ERROR, (_evt: unknown, data: ErrorData) => {
-        if (!data.fatal) return;
+      const instance = new HlsCtor({ enableWorker: true, lowLatencyMode: false });
+      hls = instance;
+      instance.loadSource(url);
+      instance.attachMedia(vid);
+      controller.setHls(instance); // wire the Quality + Audio-track menus from this source's levels
+      instance.on(HlsCtor.Events.MEDIA_ATTACHED, () => {
+        if (isCurrentSource() && hls === instance) startPlayback(vid);
+      });
+      instance.on(HlsCtor.Events.ERROR, (_evt: unknown, data: ErrorData) => {
+        if (!isCurrentSource() || hls !== instance || !data.fatal) return;
         switch (data.type) {
           case mod.ErrorTypes.NETWORK_ERROR:
-            hls?.startLoad();
+            instance.startLoad();
             break;
           case mod.ErrorTypes.MEDIA_ERROR:
-            hls?.recoverMediaError();
+            instance.recoverMediaError();
             break;
           default:
-            if (myGen !== sourceGen) break; // superseded by a newer source; ignore this stale fatal error
             if (!advanceSource(host, "decode")) showError(host, "This stream could not be played. Try another source.");
             break;
         }

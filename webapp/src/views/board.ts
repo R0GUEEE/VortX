@@ -8,6 +8,8 @@ import { continueWatching, hiddenRailCount, isRailHidden, libraryItems } from ".
 // The Home board: one poster rail per loadable catalog across the installed add-ons (the same shape as
 // desktop/src/main.ts renderBoard, but fetched directly from the add-on protocol instead of read from
 // the engine's `board` model). Rails stream in as their fetches resolve so the page fills progressively.
+// A route disposal or newer board load invalidates all callbacks owned by the previous surface.
+let boardGeneration = 0;
 
 /** Stable identity for a catalog rail (type:id:addon), used to remember which rails the user hid. */
 function railKey(ref: CatalogRef): string {
@@ -67,13 +69,15 @@ function topPicksPlaceholder(): string {
 
 /** Fill the Top Picks rail from genre-similar recommendations off the user's seeds; removes the section
  *  on cold start / no results. Fail-soft, async (does not block the catalog rails). */
-async function loadTopPicks(addons: Addon[]): Promise<void> {
+async function loadTopPicks(addons: Addon[], generation: number): Promise<void> {
   const section = document.getElementById("top-picks");
   const body = document.getElementById("top-picks-body");
   if (!section || !body) return;
   const seeds = topPicksSeeds();
   const exclude = new Set(seeds.map((s) => s.id));
   const picks = await fetchTopPicks(addons, seeds, exclude);
+  if (generation !== boardGeneration || document.getElementById("top-picks") !== section
+    || document.getElementById("top-picks-body") !== body) return;
   if (!picks.length) {
     section.remove();
     return;
@@ -105,14 +109,15 @@ function continueWatchingRail(): string {
 
 /** Fetch each catalog and paint its rail; bad add-ons leave an empty rail rather than failing Home. */
 export async function loadBoard(addons: Addon[]): Promise<void> {
-  void loadTopPicks(addons); // personalized rail; fills/removes itself, never blocks the catalog rails
+  const generation = ++boardGeneration;
+  void loadTopPicks(addons, generation); // personalized rail; fills/removes itself, never blocks the catalog rails
   const refs = catalogRefs(addons);
   let heroSeeded = false;
   await Promise.all(
     refs.map(async (ref, i) => {
-      const metas = await fetchCatalog(ref);
       const body = document.getElementById(`rail-body-${i}`);
-      if (!body) return;
+      const metas = await fetchCatalog(ref);
+      if (generation !== boardGeneration || !body || document.getElementById(`rail-body-${i}`) !== body) return;
       const section = body.closest(".rail-section");
       if (!metas.length) {
         section?.classList.add("rail-empty");
@@ -147,6 +152,8 @@ const HERO_FADE_MS = 280; // cross-fade out before swapping art + overlay, then 
 let heroPool: MetaItem[] = [];
 let heroIndex = 0;
 let heroTimer: number | undefined;
+let heroFadeTimer: number | undefined;
+let heroGeneration = 0;
 
 /** One featured item's billboard markup (art layer + scrim + bottom-left content block). */
 function featuredHero(item: MetaItem): string {
@@ -191,6 +198,8 @@ function featuredMeta(item: MetaItem): string {
 /** Paint the featured hero from a pool of top items and start the ambient rotation. Shared by Home +
  *  Discover (both render a `#featured` slot; only one is in the DOM at a time). */
 export function mountFeatured(pool: MetaItem[]): void {
+  stopHeroTimer();
+  heroGeneration++;
   const host = document.getElementById("featured");
   if (!host || !pool.length) return;
   heroPool = pool;
@@ -206,20 +215,23 @@ export function mountFeatured(pool: MetaItem[]): void {
 
 function startHeroTimer(): void {
   stopHeroTimer();
+  const generation = heroGeneration;
+  const host = document.getElementById("featured");
   heroTimer = window.setInterval(() => {
+    if (generation !== heroGeneration) return;
     if (document.hidden) return; // pause while the tab is backgrounded
-    const host = document.getElementById("featured");
-    if (!host || heroPool.length < 2) {
+    if (!host || document.getElementById("featured") !== host || heroPool.length < 2) {
       disposeFeatured();
       return;
     }
     heroIndex = (heroIndex + 1) % heroPool.length;
+    const item = heroPool[heroIndex];
     host.classList.add("is-swapping");
-    window.setTimeout(() => {
-      const live = document.getElementById("featured");
-      if (!live) return;
-      live.innerHTML = featuredHero(heroPool[heroIndex]);
-      live.classList.remove("is-swapping");
+    heroFadeTimer = window.setTimeout(() => {
+      if (generation !== heroGeneration || document.getElementById("featured") !== host) return;
+      heroFadeTimer = undefined;
+      host.innerHTML = featuredHero(item);
+      host.classList.remove("is-swapping");
     }, HERO_FADE_MS);
   }, HERO_ROTATE_MS);
 }
@@ -229,11 +241,18 @@ function stopHeroTimer(): void {
     window.clearInterval(heroTimer);
     heroTimer = undefined;
   }
+  if (heroFadeTimer !== undefined) {
+    window.clearTimeout(heroFadeTimer);
+    heroFadeTimer = undefined;
+  }
+  document.getElementById("featured")?.classList.remove("is-swapping");
 }
 
 /** Stop the rotation and drop references. The router calls this before leaving Home so the interval
  *  never fires against a detached DOM. */
 export function disposeFeatured(): void {
+  boardGeneration++;
+  heroGeneration++;
   stopHeroTimer();
   heroPool = [];
   heroIndex = 0;

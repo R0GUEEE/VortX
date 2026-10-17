@@ -70,3 +70,16 @@ assert.match(
   /dashboard-only settings/,
   "Wrangler guidance must identify the dashboard-only settings",
 );
+
+// HTTPS fetch permission does not authorize the separate WSS scheme used by live sync.
+const headers = read("public/_headers");
+const csp = headers.match(/^\s*Content-Security-Policy:\s*(.+)$/m)?.[1];
+assert.ok(csp, "Pages must publish a content security policy");
+const connectSources = csp.split(";").map((entry) => entry.trim()).find((entry) => entry.startsWith("connect-src "))?.split(/\s+/).slice(1) ?? [];
+assert.ok(connectSources.includes("wss://api.vortx.tv"), "live account sync must be allowed to connect to the API WebSocket");
+assert.ok(!connectSources.includes("wss:") && !connectSources.includes("*"), "the WebSocket allowance must stay limited to the VortX API");
+assert.match(
+  read("src/lib/vault.ts"),
+  /new URL\("\/v1\/sync\/connect", API\)[\s\S]*?url\.protocol = "wss:"/,
+  "the CSP allowance must match the actual live sync transport",
+);

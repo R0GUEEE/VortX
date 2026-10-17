@@ -139,6 +139,34 @@ function bumpSyncFloor(accountId: string, version: number): void {
   if (version > syncFloor(accountId)) localStorage.setItem("vortx.syncVer." + accountId, String(version));
 }
 
+// A destructive reset retains the account ID but mints a different key. Only a successful reset
+// authorizes a separate ratchet namespace. Ordinary login/QR/recovery never lower legacy floors.
+const resetSyncGenerationProofs = new Map<string, string>();
+async function syncGenerationID(session: Session): Promise<string> {
+  const domain = enc("vortx/reset-sync-generation/v1\n" + session.account.id + "\n");
+  const material = new Uint8Array(domain.length + session.dataKey.length);
+  material.set(domain); material.set(session.dataKey, domain.length);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", material));
+  return session.account.id + ".key." + Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function syncGenerationProofText(session: Session, generation: string): string {
+  return "vortx/accepted-reset-sync-generation/v1\n" + session.account.id + "\n" + generation;
+}
+async function authorizeResetSyncGeneration(session: Session): Promise<void> {
+  const generation = await syncGenerationID(session);
+  const proof = await seal(session.dataKey, enc(syncGenerationProofText(session, generation)));
+  resetSyncGenerationProofs.set(generation, proof);
+  try { localStorage.setItem("vortx.syncGeneration.v1." + generation, proof); } catch { /* this tab retains the accepted proof */ }
+}
+async function syncRatchetAccount(session: Session): Promise<string> {
+  const generation = await syncGenerationID(session);
+  let proof = resetSyncGenerationProofs.get(generation);
+  try { proof = localStorage.getItem("vortx.syncGeneration.v1." + generation) ?? proof; } catch { /* use this tab's accepted proof */ }
+  if (!proof) return session.account.id;
+  const plaintext = await open(session.dataKey, proof);
+  return plaintext && td.decode(plaintext) === syncGenerationProofText(session, generation) ? generation : session.account.id;
+}
+
 // Exported ONLY for the in-repo crypto test (vault.crypto.test.mjs) so it exercises the REAL functions rather
 // than a re-implementation. Not part of the app's public API; do not import elsewhere.
 export const __syncCryptoTestHooks = { documentAAD, sealDocument, openDocument, DOC_V2_PREFIX, sawV2, markSawV2, syncFloor, bumpSyncFloor };
@@ -214,6 +242,8 @@ export interface Session {
 const SESSION_KEY = "vortx.session.v1";
 const DATAKEY_KEY = "vortx.dk.v2";
 const LEGACY_DATAKEY_KEY = "vortx.dk.v1";
+// Provenance survives descriptor deletion; only never-persisted sessions may use memory-only writes.
+const persistedSessions = new WeakSet<Session>();
 let syncSessionGeneration = 0;
 
 function encodedSessionKey(session: Session): string {
@@ -226,6 +256,7 @@ export function saveSession(s: Session): void {
     sessionStorage.setItem(DATAKEY_KEY, encodedSessionKey(s));
     localStorage.setItem(SESSION_KEY, JSON.stringify({ token: s.token, account: s.account }));
     sessionStorage.removeItem(LEGACY_DATAKEY_KEY);
+    persistedSessions.add(s);
   } catch {
     // Storage failure cannot attach another tab's descriptor to this key.
   }
@@ -257,6 +288,7 @@ export function loadSession(): Session | null {
       localStorage.setItem(SESSION_KEY, JSON.stringify({ token: session.token, account: session.account }));
       sessionStorage.removeItem(LEGACY_DATAKEY_KEY);
     }
+    persistedSessions.add(session);
     return session;
   } catch { return null; }
 }
@@ -453,8 +485,12 @@ export async function resetComplete(
   });
   if (r.status === 401) throw new Error("That reset code is wrong or expired.");
   if (r.status !== 200) throw new Error("Could not reset the password.");
-  const data = r.data as { token: string; account: Account };
-  return { session: { token: data.token, account: data.account, dataKey }, recoveryCode };
+  const account = r.data?.account as Account | undefined;
+  if (typeof r.data?.token !== "string" || !r.data.token || !account || typeof account !== "object" || Array.isArray(account)
+    || typeof account.id !== "string" || !account.id) throw new Error("Could not confirm the password reset. Please sign in again.");
+  const session: Session = { token: r.data.token, account, dataKey };
+  await authorizeResetSyncGeneration(session);
+  return { session, recoveryCode };
 }
 
 // --- Account management (signed-in) -------------------------------------------------------------
@@ -550,15 +586,21 @@ export class SyncUpgradeRequiredError extends Error {
   constructor() { super("Update VortX to continue syncing. Your unsaved changes are retained."); this.name = "SyncUpgradeRequiredError"; }
 }
 function snapshotSyncSession(session: Session): Session {
-  return { ...session, account: { ...session.account }, dataKey: session.dataKey.slice() };
+  const snapshot = { ...session, account: { ...session.account }, dataKey: session.dataKey.slice() };
+  if (persistedSessions.has(session)) persistedSessions.add(snapshot);
+  return snapshot;
 }
 function captureSyncWriter(source: Session): () => void {
   const snapshot = snapshotSyncSession(source), stored = loadSession(), generation = syncSessionGeneration;
+  const hasDescriptor = () => {
+    try { return localStorage.getItem(SESSION_KEY) !== null; } catch { return false; }
+  };
+  const requiresStoredOwner = persistedSessions.has(source) || hasDescriptor();
   const matches = (value: Session | null) => !!value && value.token === snapshot.token && value.account.id === snapshot.account.id
     && value.dataKey.length === snapshot.dataKey.length && snapshot.dataKey.every((byte, index) => byte === value.dataKey[index]);
   return () => {
     const current = loadSession();
-    if (generation !== syncSessionGeneration || !matches(source) || ((stored || current) && !matches(current))) throw new Error("Account session changed.");
+    if (generation !== syncSessionGeneration || !matches(source) || ((requiresStoredOwner || hasDescriptor() || stored || current) && !matches(current))) throw new Error("Account session changed.");
   };
 }
 function candidateBaseRevision(status: SyncStatus): number | null {
@@ -572,13 +614,18 @@ export async function fetchSync(session: Session, options: { version?: number; s
   session = snapshotSyncSession(session);
   const assertCurrent = () => { options.signal?.throwIfAborted(); if (options.isCurrent?.() === false) throw new Error("Account session changed."); };
   assertCurrent();
+  const ratchet = await syncRatchetAccount(session);
+  assertCurrent();
   const r = await api("/v1/backup", {
     token: session.token,
     signal: options.signal,
     headers: options.version === undefined ? undefined : { "if-none-match": `"${options.version}"` },
   });
   assertCurrent();
-  if (r.status === 304 && Number.isSafeInteger(options.version) && options.version! >= 0) return { synced: true, unchanged: true, version: options.version };
+  if (r.status === 304 && Number.isSafeInteger(options.version) && options.version! >= 0) {
+    if (options.version! < syncFloor(ratchet)) return { synced: true, version: options.version, decryptFailed: true };
+    return { synced: true, unchanged: true, version: options.version };
+  }
   if (r.status === 404) return { synced: false };
   if (r.status !== 200) throw new Error("offline");
   const data = r.data as { document: string; version: number };
@@ -590,7 +637,7 @@ export async function fetchSync(session: Session, options: { version?: number; s
   // "decryptFailed" means "do not use / do not clobber". It covers: an undecryptable doc (wrong key, tamper,
   // a v2 doc served under a forged version), a NON-parsing doc, H-2 a stale replay below our per-account
   // version high-water, and H-1 a bare-legacy doc after this account has been seen as v2 (a downgrade).
-  if (data.version < syncFloor(acct) || (!isV2 && sawV2(acct))) {
+  if (data.version < syncFloor(ratchet) || (!isV2 && sawV2(ratchet))) {
     decryptFailed = true;
   } else {
     const pt = await openDocument(session.dataKey, data.document, acct, data.version);
@@ -599,11 +646,11 @@ export async function fetchSync(session: Session, options: { version?: number; s
       try {
         contents = JSON.parse(td.decode(pt)) as Record<string, unknown>;
         if (!contents || typeof contents !== "object" || Array.isArray(contents) ||
-          data.version < syncFloor(acct) || options.signal?.aborted) {
+          data.version < syncFloor(ratchet) || (!isV2 && sawV2(ratchet)) || options.signal?.aborted) {
           return { synced: true, version: data.version, decryptFailed: true };
         }
-        if (isV2) markSawV2(acct);
-        bumpSyncFloor(acct, data.version);
+        if (isV2) markSawV2(ratchet);
+        bumpSyncFloor(ratchet, data.version);
       } catch {
         decryptFailed = true;
       }
@@ -638,6 +685,8 @@ export async function mutateSyncDoc(
 ): Promise<void> {
   const sessionGuard = captureSyncWriter(session);
   session = snapshotSyncSession(session);
+  const ratchet = await syncRatchetAccount(session);
+  sessionGuard();
   const guard = (): void => { sessionGuard(); if (!isCurrent()) throw new Error("Account session changed."); };
   for (let attempt = 0; attempt < 5; attempt++) {
     guard();
@@ -654,7 +703,7 @@ export async function mutateSyncDoc(
     guard();
     if (changed === false) return;
     const version = baseRevision === null ? 0 : baseRevision + 1;
-    const ciphertext = await sealDocument(session.dataKey, enc(JSON.stringify(doc)), session.account.id, version, WRITE_SYNC_DOC_V2);
+    const ciphertext = await sealDocument(session.dataKey, enc(JSON.stringify(doc)), session.account.id, version, WRITE_SYNC_DOC_V2 || sawV2(ratchet));
     guard();
     const r = await api("/v1/backup", {
       method: "PUT",
@@ -665,8 +714,8 @@ export async function mutateSyncDoc(
     if (r.status === 426) throw new SyncUpgradeRequiredError();
     if (r.status !== 200) throw new Error("Could not save to your account.");
     if (r.data?.accepted === true) {
-      bumpSyncFloor(session.account.id, version);                      // H-2: never accept below this again
-      if (WRITE_SYNC_DOC_V2) markSawV2(session.account.id);            // H-1: our stored doc is now v2
+      bumpSyncFloor(ratchet, version);                      // H-2: never accept below this again
+      if (WRITE_SYNC_DOC_V2) markSawV2(ratchet);            // H-1: our stored doc is now v2
       receipt.accepted?.();
       return;
     }

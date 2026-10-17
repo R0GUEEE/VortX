@@ -171,11 +171,12 @@ export function registerAddonsSyncPusher(fn: ((hint?: AddonSyncHint) => void) | 
 
 /** Add a stream/catalog add-on by transport URL. Validates the manifest before persisting; returns
  *  the resolved Addon so the caller can refresh the UI. Throws if the URL is not a valid add-on. */
-export async function addAddon(transportUrl: string): Promise<Addon> {
+export async function addAddon(transportUrl: string, isCurrent: () => boolean = () => true): Promise<Addon> {
+  if (!isCurrent()) throw new Error("Account changed while loading this add-on. Please try again.");
   const admitted = addonAdmission?.();
   const addon = await loadAddon(transportUrl.trim()); // validates scheme (https-only) + normalizes
   if (nativeBlockedScope) throw new Error("Account native data is unavailable; retry after a compatible account update.");
-  if (admitted && !admitted()) throw new Error("Account changed while loading this add-on. Please try again.");
+  if (!isCurrent() || (admitted && !admitted())) throw new Error("Account changed while loading this add-on. Please try again.");
   rememberNativeAddonEdit(addon.transportUrl, true);
   persist([...installedUrls(), addon.transportUrl]); // store exactly the normalized URL that loaded
   addonsSyncPusher?.({ added: addon.transportUrl, descriptor: addon });
@@ -832,8 +833,9 @@ const RECENT_MAX = 8;
 
 /** Recent search queries, newest first. */
 export function recentSearches(): string[] {
+  if (nativeBlockedScope || (nativeProjection && (!nativeProfile() || nativeProfile()!.pending || nativeProfile()!.locked || nativeProfile()!.kids))) return [];
   try {
-    const raw = localStorage.getItem(RECENT_KEY);
+    const raw = localStorage.getItem(scopedKey(RECENT_KEY));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? (parsed as string[]).filter((s) => typeof s === "string") : [];
   } catch {
@@ -843,11 +845,12 @@ export function recentSearches(): string[] {
 
 /** Record a search query (trimmed, de-duped case-insensitively, capped). */
 export function addRecentSearch(query: string): void {
+  if (nativeBlockedScope || (nativeProjection && (!nativeProfile() || nativeProfile()!.pending || nativeProfile()!.locked || nativeProfile()!.kids))) return;
   const q = query.trim();
   if (!q) return;
   const next = [q, ...recentSearches().filter((s) => s.toLowerCase() !== q.toLowerCase())].slice(0, RECENT_MAX);
   try {
-    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+    localStorage.setItem(scopedKey(RECENT_KEY), JSON.stringify(next));
   } catch {
     /* storage disabled or full: best-effort */
   }

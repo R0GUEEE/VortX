@@ -6,7 +6,7 @@
 //   - an account-scoped journal of explicit edits, ACKed only after serialized successful writes.
 // vault.ts owns session persistence and encrypted transport. Journals carry no session/key/socket URL.
 
-import { loadSession, clearSession, validateSession, saveSession, getSyncDoc, fetchSync, connectSyncSocket, mutateSyncDoc, SyncUpgradeRequiredError, type Session } from "./vault";
+import { loadSession, clearSession, validateSession, saveSession, fetchSync, connectSyncSocket, mutateSyncDoc, SyncUpgradeRequiredError, type Session } from "./vault";
 import {
   mergeInstalledAddons,
   pruneInstalledAddons,
@@ -64,6 +64,7 @@ function nativeSettingsTarget(profile: NativeSyncProjection["profiles"][number])
 // The in-memory cache. `undefined` = not yet hydrated from storage; `null` = hydrated, signed out.
 // We lazily hydrate from loadSession() on first read so a hard reload restores the signed-in state.
 let cached: Session | null | undefined = undefined;
+const SESSION_DESCRIPTOR_KEY = "vortx.session.v1";
 
 type Listener = (session: Session | null) => void;
 const listeners = new Set<Listener>();
@@ -106,13 +107,21 @@ export function accountDisplay(): string | null {
  *  null. Safe to call once at startup, before painting the nav. */
 export async function ensureValidSession(): Promise<Session | null> {
   const session = loadSession();
-  const prior = currentSession();
+  const prior = snapshotSession(currentSession());
   if (!session) {
     setSession(null);
     return null;
   }
+  const ownsStoredSession = captureStoredSession(session);
   const ok = await validateSession(session);
   if (!sameSession(currentSession(), prior)) return currentSession();
+  if (!ownsStoredSession()) {
+    // Another tab may replace the shared descriptor before its storage event is delivered.
+    // Retire this tab without rewriting or deleting the newer account's descriptor.
+    const next = loadSession();
+    setSession(next);
+    return next;
+  }
   if (!ok) {
     clearSession();
     setSession(null);
@@ -466,9 +475,11 @@ export async function hydrateFromAccount(session: Session): Promise<void> {
     await requestAccountPull(receiveState);
     return;
   }
+  const ownsStoredSession = captureStoredSession(session);
+  const isCurrent = () => sameSession(settingsSyncState.session, session) && settingsSyncState.ownsStoredSession() && ownsStoredSession();
   try {
-    const doc = await getSyncDoc(session);
-    if (sameSession(settingsSyncState.session, session)) applySyncDoc(doc);
+    const status = await fetchSync(session, { isCurrent });
+    if (isCurrent() && status.contents && !status.decryptFailed) applySyncDoc(status.contents);
   } catch {
     // network / decrypt failure: sign-in still succeeds with local state.
   }
@@ -476,6 +487,7 @@ export async function hydrateFromAccount(session: Session): Promise<void> {
 
 interface ReceiveState {
   session: Session;
+  ownsStoredSession: () => boolean;
   receivedVersion?: number;
   appliedVersion?: number;
   projectionPending?: boolean;
@@ -497,7 +509,7 @@ function syncIsActive(): boolean {
 }
 
 function isCurrentReceiver(state: ReceiveState): boolean {
-  return receiveStarted && receiveState === state && sameSession(settingsSyncState.session, state.session);
+  return receiveStarted && receiveState === state && sameSession(settingsSyncState.session, state.session) && state.ownsStoredSession();
 }
 
 function disposeReceiver(state: ReceiveState): void {
@@ -518,6 +530,7 @@ function bindReceiveSession(session: Session | null): void {
   if (receiveState) disposeReceiver(receiveState);
   receiveState = session ? {
     session: { ...session, account: { ...session.account }, dataKey: session.dataKey.slice() },
+    ownsStoredSession: captureStoredSession(session),
     pull: null, pullAgain: false, abort: null, socket: null, reconnectAttempt: 0,
   } : null;
   if (receiveState) resumeReceiver(receiveState, true);
@@ -628,6 +641,10 @@ function requestAccountPull(state: ReceiveState): Promise<void> {
 
 /** One automatic receiving lifecycle for this page. Account/token changes retire old callbacks. */
 export function startAccountSync(): () => void {
+  // Reconcile changes that occurred after boot validation but before the listener existed.
+  const initial = currentSession(), stored = loadSession();
+  if (stored && !sameSession(initial, stored)) setSession(stored);
+  else if (initial && !captureStoredSession(initial)()) setSession(null);
   receiveStarted = true;
   bindReceiveSession(currentSession());
   const catchUp = (): void => {
@@ -639,6 +656,12 @@ export function startAccountSync(): () => void {
     if (receiveState) disposeReceiver(receiveState);
     releaseJournals(settingsSyncState);
   };
+  const storageChanged = (event: StorageEvent): void => {
+    if (event.key !== null && event.key !== SESSION_DESCRIPTOR_KEY) return;
+    const next = loadSession();
+    if (!sameSession(currentSession(), next)) setSession(next);
+  };
+  window.addEventListener("storage", storageChanged);
   window.addEventListener("online", catchUp);
   window.addEventListener("offline", catchUp);
   window.addEventListener("pageshow", catchUp);
@@ -648,6 +671,7 @@ export function startAccountSync(): () => void {
     receiveStarted = false;
     if (receiveState) disposeReceiver(receiveState);
     receiveState = null;
+    window.removeEventListener("storage", storageChanged);
     window.removeEventListener("online", catchUp);
     window.removeEventListener("offline", catchUp);
     window.removeEventListener("pageshow", catchUp);
@@ -707,6 +731,8 @@ const ACCOUNT_SCOPED_SETTING_DEFAULTS: Partial<Settings> = {
 
 interface SettingsSyncState {
   session: Session | null;
+  requiresStoredSession: boolean;
+  ownsStoredSession: () => boolean;
   suppressUpDepth: number;
   pushTimer: ReturnType<typeof setTimeout> | undefined;
   pendingKeys: Set<keyof Settings>;
@@ -1047,6 +1073,26 @@ let settingsSyncState: SettingsSyncState;
 // Jobs still verify their captured state before starting, so a queued write from a departed account drops.
 let settingsWriteTail: Promise<void> = Promise.resolve();
 
+function snapshotSession(session: Session | null): Session | null {
+  return session ? { ...session, account: { ...session.account }, dataKey: session.dataKey.slice() } : null;
+}
+
+/** Bind async readers to the descriptor and key owned when they start. In-memory callers
+ *  may omit storage entirely; a present but unowned descriptor never grants that exception. */
+function hasSessionDescriptor(): boolean {
+  try { return localStorage.getItem(SESSION_DESCRIPTOR_KEY) !== null; }
+  catch { return false; }
+}
+function captureStoredSession(session: Session, requireStored = false): () => boolean {
+  const captured = snapshotSession(session)!;
+  const required = requireStored || hasSessionDescriptor();
+  return () => {
+    if (!sameSession(session, captured)) return false;
+    const stored = loadSession();
+    return (!required && !hasSessionDescriptor() && !stored) || sameSession(stored, captured);
+  };
+}
+
 function sameSession(a: Session | null, b: Session | null): boolean {
   if (a === b) return true;
   if (!sameAccountScope(a, b) || !a || !b || a.token !== b.token) {
@@ -1097,8 +1143,11 @@ function initialOwnerSettings(): Settings {
 }
 
 function createSettingsSyncState(session: Session | null, ownerSnapshot?: Settings): SettingsSyncState {
+  const requiresStoredSession = !!session && hasSessionDescriptor();
   const state: SettingsSyncState = {
     session,
+    requiresStoredSession,
+    ownsStoredSession: session ? captureStoredSession(session, requiresStoredSession) : () => true,
     suppressUpDepth: 0,
     pushTimer: undefined,
     pendingKeys: new Set(),
@@ -1121,7 +1170,9 @@ settingsSyncState = createSettingsSyncState(null);
 
 function bindSettingsSyncState(session: Session | null): void {
   if (sameAccountScope(settingsSyncState.session, session)) {
+    settingsSyncState.requiresStoredSession ||= !!session && hasSessionDescriptor();
     settingsSyncState.session = session;
+    settingsSyncState.ownsStoredSession = session ? captureStoredSession(session, settingsSyncState.requiresStoredSession) : () => true;
     return;
   }
   if (settingsSyncState.pushTimer) clearTimeout(settingsSyncState.pushTimer);
@@ -1639,7 +1690,7 @@ function queueSettingsPush(state: SettingsSyncState): void {
       return;
     }
     const session = state.session;
-    const isCurrent = () => state === settingsSyncState && !state.upgradeRequired && sameSession(state.session, session) && ownsJournals(state);
+    const isCurrent = () => state === settingsSyncState && !state.upgradeRequired && sameSession(state.session, session) && state.ownsStoredSession() && ownsJournals(state);
     let failed = Object.keys(state.retainedNativeSettings).length > 0;
     const attempt = async (job: () => Promise<void>): Promise<void> => {
       try { if (isCurrent()) await job(); } catch (error) {
