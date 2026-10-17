@@ -120,7 +120,10 @@ check_contract() {
   require_before "${fetch_script}" \
     'verify_sha256 "${TMP_SERVER}" "${SERVER_SHA256}"' \
     'mv "${TMP_SERVER}" "${SERVER_DEST}"'
-  require_count "${fetch_script}" 'TEMP_PATHS+=(' 4
+  require_count "${fetch_script}" 'TEMP_PATHS+=(' 5
+  require_literal "${fetch_script}" 'verify_sha256 "${VERIFIED_MPV_ARCHIVE}" "$2" "$3 cached archive"'
+  require_literal "${fetch_script}" 'verify_mpv_payload "${TMP_MPV}/mpv.exe" "${MPV_WIN_DEST}"'
+  require_literal "${fetch_script}" 'verify_mpv_payload "${APP_SRC}" "${MPV_MAC_DEST}"'
 }
 
 copy_contract_fixture() {

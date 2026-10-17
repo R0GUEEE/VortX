@@ -231,25 +231,27 @@ fn mpv_binary_name() -> &'static str {
     }
 }
 
-/// Resolve the staged mpv binary path, preferring the bundled `resources/` copy and falling back to
-/// a `mpv` already on PATH (handy for `tauri dev` before the binary is staged, and on Linux where a
-/// system mpv is common). Returns the path to run, or None if neither is available.
+/// Resolve the packaged runtime. A release must not silently run an unrelated PATH executable
+/// when its bundle is incomplete. Only debug builds retain the explicit system-mpv convenience.
 fn resolve_mpv_binary(resource_dir: &Path) -> Option<PathBuf> {
     let bundled = resource_dir.join(mpv_binary_name());
-    if bundled.exists() {
+    if bundled.is_file() {
         return Some(bundled);
     }
-    // PATH fallback: trust the OS to resolve a plain `mpv`/`mpv.exe`. We only return the bare name;
-    // Command will search PATH. We can't cheaply prove it exists here, so callers treat a spawn
-    // failure as "no mpv" via the Failed state.
-    #[cfg(target_os = "windows")]
-    let path_name = "mpv.exe";
-    #[cfg(not(target_os = "windows"))]
-    let path_name = "mpv";
-    which_on_path(path_name).map(PathBuf::from)
+    #[cfg(debug_assertions)]
+    {
+        #[cfg(target_os = "windows")]
+        let path_name = "mpv.exe";
+        #[cfg(not(target_os = "windows"))]
+        let path_name = "mpv";
+        return which_on_path(path_name).map(PathBuf::from);
+    }
+    #[cfg(not(debug_assertions))]
+    None
 }
 
 /// Best-effort `which`: is `name` resolvable on PATH? Used only for the dev/system-mpv fallback.
+#[cfg(debug_assertions)]
 fn which_on_path(name: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -404,7 +406,7 @@ fn play_native(
 
     let mpv_bin = resolve_mpv_binary(resource_dir).ok_or_else(|| {
         format!(
-            "mpv runtime missing ({}). Drop the mpv binary into resources/ (see fetch-server-deps.sh) or install mpv on PATH.",
+            "packaged mpv runtime missing ({}). Restage the verified runtime before packaging; PATH fallback is debug-only.",
             mpv_binary_name()
         )
     })?;

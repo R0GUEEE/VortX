@@ -135,6 +135,16 @@ mod child_supervisor {
             Ok(status)
         }
 
+        /// Transfer configured output pipes to bounded drainers before authorizing target launch.
+        pub(crate) fn take_output(
+            &mut self,
+        ) -> (
+            Option<std::process::ChildStdout>,
+            Option<std::process::ChildStderr>,
+        ) {
+            (self.process.stdout.take(), self.process.stderr.take())
+        }
+
         #[cfg(test)]
         pub(crate) fn id(&self) -> u32 {
             self.process.id()
@@ -488,6 +498,7 @@ mod child_supervisor {
     }
 }
 
+mod bounded_log;
 mod engine;
 mod model;
 mod player;

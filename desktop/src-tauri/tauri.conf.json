@@ -22,7 +22,38 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'none'",
+        "script-src": "'self'",
+        "script-src-attr": "'none'",
+        "style-src": "'self' 'unsafe-inline'",
+        "style-src-attr": "'unsafe-inline'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:11470",
+        "img-src": "'self' http: https:",
+        "media-src": "'self' http: https:",
+        "font-src": "'self'",
+        "frame-src": "https://www.youtube-nocookie.com/embed/",
+        "worker-src": "'none'",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'"
+      },
+      "devCsp": {
+        "default-src": "'none'",
+        "script-src": "'self'",
+        "script-src-attr": "'none'",
+        "style-src": "'self' 'unsafe-inline'",
+        "style-src-attr": "'unsafe-inline'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:11470 http://localhost:1420 ws://localhost:1420",
+        "img-src": "'self' http: https:",
+        "media-src": "'self' http: https:",
+        "font-src": "'self'",
+        "frame-src": "https://www.youtube-nocookie.com/embed/",
+        "worker-src": "'self' blob:",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'"
+      }
     }
   },
   "bundle": {

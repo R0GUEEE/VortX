@@ -36,7 +36,11 @@ use once_cell::sync::Lazy;
 use serde::Serialize;
 use sha2::Sha256;
 
+use crate::bounded_log::LogSink;
 use crate::child_supervisor::SupervisedChild;
+
+/// Retain at most 2 MiB per file (current log plus one previous tail), even during a long boot.
+const SERVER_LOG_BYTES: u64 = 2 * 1024 * 1024;
 
 /// How often the monitor polls the live child for exit. Short enough that a crash is noticed and
 /// restarted promptly, long enough to stay idle-cheap. The monitor holds no lock between polls, so
@@ -195,7 +199,8 @@ fn ffmpeg_binaries() -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-/// The preload JS injected with `node -r`. It (a) tees uncaught errors to a log file, (b) installs
+/// The preload JS injected with `node -r`. It (a) sends uncaught errors to bounded stderr capture,
+/// (b) installs
 /// the private HMAC health route, and (c) pins every host-less `server.listen(port)` to loopback
 /// (127.0.0.1). Parent death is enforced outside JavaScript by the same-binary Rust supervisor:
 /// node is its direct child, and ownership-pipe EOF makes the supervisor kill and wait node on
@@ -203,17 +208,15 @@ fn ffmpeg_binaries() -> Option<(PathBuf, PathBuf)> {
 /// interface), so we monkeypatch `net.Server.prototype.listen` exactly like MacNodeServer.
 fn write_preload(home: &Path) -> std::io::Result<PathBuf> {
     let preload_path = home.join("stremiox-preload.js");
-    let log_path = home.join("stremio-server.log");
-    let log_js = json_string(&log_path.to_string_lossy());
     let host_js = json_string(HOST);
     let health_env_js = json_string(HEALTH_TOKEN_ENV);
     let health_path_js = json_string(HEALTH_PATH);
     let health_header_js = json_string(&HEALTH_CHALLENGE_HEADER.to_ascii_lowercase());
     let preload = format!(
-        r#"const fs=require('fs'),L={log},HENV={health_env},HPATH={health_path},HHEADER={health_header};
+        r#"const fs=require('fs'),HENV={health_env},HPATH={health_path},HHEADER={health_header};
 const TOKEN=process.env[HENV]||'';
 delete process.env[HENV];
-const w=(t,a)=>{{try{{fs.appendFileSync(L,t+' '+Array.prototype.map.call(a,String).join(' ')+'\n')}}catch(e){{}}}};
+const w=(t,a)=>{{try{{fs.writeSync(2,(t+' '+Array.prototype.map.call(a,String).join(' ')).slice(0,4096)+'\n')}}catch(e){{}}}};
 process.on('uncaughtException',function(e){{w('[uncaught]',[e&&e.stack||e])}});
 process.on('unhandledRejection',function(e){{w('[rej]',[e&&e.stack||e])}});
 try{{
@@ -249,7 +252,6 @@ try{{
   w('[boot]',['desktop preload active; bind='+HOST]);
 }}catch(e){{w('[bind-err]',[e&&e.stack||e]);}}
 "#,
-        log = log_js,
         host = host_js,
         health_env = health_env_js,
         health_path = health_path_js,
@@ -299,14 +301,9 @@ fn spawn_child(
     std::fs::create_dir_all(&server_data)?;
     let preload = write_preload(home)?;
 
-    // Tee the node process's own stdout/stderr into the same log the preload appends to, so a dead
-    // server can explain itself. Append (don't truncate) so a prior boot's tail survives a restart.
-    let log_path = home.join("stremio-server.log");
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let log_err = log.try_clone()?;
+    // Both streams (including preload diagnostics) pass through one bounded sink. Open it before
+    // spawning; drainers are attached while the helper is still parked and cannot launch node.
+    let log = LogSink::open(&home.join("stremio-server.log"), SERVER_LOG_BYTES)?;
 
     let target_args = vec![
         "-r".to_owned(),
@@ -321,8 +318,8 @@ fn spawn_child(
         .env("NO_CORS", "1")
         .env("CASTING_DISABLED", "1") // no cast UI on desktop; skip the SSDP multicast loop
         .env("UV_THREADPOOL_SIZE", "16") // more libuv workers for tracker DNS + disk/crypto
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     if let Some((ffmpeg, ffprobe)) = ffmpeg_binaries() {
         cmd.env("FFMPEG_BIN", &ffmpeg).env("FFPROBE_BIN", &ffprobe);
@@ -331,8 +328,18 @@ fn spawn_child(
     // The owner key crosses the private control pipe only after the helper is parked. It is never
     // placed in the helper environment; node receives it at spawn and the preload immediately
     // deletes process.env[...] before server.cjs loads.
-    SupervisedChild::spawn_with_private_env(cmd, &[(HEALTH_TOKEN_ENV, health_token_hex.as_str())])
-        .map(|child| (child, health_token))
+    let mut child = SupervisedChild::spawn_with_private_env(
+        cmd,
+        &[(HEALTH_TOKEN_ENV, health_token_hex.as_str())],
+    )?;
+    let (stdout, stderr) = child.take_output();
+    let stdout = stdout.ok_or_else(|| std::io::Error::other("server stdout pipe unavailable"))?;
+    let stderr = stderr.ok_or_else(|| std::io::Error::other("server stderr pipe unavailable"))?;
+    // A drainer-spawn failure drops the unstarted helper and closes its ownership pipe. Detached
+    // readers exit on EOF; no joins can delay teardown if a descendant keeps an inherited pipe.
+    let _ = log.capture(stdout, "stremiox-server-stdout")?;
+    let _ = log.capture(stderr, "stremiox-server-stderr")?;
+    Ok((child, health_token))
 }
 
 /// Before the first spawn, reclaim the port if a legacy STALE copy of OUR OWN node server is still

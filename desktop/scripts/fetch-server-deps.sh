@@ -11,8 +11,8 @@
 # scripts/fetch-server-deps.sh): the Mac is unsandboxed and spawns the ordinary
 # standalone `node` with Process; Tauri does the same with std::process::Command.
 #
-# Idempotent: skips a download whose output is already present and (for node) runnable
-# at the pinned version. Run it before `npm run build` / `npm run tauri build`; it is
+# Idempotent: verifies every reused payload against its pinned digest or a freshly
+# extracted digest-verified archive. Run before `npm run build` / `npm run tauri build`; it is
 # also wired as the Tauri beforeBuildCommand (tauri.conf.json) so a plain build fetches.
 #
 # CROSS-PLATFORM: this script fetches the runtime for the host it runs on (macOS arm64/
@@ -36,7 +36,7 @@ fail() {
 TEMP_PATHS=()
 cleanup_temp_paths() {
   local path
-  for path in "${TEMP_PATHS[@]}"; do
+  for path in "${TEMP_PATHS[@]-}"; do
     if [ -n "${path}" ]; then
       rm -rf -- "${path}"
     fi
@@ -186,6 +186,64 @@ else
 fi
 NODE_BINARY_SHA256="$(normalize_sha256 "${NODE_BINARY_SHA256}" "Node binary ${NODE_VERSION} ${NODE_PLATFORM}")"
 
+# Cache only authenticated archives, never an unsigned "already verified" marker.
+# Re-extract and compare reused mpv payloads on every run: the executable, dylibs,
+# bundle metadata, symlink targets, and executable bits are all part of the payload.
+fetch_verified_mpv_archive() { # <url> <sha256> <label> <cache-name>
+  local cache_dir="${RES_DIR}/.verified-downloads"
+  [ ! -L "${cache_dir}" ] || fail "mpv archive cache must not be a symlink"
+  mkdir -p "${cache_dir}"
+  VERIFIED_MPV_ARCHIVE="${cache_dir}/$4"
+  [ ! -L "${VERIFIED_MPV_ARCHIVE}" ] || fail "mpv archive must not be a symlink"
+  [ ! -e "${VERIFIED_MPV_ARCHIVE}" ] || [ -f "${VERIFIED_MPV_ARCHIVE}" ] || fail "mpv archive must be a regular file"
+  if [ ! -f "${VERIFIED_MPV_ARCHIVE}" ]; then
+    local download
+    download="$(mktemp "${cache_dir}/.mpv-download.XXXXXX")"
+    TEMP_PATHS+=("${download}")
+    curl -fsSL "$1" -o "${download}"
+    verify_sha256 "${download}" "$2" "$3"
+    mv "${download}" "${VERIFIED_MPV_ARCHIVE}"
+  fi
+  verify_sha256 "${VERIFIED_MPV_ARCHIVE}" "$2" "$3 cached archive"
+}
+
+verify_mpv_payload() { # <verified-extracted-source> <staged-destination>
+  # NODE_DEST was checksum-verified above, before any invocation of this helper.
+  "${NODE_DEST}" - "$1" "$2" <<'NODE'
+const fs = require('fs'), path = require('path');
+function equalFile(a, b) {
+  const af = fs.openSync(a, 'r'), bf = fs.openSync(b, 'r');
+  const ab = Buffer.alloc(65536), bb = Buffer.alloc(65536);
+  try {
+    for (;;) {
+      const an = fs.readSync(af, ab, 0, ab.length, null);
+      const bn = fs.readSync(bf, bb, 0, bb.length, null);
+      if (an !== bn || !ab.subarray(0, an).equals(bb.subarray(0, bn))) return false;
+      if (!an) return true;
+    }
+  } finally { fs.closeSync(af); fs.closeSync(bf); }
+}
+function compare(a, b) {
+  const x = fs.lstatSync(a), y = fs.lstatSync(b);
+  if (x.isSymbolicLink() || y.isSymbolicLink()) {
+    return x.isSymbolicLink() && y.isSymbolicLink() && fs.readlinkSync(a) === fs.readlinkSync(b);
+  }
+  if (x.isDirectory() && y.isDirectory()) {
+    const names = fs.readdirSync(a).sort(), other = fs.readdirSync(b).sort();
+    return JSON.stringify(names) === JSON.stringify(other) && names.every(n => compare(path.join(a, n), path.join(b, n)));
+  }
+  return x.isFile() && y.isFile() && (x.mode & 0o111) === (y.mode & 0o111) && equalFile(a, b);
+}
+try {
+  const [source, staged] = process.argv.slice(2);
+  if (fs.lstatSync(staged).isSymbolicLink() || !compare(source, staged)) throw new Error('payload mismatch');
+} catch (error) {
+  console.error('fetch-server-deps: cached mpv payload differs from its pinned archive; remove only the generated staged mpv payload and retry');
+  process.exit(1);
+}
+NODE
+}
+
 # --- 1) Node runtime (idempotent) -----------------------------------------------------
 if [ -f "${NODE_DEST}" ]; then
   # Never execute a staged runtime until its exact bytes match the platform pin.
@@ -267,48 +325,41 @@ echo "fetch-server-deps: done. node + server.cjs staged in ${RES_DIR}"
 case "${uname_s}" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     MPV_WIN_DEST="${RES_DIR}/mpv-win-x64.exe"
-    if [ -f "${MPV_WIN_DEST}" ]; then
-      echo "fetch-server-deps: mpv-win-x64.exe already present, skipping."
-    else
       # Pinned zhongfly release. Baseline x86-64 build (NOT the -v3/AVX2 build) for broad CPU
       # compatibility. The checksum is verified on the downloaded bytes.
       MPV_WIN_TAG="2026-07-20-94335ab87a"
       MPV_WIN_ASSET="mpv-x86_64-20260720-git-94335ab87a.7z"
       MPV_WIN_SHA256="a77cd53dc8d9e002b612d3bfaffa15be3ca2944713caab508b6f4f26a75400b3"
       MPV_WIN_URL="https://github.com/zhongfly/mpv-winbuild/releases/download/${MPV_WIN_TAG}/${MPV_WIN_ASSET}"
-      echo "fetch-server-deps: downloading mpv (zhongfly ${MPV_WIN_TAG})..."
+      fetch_verified_mpv_archive "${MPV_WIN_URL}" "${MPV_WIN_SHA256}" \
+        "mpv windows ${MPV_WIN_TAG}" "${MPV_WIN_ASSET}"
       TMP_MPV="$(mktemp -d)"
       TEMP_PATHS+=("${TMP_MPV}")
-      if ! curl -fsSL "${MPV_WIN_URL}" -o "${TMP_MPV}/mpv.7z"; then
-        echo "fetch-server-deps: ERROR - pinned Windows mpv artifact is unavailable: ${MPV_WIN_URL}" >&2
-        rm -rf "${TMP_MPV}"
-        exit 1
-      fi
-      verify_sha256 "${TMP_MPV}/mpv.7z" "${MPV_WIN_SHA256}" "mpv windows ${MPV_WIN_TAG}"
       # 7-Zip ships on the GitHub windows runner; extract just mpv.exe (flat, ignore the rest).
-      ( cd "${TMP_MPV}" && 7z e -y mpv.7z mpv.exe >/dev/null )
-      cp "${TMP_MPV}/mpv.exe" "${MPV_WIN_DEST}"
+      ( cd "${TMP_MPV}" && 7z e -y "${VERIFIED_MPV_ARCHIVE}" mpv.exe >/dev/null )
+      [ -f "${TMP_MPV}/mpv.exe" ] && [ ! -L "${TMP_MPV}/mpv.exe" ] || fail "mpv.exe missing from pinned archive"
+      if [ -e "${MPV_WIN_DEST}" ] || [ -L "${MPV_WIN_DEST}" ]; then
+        verify_mpv_payload "${TMP_MPV}/mpv.exe" "${MPV_WIN_DEST}"
+      else
+        cp "${TMP_MPV}/mpv.exe" "${MPV_WIN_DEST}"
+        verify_mpv_payload "${TMP_MPV}/mpv.exe" "${MPV_WIN_DEST}"
+      fi
       rm -rf "${TMP_MPV}"
-      echo "fetch-server-deps: staged mpv-win-x64.exe"
-    fi
+      echo "fetch-server-deps: verified mpv-win-x64.exe"
     ;;
   Darwin)
     if [ "${uname_m}" = "arm64" ]; then
       MPV_MAC_DEST="${RES_DIR}/mpv-darwin-arm64.app"
-      if [ -d "${MPV_MAC_DEST}" ]; then
-        echo "fetch-server-deps: mpv-darwin-arm64.app already present, skipping."
-      else
         # Pinned stolendata build (https://laboratory.stolendata.net/~djinn/mpv_osx/), the macOS build
         # listed by mpv.io. Self-contained mpv.app, so spawning Contents/MacOS/mpv as a child works.
         MPV_MAC_VER="0.40.0"
         MPV_MAC_SHA256="3170fb709defebaba33e9755297d70dc3562220541de54fc3d494a8309ef1260"
         MPV_MAC_URL="https://laboratory.stolendata.net/~djinn/mpv_osx/mpv-arm64-${MPV_MAC_VER}.tar.gz"
-        echo "fetch-server-deps: downloading mpv (stolendata ${MPV_MAC_VER} arm64)..."
+        fetch_verified_mpv_archive "${MPV_MAC_URL}" "${MPV_MAC_SHA256}" \
+          "mpv macOS ${MPV_MAC_VER}" "mpv-arm64-${MPV_MAC_VER}.tar.gz"
         TMP_MPVM="$(mktemp -d)"
         TEMP_PATHS+=("${TMP_MPVM}")
-        curl -fsSL "${MPV_MAC_URL}" -o "${TMP_MPVM}/mpv.tar.gz"
-        verify_sha256 "${TMP_MPVM}/mpv.tar.gz" "${MPV_MAC_SHA256}" "mpv macOS ${MPV_MAC_VER}"
-        tar -xzf "${TMP_MPVM}/mpv.tar.gz" -C "${TMP_MPVM}"
+        tar -xzf "${VERIFIED_MPV_ARCHIVE}" -C "${TMP_MPVM}"
         # stolendata's tarball carries mpv.app (find it whether at root or nested).
         APP_SRC="$(find "${TMP_MPVM}" -maxdepth 2 -name 'mpv.app' -type d | head -1)"
         if [ -z "${APP_SRC}" ]; then
@@ -316,24 +367,25 @@ case "${uname_s}" in
           ls -la "${TMP_MPVM}" >&2
           exit 1
         fi
-        mv "${APP_SRC}" "${MPV_MAC_DEST}"
+        [ -f "${APP_SRC}/Contents/MacOS/mpv" ] || fail "mpv executable missing from pinned app archive"
+        if [ -e "${MPV_MAC_DEST}" ] || [ -L "${MPV_MAC_DEST}" ]; then
+          verify_mpv_payload "${APP_SRC}" "${MPV_MAC_DEST}"
+        else
+          mv "${APP_SRC}" "${MPV_MAC_DEST}"
+        fi
         rm -rf "${TMP_MPVM}"
-        echo "fetch-server-deps: staged mpv-darwin-arm64.app"
-      fi
+        echo "fetch-server-deps: verified mpv-darwin-arm64.app"
     else
       echo "fetch-server-deps: no pinned mpv for macOS arch ${uname_m} (only arm64 wired)." >&2
     fi
     ;;
 esac
 
-# The Tauri build bundles resources/mpv-* as a HARD glob validated at build-script time, so a build
-# FAILS on an empty glob until at least one mpv binary exists. macOS/Linux staging is not wired yet,
-# so warn there (this warn is silent once an mpv-<platform> file is present, e.g. Windows above).
+# Platform-specific Tauri configs name the exact player payload. This diagnostic does
+# not substitute for those build-time resource checks or runtime executable admission.
 if ! ls "${RES_DIR}"/mpv-* >/dev/null 2>&1; then
   echo "fetch-server-deps: WARNING - no mpv binary staged in ${RES_DIR}." >&2
-  echo "  The Tauri build will FAIL on the 'resources/mpv-*' bundle glob until one exists." >&2
-  echo "  Stage the host mpv binary by hand before building (e.g. macOS arm64 ->" >&2
-  echo "  ${RES_DIR}/mpv-darwin-arm64). See the 'mpv PLAYER BINARY' note below for all paths." >&2
+  echo "  Stage the complete verified host payload before packaging (see paths below)." >&2
 fi
 
 # ---------------------------------------------------------------------------------------
@@ -348,28 +400,24 @@ fi
 # ---------------------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------------------
-# mpv PLAYER BINARY (staged manually for now; NOT fetched by this script yet)
+# mpv PLAYER PAYLOAD (platform-specific staging)
 # ---------------------------------------------------------------------------------------
 # The desktop player is mpv (libmpv), spawned as a child process and driven over JSON IPC
 # (see src-tauri/src/player.rs). Like the node runtime above, mpv ships as a per-platform
-# binary under resources/, bundled via tauri.conf.json's `bundle.resources` ("resources/mpv-*").
+# payload under resources/, bundled by the platform-specific Tauri configuration.
 # player.rs::mpv_binary_name() selects the one matching the running OS/arch:
 #
-#   macOS arm64  -> resources/mpv-darwin-arm64
-#   macOS x64    -> resources/mpv-darwin-x64
-#   Linux x64    -> resources/mpv-linux-x64
-#   Linux arm64  -> resources/mpv-linux-arm64
+#   macOS arm64  -> resources/mpv-darwin-arm64.app/Contents/MacOS/mpv
+#   macOS x64    -> resources/mpv-darwin-x64.app/Contents/MacOS/mpv (not fetched here)
+#   Linux x64    -> resources/mpv-linux-x64/AppRun (staged by desktop.yml)
+#   Linux arm64  -> resources/mpv-linux-arm64/AppRun (not staged here)
 #   Windows x64  -> resources/mpv-win-x64.exe
 #
-# This script does NOT download mpv yet: unlike Node (a single self-contained binary from
-# nodejs.org), a portable mpv with vo=gpu-next + libplacebo + the codec set we want is not a
-# single canonical public artifact across all three OSes (macOS: a notarized build or the
-# mpv.app payload; Windows: shinchiro/zhongfly builds; Linux: usually the system package).
-# For now DROP A BINARY IN BY HAND (or your CI job copies it) at the path above before ANY build:
-# the `bundle.resources` glob "resources/mpv-*" is validated at build-script time, so `cargo check`,
-# `tauri dev`, and `tauri build` ALL fail until at least one mpv-<platform> file exists - staging is
-# NOT optional for dev. player.rs additionally falls back to an `mpv` on PATH at RUNTIME, so once the
-# build succeeds you may stage a stub/symlink and rely on a locally installed mpv (brew/apt) to play.
+# Windows x64 and macOS arm64 are fetched here from pinned archives and verified on
+# every reuse. Linux x64 CI builds its AppDir with separately pinned deployment tools.
+# Local Linux/arm64 and macOS x64 packaging need an explicitly verified complete payload;
+# a stub/symlink is not a packaging substitute. Release runtime resolution never falls
+# back to PATH. Debug builds alone retain that convenience for local development.
 #
 # ALTERNATIVE PACKAGING (Tauri externalBin). Instead of bundle.resources, mpv could be a
 # Tauri sidecar via `bundle.externalBin: ["binaries/mpv"]`, which requires the binary be named
