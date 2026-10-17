@@ -266,6 +266,7 @@ final class StremioAccount: ObservableObject {
         set { Self.storeAuthKey(newValue, account: tokenKey) }
     }
     private static func storeAuthKey(_ value: String?, account: String) {
+        LegacyWatchOwnership.invalidateSession()
 #if VORTX_NATIVE_DATA_ENGINE
         VortxNativeOwnAccountProducer.withCredentialMutation(slot: account) { _ = Keychain.set(value, for: account) }
 #else
@@ -281,6 +282,7 @@ final class StremioAccount: ObservableObject {
     }
 
     private func beginAuthOperation() -> AuthOperationContext {
+        LegacyWatchOwnership.invalidateSession()
 #if VORTX_NATIVE_DATA_ENGINE
         VortxNativeOwnAccountProducer.invalidate(slot: tokenKey)
 #endif
@@ -322,6 +324,7 @@ final class StremioAccount: ObservableObject {
 
     /// Re-read the session for the newly active profile (called after a profile switch).
     func reloadForActiveProfile(preservingSignInError message: String? = nil) {
+        LegacyWatchOwnership.invalidateSession()
 #if VORTX_NATIVE_DATA_ENGINE
         VortxNativeOwnAccountProducer.invalidateContext()
 #endif
@@ -494,6 +497,7 @@ final class StremioAccount: ObservableObject {
     }
 
     func signOut() {
+        LegacyWatchOwnership.invalidateSession()
 #if VORTX_NATIVE_DATA_ENGINE
         VortxNativeOwnAccountProducer.invalidate(slot: tokenKey)
 #endif

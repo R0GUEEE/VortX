@@ -198,9 +198,54 @@ final class ProfileStore: ObservableObject {
     private var pendingAccountLibraryReplayIDs: Set<String> = []
     static let shared = ProfileStore()
 
-    @Published private(set) var profiles: [UserProfile] = []
-    @Published private(set) var activeID: UUID?
+    // BEGIN legacy-watch lifecycle projection (also extracted by the focused regression).
+    @Published private(set) var profiles: [UserProfile] = [] {
+        didSet {
+            // Array element writeback and every whole-roster restore/adopt/merge pass here.
+            if Self.legacyWatchBinding(in: oldValue, activeID: activeID)
+                != Self.legacyWatchBinding(in: profiles, activeID: activeID) {
+                LegacyWatchOwnership.invalidateSession()
+                retireLegacyHistoryNotices()
+            }
+        }
+    }
+    @Published private(set) var activeID: UUID? {
+        didSet {
+            if oldValue != activeID {
+                LegacyWatchOwnership.invalidateSession()
+                retireLegacyHistoryNotices()
+            }
+        }
+    }
+    private static func legacyWatchBinding(in roster: [UserProfile], activeID: UUID?) -> LegacyWatchOwnership.ProfileBinding? {
+        roster.first(where: { $0.id == activeID }).map {
+            .init(id: $0.id, isOwner: $0.isOwner, usesOwnAccount: $0.usesOwnAccount)
+        }
+    }
+    // END legacy-watch lifecycle projection.
     @Published private(set) var nativeProfileError: String?
+    private typealias LegacyNoticeOwner = LegacyWatchOwnership.NoticeOwner<CredentialScopeRegistry.Capture>
+    @Published private var legacyHistoryNoticeState = LegacyProfileRecoveryPolicy.Notices<LegacyNoticeOwner>()
+    var legacyHistoryRecoveryNotice: String? {
+        // Rendering uses process-local authority only; certification stays at capture and
+        // asynchronous publication/transport boundaries, never in a computed view getter.
+        legacyHistoryNoticeState.visible(matching: { expected in
+            guard let binding = Self.legacyWatchBinding(in: profiles, activeID: activeID) else { return false }
+            return expected.matchesPresentation(owner: CredentialScopeRegistry.shared.capture(),
+                session: LegacyWatchOwnership.session(), profile: binding)
+        })
+    }
+    func retireLegacyHistoryNotices() {
+        legacyHistoryNoticeState = .init()
+    }
+    private func currentLegacyNoticeOwner() -> LegacyNoticeOwner? {
+        guard let profile = active,
+              let binding = Self.legacyWatchBinding(in: profiles, activeID: profile.id) else { return nil }
+        let slot = keychainAccount(for: profile)
+        guard case .value(let token) = Keychain.confirmedString(slot), !token.isEmpty else { return nil }
+        return .init(owner: CredentialScopeRegistry.shared.capture(), session: LegacyWatchOwnership.session(),
+                     profile: binding, slot: slot, token: token)
+    }
 #if VORTX_NATIVE_DATA_ENGINE
     private var nativeProjectionTarget: PlaybackMutationTarget?
     private var nativePublishedPlayback: UserProfile.PlaybackPrefs?
@@ -1800,9 +1845,9 @@ final class ProfileStore: ObservableObject {
 
     /// Launch reconciliation for the roster + overlay watch. VortX (doc.vortx.*) is authoritative, so this
     /// no longer reads the Stremio datastore as the source of truth on the normal path. It does three things:
-    ///   1. Runs the libraryItem repair scan FIRST (permanent safety): an old build on the same account can
-    ///      still write the legacy stremiox:* documents that break official Stremio library sync, and any
-    ///      watch history found in them is salvaged into the local cache so nothing is lost.
+    ///   1. Inspects historical libraryItem records FIRST, without rewriting them. Preserved history with
+    ///      only a UUID is not automatically adopted into the current account's local cache; unresolved
+    ///      records produce an owner-scoped safe-recovery notice instead.
     ///   2. Imports the legacy Stremio roster + overlay watch into the VortX account ONCE per account, then
     ///      never reads Stremio for them again on the default path (VortX is authoritative thereafter).
     ///   3. Keeps the legacy two-way Stremio sync alive ONLY while the opt-in "also sync to Stremio" mirror
@@ -1812,10 +1857,24 @@ final class ProfileStore: ObservableObject {
         return // Native imports use authenticated account-qualified source receipts, never this legacy repair.
 #else
         guard let key = Keychain.string(Self.primaryTokenAccount), !key.isEmpty else { return }
-        Task { [weak self] in
+        let inspectionOwner = CredentialScopeRegistry.shared.capture()
+        let inspectionSession = LegacyWatchOwnership.session()
+        // The scan is of the primary account, not an own-account profile selected in the UI.
+        let inspectionNoticeOwner = currentLegacyNoticeOwner().flatMap {
+            $0.matchesCredential(slot: Self.primaryTokenAccount, token: key) ? $0 : nil
+        }
+        Task { @MainActor [weak self] in
             guard let self else { return }
-            let salvaged = await ProfileSync.prepare(authKey: key)
-            if !salvaged.isEmpty { await MainActor.run { self.migrateSalvagedWatch(salvaged) } }
+            let recovery = await ProfileSync.prepare(authKey: key)
+            guard !Task.isCancelled, CredentialScopeRegistry.shared.isCurrent(inspectionOwner),
+                  LegacyWatchOwnership.session() == inspectionSession,
+                  Keychain.string(Self.primaryTokenAccount).map({ Data($0.utf8) }) == Data(key.utf8) else { return }
+            if let owner = inspectionNoticeOwner, self.currentLegacyNoticeOwner() == owner {
+                self.legacyHistoryNoticeState.inspected(recovery, owner: owner)
+            }
+            // A UUID-only historical payload is not verified current-account/profile
+            // authority. Keep it at its original remote location for safe recovery/export;
+            // do not guess a local destination from the currently selected roster.
             guard ProfileSync.cloudAvailable == true else { return }   // Stremio custom collection unavailable
             if !Self.stremioImportDone(authKey: key) {
                 await self.importProfilesFromStremio(authKey: key)
@@ -2501,16 +2560,44 @@ final class ProfileStore: ObservableObject {
         // sync 3s after the last write. requestSyncSoon no-ops when not signed into a VortX account.
         let profile = active
         let snapshot = watch
-        pushWatchTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled else { return }
+        let mirrorNoticeOwner = currentLegacyNoticeOwner()
+        // Capture every owner component with the snapshot, never acquire a replacement token
+        // after the debounce. Account generation and session epoch also reject same-byte ABA.
+        let owner = CredentialScopeRegistry.shared.capture()
+        let session = LegacyWatchOwnership.session()
+        let slot = profile.map(keychainAccount(for:))
+        let capturedKey = slot.flatMap { slot -> String? in
+            guard case .value(let token) = Keychain.confirmedString(slot), !token.isEmpty else { return nil }
+            return token
+        }
+        let ownership = profile.flatMap { profile in
+            slot.flatMap { slot in capturedKey.map {
+                LegacyWatchOwnership.Capture(owner: owner, session: session, profileID: profile.id, slot: slot, token: $0)
+            } }
+        }
+        pushWatchTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(3)) } catch { return }
+            guard let self, !Task.isCancelled, CredentialScopeRegistry.shared.isCurrent(owner),
+                  LegacyWatchOwnership.session() == session, self.activeID == profile?.id else { return }
             // VortX authoritative: the overlay rides doc.vortx.byProfile, so always nudge the VortX sync.
             VortXSyncManager.shared.requestSyncSoon()
             // The legacy Stremio overlay write is opt-in (default OFF); it stays dormant unless the mirror is on.
-            if ProfileSync.alsoSyncToStremio,
-               let profile, !profile.usesEngineHistory,
-               let key = Keychain.string(keychainAccount(for: profile)), !key.isEmpty {
-                await ProfileSync.pushWatch(snapshot, profileID: profile.id, authKey: key)
+            if let profile, !profile.usesEngineHistory, let ownership, let capturedKey {
+                let isCurrent: @MainActor () -> Bool = { [weak self] in
+                    guard let self, !Task.isCancelled, ProfileSync.alsoSyncToStremio,
+                          CredentialScopeRegistry.shared.isCurrent(owner), let current = self.active else { return false }
+                    let currentSlot = self.keychainAccount(for: current)
+                    guard case .value(let currentToken) = Keychain.confirmedString(currentSlot) else { return false }
+                    return ownership.matches(owner: CredentialScopeRegistry.shared.capture(), session: LegacyWatchOwnership.session(),
+                        profileID: current.id, usesEngineHistory: current.usesEngineHistory,
+                        slot: currentSlot, token: currentToken)
+                }
+                guard isCurrent() else { return }
+                let result = await ProfileSync.pushWatch(snapshot, profileID: profile.id, authKey: capturedKey, isCurrent: isCurrent)
+                guard isCurrent() else { return }
+                if let owner = mirrorNoticeOwner, self.currentLegacyNoticeOwner() == owner {
+                    self.legacyHistoryNoticeState.mirrored(result, owner: owner)
+                }
             }
         }
     }

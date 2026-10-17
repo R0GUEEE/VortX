@@ -104,6 +104,8 @@ struct ProfilePickerView: View {
     private var visibleProfileError: String? {
         #if VORTX_NATIVE_DATA_ENGINE
         if profilesArePreparing { return nil }
+        #else
+        if let notice = store.legacyHistoryRecoveryNotice { return notice }
         #endif
         return profileAction.errorMessage
     }
@@ -271,6 +273,14 @@ struct ProfilePickerView: View {
             deferredSelection.cancel()
             pinTarget = nil; pinCredential = nil; pinIsForEditing = false
             signInCredential = nil; signInProfileID = nil
+        }
+        #else
+        // Owner changes must invalidate an already-rendered warning, not merely its next getter.
+        .onReceive(NotificationCenter.default.publisher(for: LegacyWatchOwnership.sessionDidChange)) { _ in
+            store.retireLegacyHistoryNotices()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: VortXSyncManager.credentialScopeDidChangeNote)) { _ in
+            store.retireLegacyHistoryNotices()
         }
         #endif
     }
