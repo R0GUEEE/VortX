@@ -12,7 +12,10 @@ import CryptoKit
     static let owner = UUID(uuidString: "90000000-0000-0000-0000-000000000009")!
     static let scope = VortxAccountScope(account: "archive.fixture", ownerProfileID: owner.uuidString)
     static func check(_ value: Bool, _ message: String, line: UInt = #line) {
-        precondition(value, "\(message), line \(line)")
+        guard value else {
+            FileHandle.standardError.write(Data("FAIL: watched archive \(message), line \(line)\n".utf8))
+            exit(1)
+        }
     }
     static func encode(_ value: Any) throws -> Data {
         try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes])

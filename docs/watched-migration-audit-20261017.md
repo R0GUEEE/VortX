@@ -34,8 +34,9 @@ The policy is deliberately bounded:
 - The 96 MiB processing budget is not a measured process-memory ceiling. Large
   legitimate histories may still require a later recovery design; the error
   preserves the original data and asks for support/update, not reset or deletion.
-- Fresh preparation can still accumulate output receipts before retention.
-  This change does not close that separate transient-memory issue.
+- At this initial stage, fresh preparation still accumulated output receipts before
+  retention. The cooperative producer successor below replaces that path; this
+  initial result alone did not close the separate transient-memory issue.
 - Older clients are not certified to process the new compact migration format.
   Full device-memory/performance and all host-state persistence sinks remain
   outside the verified scope.
@@ -44,7 +45,7 @@ Standalone regression: `bash scripts/test-native-watched-archive.sh`.
 
 ## 18 October cooperative producer successor
 
-The next source milestone replaces fresh receipt-array accumulation with a bounded
+This source milestone replaces fresh receipt-array accumulation with a bounded
 stream and durable draft checkpoints. Construction is cheap; an explicit recovery
 worker owns journal loading, strict validation, indexing, compaction and cooperative
 replay. Main-actor callers do not obtain that isolation merely by writing `await`.
@@ -62,10 +63,11 @@ They are finite format/work limits, not a process-memory or device-latency guara
 
 The actual-source watched/session fixtures cover checkpoint/reopen, exact source
 retention, cancelled/revoked work, stale CAS, generic/existential dispatch and closure.
-Final composed-stack gates are retained by the serial phase-A runner. The session's
-final leased replay and repeated whole-history work remain a separate Phase B repair;
-one indivisible decode/hash/encode/file operation is not made preemptible by these
-cooperative item boundaries. Whole-app/UI typechecking and physical performance remain
+Final composed-stack gates are retained by the serial phase-A runner. At this stage,
+final leased replay and repeated whole-history work remained separate Phase B repairs;
+the later sections close only their stated slices. One indivisible decode/hash/encode/file
+operation is not made preemptible by these cooperative item boundaries. Whole-app/UI
+typechecking and physical performance remain
 unverified. No SDK/application package or real account is exercised by these fixtures.
 
 ## 18 October final-session replay slice
@@ -96,3 +98,34 @@ receives a complete cooperative validation; other overlapping history passes rem
 The final sink still synchronously reads, decrypts, compares, encrypts, writes, fsyncs
 and reads back. Indivisible parsing/hashing/serialization, CPU/RSS/UI-latency measurement,
 generic fallback cost, whole-app/SDK compilation and device performance remain open.
+
+## 18 October retry-local preflight slice
+
+Historical retry now obtains an immutable, invocation-local journal snapshot through
+the full strict cooperative validator. Its private construction binds the exact
+archive bytes and authenticated account/owner scope. It is neither a cross-retry
+cache nor current write authority. Per-tuple retry still checks receipt provenance,
+identity and ambiguity; newly fetched receipts retain their strict admission checks.
+
+The write stream is created only on the first genuinely new receipt. It uses that
+validated snapshot rather than repeating the same complete preflight, then retains
+per-record compaction/accounting and current-authority/cancellation checks. A no-new
+retry returns the exact original archive bytes without stream initialization or a
+draft write. Raw stream callers still receive their independent full validation.
+There is no saved-data schema, cap, caller or publication-protocol change.
+
+Actual-source fixtures pass for resolved, offline and no-pending retries; a first-new
+receipt; immutable pending spelling variants and exact source receipts; unknown/null
+and enclosing recovery fields; cancellation and source retirement; stale exact-byte
+CAS, lost acknowledgement, cold strict-reader reopen and reentrant raw-stream denial.
+A diagnostic tests-only run against the prior source failed normally at the intended
+no-new traversal assertion: 56 actual cooperative checkpoints versus 28 expected.
+The repaired source passes the same assertion at 28; offline/no-pending cases report
+20/12 and the changed-retry case reports 30, each matching its source-bound expectation.
+These counts compare traversal structure, not wall-clock speed or memory use, and do
+not detect every possible control-flow change. The synthetic fixture does not mount
+an account or exercise physical-device performance.
+
+Other repeated history work, source parsing, persistence validation, synchronous
+serialization/file operations and temporary memory overlap remain. CPU/RSS/UI-latency,
+whole-app/SDK compilation and device acceptance remain separate open gates.

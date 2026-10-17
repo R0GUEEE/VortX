@@ -331,6 +331,24 @@ enum VortxNativeWatchedArchive {
         }
     }
 
+    /// One retry invocation's immutable preflight, not a cache or publication lease.
+    /// The only initializer performs the full validator; no raw Journal can mint it.
+    fileprivate struct ValidatedJournalSnapshot: Sendable {
+        let archive: Data
+        let scope: VortxAccountScope
+        let journal: Journal
+        init(validating archive: Data, scope: VortxAccountScope,
+             isCurrent: @escaping @Sendable () -> Bool,
+             checkpoint: (@Sendable () async throws -> Void)?) async throws {
+            try scope.validate()
+            let worker = RecoveryWorker(scope: scope, isCurrent: isCurrent, checkpoint: checkpoint)
+            let journal = try await worker.validatedJournal(archive)
+            try Task.checkCancellation()
+            guard isCurrent() else { throw LegacyWatchedBitfieldMigrationEvidence.Failure.admissionRevoked }
+            self.archive = archive; self.scope = scope; self.journal = journal
+        }
+    }
+
     private static func canonical(_ object: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
     }
@@ -361,12 +379,13 @@ enum VortxNativeWatchedArchive {
         try await cooperation.boundary()
         guard let archive else { return nil }
         let worker = RecoveryWorker(scope: scope, isCurrent: isCurrent, checkpoint: checkpoint)
-        let journal = try await worker.validatedJournal(archive)
+        let snapshot = try await ValidatedJournalSnapshot(validating: archive, scope: scope,
+            isCurrent: isCurrent, checkpoint: checkpoint)
+        let journal = snapshot.journal
         let pending = try journal.records(pendingKey)
         guard !pending.isEmpty, let owner = UUID(uuidString: scope.ownerProfileID) else { return archive }
         let indexed = try await worker.index(journal)
-        let stream = try await worker.stream(archive: archive, persist: persist)
-        var changed = false
+        var stream: Stream?
         var seen = Set<Data>()
         for record in pending {
             try await cooperation.boundary()
@@ -384,13 +403,20 @@ enum VortxNativeWatchedArchive {
                 archivedEvidence: matching.map(journal.expanded), isCurrent: isCurrent, fetch: fetch)
             if matching.isEmpty {
                 for receipt in retried.archives {
-                    try await stream.append(receipt, pending: false)
-                    changed = true
+                    // Old pending observations may already be resolved, or still be
+                    // unavailable. Do not recompact history until an actual addition.
+                    let destination: Stream
+                    if let stream { destination = stream }
+                    else {
+                        destination = try await worker.stream(snapshot: snapshot, persist: persist)
+                        stream = destination
+                    }
+                    try await destination.append(receipt, pending: false)
                 }
             }
         }
         try await cooperation.boundary()
-        guard changed else { return archive }
+        guard let stream else { return archive }
         return try await stream.finish()
     }
     enum Failure: LocalizedError, Equatable {
@@ -628,6 +654,16 @@ enum VortxNativeWatchedArchive {
             try await cooperation.boundary()
             return stream
         }
+        fileprivate func stream(snapshot: ValidatedJournalSnapshot,
+                                persist: (@Sendable (Data) async throws -> Void)?) async throws -> Stream {
+            try await cooperation.boundary()
+            guard scope.authenticatedData == snapshot.scope.authenticatedData else { throw Failure.malformed }
+            let stream = Stream(snapshot: snapshot, isCurrent: cooperation.isCurrent,
+                persist: persist, checkpoint: cooperation.checkpoint)
+            try await stream.initialize()
+            try await cooperation.boundary()
+            return stream
+        }
         func readDraft(_ store: VortxEncryptedCheckpointStore) async throws -> Data? {
             try await cooperation.boundary()
             let result = try await store.readMigrationDraftCooperatively(scope: scope,
@@ -721,6 +757,7 @@ enum VortxNativeWatchedArchive {
         private var batchCount = 0
         private var operationActive = false
         private var ready = false
+        private var initialSnapshot: ValidatedJournalSnapshot?
         private let cooperation: Cooperation
         private static let maximumBatchCount = 64
 
@@ -729,6 +766,13 @@ enum VortxNativeWatchedArchive {
              checkpoint: (@Sendable () async throws -> Void)? = nil) throws {
             self.archive = archive; self.scope = scope; self.isCurrent = isCurrent; self.persist = persist
             self.host = [:]
+            cooperation = Cooperation(isCurrent: isCurrent, checkpoint: checkpoint)
+        }
+        fileprivate init(snapshot: ValidatedJournalSnapshot, isCurrent: @escaping @Sendable () -> Bool,
+                         persist: (@Sendable (Data) async throws -> Void)?,
+                         checkpoint: (@Sendable () async throws -> Void)?) {
+            archive = snapshot.archive; scope = snapshot.scope; self.isCurrent = isCurrent; self.persist = persist
+            host = [:]; initialSnapshot = snapshot
             cooperation = Cooperation(isCurrent: isCurrent, checkpoint: checkpoint)
         }
         /// Called on this actor, never in its synchronous initializer. Local working maps
@@ -741,8 +785,15 @@ enum VortxNativeWatchedArchive {
         }
         private func loadIfNeeded() async throws {
             if ready { try requireCurrent(); return }
-            let worker = RecoveryWorker(scope: scope, isCurrent: isCurrent, checkpoint: cooperation.checkpoint)
-            let journal = try await worker.validatedJournal(archive)
+            let journal: Journal
+            if let snapshot = initialSnapshot {
+                try requireCurrent()
+                guard archive == snapshot.archive, scope.authenticatedData == snapshot.scope.authenticatedData else { throw Failure.malformed }
+                journal = snapshot.journal
+            } else {
+                let worker = RecoveryWorker(scope: scope, isCurrent: isCurrent, checkpoint: cooperation.checkpoint)
+                journal = try await worker.validatedJournal(archive)
+            }
             var pool: [String: String] = [:]
             var captured: [String: VortxJSON] = [:], unresolved: [String: VortxJSON] = [:]
             for (key, isPending) in [(evidenceKey, false), (pendingKey, true)] {
@@ -759,7 +810,7 @@ enum VortxNativeWatchedArchive {
             guard size <= maximumJournalBytes else { throw Failure.processingLimit }
             try await cooperation.boundary()
             sources = pool; evidence = captured; pending = unresolved
-            host = journal.host; encodedBytes = size; ready = true
+            host = journal.host; encodedBytes = size; initialSnapshot = nil; ready = true
         }
         func append(_ receipt: Data, pending isPending: Bool) async throws {
             guard !operationActive else { throw Failure.malformed }

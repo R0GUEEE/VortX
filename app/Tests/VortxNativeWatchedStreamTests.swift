@@ -267,6 +267,188 @@ enum VortxNativeWatchedStreamTests {
         let host = try T.object(archive)["hostDocument"] as! T.Object
         return (host[key] as? [Any])?.count ?? 0
     }
+    private static func validationBoundaries(_ archive: Data) async throws -> Int {
+        let visits = Counter()
+        let worker = VortxNativeWatchedArchive.RecoveryWorker(scope: T.scope, isCurrent: { true },
+            checkpoint: { await visits.increment() })
+        try await worker.validate(archive)
+        return await visits.value()
+    }
+    /// Source-bound comparative checks of actual cooperative checkpoint counts, not
+    /// elapsed time or a replacement validator. Counts need not detect every control-
+    /// flow/placement drift; source review and paired semantic checks remain required.
+    @MainActor private static func retrySnapshotTests(directory: URL) async throws {
+        let source = try T.source(bytes: 8_192, count: 2)
+        let prepared = try await T.prepare(source)
+        let unavailable = try await T.prepare(source, available: false)
+        let originalPending = try unavailable.pendingArchives
+        let noncanonical = Data(" \n".utf8) + originalPending[0] + Data("\n".utf8)
+        let allPending = originalPending + [noncanonical]
+        let original = try VortxNativeBootstrapArchive.encode(document: T.encode(["sourceFuture": ["kept": true]]))
+        let base = try VortxNativeBootstrapArchive.encode(
+            document: T.encode(["future": ["kept": NSNull()], "apiKeys": ["provider": "fixture-excluded"]]),
+            material: T.encode(["schemaVersion": 1, "sourceClock": 1000.125]), authenticatedSourceArchive: original)
+        let pending = Data(" \n".utf8) + (try VortxNativeWatchedArchive.retaining(base, pending: allPending, scope: T.scope))
+        let resolved = Data(" \n".utf8) + (try VortxNativeWatchedArchive.retaining(pending, evidence: prepared.archives, scope: T.scope))
+        let complete = try VortxNativeWatchedArchive.retaining(base, evidence: prepared.archives, scope: T.scope)
+        T.check(prepared.archives.count == 2 && allPending.count == 3, "small retry fixture has two tuples and three immutable observations")
+        // A completed tuple retains all pending observations. No-op retry must not
+        // instantiate/recompact a write stream or normalize the original envelope.
+        for (input, offline) in [(resolved, false), (pending, true), (complete, false)] {
+            let strict = try await validationBoundaries(input)
+            let evidenceCount = try count(input, VortxNativeWatchedArchive.evidenceKey)
+            let pendingCount = try count(input, VortxNativeWatchedArchive.pendingKey)
+            let visits = Counter(), fetches = Counter(), writes = Counter()
+            let result = try await VortxNativeWatchedArchive.retryHistorical(input, scope: T.scope,
+                isCurrent: { true }, fetch: { _ in
+                    await fetches.increment()
+                    guard offline else { preconditionFailure("Completed retry unexpectedly fetched") }
+                    throw URLError(.notConnectedToInternet)
+                }, persist: { _ in await writes.increment() }, checkpoint: { await visits.increment() })
+            let expected = pendingCount == 0 ? strict + 1 : strict + evidenceCount + pendingCount + 3
+            let actual = await visits.value()
+            FileHandle.standardError.write(Data("Retry snapshot no-new checkpoints: actual=\(actual) expected=\(expected) strict=\(strict) evidence=\(evidenceCount) pending=\(pendingCount)\n".utf8))
+            T.check(actual == expected, "no-new retry uses one full preflight and no stream initialization traversal")
+            T.check(result == input, "no-new retry retains exact original envelope spelling")
+            T.check(await writes.value() == 0, "no-new retry never publishes or acknowledges a draft")
+            T.check(await fetches.value() == (offline ? 2 : 0), "pending spelling variants never duplicate capture")
+        }
+        let strict = try await validationBoundaries(pending)
+        let pendingCount = try count(pending, VortxNativeWatchedArchive.pendingKey)
+        let visits = Counter(), fetches = Counter(), writes = Counter()
+        let result = try await VortxNativeWatchedArchive.retryHistorical(pending, scope: T.scope,
+            isCurrent: { true }, fetch: { request in await fetches.increment(); return try T.metadata(request) },
+            persist: { _ in await writes.increment() }, checkpoint: { await visits.increment() })!
+        // No original evidence, P original pending records, F fresh receipts: one
+        // preflight + P retry groups + P compaction groups + F appends + 8 boundaries.
+        let changedActual = await visits.value(), changedExpected = strict + 2 * pendingCount + prepared.archives.count + 8
+        FileHandle.standardError.write(Data("Retry snapshot changed checkpoints: actual=\(changedActual) expected=\(changedExpected) strict=\(strict) pending=\(pendingCount) fresh=\(prepared.archives.count)\n".utf8))
+        T.check(changedActual == changedExpected,
+            "first-new retry initializes once from its snapshot without a second strict replay")
+        T.check(await fetches.value() == 2, "lazy retry still validates/captures each missing tuple")
+        T.check(await writes.value() == 1, "tiny changed retry flushes exactly once")
+        T.check(Set(try VortxNativeWatchedArchive.entries(result, key: VortxNativeWatchedArchive.pendingKey)) == Set(allPending),
+            "snapshot path retains canonical and noncanonical pending originals")
+        T.check(Set(try VortxNativeWatchedArchive.entries(result, key: VortxNativeWatchedArchive.evidenceKey)) == Set(prepared.archives),
+            "new receipts retain exact original source and metadata bytes")
+        let beforeEnvelope = try JSONDecoder().decode(VortxJSON.self, from: pending)
+        let afterEnvelope = try JSONDecoder().decode(VortxJSON.self, from: result)
+        for key in ["legacyImportMaterial", "authenticatedSourceArchive", "excludedCredentialPaths"] {
+            T.check(afterEnvelope[key] == beforeEnvelope[key], "snapshot retains outer witness \(key)")
+        }
+        T.check(afterEnvelope["hostDocument"]?["future"] == beforeEnvelope["hostDocument"]?["future"], "unknown/null host values survive")
+        T.check(try VortxNativeWatchedArchive.pendingProfileIDs(result).isEmpty, "only validated matching evidence clears pending display")
+
+        let storeDirectory = directory.appendingPathComponent("retry-snapshot")
+        let key = SymmetricKey(data: Data(repeating: 0x63, count: 32))
+        let store = try VortxEncryptedCheckpointStore(directory: storeDirectory, key: key)
+        try store.retainMigrationDraft(pending, scope: T.scope, authority: Authority())
+        let draftURL = storeDirectory.appendingPathComponent("native-migration-draft-v1-" + T.digest(T.scope.authenticatedData) + ".sealed")
+        let originalCiphertext = try Data(contentsOf: draftURL)
+        // Park first before seed construction, then between seed compaction groups.
+        // The existing watchdog is a hang guard only; expected failures stay typed.
+        let sentinel = MainSentinel()
+        for cancel in [true, false] {
+            let lease = Lease(), gate = BoundaryGate(stop: strict + (cancel ? 4 : 6)), publications = Counter()
+            let task = Task {
+                try await gate.run {
+                    try await VortxNativeWatchedArchive.retryHistorical(pending, scope: T.scope,
+                        isCurrent: { lease.isCurrent() }, fetch: { try T.metadata($0) }, persist: { bytes in
+                            await publications.increment()
+                            try store.retainMigrationDraft(bytes, scope: T.scope, expected: pending, authority: LeaseAuthority(lease: lease))
+                        }, checkpoint: { try await gate.checkpoint() })
+                }
+            }
+            try await gate.waitUntilParked()
+            sentinel.visits += 1
+            T.check(try store.readMigrationDraft(scope: T.scope) == pending, "no draft lock spans snapshot handoff/compaction suspension")
+            if cancel { task.cancel() } else { lease.revoke() }
+            await gate.release()
+            do { _ = try await task.value; preconditionFailure("Cancelled or retired snapshot published") }
+            catch is CancellationError { T.check(cancel, "snapshot cancellation is typed") }
+            catch LegacyWatchedBitfieldMigrationEvidence.Failure.admissionRevoked { T.check(!cancel, "snapshot revocation is typed") }
+            T.check(await publications.value() == 0, "retired snapshot never reaches persistence")
+            T.check(try Data(contentsOf: draftURL) == originalCiphertext, "snapshot cancellation preserves ciphertext")
+        }
+        T.check(sentinel.visits == 2, "main actor advances at both snapshot suspension points")
+        let staleGate = BoundaryGate(stop: strict + 3)
+        let stalePublisher = VortxNativeWatchedArchive.DraftPublisher(expected: pending) { bytes, expected in
+            try store.retainMigrationDraft(bytes, scope: T.scope, expected: expected, authority: Authority())
+        }
+        let stale = Task {
+            try await staleGate.run {
+                try await VortxNativeWatchedArchive.retryHistorical(pending, scope: T.scope, isCurrent: { true },
+                    fetch: { try T.metadata($0) }, persist: { try await stalePublisher.publish($0) },
+                    checkpoint: { try await staleGate.checkpoint() })
+            }
+        }
+        try await staleGate.waitUntilParked()
+        let winner = pending + Data(" \t\n".utf8)
+        try store.retainMigrationDraft(winner, scope: T.scope, expected: pending, authority: Authority())
+        let winnerCiphertext = try Data(contentsOf: draftURL)
+        await staleGate.release()
+        do { _ = try await stale.value; preconditionFailure("Snapshot replaced a concurrent exact-byte winner") }
+        catch VortxNativeError.superseded {}
+        T.check(try Data(contentsOf: draftURL) == winnerCiphertext, "stale snapshot leaves winning ciphertext unchanged")
+        T.check(try store.readMigrationDraft(scope: T.scope) == winner, "stale snapshot leaves winning plaintext unchanged")
+        try store.retainMigrationDraft(pending, scope: T.scope, expected: winner, authority: Authority())
+        let lost = VortxNativeWatchedArchive.DraftPublisher(expected: pending) { bytes, expected in
+            try store.retainMigrationDraft(bytes, scope: T.scope, expected: expected, authority: Authority())
+            throw SimulatedCrash.afterDurableWrite
+        }
+        do { _ = try await VortxNativeWatchedArchive.retryHistorical(pending, scope: T.scope, isCurrent: { true },
+                fetch: { try T.metadata($0) }, persist: { try await lost.publish($0) })
+            preconditionFailure("Missing snapshot lost-ACK fixture error") }
+        catch SimulatedCrash.afterDurableWrite {}
+        let lostCiphertext = try Data(contentsOf: draftURL)
+        do { _ = try await VortxNativeWatchedArchive.retryHistorical(pending, scope: T.scope, isCurrent: { true },
+                fetch: { try T.metadata($0) }, persist: { try await lost.publish($0) })
+            preconditionFailure("Snapshot advanced expected bytes after lost ACK") }
+        catch VortxNativeError.superseded {}
+        T.check(try Data(contentsOf: draftURL) == lostCiphertext, "lost-ACK retry cannot overwrite durable bytes")
+        let cold = try VortxEncryptedCheckpointStore(directory: storeDirectory, key: key)
+        T.check(try cold.readMigrationDraft(scope: T.scope) == result, "old strict reader reopens the exact snapshot result")
+        T.check(try cold.read(scope: T.scope) == nil, "snapshot persistence cannot mount an account")
+
+        var broken = try T.object(pending)
+        var brokenHost = broken["hostDocument"] as! T.Object
+        brokenHost[VortxNativeWatchedArchive.sourcesKey] = [T.digest(source): Data("different-source".utf8).base64EncodedString()]
+        broken["hostDocument"] = brokenHost
+        let negatives: [(Data, VortxAccountScope)] = [
+            (Data("not-json".utf8), T.scope), (try T.encode(broken), T.scope),
+            (Data(#"{"schemaVersion":1,"excludedCredentialPaths":[],"hostDocument":{"authKey":"fixture-not-a-credential"}}"#.utf8), T.scope),
+            (pending, .init(account: "foreign", ownerProfileID: T.owner.uuidString)),
+            (pending, .init(account: T.scope.account, ownerProfileID: UUID().uuidString))]
+        for (bad, scope) in negatives {
+            let badFetches = Counter(), badWrites = Counter()
+            try await rejectedAsync("invalid retry snapshot") {
+                _ = try await VortxNativeWatchedArchive.retryHistorical(bad, scope: scope, isCurrent: { true },
+                    fetch: { request in await badFetches.increment(); return try T.metadata(request) },
+                    persist: { _ in await badWrites.increment() })
+            }
+            T.check(await badFetches.value() == 0, "invalid snapshot never invokes metadata provider")
+            T.check(await badWrites.value() == 0, "invalid snapshot never publishes")
+            let raw = try VortxNativeWatchedArchive.Stream(archive: bad, scope: scope, isCurrent: { true })
+            try await rejectedAsync("raw stream still validates independently") { _ = try await raw.finish() }
+        }
+        // Both raw and seeded initialization enter the same operationActive gate.
+        // Only the raw public path exposes its handle before initialization, so it is
+        // the externally reachable reentrancy boundary exercised here.
+        let reentrantGate = BoundaryGate(stop: 2)
+        let raw = try VortxNativeWatchedArchive.Stream(archive: pending, scope: T.scope, isCurrent: { true },
+            checkpoint: { try await reentrantGate.checkpoint() })
+        let initializing = Task { try await reentrantGate.run { try await raw.finish() } }
+        try await reentrantGate.waitUntilParked()
+        do { try await raw.append(prepared.archives[0], pending: false); preconditionFailure("Reentrant append entered unfinished maps") }
+        catch VortxNativeWatchedArchive.Failure.malformed {}
+        do { _ = try await raw.finish(); preconditionFailure("Reentrant finish published unfinished maps") }
+        catch VortxNativeWatchedArchive.Failure.malformed {}
+        await reentrantGate.release()
+        let unchanged = try await initializing.value
+        T.check(Set(try VortxNativeWatchedArchive.entries(unchanged, key: VortxNativeWatchedArchive.pendingKey)) == Set(allPending),
+            "reentrant rejection preserves original pending map")
+        print("Retry snapshot: one-preflight traversal, lazy no-op, exact history, cancellation, stale CAS, lost ACK, cold read and reentrancy passed")
+    }
     static func run() async throws {
         precondition(CommandLine.arguments.count == 3)
         let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
@@ -274,6 +456,7 @@ enum VortxNativeWatchedStreamTests {
         T.check(directory.path.hasPrefix(repository.appendingPathComponent("app/build/").path), "synthetic draft path is in the disposable runner directory")
         try await gateFailureTests()
         try await workerIsolationAndConservation(directory: directory, repository: repository)
+        try await retrySnapshotTests(directory: directory)
         let key = SymmetricKey(data: Data(repeating: 0x75, count: 32))
         let store = try VortxEncryptedCheckpointStore(directory: directory, key: key)
         let source = try T.source(count: 80)
