@@ -66,13 +66,14 @@ internal class NativeAccountCoordinator(
         internal val owner: VortxNativeOwner?, internal val update: Long?, internal val pendingID: UUID?)
     fun migrationStatus(): MigrationStatus? {
         mounted.get()?.takeIf { accountCurrent(it.account) }?.let { current ->
-            val count = current.session.read().state.optJSONObject("hostDocument")?.optJSONArray("nativeWatchedMigrationPending")?.length() ?: 0
-            val candidates = current.session.read().state.optJSONObject("hostDocument")?.optJSONObject("nativeOwnAccountCandidates")?.length() ?: 0
-            val watchlists = current.session.read().state.optJSONObject("hostDocument")?.optJSONArray("nativeWatchlistMigrationPending")?.length() ?: 0
+            val document = current.session.read().state.optJSONObject("hostDocument")
+            val count = NativeWatchedMigrationStorage.unresolvedCountForStatus(document)
+            val candidates = document?.optJSONObject("nativeOwnAccountCandidates")?.length() ?: 0
+            val watchlists = document?.optJSONArray("nativeWatchlistMigrationPending")?.length() ?: 0
             return MigrationStatus(count, false, watchlists).takeIf { count > 0 || candidates > 0 || watchlists > 0 }
         }
         val pending = pendingImport?.takeIf { it.isCurrent() && accountCurrent(it.account) } ?: return null
-        return MigrationStatus(pending.document.optJSONArray("nativeWatchedMigrationPending")?.length() ?: 0, true,
+        return MigrationStatus(NativeWatchedMigrationStorage.unresolvedCountForStatus(pending.document), true,
             pending.document.optJSONArray("nativeWatchlistMigrationPending")?.length() ?: 0)
     }
     fun captureMigrationTarget(): MigrationTarget {
@@ -98,10 +99,9 @@ internal class NativeAccountCoordinator(
         val operationJob = currentCoroutineContext()[Job]
         val current = { operationJob?.isActive != false && migrationTargetCurrent(target) }
         check(current()) { "Migration target changed" }
-        val history = watchedProducer.retryPending(target.scope, target.document.optJSONArray("nativeWatchedMigrationPending") ?: JSONArray(),
-            target.document.optJSONArray("nativeWatchedMigrationEvidence"), current)
+        val history = watchedProducer.retryPending(target.scope, NativeWatchedMigrationStorage.read(target.document), current)
         val retained = NativeProfileOverlayWitness.parseDocument(nativeWatchedDocumentSnapshot(target.document))
-            .put("nativeWatchedMigrationEvidence", history.archive()).put("nativeWatchedMigrationPending", history.pending())
+        history.storage().writeTo(retained)
         check(current()) { "Migration target changed" }
         // Retrying A never grants authority to import A into a changed B. Current B gets its own
         // capture/batch; historical A evidence is only retained for exact source-bound replay.
@@ -464,7 +464,7 @@ internal class NativeAccountCoordinator(
                 && (capturedUpdate == null || old!!.session.updates.value == capturedUpdate)
         }
         val watched = watchedProducer.prepare(scope, materialDocument, roster, sources,
-            priorArchive?.optJSONArray("nativeWatchedMigrationEvidence"), migrationCurrent)
+            retainedStorage = NativeWatchedMigrationStorage.read(priorArchive), isCurrent = migrationCurrent)
         val preparation = if (unavailable.isNotEmpty() || !watched.isComplete) null else try {
             prepareNativeLegacyMaterial(materialDocument, roster, resolved.modifiedSeconds,
                 sources, ownBaseline, scope, pendingOverlays, watchedMigration = watched)
@@ -506,7 +506,7 @@ internal class NativeAccountCoordinator(
         priorArchive?.optJSONObject("nativeOwnAccountCandidates")?.let {
             archivedDocument.put("nativeOwnAccountCandidates", validateNativeOwnAccountCandidates(it))
         }
-        mergeNativeWatchedArchive(scope, priorArchive, archivedDocument, watched.archive(), watched.pending())
+        mergeNativeWatchedArchive(scope, priorArchive, archivedDocument, watched.storage())
         val archivedSources = retainedSources?.let { JSONObject(it.toString()) } ?: JSONObject()
         sources.forEach { source -> archivedSources.put(source.profileID, JSONObject().put("verifiedStreamingUid", source.verifiedUID)
             .put("sourceDocumentBase64", source.archiveBase64())) }
@@ -530,6 +530,8 @@ internal class NativeAccountCoordinator(
             }
             pending.put(id, record)
         } })
+        // Admission applies to the complete retained host, not just its compact watched journal.
+        nativeWatchedDocumentSnapshot(archivedDocument)
         if (!hasNative && material == null) {
             // Preserve setup across a restart, but do not create a native runtime, publish a
             // checkpoint locator, acknowledge the legacy receipt, or drop unresolved originals.

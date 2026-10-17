@@ -76,6 +76,7 @@ internal data class VortxAccountScope(val accountID: String, val ownerProfileID:
             NativeHostDocument.requireCredentialFree(bootstrap)
         }
         if (state.has("hostDocument")) {
+            NativeWatchedMigrationStorage.read(state.getJSONObject("hostDocument")).requireScope(this)
             state.getJSONObject("hostDocument")
             val excluded = state.getJSONArray("excludedCredentialPaths")
             (0 until excluded.length()).forEach { require(excluded.get(it) is String) }
