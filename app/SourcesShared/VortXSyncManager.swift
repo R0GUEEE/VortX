@@ -251,6 +251,8 @@ final class VortXSyncManager: ObservableObject {
     @Published private(set) var nativeOwnAccountResyncUnavailable: [UUID] = []
     @Published private(set) var nativeOwnAccountOverlayPending: [UUID] = []
     @Published private(set) var nativeWatchedMigrationPending: [UUID] = []
+    private var nativeWatchedPendingTask: Task<Void, Never>?
+    private var nativeWatchedPendingGeneration = UUID()
     @Published private(set) var nativeUnsupportedSettings: [String] = []
     private var nativeLegacyWatchlistPending = Set<String>()
     @Published private(set) var nativeOwnAccountOverlayUnattributed: [UUID] = []
@@ -886,13 +888,45 @@ final class VortXSyncManager: ObservableObject {
             if appliedCatalogAppearance { CatalogPreferences.shared.reloadFromDefaults() }
         }
     }
-    private func nativeBackupSeen(capture: CredentialScopeRegistry.Capture) -> Bool {
-        Keychain.string("vortx.native.backupSeen." + capture.namespace) == "1"
+    // A seen authenticated document blocks seeding even if no receipt byte could be written.
+    // This process-only floor never certifies a successful pull/upload or replaces the durable floor.
+    // Never evict a known account to make another eligible: saturation blocks all unproven seeds.
+    private static let nativeObservedBackupAccountLimit = 64
+    private var nativeObservedBackupAccounts: Set<String> = []
+    private var nativeBackupObservationOverflow = false
+    private enum NativeBackupHistory: Equatable { case seen, confirmedAbsent, unavailable }
+    private func nativeBackupHistory(capture: CredentialScopeRegistry.Capture) -> NativeBackupHistory {
+        guard isCurrent(capture), case .account = capture.scope else { return .unavailable }
+        let result = Keychain.confirmedString("vortx.native.backupSeen." + capture.namespace)
+        guard isCurrent(capture) else { return .unavailable }
+        switch result {
+        case .value("1"): return .seen
+        case .missing:
+            return nativeBackupObservationOverflow || nativeObservedBackupAccounts.contains(capture.namespace) ? .unavailable : .confirmedAbsent
+        case .value, .failure: return .unavailable
+        }
     }
     private func rememberNativeBackup(capture: CredentialScopeRegistry.Capture) -> Bool {
-        guard isCurrent(capture) else { return false }
+        guard isCurrent(capture), case .account = capture.scope else { return false }
+        if nativeObservedBackupAccounts.count < Self.nativeObservedBackupAccountLimit {
+            nativeObservedBackupAccounts.insert(capture.namespace)
+        } else if !nativeObservedBackupAccounts.contains(capture.namespace) {
+            nativeBackupObservationOverflow = true
+        }
         let slot = "vortx.native.backupSeen." + capture.namespace
-        return Keychain.set("1", for: slot) == .success && Keychain.string(slot) == "1"
+        let prior = Keychain.confirmedString(slot)
+        guard isCurrent(capture) else { return false }
+        switch prior {
+        case .value("1"): return true // A certified monotonic floor needs no new mutation.
+        case .value, .failure: return false // Failure may hide unknown target or invalidation bytes.
+        case .missing: break
+        }
+        // Only certified absence permits creating this receipt. confirmedString deliberately
+        // collapses unknown/invalidated/unreadable state; it cannot authorize repair or overwrite.
+        // Neither a failed write nor its volatile override certifies the new receipt.
+        guard Keychain.set("1", for: slot) == .success,
+              Keychain.confirmedString(slot) == .value("1") else { return false }
+        return isCurrent(capture)
     }
     private func nativeHostActor(capture: CredentialScopeRegistry.Capture) throws -> String {
         guard isCurrent(capture) else { throw VortxNativeError.superseded }
@@ -989,9 +1023,31 @@ final class VortXSyncManager: ObservableObject {
         guard isCurrent(capture) else { return }
         nativeOwnAccountResyncUnavailable.removeAll { $0 == profileID }
     }
-    func publishNativeWatchedPending(_ archive: Data?, capture: CredentialScopeRegistry.Capture) throws {
-        guard isCurrent(capture) else { throw VortxNativeError.superseded }
-        nativeWatchedMigrationPending = try VortxNativeWatchedArchive.pendingProfileIDs(archive)
+    private func retireNativeWatchedPendingProjection() {
+        nativeWatchedPendingTask?.cancel()
+        nativeWatchedPendingTask = nil
+        nativeWatchedPendingGeneration = UUID()
+    }
+    func publishNativeWatchedPending(_ archive: Data?, scope: VortxAccountScope,
+        capture: CredentialScopeRegistry.Capture, isCurrentSource: @escaping @Sendable () -> Bool) throws {
+        guard isCurrent(capture), scope.account == capture.namespace, isCurrentSource() else { throw VortxNativeError.superseded }
+        retireNativeWatchedPendingProjection()
+        let generation = nativeWatchedPendingGeneration
+        let worker = VortxNativeWatchedArchive.RecoveryWorker(scope: scope,
+            isCurrent: { CredentialScopeRegistry.shared.isCurrent(capture) && isCurrentSource() })
+        nativeWatchedPendingTask = Task { @MainActor [weak self] in
+            do {
+                let pending = try await worker.pendingProfileIDs(archive)
+                guard let self, !Task.isCancelled, self.isCurrent(capture), isCurrentSource(),
+                      self.nativeWatchedPendingGeneration == generation else { return }
+                self.nativeWatchedMigrationPending = pending
+                self.nativeWatchedPendingTask = nil
+            } catch {
+                // Failed inspection is not evidence that previously pending work completed.
+                guard let self, self.nativeWatchedPendingGeneration == generation else { return }
+                self.nativeWatchedPendingTask = nil
+            }
+        }
     }
     func retryNativeWatchedMigration() async {
         if CoreBridge.shared.hasNativeSession { _ = await syncDown(force: true) }
@@ -1033,9 +1089,17 @@ final class VortXSyncManager: ObservableObject {
             .appendingPathComponent("VortX/native-engine-v1", isDirectory: true)
         let probe = try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(data: keyBytes),
                                                      installationKey: VortxNativeInstallationKey.loadOrCreate())
+        let recoveryCheckpoint: @Sendable () async throws -> Void = { @MainActor [weak self] in
+            guard let self, self.isCurrent(capture), ProfileStore.shared.activeID == selectedProfile,
+                  !enforceMountedFence || mountedSourceFence() else { throw VortxNativeError.superseded }
+        }
+        let initialRecovery = VortxNativeWatchedArchive.RecoveryWorker(scope: scope,
+            isCurrent: { CredentialScopeRegistry.shared.isCurrent(capture) && (!enforceMountedFence || mountedSourceFence()) },
+            checkpoint: recoveryCheckpoint)
+        let checkpoint = try await initialRecovery.authenticatedCheckpoint(probe)
         let remote = try document["nativeSync"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
         let validatedSync = try VortxNativeSession.authenticatedAccountSync(scope: scope, ownerName: owner.name,
-            snapshot: probe.authenticatedCheckpoint(scope: scope), nativeSync: remote, abi: VortxCABI())
+            snapshot: checkpoint, nativeSync: remote, abi: VortxCABI())
         let retainedBaseline = try validatedSync?["legacyImport"]?["baseline"].flatMap { baseline in
             guard [VortxJSON.integer(1), .unsigned(1), .integer(2), .unsigned(2)].contains(baseline["schemaVersion"] ?? .null) else { throw VortxNativeError.invalidSnapshot }
             return try JSONEncoder().encode(baseline)
@@ -1063,31 +1127,29 @@ final class VortXSyncManager: ObservableObject {
         var retainedEnvelopes: [VortxLegacyBootstrapMaterial.RetainedOwnAccountSourceEnvelope] = []
         var pendingOverlays: [String: VortxJSON] = [:]
         var priorSourceArchive: Data?
-        let priorWatchedDraft = try probe.readMigrationDraft(scope: scope)
+        let priorWatchedDraft = try await initialRecovery.readDraft(probe)
         if validatedSync == nil, let priorWatchedDraft {
-            let draft = try JSONDecoder().decode(VortxJSON.self, from: priorWatchedDraft)
-            if let pending = draft["hostDocument"]?["ownAccountOverlayPending"] {
+            let draftHost = try await initialRecovery.hostDocument(priorWatchedDraft)
+            if let pending = draftHost["ownAccountOverlayPending"] {
                 guard case .object(let values) = pending else { throw VortxNativeError.invalidSnapshot }
                 pendingOverlays = values
             }
         }
         priorSourceArchive = priorWatchedDraft
         var watchedArchive = priorWatchedDraft
-        if let host = try probe.readHostPreferences(scope: scope),
-           let archive = try JSONDecoder().decode(VortxNativeHostPreferences.Local.self, from: host).authenticatedSourceArchive {
-            priorSourceArchive = try VortxNativeUnattributedOverlayArchive.retaining(archive,
-                prior: priorSourceArchive, document: Data("{}".utf8), profileIDs: [], scope: scope)
-            watchedArchive = try VortxNativeWatchedArchive.retaining(archive, prior: watchedArchive, scope: scope)
-            try VortxNativeBootstrapArchive.validate(archive)
-            let value = try JSONDecoder().decode(VortxJSON.self, from: archive)
-            if case .object(let pending) = value["hostDocument"]?["ownAccountOverlayPending"] {
+        if let archive = try await initialRecovery.authenticatedSourceArchive(probe) {
+            priorSourceArchive = try await initialRecovery.retainingUnattributed(archive,
+                prior: priorSourceArchive, document: Data("{}".utf8), profileIDs: [])
+            watchedArchive = try await initialRecovery.retaining(archive, prior: watchedArchive)
+            let host = try await initialRecovery.hostDocument(archive)
+            if case .object(let pending) = host["ownAccountOverlayPending"] {
                 for (id, record) in pending {
                     // An unattributed draft remains unattributed even if the current host map
                     // has a different source. Its immutable raw records remain in quarantine.
                     if pendingOverlays[id] == nil || pendingOverlays[id]?["verifiedStreamingUid"] != nil { pendingOverlays[id] = record }
                 }
             }
-            if case .object(let retained) = value["hostDocument"]?["ownAccountSources"] {
+            if case .object(let retained) = host["ownAccountSources"] {
                 for (id, source) in retained {
                     if let profile = UUID(uuidString: id), case .string(let encoded) = source["sourceDocumentBase64"], let data = Data(base64Encoded: encoded) {
                         let envelope = VortxLegacyBootstrapMaterial.RetainedOwnAccountSourceEnvelope(profileID: profile, sourceDocument: data)
@@ -1103,7 +1165,7 @@ final class VortXSyncManager: ObservableObject {
             DiagnosticsLog.log("native-profiles", $0)
         })
         let sourceDocument = try JSONDecoder().decode(VortxJSON.self, from: documentBytes)
-        let firstImportRecovery = try VortxNativeUnattributedOverlayArchive.firstImportRecovery(priorSourceArchive, scope: scope)
+        let firstImportRecovery = try await initialRecovery.firstImportRecovery(priorSourceArchive)
         let resumedPendingOwn = validatedSync == nil ? Set(firstImportRecovery.pending.keys.compactMap(UUID.init(uuidString:))) : []
         if validatedSync == nil {
             // A changed/removed roster cannot reinterpret a sealed own slice as shared or owner.
@@ -1183,6 +1245,8 @@ final class VortXSyncManager: ObservableObject {
             }
         })
         var sources: [VortxLegacyBootstrapMaterial.OwnAccountSource] = []
+        let recovery = VortxNativeWatchedArchive.RecoveryWorker(scope: scope,
+            isCurrent: { (try? authority.withActive {}) != nil }, checkpoint: recoveryCheckpoint)
         // The classifier's admission token binds these exact bytes. Reuse them at encode rather
         // than serializing an unordered dictionary twice across the asynchronous source fetch.
         for binding in captured {
@@ -1237,38 +1301,52 @@ final class VortXSyncManager: ObservableObject {
                 pendingOverlays.removeValue(forKey: source.profileID.uuidString)
             }
         }
+        // Progress drafts contain exact watched evidence and original missing-own disposition,
+        // never an unimported fresh own source. They do not alter the native source fence.
+        let pendingSources = try await recovery.retainingUnattributed(
+            VortxNativeOwnAccountProducer.archive([], pendingOverlays: pendingOverlays), prior: priorSourceArchive,
+            document: documentBytes, profileIDs: Set(pendingOverlays.compactMap { key, value in
+                value["verifiedStreamingUid"] == nil ? UUID(uuidString: key) : nil
+            }), pendingOriginProfileIDs: newlyMissingOwn)
+        watchedArchive = try await recovery.retaining(pendingSources, prior: watchedArchive)
+        let progress = VortxNativeWatchedArchive.DraftPublisher(expected: priorWatchedDraft) { archive, expected in
+            try await probe.retainMigrationDraftCooperatively(archive, scope: scope, expected: expected,
+                authority: authority, checkpoint: recoveryCheckpoint)
+        }
         watchedArchive = try await VortxNativeWatchedArchive.retryHistorical(watchedArchive, scope: scope,
-            isCurrent: { (try? authority.withActive {}) != nil }, fetch: { try await VortxLegacyWatchedMetadataTransport.fetch($0) })
+            isCurrent: { (try? authority.withActive {}) != nil }, fetch: { try await VortxLegacyWatchedMetadataTransport.fetch($0) },
+            persist: { try await progress.publish($0) }, checkpoint: recoveryCheckpoint)
+        let receiptStream = try await recovery.stream(archive: watchedArchive!, persist: { try await progress.publish($0) })
+        let watchedLookup = try await recovery.evidenceLookup(watchedArchive)
         try authority.withActive {}
         let watched = try await VortxLegacyWatchedMigration.prepare(accountID: capture.namespace, ownerProfileID: owner.id,
             document: documentBytes, profileIDs: roster.profiles.filter {
                 $0.isOwner || origins[$0.id] == .shared || (origins[$0.id] == nil && !$0.usesOwnAccount)
             }.map(\.id),
-            ownAccountSources: sources, archivedEvidenceLookup: VortxNativeWatchedArchive.evidenceLookup(watchedArchive, scope: scope),
+            ownAccountSources: sources, archivedEvidenceLookup: watchedLookup,
+            receiptSink: { try await receiptStream.append($0, pending: $1) },
             isCurrent: { (try? authority.withActive {}) != nil }, fetch: { try await VortxLegacyWatchedMetadataTransport.fetch($0) })
+        let watchedJournal = try await receiptStream.finish()
         try authority.withActive {}
         let unattributedIDs = Set(pendingOverlays.compactMap { key, value in value["verifiedStreamingUid"] == nil ? UUID(uuidString: key) : nil })
-        let baseArchive = try VortxNativeUnattributedOverlayArchive.retaining(
+        let baseArchive = try await recovery.retainingUnattributed(
             VortxNativeOwnAccountProducer.archive(sources, pendingOverlays: pendingOverlays), prior: priorSourceArchive,
-            document: documentBytes, profileIDs: unattributedIDs, pendingOriginProfileIDs: newlyMissingOwn, scope: scope)
-        let archive = try VortxNativeWatchedArchive.retaining(baseArchive, prior: watchedArchive,
-            evidence: watched.archives, pending: watched.pendingArchives, scope: scope)
+            document: documentBytes, profileIDs: unattributedIDs, pendingOriginProfileIDs: newlyMissingOwn)
+        let archive = try await recovery.retaining(baseArchive, prior: watchedJournal)
         if !watched.unresolved.isEmpty {
             // Never pair an unimported own source with the existing kernel receipt. Only the
             // self-contained metadata/pending sidecars enter this no-op checkpoint transaction.
-            let pendingSources = try VortxNativeUnattributedOverlayArchive.retaining(
-                VortxNativeOwnAccountProducer.archive([], pendingOverlays: pendingOverlays), prior: baseArchive,
-                document: documentBytes, profileIDs: [], scope: scope)
-            let pendingArchive = try VortxNativeWatchedArchive.retaining(pendingSources, prior: watchedArchive,
-                evidence: watched.archives, pending: watched.pendingArchives, scope: scope)
+            let pendingArchive = try await recovery.retaining(pendingSources, prior: watchedJournal)
+            let pendingIDs = try await recovery.pendingProfileIDs(pendingArchive)
             if enforceMountedFence, CoreBridge.shared.hasNativeSession {
                 _ = try await CoreBridge.shared.mergeNativeAccountDocument(nil, hostRemote: nil, capture: capture,
                     legacyMaterial: nil, sourceAuthority: authority, authenticatedSourceArchive: pendingArchive)
             } else {
-                try probe.retainMigrationDraft(pendingArchive, scope: scope, expected: priorWatchedDraft, authority: authority)
+                try await progress.publish(pendingArchive)
             }
-            guard isCurrent(capture), !Task.isCancelled else { throw VortxNativeError.superseded }
-            nativeWatchedMigrationPending = try VortxNativeWatchedArchive.pendingProfileIDs(pendingArchive)
+            guard isCurrent(capture), !Task.isCancelled, ProfileStore.shared.activeID == selectedProfile else { throw VortxNativeError.superseded }
+            retireNativeWatchedPendingProjection()
+            nativeWatchedMigrationPending = pendingIDs
             throw VortxNativeWatchedArchive.Failure.pending
         }
         let preparation = try VortxLegacyBootstrapMaterial.prepare(document: documentBytes,
@@ -1280,9 +1358,10 @@ final class VortXSyncManager: ObservableObject {
         // Historical orphan receipts are not permission to fetch/reinstall an add-on or guess a
         // removed title's type. Retain them atomically with this account's encrypted checkpoint.
         // Native exports continue to preserve every original legacy cloud carrier unchanged.
-        let preparedArchive = try VortxLegacyMembershipReceiptArchive.appending(preparation.pendingMembershipReceipts,
-            to: archive, scope: scope.account, ownerProfileID: scope.ownerProfileID,
-            sourceDocumentSHA256: SHA256.hash(data: documentBytes).map { String(format: "%02x", $0) }.joined())
+        let preparedArchive = try await recovery.appendingMembership(preparation.pendingMembershipReceipts,
+            to: archive, sourceDocument: documentBytes)
+        guard isCurrent(capture), ProfileStore.shared.activeID == selectedProfile else { throw VortxNativeError.superseded }
+        try authority.withActive {}
         // Held units (issue #262) stay only in the retained original document; name them without values.
         let held = preparation.held.isEmpty ? "" : " held=\(preparation.held.count) held_units=" + VortxLegacyBootstrapMaterial.heldSummary(preparation.held)
         DiagnosticsLog.log("native-profiles", "prepare result=ready pending_membership_receipts=\(preparation.pendingCount)\(held)")
@@ -1326,8 +1405,13 @@ final class VortXSyncManager: ObservableObject {
     /// Used only after a successful authenticated empty response, before any accepted version.
     /// Reopens the exact first bootstrap across a crash between local commit and initial upload.
     private func nativeEmptyAccountDocument(capture: CredentialScopeRegistry.Capture) throws -> [String: Any] {
-        guard isCurrent(capture), lastSyncedVersion == 0, !nativeBackupSeen(capture: capture), account != nil,
+        guard isCurrent(capture), lastSyncedVersion == 0, account != nil,
               let keyBytes = dataKey, keyBytes.count == 32 else { throw VortxNativeError.invalidSnapshot }
+        switch nativeBackupHistory(capture: capture) {
+        case .confirmedAbsent: break
+        case .seen: throw NativeRestoreAdmissionFailure.backupAlreadySeen
+        case .unavailable: throw NativeRestoreAdmissionFailure.backupHistoryUnavailable
+        }
         let directory = try VortxNativeStorage.root()
             .appendingPathComponent("VortX/native-engine-v1", isDirectory: true)
         let store = try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(data: keyBytes), installationKey: VortxNativeInstallationKey.loadOrCreate())
@@ -1472,6 +1556,90 @@ final class VortXSyncManager: ObservableObject {
 
     /// The key never leaves this account owner. Only an absent checkpoint permits a complete
     /// authenticated import/native-carrier adoption; failed reads/decryption never mean absence.
+    private enum NativeRestoreAdmissionFailure: String, Error {
+        case superseded, cancelled
+        case accountDocumentUnavailable = "account_document_unavailable"
+        case unexpectedUnchanged = "unexpected_unchanged"
+        case staleDocument = "stale_document"
+        case backupAlreadySeen = "backup_already_seen"
+        case backupHistoryUnavailable = "backup_history_unavailable"
+        case emptyBootstrapRejected = "empty_bootstrap_rejected"
+        case emptySeedRejected = "empty_seed_rejected"
+        case emptySeedUnconfirmed = "empty_seed_unconfirmed"
+        case rosterUnavailable = "full_roster_unavailable"
+        case keyUnavailable = "data_key_unavailable"
+        case invalidKey = "data_key_invalid"
+        case ownersUnavailable = "owner_attribution_unavailable"
+        case selectionUnavailable = "profile_selection_unavailable"
+
+        var stage: String {
+            switch self {
+            case .accountDocumentUnavailable, .unexpectedUnchanged, .staleDocument: return "account_pull"
+            case .backupAlreadySeen, .backupHistoryUnavailable, .emptyBootstrapRejected: return "empty_account_history"
+            case .emptySeedRejected, .emptySeedUnconfirmed: return "empty_account_seed"
+            default: return "account_admission"
+            }
+        }
+        var status: String {
+            switch self {
+            case .backupAlreadySeen, .backupHistoryUnavailable, .emptyBootstrapRejected,
+                 .emptySeedRejected, .emptySeedUnconfirmed: return "empty_account_attribution_unavailable"
+            case .ownersUnavailable, .selectionUnavailable: return "profile_attribution_unavailable"
+            default: return "account_document_unavailable"
+            }
+        }
+        var retired: Bool { self == .superseded || self == .cancelled }
+    }
+    private struct NativeRestoreDocument {
+        let document: [String: Any]
+        let roster: ProfileRosterSnapshot
+        let keyBytes: Data
+        let owners: [UserProfile]
+        let selectedProfile: UUID
+    }
+    /// The unchanged admission gates are explicit so every preflight refusal has a fixed,
+    /// non-sensitive reason. This does not mount, acknowledge, or relax empty-account authority.
+    private func nativeRestoreDocument(_ pulled: VersionedPull,
+        capture: CredentialScopeRegistry.Capture, selectedProfile: UUID?, generation: UUID) async throws -> NativeRestoreDocument {
+        func requireCurrent() throws {
+            guard isCurrent(capture), nativeCheckpointGeneration == generation,
+                  ProfileStore.shared.activeID == selectedProfile else { throw NativeRestoreAdmissionFailure.superseded }
+            guard !Task.isCancelled else { throw NativeRestoreAdmissionFailure.cancelled }
+        }
+        try requireCurrent()
+        let document: [String: Any]
+        switch pulled {
+        case .doc(let value, let version):
+            guard version >= lastSyncedVersion else { throw NativeRestoreAdmissionFailure.staleDocument }
+            document = value
+        case .empty:
+            let value: [String: Any]
+            do { value = try nativeEmptyAccountDocument(capture: capture) }
+            catch let failure as NativeRestoreAdmissionFailure { throw failure }
+            catch { throw NativeRestoreAdmissionFailure.emptyBootstrapRejected }
+            try requireCurrent()
+            let accepted: [String: Any]?
+            do { accepted = try await publishDetachedNativeSeed(value, capture: capture) }
+            catch {
+                try requireCurrent()
+                throw NativeRestoreAdmissionFailure.emptySeedRejected
+            }
+            try requireCurrent()
+            guard let accepted else { throw NativeRestoreAdmissionFailure.emptySeedUnconfirmed }
+            document = accepted
+        case .unchanged: throw NativeRestoreAdmissionFailure.unexpectedUnchanged
+        case .failed: throw NativeRestoreAdmissionFailure.accountDocumentUnavailable
+        }
+        try requireCurrent()
+        guard let roster = Self.resolveRoster(from: document, fullOnly: true) else { throw NativeRestoreAdmissionFailure.rosterUnavailable }
+        guard let keyBytes = dataKey else { throw NativeRestoreAdmissionFailure.keyUnavailable }
+        guard keyBytes.count == 32 else { throw NativeRestoreAdmissionFailure.invalidKey }
+        let owners = roster.profiles.filter(\.isOwner)
+        guard owners.count == 1 else { throw NativeRestoreAdmissionFailure.ownersUnavailable }
+        guard let selectedProfile else { throw NativeRestoreAdmissionFailure.selectionUnavailable }
+        return NativeRestoreDocument(document: document, roster: roster, keyBytes: keyBytes, owners: owners, selectedProfile: selectedProfile)
+    }
+
     @discardableResult
     func restoreNativeCheckpoint(credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil,
                                  userInitiated: Bool = false) async -> Bool {
@@ -1482,17 +1650,35 @@ final class VortXSyncManager: ObservableObject {
             return false
         }
         if let pending = nativeCheckpointTask, nativeCheckpointCapture == capture, nativeCheckpointProfile == selectedProfile {
-            return await pending.value
+            let joinedGeneration = nativeCheckpointGeneration
+            DiagnosticsLog.log("native-profiles", "restore result=joined reason=in_flight")
+            let result = await pending.value
+            guard isCurrent(capture), !Task.isCancelled, nativeCheckpointGeneration == joinedGeneration,
+                  ProfileStore.shared.activeID == selectedProfile else {
+                DiagnosticsLog.log("native-profiles", "restore result=joined_complete outcome=unavailable reason=superseded_or_cancelled")
+                return false
+            }
+            DiagnosticsLog.log("native-profiles", "restore result=joined_complete outcome=\(result ? "ready" : "unavailable")")
+            return result
         }
         if let failure = nativeRecoveryFailure, failure.capture == capture, failure.profileID == selectedProfile,
-           !failure.backoff.permitsAttempt(at: Date(), userInitiated: userInitiated) { return false }
-        let generation = UUID(); nativeCheckpointGeneration = generation; nativeProfileEditConflicts = []; nativeAddonEditConflicts = []; nativeOwnAccountResyncUnavailable = []; nativeOwnAccountOverlayPending = []; nativeOwnAccountOverlayUnattributed = []; nativeWatchedMigrationPending = []
+           !failure.backoff.permitsAttempt(at: Date(), userInitiated: userInitiated) {
+            DiagnosticsLog.log("native-profiles", "restore result=not_started reason=backoff")
+            return false
+        }
+        let generation = UUID(); nativeCheckpointGeneration = generation; nativeProfileEditConflicts = []; nativeAddonEditConflicts = []; nativeOwnAccountResyncUnavailable = []; nativeOwnAccountOverlayPending = []; nativeOwnAccountOverlayUnattributed = []; retireNativeWatchedPendingProjection(); nativeWatchedMigrationPending = []
         nativeUnsupportedSettings = []; nativeLegacyWatchlistPending = []
         let previous = nativeCheckpointTask; previous?.cancel(); _ = await previous?.value
-        guard isCurrent(capture), nativeCheckpointGeneration == generation else { return false }
+        guard isCurrent(capture), nativeCheckpointGeneration == generation else {
+            DiagnosticsLog.log("native-profiles", "restore result=not_started reason=superseded")
+            return false
+        }
         nativeCheckpointCapture = capture; nativeCheckpointProfile = selectedProfile
         let task = Task { @MainActor [weak self] () -> Bool in
-            guard let self else { return false }
+            guard let self else {
+                DiagnosticsLog.log("native-profiles", "restore result=not_started reason=owner_released")
+                return false
+            }
             defer {
                 if self.nativeCheckpointGeneration == generation {
                     if self.isCurrent(capture), ProfileStore.shared.activeID == selectedProfile {
@@ -1509,35 +1695,46 @@ final class VortXSyncManager: ObservableObject {
                     self.nativeCheckpointTask = nil; self.nativeCheckpointCapture = nil; self.nativeCheckpointProfile = nil
                 }
             }
-            guard self.isCurrent(capture), !Task.isCancelled else { return false }
+            guard self.isCurrent(capture), !Task.isCancelled else {
+                DiagnosticsLog.log("native-profiles", "restore result=not_started reason=superseded_or_cancelled")
+                return false
+            }
             self.nativeCheckpointStatus = "restoring"
             DiagnosticsLog.log("native-profiles", "restore result=started")
             // Global ProfileStore is not account-attribution evidence. Pin the owner from this
             // freshly authenticated/decrypted account roster, including historical PIN-bound IDs.
             let pulled = await self.pullDocVersionedResult(credentialCapture: capture)
             if case .failed(retryable: true) = pulled {
-                return await self.restoreOfflineNativeCheckpoint(capture: capture, selectedProfile: selectedProfile, generation: generation)
-            }
-            let document: [String: Any]
-            switch pulled {
-            case .doc(let value, let version) where version >= self.lastSyncedVersion: document = value
-            case .empty:
-                guard let value = try? self.nativeEmptyAccountDocument(capture: capture),
-                      let accepted = try? await self.publishDetachedNativeSeed(value, capture: capture) else {
-                    self.nativeCheckpointStatus = "empty_account_attribution_unavailable"; return false
+                let restored = await self.restoreOfflineNativeCheckpoint(capture: capture, selectedProfile: selectedProfile, generation: generation)
+                if !restored {
+                    if !self.isCurrent(capture) || Task.isCancelled || self.nativeCheckpointGeneration != generation
+                        || ProfileStore.shared.activeID != selectedProfile {
+                        DiagnosticsLog.log("native-profiles", "restore result=aborted stage=offline_restore reason=superseded_or_cancelled")
+                    } else { DiagnosticsLog.log("native-profiles", "restore result=failed stage=offline_restore reason=checkpoint_unavailable") }
                 }
-                document = accepted
-            default: self.nativeCheckpointStatus = "account_document_unavailable"; return false
+                return restored
             }
-            guard self.isCurrent(capture), !Task.isCancelled,
-                  let roster = Self.resolveRoster(from: document, fullOnly: true),
-                  let keyBytes = self.dataKey, keyBytes.count == 32 else {
-                if self.isCurrent(capture) { self.nativeCheckpointStatus = "account_document_unavailable" }; return false
+            let admitted: NativeRestoreDocument
+            do {
+                admitted = try await self.nativeRestoreDocument(pulled, capture: capture, selectedProfile: selectedProfile, generation: generation)
+            } catch {
+                let failure: NativeRestoreAdmissionFailure
+                if !self.isCurrent(capture) || self.nativeCheckpointGeneration != generation || ProfileStore.shared.activeID != selectedProfile {
+                    failure = .superseded
+                } else if Task.isCancelled { failure = .cancelled }
+                else { failure = (error as? NativeRestoreAdmissionFailure) ?? .accountDocumentUnavailable }
+                if !failure.retired, self.isCurrent(capture), self.nativeCheckpointGeneration == generation,
+                   ProfileStore.shared.activeID == selectedProfile { self.nativeCheckpointStatus = failure.status }
+                DiagnosticsLog.log("native-profiles", "restore result=\(failure.retired ? "aborted" : "failed") stage=\(failure.stage) reason=\(failure.rawValue)")
+                return false
             }
-            let owners = roster.profiles.filter(\.isOwner)
-            guard owners.count == 1, let selectedProfile else {
-                self.nativeCheckpointStatus = "profile_attribution_unavailable"; return false
+            guard self.isCurrent(capture), !Task.isCancelled, self.nativeCheckpointGeneration == generation,
+                  ProfileStore.shared.activeID == selectedProfile else {
+                DiagnosticsLog.log("native-profiles", "restore result=aborted stage=account_admission reason=superseded_or_cancelled")
+                return false
             }
+            let document = admitted.document, roster = admitted.roster, keyBytes = admitted.keyBytes
+            let owners = admitted.owners, selectedProfile = admitted.selectedProfile
             var stage = "account_preflight"
             do {
                 let scope = VortxAccountScope(account: capture.namespace, ownerProfileID: owners[0].id.uuidString)
@@ -2432,6 +2629,7 @@ final class VortXSyncManager: ObservableObject {
         nativeAddonEditConflicts = []
         nativeOwnAccountResyncUnavailable = []
         nativeOwnAccountOverlayPending = []
+        retireNativeWatchedPendingProjection()
         nativeWatchedMigrationPending = []
         nativeUnsupportedSettings = []; nativeLegacyWatchlistPending = []
         nativeOwnAccountOverlayUnattributed = []
@@ -2463,6 +2661,7 @@ final class VortXSyncManager: ObservableObject {
         nativeAddonEditConflicts = []
         nativeOwnAccountResyncUnavailable = []
         nativeOwnAccountOverlayPending = []
+        retireNativeWatchedPendingProjection()
         nativeWatchedMigrationPending = []
         nativeUnsupportedSettings = []; nativeLegacyWatchlistPending = []
         nativeOwnAccountOverlayUnattributed = []
@@ -3138,14 +3337,28 @@ final class VortXSyncManager: ObservableObject {
     private enum VersionedPull { case doc(doc: [String: Any], version: Int); case unchanged(version: Int); case empty; case failed(retryable: Bool) }
     private func pullDocVersionedResult(credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil,
                                         ifNoneMatch: Int? = nil) async -> VersionedPull {
+        enum FailureReason: String {
+            case superseded
+            case dataKeyUnavailable = "data_key_unavailable"
+            case conditionalResponseInvalid = "conditional_response_invalid"
+            case responseInvalid = "response_invalid"
+            case documentMissing = "document_missing"
+            case versionInvalid = "version_invalid"
+            case backupMarkerUnavailable = "backup_marker_unavailable"
+        }
+        func failed(_ reason: FailureReason) -> VersionedPull {
+            DiagnosticsLog.log("sync", "operation=pull result=failed reason=\(reason.rawValue)")
+            return .failed(retryable: false)
+        }
         let capture = suppliedCapture ?? credentialAuthority.capture()
-        guard isCurrent(capture), dataKey != nil else { return .failed(retryable: false) }
+        guard isCurrent(capture) else { return failed(.superseded) }
+        guard dataKey != nil else { return failed(.dataKeyUnavailable) }
         var etag: String?
         let (code, json) = await request("GET", "/v1/backup", auth: true, credentialCapture: capture,
                                          ifNoneMatch: ifNoneMatch, receiveETag: { etag = $0 })
-        guard isCurrent(capture) else { return .failed(retryable: false) }
+        guard isCurrent(capture) else { return failed(.superseded) }
         if code == 304 {
-            guard let ifNoneMatch, etag == "\"\(ifNoneMatch)\"" else { return .failed(retryable: false) }
+            guard let ifNoneMatch, etag == "\"\(ifNoneMatch)\"" else { return failed(.conditionalResponseInvalid) }
             return .unchanged(version: ifNoneMatch)
         }
         if code == 404 { return .empty }                                  // no backup yet
@@ -3155,12 +3368,12 @@ final class VortXSyncManager: ObservableObject {
             DiagnosticsLog.log("sync", "operation=pull result=failed httpStatus=\(code)")
             return .failed(retryable: code == 0 || code >= 500)
         }
-        guard let json else { return .failed(retryable: false) }
-        guard let docStr = json["document"] as? String, !docStr.isEmpty else { return .failed(retryable: false) }
+        guard let json else { return failed(.responseInvalid) }
+        guard let docStr = json["document"] as? String, !docStr.isEmpty else { return failed(.documentMissing) }
         // `version` stays `as? Int` (Swift's Int is 64-bit on every platform this app targets), so an epoch-ms
         // version is carried whole. Never narrow this to a 32-bit type: a truncated version corrupts the AAD and
         // GCM auth then fails on every Apple / web doc.
-        guard let version = Self.documentVersion(json["version"]) else { return .failed(retryable: false) }
+        guard let version = Self.documentVersion(json["version"]) else { return failed(.versionInvalid) }
         // A doc we cannot open is NOT an empty account. Refusing it (rather than falling through to a nil that
         // reads as "nothing there") is what keeps a decrypt-miss / ratchet refusal from being pushed over.
         guard let pt = openSyncDocument(docStr, version: version),
@@ -3169,7 +3382,7 @@ final class VortXSyncManager: ObservableObject {
             return .failed(retryable: false)
         }
 #if VORTX_NATIVE_DATA_ENGINE
-        guard rememberNativeBackup(capture: capture) else { return .failed(retryable: false) }
+        guard rememberNativeBackup(capture: capture) else { return failed(.backupMarkerUnavailable) }
 #endif
         return .doc(doc: obj, version: version)
     }

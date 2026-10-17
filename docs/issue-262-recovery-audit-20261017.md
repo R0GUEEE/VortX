@@ -153,3 +153,50 @@ unchanged. No new app build is authorized by this source repair. A future review
 build and affected-device checks remain necessary before calling issue #262 resolved.
 The website safety change is committed locally as `f0687ce`; it has not been pushed,
 built or deployed. The existing production website is unchanged.
+
+## 18 October follow-up: settings inspection and silent restore admission
+
+A newer diagnostic export repeatedly reports an opaque preference inside the settings
+payload before native preparation. Its masked path does not identify the customer's
+exact value. An old server-stop entry is followed by a later server boot; it is not proof
+that the current failure is a loopback-server outage.
+
+The current producer accepts literal profile names and single-grapheme avatars which
+can begin with `[` or `{`. The inspector now recognizes only the actual settings-domain
+JSON-Data roster, UUID/name/avatar-shaped rows, and their direct display fields. Decoded
+containers, unrelated fields and provider-authored identities retain ordinary inspection.
+Unknown noncredential values survive; original inputs are unchanged. Archived roster
+Data contains the inspected re-encoding, not uninspected duplicate-key source bytes.
+
+Issue 265's early restore guards now report fixed, non-sensitive admission reasons.
+Backup history distinguishes certified absence from unavailable storage. Certified `1`
+needs no new write; only certified missing permits initial receipt creation. Unknown or
+invalidated secure state is not overwritten or treated as permission to seed an empty
+account. A bounded process-local observation floor is denial-only, not durable ACK.
+Persisted invalidation still requires a separately verified recovery path; it is not
+silently cleared. No installation/account key or checkpoint is reset.
+
+A separate structured-JSON admission check rejects duplicate decoded keys, including
+escaped and canonically equivalent Unicode collisions, before returning an archive.
+A shared temporary UTF-8 view lets Foundation and this check inspect valid UTF-16/32
+carriers consistently, including encodings the raw platform decoder rejects. Stored
+noncredential String/Base64 bytes are not replaced by that inspection view.
+Unambiguous authenticated source String/Base64 bytes and their hashes stay exact.
+The scanner adds an explicit raw-JSON depth limit of 128; this also rejects excessively
+deep credential subtrees which the old dictionary sanitizer could discard without
+traversal. Rejection preserves the original input rather than truncating or replacing it.
+It adds no byte-size, numeric-magnitude or numeric-token limit. Foundation still parses
+the inspection view first, so this is not a complete memory/CPU bound. Completely
+untranscodable malformed Unicode, plist ambiguity and already-materialized external
+duplicates remain outside this bounded check's guarantee.
+
+Selected source gates use `scripts/test-native-migration-phase-a.sh` with `bootstrap`,
+`restore`, `publication` or `parse`. Each stage retains immutable inputs and command
+receipts and runs serially at low priority. Restore has 218 focused synthetic checks;
+publication has 57 source-wiring checks. Bootstrap passes 192 structured-carrier
+permutations, 50 normalized fragment journeys, ten object encoding/BOM combinations,
+duplicate/credential/depth/byte-conservation controls and the prior profile/archive
+groups. Raw Foundation accepted 41/50 fragments and 9/10 objects on the test host;
+these observations do not replace the unconditional normalized-production checks.
+Parse is syntax only, not target/SDK typechecking.
+No new app build, real-account operation, device acceptance or issue closure is implied.

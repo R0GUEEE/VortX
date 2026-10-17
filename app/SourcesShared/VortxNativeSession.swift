@@ -268,6 +268,13 @@ protocol VortxCheckpointStore: Sendable {
     func readHostPreferences(scope: VortxAccountScope) throws -> Data?
     func readLegacyMaterial(scope: VortxAccountScope) throws -> Data?
     func readLegacyProfileEdits(scope: VortxAccountScope) throws -> VortxJSON?
+    func readMigrationDraft(scope: VortxAccountScope) throws -> Data?
+    /// A requirement, not extension-only dispatch: encrypted stores may snapshot under
+    /// their file lock, then replay outside it. nil still means genuinely absent only.
+    func readMigrationDraftCooperatively(scope: VortxAccountScope,
+        isCurrent: @escaping @Sendable () -> Bool,
+        checkpoint: (@Sendable () async throws -> Void)?) async throws -> Data?
+    func retainMigrationDraft(_ archive: Data, scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws
     func commit(_ snapshot: String, scope: VortxAccountScope, hostPreferences: Data) throws
 }
 /// Optional external-source authentication lease. Its implementation linearizes credential
@@ -279,6 +286,19 @@ extension VortxCheckpointStore {
     func readHostPreferences(scope: VortxAccountScope) throws -> Data? { nil }
     func readLegacyMaterial(scope: VortxAccountScope) throws -> Data? { nil }
     func readLegacyProfileEdits(scope: VortxAccountScope) throws -> VortxJSON? { nil }
+    func readMigrationDraft(scope: VortxAccountScope) throws -> Data? { nil }
+    /// Existing stores keep their synchronous reader. Run it on the explicit recovery
+    /// actor and strictly validate its result; never cast or trust unchecked raw bytes.
+    func readMigrationDraftCooperatively(scope: VortxAccountScope,
+        isCurrent: @escaping @Sendable () -> Bool,
+        checkpoint: (@Sendable () async throws -> Void)? = nil) async throws -> Data? {
+        let worker = VortxNativeWatchedArchive.RecoveryWorker(scope: scope,
+            isCurrent: isCurrent, checkpoint: checkpoint)
+        return try await worker.readSynchronousDraft(self)
+    }
+    func retainMigrationDraft(_ archive: Data, scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws {
+        throw VortxNativeError.unavailable
+    }
     func commit(_ snapshot: String, scope: VortxAccountScope, hostPreferences: Data) throws { throw VortxNativeError.unavailable }
 }
 
@@ -344,19 +364,53 @@ final class VortxEncryptedCheckpointStore: VortxCheckpointStore, @unchecked Send
     /// A draft cannot mount an account, pin an owner, or certify an import. It only retains exact
     /// authenticated recovery evidence before the first complete kernel checkpoint exists.
     func readMigrationDraft(scope: VortxAccountScope) throws -> Data? {
+        guard let archive = try readMigrationDraftBytes(scope: scope) else { return nil }
+        try VortxNativeWatchedArchive.validate(archive, scope: scope)
+        return archive
+    }
+    /// File/decrypt work is synchronous under the file lock; strict replay is outside it.
+    /// This private read never escapes without validation through one of the public readers.
+    private func readMigrationDraftBytes(scope: VortxAccountScope) throws -> Data? {
         Self.migrationDraftLock.lock(); defer { Self.migrationDraftLock.unlock() }
         try scope.validate()
         let bytes: Data
         do { bytes = try Data(contentsOf: migrationDraftURL(scope)) }
         catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
         let archive = try AES.GCM.open(AES.GCM.SealedBox(combined: bytes), using: key, authenticating: migrationDraftAAD(scope))
-        try VortxNativeWatchedArchive.validate(archive, scope: scope)
+        return archive
+    }
+    func readMigrationDraftCooperatively(scope: VortxAccountScope,
+        isCurrent: @escaping @Sendable () -> Bool,
+        checkpoint: (@Sendable () async throws -> Void)? = nil) async throws -> Data? {
+        try Task.checkCancellation()
+        guard isCurrent() else { throw VortxNativeError.superseded }
+        guard let archive = try readMigrationDraftBytes(scope: scope) else {
+            try Task.checkCancellation()
+            guard isCurrent() else { throw VortxNativeError.superseded }
+            return nil
+        }
+        let worker = VortxNativeWatchedArchive.RecoveryWorker(scope: scope, isCurrent: isCurrent, checkpoint: checkpoint)
+        try await worker.validate(archive)
         return archive
     }
     func retainMigrationDraft(_ archive: Data, scope: VortxAccountScope, expected: Data? = nil, authority: any VortxMutationAuthority) throws {
-        Self.migrationDraftLock.lock(); defer { Self.migrationDraftLock.unlock() }
         try scope.validate(); try VortxNativeWatchedArchive.validate(archive, scope: scope)
+        try installValidatedMigrationDraft(archive, scope: scope, expected: expected, authority: authority)
+    }
+    func retainMigrationDraftCooperatively(_ archive: Data, scope: VortxAccountScope, expected: Data? = nil,
+        authority: any VortxMutationAuthority, checkpoint: (@Sendable () async throws -> Void)? = nil) async throws {
+        try scope.validate()
+        let worker = VortxNativeWatchedArchive.RecoveryWorker(scope: scope,
+            isCurrent: { (try? authority.withActive {}) != nil }, checkpoint: checkpoint)
+        try await worker.validate(archive)
+        try installValidatedMigrationDraft(archive, scope: scope, expected: expected, authority: authority)
+    }
+    /// Only fully validated immutable bytes reach this private sink. Validation never carries
+    /// a file lock or publication lease over suspension; CAS and durable readback stay atomic.
+    private func installValidatedMigrationDraft(_ archive: Data, scope: VortxAccountScope,
+        expected: Data?, authority: any VortxMutationAuthority) throws {
         guard archive.count <= 48 * 1_024 * 1_024 else { throw VortxNativeError.invalidSnapshot }
+        Self.migrationDraftLock.lock(); defer { Self.migrationDraftLock.unlock() }
         try authority.withActive {
             try Task.checkCancellation()
             var current: Data?
@@ -1247,6 +1301,24 @@ actor VortxNativeSession {
     }
     func authenticatedSourceArchive() throws -> Data? {
         try lease.withActive { hostPreferences.local.authenticatedSourceArchive }
+    }
+    func migrationDraft(isCurrent: @escaping @Sendable () -> Bool = { true },
+        checkpoint: (@Sendable () async throws -> Void)? = nil) async throws -> Data? {
+        guard !closed else { throw VortxNativeError.closed }
+        try lease.withActive {}
+        let lease = lease
+        let result = try await store.readMigrationDraftCooperatively(scope: scope,
+            isCurrent: { (try? lease.withActive {}) != nil && isCurrent() }, checkpoint: checkpoint)
+        guard !closed else { throw VortxNativeError.closed }
+        try lease.withActive {}
+        return result
+    }
+    func retainMigrationProgress(_ archive: Data, expected: Data?, authority: any VortxMutationAuthority) throws {
+        guard !closed else { throw VortxNativeError.closed }
+        guard !persistenceFailed else { throw VortxNativeError.checkpointUncertain }
+        try lease.withActive {
+            try store.retainMigrationDraft(archive, scope: scope, expected: expected, authority: authority)
+        }
     }
     @discardableResult func dispatch(_ actions: [String], now: UInt64, legacyMaterial: Data? = nil,
                                     hostRemote: VortxJSON? = nil, hostEdits: [VortxNativeHostPreferences.Edit] = [],

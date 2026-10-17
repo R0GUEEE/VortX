@@ -72,6 +72,13 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     private var watchlistProfileGeneration = UUID()
     private var sourceArchive: Data?
     var authenticatedSourceArchive: Data? { lock.withLock { sourceArchive } }
+    func migrationDraft(isCurrent: @escaping @Sendable () -> Bool = { true },
+        checkpoint: (@Sendable () async throws -> Void)? = nil) async throws -> Data? {
+        try await session.migrationDraft(isCurrent: isCurrent, checkpoint: checkpoint)
+    }
+    func retainMigrationProgress(_ archive: Data, expected: Data?, authority: any VortxMutationAuthority) async throws {
+        try await session.retainMigrationProgress(archive, expected: expected, authority: authority)
+    }
     var accountGeneration: UUID { lock.withLock { accountEpoch } }
     /// Queued host/sync edits are busy work, not a new owner. Only acknowledged identity changes
     /// retire this fence; FIFO admission will recheck it after any preceding profile transaction.

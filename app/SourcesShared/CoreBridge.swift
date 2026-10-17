@@ -366,8 +366,12 @@ final class CoreBridge: ObservableObject {
     @MainActor
     private func refreshNativeProfiles(reloadCredentials: Bool = true) throws {
         guard let facade = nativeFacade, let snapshot = facade.profileSnapshot() else { throw VortxNativeError.closed }
-        if let capture = nativeFacadeLock.withLock({ nativeCredentialCapture }) {
-            try VortXSyncManager.shared.publishNativeWatchedPending(facade.authenticatedSourceArchive, capture: capture)
+        if let capture = nativeFacadeLock.withLock({ nativeCredentialCapture }), let binding = facade.watchlistBinding {
+            let sourceFence = facade.captureSourceFence()
+            try VortXSyncManager.shared.publishNativeWatchedPending(facade.authenticatedSourceArchive,
+                scope: binding.scope, capture: capture, isCurrentSource: {
+                    sourceFence() && facade.watchlistBinding == binding
+                })
         }
         let state = snapshot.state
         let profiles = try VortxNativeProfiles.project(state: state, host: snapshot.host, baseline: nativeProfileBaseline)
@@ -630,17 +634,35 @@ final class CoreBridge: ObservableObject {
             profileOverlay: consumedOverlay, framing: pendingOverlay == nil ? .independentNetworkOnly : .authenticatedOverlay, verify: { _ in uid })
         guard nativePlaybackBinding(.native(target.binding))?.0 === facade else { throw VortxNativeError.superseded }
         let scope = VortxAccountScope(account: capture.namespace, ownerProfileID: owner.id.uuidString)
-        let previousArchive = try await VortxNativeWatchedArchive.retryHistorical(facade.authenticatedSourceArchive, scope: scope,
-            isCurrent: { (try? authority.withActive {}) != nil }, fetch: { try await VortxLegacyWatchedMetadataTransport.fetch($0) })
+        let recoveryCheckpoint: @Sendable () async throws -> Void = { @MainActor [weak self] in
+            guard let self, self.nativePlaybackBinding(.native(target.binding))?.0 === facade,
+                  ProfileStore.shared.activeID == target.profile.id else { throw VortxNativeError.superseded }
+        }
+        let recovery = VortxNativeWatchedArchive.RecoveryWorker(scope: scope,
+            isCurrent: { (try? authority.withActive {}) != nil }, checkpoint: recoveryCheckpoint)
+        let savedDraft = try await facade.migrationDraft(isCurrent: { (try? authority.withActive {}) != nil },
+            checkpoint: recoveryCheckpoint)
+        let pendingBase = try await recovery.retaining(VortxNativeOwnAccountProducer.archive([]),
+            prior: facade.authenticatedSourceArchive)
+        let initialArchive = try await recovery.retaining(pendingBase, prior: savedDraft)
+        let progress = VortxNativeWatchedArchive.DraftPublisher(expected: savedDraft) { archive, expected in
+            try await facade.retainMigrationProgress(archive, expected: expected, authority: authority)
+        }
+        let previousArchive = try await VortxNativeWatchedArchive.retryHistorical(initialArchive, scope: scope,
+            isCurrent: { (try? authority.withActive {}) != nil }, fetch: { try await VortxLegacyWatchedMetadataTransport.fetch($0) },
+            persist: { try await progress.publish($0) }, checkpoint: recoveryCheckpoint)
+        let receiptStream = try await recovery.stream(archive: previousArchive!, persist: { try await progress.publish($0) })
+        let watchedLookup = try await recovery.evidenceLookup(previousArchive)
         try authority.withActive {}
         let watched = try await VortxLegacyWatchedMigration.prepare(accountID: capture.namespace, ownerProfileID: owner.id,
             document: consumedOverlay, profileIDs: [owner.id], ownAccountSources: [source],
-            archivedEvidenceLookup: VortxNativeWatchedArchive.evidenceLookup(previousArchive, scope: scope),
+            archivedEvidenceLookup: watchedLookup,
+            receiptSink: { try await receiptStream.append($0, pending: $1) },
             isCurrent: { (try? authority.withActive {}) != nil }, fetch: { try await VortxLegacyWatchedMetadataTransport.fetch($0) })
+        let watchedJournal = try await receiptStream.finish()
         try authority.withActive {}
         if !watched.unresolved.isEmpty {
-            let pendingArchive = try VortxNativeWatchedArchive.retaining(VortxNativeOwnAccountProducer.archive([]), prior: previousArchive,
-                evidence: watched.archives, pending: watched.pendingArchives, scope: scope)
+            let pendingArchive = try await recovery.retaining(VortxNativeOwnAccountProducer.archive([]), prior: watchedJournal)
             _ = try await mergeNativeAccountDocument(nil, hostRemote: nil, capture: capture, legacyMaterial: nil,
                 sourceAuthority: authority, authenticatedSourceArchive: pendingArchive)
             throw VortxNativeWatchedArchive.Failure.pending
@@ -657,8 +679,8 @@ final class CoreBridge: ObservableObject {
         if pendingOverlay != nil, case .object(var pending) = initial.pending {
             pending.removeValue(forKey: target.profile.id.uuidString); remaining = pending
         }
-        let archive = try VortxNativeWatchedArchive.retaining(VortxNativeOwnAccountProducer.archive([source], pendingOverlays: remaining),
-            prior: previousArchive, evidence: watched.archives, pending: watched.pendingArchives, scope: scope)
+        let archive = try await recovery.retaining(VortxNativeOwnAccountProducer.archive([source], pendingOverlays: remaining),
+            prior: watchedJournal)
         try await facade.mutateProfiles([VortxNativeProfiles.rebindAction(profileID: target.profile.id, request: request)], hostEdits: [],
             expectedProfileID: target.profile.id.uuidString, expectedAccountGeneration: accountEpoch, sourceAuthority: authority, authenticatedSourceArchive: archive)
         guard CredentialScopeRegistry.shared.isCurrent(capture), nativeFacade === facade,

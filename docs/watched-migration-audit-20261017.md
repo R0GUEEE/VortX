@@ -41,3 +41,29 @@ The policy is deliberately bounded:
   outside the verified scope.
 
 Standalone regression: `bash scripts/test-native-watched-archive.sh`.
+
+## 18 October cooperative producer successor
+
+The next source milestone replaces fresh receipt-array accumulation with a bounded
+stream and durable draft checkpoints. Construction is cheap; an explicit recovery
+worker owns journal loading, strict validation, indexing, compaction and cooperative
+replay. Main-actor callers do not obtain that isolation merely by writing `await`.
+The encrypted draft reader releases file locks before cooperative validation. The
+session protocol exposes the asynchronous read as a real requirement/witness, with
+a validating worker fallback for generic stores.
+
+Draft installation retains exact expected-byte CAS, account/source attribution and
+current-authority/cancellation checks. A crash after a durable checkpoint resumes the
+remaining tuples; original unresolved snapshots and unknown envelope fields remain
+recoverable. Progress checkpoints are not import, cloud or authentication ACKs.
+Existing limits remain: 32 MiB encoded journal, 96 MiB eager compatibility/batch work,
+64 receipts per uncheckpointed batch, and 48 MiB retained draft-archive admission.
+They are finite format/work limits, not a process-memory or device-latency guarantee.
+
+The actual-source watched/session fixtures cover checkpoint/reopen, exact source
+retention, cancelled/revoked work, stale CAS, generic/existential dispatch and closure.
+Final composed-stack gates are retained by the serial phase-A runner. The session's
+final leased replay and repeated whole-history work remain a separate Phase B repair;
+one indivisible decode/hash/encode/file operation is not made preemptible by these
+cooperative item boundaries. Whole-app/UI typechecking and physical performance remain
+unverified. No SDK/application package or real account is exercised by these fixtures.

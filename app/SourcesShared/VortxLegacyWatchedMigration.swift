@@ -8,13 +8,30 @@ enum VortxLegacyWatchedMigration {
     typealias Evidence = LegacyWatchedBitfieldMigrationEvidence
     typealias Object = [String: Any]
     typealias ArchivedEvidenceLookup = @Sendable (Evidence.Scope, String, Evidence.SourceRowLocator) throws -> [Data]
+    typealias ReceiptSink = @Sendable (Data, Bool) async throws -> Void
+    private static let maximumEagerReceiptBytes = 96 * 1_024 * 1_024
 
-    enum Failure: Error, Equatable { case malformedArchive, staleBinding, ambiguousInventory }
+    enum Failure: Error, Equatable { case malformedArchive, staleBinding, ambiguousInventory, processingLimit }
 
     /// Only capture/replay can construct this authority. A caller cannot supply guessed IDs.
     struct ValidatedRow: Sendable {
-        fileprivate let evidence: Evidence.Evidence
-        fileprivate init(_ evidence: Evidence.Evidence) { self.evidence = evidence }
+        // Import authority needs the exact source and validated bare facts, not the provider
+        // response/inventory. Those bytes are sealed by the receipt sink before this row escapes.
+        private struct Facts: Sendable {
+            let scope: Evidence.Scope
+            let rowLocator: Evidence.SourceRowLocator
+            let metaID: String
+            let watchedBitfield: String
+            let source: Data
+            let sourceSHA256: String
+            let watchedVideoIDs: [String]
+        }
+        private let evidence: Facts
+        fileprivate init(_ value: Evidence.Evidence) {
+            evidence = Facts(scope: value.scope, rowLocator: value.rowLocator, metaID: value.metaID,
+                watchedBitfield: value.watchedBitfield, source: value.source, sourceSHA256: value.sourceSHA256,
+                watchedVideoIDs: value.watchedVideoIDs)
+        }
 
         func videoIDs(accountID: String, profileID: UUID, sourceSHA256: String,
                       verifiedStreamingUID: String?, locator: Evidence.SourceRowLocator,
@@ -68,7 +85,21 @@ enum VortxLegacyWatchedMigration {
         let rows: [ValidatedRow]
         let archives: [Data]
         let unresolved: [Pending]
-        var pendingArchives: [Data] { get throws { try unresolved.map { try $0.archive } } }
+        var pendingArchives: [Data] {
+            get throws {
+                var remaining = maximumEagerReceiptBytes
+                for receipt in archives {
+                    guard receipt.count <= remaining else { throw Failure.processingLimit }
+                    remaining -= receipt.count
+                }
+                return try unresolved.map {
+                    let bytes = try $0.archive
+                    guard bytes.count <= remaining else { throw Failure.processingLimit }
+                    remaining -= bytes.count
+                    return bytes
+                }
+            }
+        }
     }
 
     /// Historical repair deliberately exposes no material-authorizing rows. The host unions the
@@ -91,6 +122,7 @@ enum VortxLegacyWatchedMigration {
     static func prepare(accountID: String, ownerProfileID: UUID, document: Data,
                         profileIDs: [UUID], ownAccountSources: [VortxLegacyBootstrapMaterial.OwnAccountSource] = [],
                         archivedEvidence: [Data] = [], archivedEvidenceLookup: ArchivedEvidenceLookup? = nil,
+                        receiptSink: ReceiptSink? = nil,
                         isCurrent: @escaping @Sendable () -> Bool,
                         fetch: Evidence.MetadataFetcher) async throws -> Preparation {
         try Task.checkCancellation()
@@ -141,8 +173,24 @@ enum VortxLegacyWatchedMigration {
         guard candidates.count <= 10_000, archivedEvidence.count <= 10_000 else { throw Failure.malformedArchive }
         guard archivedEvidence.isEmpty || archivedEvidenceLookup == nil else { throw Failure.malformedArchive }
         var rows = [ValidatedRow](), archives = [Data](), pending = [Pending]()
+        var remainingOutput = maximumEagerReceiptBytes
+        func retainReceipt(_ bytes: Data, pending isPending: Bool) async throws {
+            try requireAdmission(isCurrent)
+            if let receiptSink { try await receiptSink(bytes, isPending) }
+            else if !isPending {
+                guard bytes.count <= remainingOutput else { throw Failure.processingLimit }
+                remainingOutput -= bytes.count
+                archives.append(bytes)
+            }
+            try requireAdmission(isCurrent)
+        }
         // Invalid sidecars are not converted to network misses: a corrupt authenticated archive
         // must remain a visible reconciliation failure. Unrelated retained source tuples are okay.
+        var remainingInput = maximumEagerReceiptBytes
+        for receipt in archivedEvidence {
+            guard receipt.count <= remainingInput else { throw Failure.processingLimit }
+            remainingInput -= receipt.count
+        }
         let retained = try archivedEvidence.map(decodeArchive)
         guard retained.allSatisfy({ exact($0.scope.accountID, accountID) && $0.scope.ownerProfileID == ownerProfileID }) else {
             throw Failure.staleBinding
@@ -166,15 +214,19 @@ enum VortxLegacyWatchedMigration {
                 let replayed = try Evidence.replay(scope: candidate.scope, source: candidate.source,
                     rowLocator: candidate.locator, addon: archive.addon, metadata: archive.metadata, isCurrent: isCurrent)
                 try Task.checkCancellation()
-                rows.append(ValidatedRow(replayed)); archives.append(archive.bytes)
+                try await retainReceipt(archive.bytes, pending: false)
+                rows.append(ValidatedRow(replayed))
                 continue
             }
             switch try await capture(candidate, isCurrent: isCurrent, fetch: fetch) {
             case .accepted(let accepted):
-                rows.append(ValidatedRow(accepted)); archives.append(try encodeArchive(accepted))
+                try await retainReceipt(encodeArchive(accepted), pending: false)
+                rows.append(ValidatedRow(accepted))
             case .pending(let reason):
-                pending.append(.init(scope: candidate.scope, profileID: candidate.scope.profileID, sourceDocument: candidate.source,
-                    sourceDocumentSHA256: digest, row: candidate.locator, reason: reason))
+                let unresolved = Pending(scope: candidate.scope, profileID: candidate.scope.profileID, sourceDocument: candidate.source,
+                    sourceDocumentSHA256: digest, row: candidate.locator, reason: reason)
+                if receiptSink != nil { try await retainReceipt(unresolved.archive, pending: true) }
+                pending.append(unresolved)
             }
         }
         guard isCurrent() else { throw Evidence.Failure.admissionRevoked }
@@ -192,12 +244,26 @@ enum VortxLegacyWatchedMigration {
         try requireAdmission(isCurrent)
         _ = try Evidence.Scope(accountID: accountID, profileID: ownerProfileID, ownerProfileID: ownerProfileID)
         guard archives.count <= 10_000, archivedEvidence.count <= 10_000 else { throw Failure.malformedArchive }
+        // Compatibility API only; production sends one tuple. Bound both eager input arrays
+        // before decoding any receipt, and bound new metadata output before accumulating it.
+        var remainingInput = maximumEagerReceiptBytes
+        for records in [archives, archivedEvidence] {
+            for bytes in records {
+                guard bytes.count <= remainingInput else { throw Failure.processingLimit }
+                remainingInput -= bytes.count
+            }
+        }
         let pending = try archives.map { try decodePending($0, accountID: accountID, ownerProfileID: ownerProfileID) }
         let retained = try archivedEvidence.map(decodeArchive)
         guard retained.allSatisfy({ exact($0.scope.accountID, accountID) && $0.scope.ownerProfileID == ownerProfileID }) else {
             throw Failure.staleBinding
         }
         var evidence = [Data](), unresolved = [Data]()
+        var remainingOutput = maximumEagerReceiptBytes
+        func admitOutput(_ bytes: Data) throws {
+            guard bytes.count <= remainingOutput else { throw Failure.processingLimit }
+            remainingOutput -= bytes.count
+        }
         var seenPending = Set<Data>(), seenEvidence = Set<Data>()
         for (original, candidate) in zip(archives, pending) where seenPending.insert(original).inserted {
             try requireAdmission(isCurrent)
@@ -210,17 +276,22 @@ enum VortxLegacyWatchedMigration {
                 _ = try Evidence.replay(scope: candidate.scope, source: candidate.source, rowLocator: candidate.locator,
                     addon: retained.addon, metadata: retained.metadata, isCurrent: isCurrent)
                 try requireAdmission(isCurrent)
-                if seenEvidence.insert(retained.bytes).inserted { evidence.append(retained.bytes) }
+                if !seenEvidence.contains(retained.bytes) {
+                    try admitOutput(retained.bytes); seenEvidence.insert(retained.bytes); evidence.append(retained.bytes)
+                }
                 continue
             }
             switch try await capture(candidate, isCurrent: isCurrent, fetch: fetch) {
             case .accepted(let captured):
                 let archive = try encodeArchive(captured)
                 try requireAdmission(isCurrent)
-                if seenEvidence.insert(archive).inserted { evidence.append(archive) }
+                if !seenEvidence.contains(archive) {
+                    try admitOutput(archive); seenEvidence.insert(archive); evidence.append(archive)
+                }
             case .pending:
                 // Preserve even the old reason and JSON spelling; a failed retry never rewrites
                 // the original attested tuple or manufactures an acknowledgement for it.
+                try admitOutput(original)
                 unresolved.append(original)
             }
         }
@@ -233,7 +304,8 @@ enum VortxLegacyWatchedMigration {
     private static func capture(_ candidate: Candidate, isCurrent: @escaping @Sendable () -> Bool,
                                 fetch: Evidence.MetadataFetcher) async throws -> CaptureResult {
         try requireAdmission(isCurrent)
-        var captures = [Evidence.Evidence]()
+        var accepted: Evidence.Evidence?
+        var ambiguous = false
         let addons = try Evidence.originalAddons(source: candidate.source, rowLocator: candidate.locator)
             .filter { try supports($0, metaID: candidate.metaID) }
         for addon in addons {
@@ -241,15 +313,17 @@ enum VortxLegacyWatchedMigration {
                 let evidence = try await Evidence.capture(scope: candidate.scope, source: candidate.source,
                     rowLocator: candidate.locator, addon: addon, isCurrent: isCurrent, fetch: fetch)
                 try requireAdmission(isCurrent)
-                captures.append(evidence)
+                if let first = accepted {
+                    if !exactInventory(evidence.inventory, first.inventory) { ambiguous = true }
+                } else { accepted = evidence }
             } catch {
                 try requireAdmission(isCurrent)
                 // A provider failure never establishes an empty inventory or an unwatch.
             }
         }
         try requireAdmission(isCurrent)
-        guard let accepted = captures.first else { return .pending("episode_inventory_unavailable") }
-        guard captures.dropFirst().allSatisfy({ exactInventory($0.inventory, accepted.inventory) }) else {
+        guard let accepted else { return .pending("episode_inventory_unavailable") }
+        guard !ambiguous else {
             return .pending("episode_inventory_ambiguous")
         }
         try requireAdmission(isCurrent)

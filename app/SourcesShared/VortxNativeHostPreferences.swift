@@ -68,6 +68,7 @@ struct VortxNativeHostPreferences: Sendable {
             try VortxNativeWebsiteAddonEdits.validateJournal(value)
             if let archive = value.authenticatedSourceArchive {
                 try VortxNativeBootstrapArchive.validate(archive)
+                try VortxNativeWatchedArchive.validate(archive, scope: scope)
                 let source = try JSONDecoder().decode(VortxJSON.self, from: archive)
                 _ = try VortxNativeUnattributedOverlayArchive.merge(nil,
                     source["hostDocument"]?[VortxNativeUnattributedOverlayArchive.key], scope: scope)
@@ -102,7 +103,10 @@ struct VortxNativeHostPreferences: Sendable {
             guard case .object = incomingPending else { throw VortxNativeError.invalidSnapshot }
             pending = incomingPending
         }
-        var documentFields: [String: VortxJSON] = ["ownAccountSources": .object(retained)]
+        let envelope = try VortxNativeBootstrapArchive.mergingRecoveryEnvelope(archive, prior: local.authenticatedSourceArchive)
+        let preserved = try JSONDecoder().decode(VortxJSON.self, from: envelope)["hostDocument"]!.decode([String: VortxJSON].self)
+        var documentFields = preserved.filter { !VortxNativeBootstrapArchive.managedRecoveryHostKeys.contains($0.key) }
+        documentFields["ownAccountSources"] = .object(retained)
         documentFields[VortxNativeUnattributedOverlayArchive.key] = try VortxNativeUnattributedOverlayArchive.merge(
             quarantined, incoming["hostDocument"]?[VortxNativeUnattributedOverlayArchive.key],
             scope: .init(account: local.document.scope, ownerProfileID: local.document.ownerProfileId))
@@ -113,7 +117,7 @@ struct VortxNativeHostPreferences: Sendable {
             documentFields[VortxLegacyMembershipReceiptArchive.key] = try JSONDecoder().decode(VortxJSON.self, from: membership)
         }
         let document = try JSONEncoder().encode(VortxJSON.object(documentFields))
-        let merged = try VortxNativeBootstrapArchive.encode(document: document)
+        let merged = try VortxNativeBootstrapArchive.replacingHostDocument(in: envelope, with: document)
         let scope = VortxAccountScope(account: local.document.scope, ownerProfileID: local.document.ownerProfileId)
         let historical = try VortxNativeWatchedArchive.retaining(merged, prior: local.authenticatedSourceArchive, scope: scope)
         local.authenticatedSourceArchive = try VortxNativeWatchedArchive.retaining(historical, prior: archive, scope: scope)

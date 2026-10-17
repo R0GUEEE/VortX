@@ -418,7 +418,8 @@ final class CoreBridge: @unchecked Sendable {
         else { DispatchQueue.main.sync { shared.withRemoteApplySuppressed(writes) } }
     }
     func restoreNativeCheckpoint(credentialCapture: CredentialScopeRegistry.Capture? = nil) async -> Bool { true }
-    func publishNativeWatchedPending(_ archive: Data?, capture: CredentialScopeRegistry.Capture) throws {}
+    func publishNativeWatchedPending(_ archive: Data?, scope: VortxAccountScope,
+        capture: CredentialScopeRegistry.Capture, isCurrentSource: @escaping @Sendable () -> Bool) throws {}
     func publishNativeOwnOverlayPending(_ pending: VortxJSON, capture: CredentialScopeRegistry.Capture) throws {}
     func updateNativeOwnAccountAvailability(missing: [UUID], profiles: [UserProfile], capture: CredentialScopeRegistry.Capture) {}
     func preferenceSnapshotForHarness(profileID: UUID, group: NativePreferenceIntentStore.Group) throws -> NativePreferenceIntentStore.Snapshot {

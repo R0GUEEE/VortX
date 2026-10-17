@@ -6,7 +6,7 @@ enum VortxNativeUnattributedOverlayArchive {
     private static let pendingOrigin = "first_import_missing_credential"
     /// Schema 2 records retain an already-made isolation decision, never account attribution.
     /// Ordinary schema 1 recovery records cannot authorize this first-import path.
-    struct FirstImportRecovery {
+    struct FirstImportRecovery: Sendable {
         let pending: [String: VortxJSON]
         let quarantinedProfiles: Set<UUID>
     }
@@ -89,6 +89,7 @@ enum VortxNativeUnattributedOverlayArchive {
     static func retaining(_ archive: Data, prior: Data?, document: Data,
                           profileIDs: Set<UUID>, pendingOriginProfileIDs: Set<UUID> = [], scope: VortxAccountScope) throws -> Data {
         guard pendingOriginProfileIDs.isSubset(of: profileIDs) else { throw VortxNativeError.invalidSnapshot }
+        let archive = try VortxNativeBootstrapArchive.mergingRecoveryEnvelope(archive, prior: prior)
         try VortxNativeBootstrapArchive.validate(archive)
         if let prior { try VortxNativeBootstrapArchive.validate(prior) }
         var host = try JSONDecoder().decode(VortxJSON.self, from: archive)["hostDocument"]!.decode([String: VortxJSON].self)
@@ -124,9 +125,9 @@ enum VortxNativeWatchedArchive {
     static let pendingKey = "nativeWatchedMigrationPending"
     static let sourcesKey = "nativeWatchedMigrationSources"
     private static let maximumJournalBytes = 32 * 1_024 * 1_024
-    // A compact file bounds disk bytes, not replay work. Preflight both journals before any
-    // receipt expansion/replay. This separate processing budget admits the 24+24 regression
-    // while refusing source-reference amplification without discarding recovery evidence.
+    // Compatibility arrays and one streaming batch have a work budget. A pooled journal may
+    // contain more total work: production consumers must process it incrementally, never expand
+    // it into one aggregate array. The separate encoded storage cap remains unchanged.
     private static let maximumExpandedJournalBytes = 96 * 1_024 * 1_024
     private static let maximumEntries = 10_000
 
@@ -134,7 +135,24 @@ enum VortxNativeWatchedArchive {
     /// source field, whose exact bytes are held once by SHA-256. The migration API still sees
     /// the original version-1 bytes and performs its complete source/UID/metadata validation.
     /// Noncanonical older receipt spellings remain inline rather than being rewritten.
-    private struct Journal: Sendable {
+    /// Every receipt/source iteration checks the lease and suspends. A single strict JSON
+    /// parse/hash/credential inspection is still indivisible; this is not a latency bound.
+    fileprivate struct Cooperation: Sendable {
+        let isCurrent: @Sendable () -> Bool
+        let checkpoint: (@Sendable () async throws -> Void)?
+        func check() throws {
+            try Task.checkCancellation()
+            guard isCurrent() else { throw LegacyWatchedBitfieldMigrationEvidence.Failure.admissionRevoked }
+        }
+        func boundary() async throws {
+            try check()
+            await Task.yield()
+            if let checkpoint { try await checkpoint() }
+            try check()
+        }
+    }
+
+    fileprivate struct Journal: Sendable {
         var host: [String: VortxJSON] = [:]
         var sources: [String: String] = [:]
         var expandedByteCount = 0
@@ -148,6 +166,7 @@ enum VortxNativeWatchedArchive {
                 guard try JSONEncoder().encode(VortxJSON.object(journal)).count <= maximumJournalBytes else { throw Failure.malformed }
                 guard case .object(let values) = field, values.count <= 2 * maximumEntries else { throw Failure.malformed }
                 for (digest, value) in values {
+                    try Task.checkCancellation()
                     guard digest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
                           case .string(let raw) = value, let bytes = Data(base64Encoded: raw),
                           bytes.count <= maximumJournalBytes, bytes.base64EncodedString() == raw,
@@ -158,6 +177,7 @@ enum VortxNativeWatchedArchive {
             var used = Set<String>()
             for key in [evidenceKey, pendingKey] {
                 for entry in try records(key) {
+                    try Task.checkCancellation()
                     if case .object(let fields) = entry {
                         guard Set(fields.keys) == ["schemaVersion", "sourceDocumentSha256", "receiptBase64"],
                               fields["schemaVersion"] == .integer(2),
@@ -169,15 +189,74 @@ enum VortxNativeWatchedArchive {
             }
             // Unreferenced sources are not silently removed on the next retention pass.
             guard used == Set(sources.keys) else { throw Failure.malformed }
-            var remaining = maximumExpandedJournalBytes
+            var total = 0
             for key in [evidenceKey, pendingKey] {
                 for entry in try records(key) {
+                    try Task.checkCancellation()
                     let size = try expandedSize(entry)
-                    guard size <= remaining else { throw Failure.processingLimit }
-                    remaining -= size
+                    let (sum, overflow) = total.addingReportingOverflow(size)
+                    guard !overflow else { throw Failure.processingLimit }
+                    total = sum
                 }
             }
-            expandedByteCount = maximumExpandedJournalBytes - remaining
+            // Old valid writers allowed 32 MiB decoded per array. Preserve those reads, but
+            // do not accept an unbounded new inline-only input in the name of compatibility.
+            guard host[sourcesKey] != nil || total <= maximumExpandedJournalBytes else { throw Failure.processingLimit }
+            expandedByteCount = total
+        }
+
+        private init() {}
+        static func load(_ archive: Data?, cooperation: Cooperation, on worker: isolated RecoveryWorker) async throws -> Journal {
+            var result = Journal()
+            try await cooperation.boundary()
+            guard let archive else { return result }
+            try VortxNativeBootstrapArchive.validate(archive)
+            result.host = try JSONDecoder().decode(VortxJSON.self, from: archive)["hostDocument"]!.decode([String: VortxJSON].self)
+            if let field = result.host[sourcesKey] {
+                let journal = result.host.filter { [evidenceKey, pendingKey, sourcesKey].contains($0.key) }
+                guard try JSONEncoder().encode(VortxJSON.object(journal)).count <= maximumJournalBytes else { throw Failure.malformed }
+                guard case .object(let values) = field, values.count <= 2 * maximumEntries else { throw Failure.malformed }
+                for (digest, value) in values {
+                    try Task.checkCancellation()
+                    try await cooperation.boundary()
+                    guard digest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+                          case .string(let raw) = value, let bytes = Data(base64Encoded: raw),
+                          bytes.count <= maximumJournalBytes, bytes.base64EncodedString() == raw,
+                          sha256(bytes) == digest else { throw Failure.malformed }
+                    result.sources[digest] = raw
+                }
+            }
+            var used = Set<String>()
+            for key in [evidenceKey, pendingKey] {
+                for entry in try result.records(key) {
+                    try await cooperation.boundary()
+                    if case .object(let fields) = entry {
+                        guard Set(fields.keys) == ["schemaVersion", "sourceDocumentSha256", "receiptBase64"],
+                              fields["schemaVersion"] == .integer(2),
+                              case .string(let digest) = fields["sourceDocumentSha256"], result.sources[digest] != nil,
+                              case .string = fields["receiptBase64"] else { throw Failure.malformed }
+                        used.insert(digest)
+                    } else if case .string = entry {} else { throw Failure.malformed }
+                }
+            }
+            // Unreferenced sources are not silently removed on the next retention pass.
+            guard used == Set(result.sources.keys) else { throw Failure.malformed }
+            var total = 0
+            for key in [evidenceKey, pendingKey] {
+                for entry in try result.records(key) {
+                    try await cooperation.boundary()
+                    let size = try result.expandedSize(entry)
+                    let (sum, overflow) = total.addingReportingOverflow(size)
+                    guard !overflow else { throw Failure.processingLimit }
+                    total = sum
+                }
+            }
+            // Old valid writers allowed 32 MiB decoded per array. Preserve those reads, but
+            // do not accept an unbounded new inline-only input in the name of compatibility.
+            guard result.host[sourcesKey] != nil || total <= maximumExpandedJournalBytes else { throw Failure.processingLimit }
+            result.expandedByteCount = total
+            try await cooperation.boundary()
+            return result
         }
 
         func records(_ key: String) throws -> [VortxJSON] {
@@ -258,23 +337,28 @@ enum VortxNativeWatchedArchive {
     /// The caller commits the returned immutable union under its captured source authority.
     static func retryHistorical(_ archive: Data?, scope: VortxAccountScope,
                                 isCurrent: @escaping @Sendable () -> Bool,
-                                fetch: LegacyWatchedBitfieldMigrationEvidence.MetadataFetcher) async throws -> Data? {
+                                fetch: LegacyWatchedBitfieldMigrationEvidence.MetadataFetcher,
+                                persist: (@Sendable (Data) async throws -> Void)? = nil,
+                                checkpoint: (@Sendable () async throws -> Void)? = nil) async throws -> Data? {
+        let cooperation = Cooperation(isCurrent: isCurrent, checkpoint: checkpoint)
+        try await cooperation.boundary()
         guard let archive else { return nil }
-        try validate(archive, scope: scope)
-        let journal = try Journal(archive)
+        let worker = RecoveryWorker(scope: scope, isCurrent: isCurrent, checkpoint: checkpoint)
+        let journal = try await worker.validatedJournal(archive)
         let pending = try journal.records(pendingKey)
         guard !pending.isEmpty, let owner = UUID(uuidString: scope.ownerProfileID) else { return archive }
-        let indexed = try evidenceIndex(journal)
-        var sources = journal.sources
-        var added: [String: VortxJSON] = [:]
-        var remaining = maximumExpandedJournalBytes - journal.expandedByteCount
-        var seen = Set<String>()
+        let indexed = try await worker.index(journal)
+        let stream = try await worker.stream(archive: archive, persist: persist)
+        var changed = false
+        var seen = Set<Data>()
         for record in pending {
-            try Task.checkCancellation()
-            guard isCurrent() else { throw LegacyWatchedBitfieldMigrationEvidence.Failure.admissionRevoked }
+            try await cooperation.boundary()
             let bytes = try journal.expanded(record)
-            guard seen.insert(sha256(bytes)).inserted else { continue }
-            let matching = indexed[try identity(journal.fields(record))] ?? []
+            let tuple = try identity(journal.fields(record))
+            // Multiple pending reasons/spellings are immutable observations of the same
+            // source tuple, not permission for multiple provider captures in one retry.
+            guard seen.insert(tuple).inserted else { continue }
+            let matching = indexed[tuple] ?? []
             guard matching.count <= 1 else { throw Failure.malformed }
             // Only one pending tuple and its matching evidence are expanded at a time. Each
             // captured result is compacted immediately; old pending bytes stay in the journal.
@@ -283,25 +367,14 @@ enum VortxNativeWatchedArchive {
                 archivedEvidence: matching.map(journal.expanded), isCurrent: isCurrent, fetch: fetch)
             if matching.isEmpty {
                 for receipt in retried.archives {
-                    let digest = sha256(receipt)
-                    guard added[digest] == nil else { continue }
-                    // Newly fetched metadata also consumes the aggregate work budget. Check
-                    // before accumulating it; a failed retry leaves the original archive intact.
-                    guard receipt.count <= remaining else { throw Failure.processingLimit }
-                    remaining -= receipt.count
-                    added[digest] = try compact(receipt, sources: &sources)
+                    try await stream.append(receipt, pending: false)
+                    changed = true
                 }
             }
         }
-        try Task.checkCancellation()
-        guard isCurrent() else { throw LegacyWatchedBitfieldMigrationEvidence.Failure.admissionRevoked }
-        guard !added.isEmpty else { return archive }
-        var host = journal.host
-        host[evidenceKey] = .array(try journal.records(evidenceKey) + added.keys.sorted().map { added[$0]! })
-        host[sourcesKey] = .object(sources.mapValues(VortxJSON.string))
-        let candidate = try VortxNativeBootstrapArchive.replacingHostDocument(in: archive,
-            with: JSONEncoder().encode(VortxJSON.object(host)))
-        return try retaining(candidate, prior: archive, scope: scope)
+        try await cooperation.boundary()
+        guard changed else { return archive }
+        return try await stream.finish()
     }
     enum Failure: LocalizedError, Equatable {
         case pending, malformed, processingLimit
@@ -347,7 +420,17 @@ enum VortxNativeWatchedArchive {
     }
     static func pendingProfileIDs(_ archive: Data?) throws -> [UUID] {
         let journal = try Journal(archive)
-        let completed = try Set(journal.records(evidenceKey).map { try identity(journal.fields($0)) })
+        // A forged/malformed evidence header must not hide a pending row in presentation.
+        // Scope-aware ingress validates the expected account separately; this display-only
+        // helper still requires all entries to agree on one valid authenticated tuple.
+        let records = try journal.records(evidenceKey) + journal.records(pendingKey)
+        if let first = records.first {
+            let fields = try journal.fields(first)
+            guard let account = fields["accountId"] as? String,
+                  let owner = fields["ownerProfileId"] as? String else { throw Failure.malformed }
+            try validate(archive, scope: .init(account: account, ownerProfileID: owner))
+        }
+        let completed = try Set(evidenceIndex(journal).filter { $0.value.count == 1 }.keys)
         var ids = Set<UUID>()
         for entry in try journal.records(pendingKey) {
             let value = try journal.fields(entry)
@@ -360,6 +443,7 @@ enum VortxNativeWatchedArchive {
 
     static func entries(_ archive: Data?, key: String) throws -> [Data] {
         let journal = try Journal(archive)
+        guard journal.expandedByteCount <= maximumExpandedJournalBytes else { throw Failure.processingLimit }
         return try journal.records(key).map(journal.expanded)
     }
     static func validate(_ archive: Data?, scope: VortxAccountScope) throws {
@@ -368,14 +452,17 @@ enum VortxNativeWatchedArchive {
         // Expand one receipt at a time during checkpoint validation. A compact on-disk journal
         // must not require allocating its entire source-per-row representation just to open it.
         for entry in try journal.records(evidenceKey) {
+            try Task.checkCancellation()
             try VortxLegacyWatchedMigration.validateArchivedEvidence(journal.expanded(entry), accountID: scope.account, ownerProfileID: owner)
         }
         for entry in try journal.records(pendingKey) {
+            try Task.checkCancellation()
             try VortxLegacyWatchedMigration.validateArchivedPending(journal.expanded(entry), accountID: scope.account, ownerProfileID: owner)
         }
     }
     static func retaining(_ archive: Data, prior: Data? = nil, evidence: [Data] = [], pending: [Data] = [],
                           scope: VortxAccountScope) throws -> Data {
+        let archive = try VortxNativeBootstrapArchive.mergingRecoveryEnvelope(archive, prior: prior)
         try validate(prior, scope: scope)
         try validate(archive, scope: scope)
         let journals = try [Journal(prior), Journal(archive)]
@@ -406,5 +493,310 @@ enum VortxNativeWatchedArchive {
             with: JSONEncoder().encode(VortxJSON.object(root)))
         try validate(result, scope: scope)
         return result
+    }
+
+    /// Explicit non-main executor for production journal operations. Construction stores
+    /// only immutable scope/callbacks. Results have no publication authority; callers retain
+    /// their source/account/profile fences and the store retains strict expected-byte CAS.
+    actor RecoveryWorker {
+        private let scope: VortxAccountScope
+        private let cooperation: Cooperation
+        init(scope: VortxAccountScope, isCurrent: @escaping @Sendable () -> Bool,
+             checkpoint: (@Sendable () async throws -> Void)? = nil) {
+            self.scope = scope
+            cooperation = Cooperation(isCurrent: isCurrent, checkpoint: checkpoint)
+        }
+        fileprivate func validatedJournal(_ archive: Data?) async throws -> Journal {
+            try await cooperation.boundary()
+            guard let owner = UUID(uuidString: scope.ownerProfileID) else { throw Failure.malformed }
+            let journal = try await Journal.load(archive, cooperation: cooperation, on: self)
+            for (key, pending) in [(evidenceKey, false), (pendingKey, true)] {
+                for entry in try journal.records(key) {
+                    try await cooperation.boundary()
+                    let bytes = try journal.expanded(entry)
+                    if pending { try VortxLegacyWatchedMigration.validateArchivedPending(bytes, accountID: scope.account, ownerProfileID: owner) }
+                    else { try VortxLegacyWatchedMigration.validateArchivedEvidence(bytes, accountID: scope.account, ownerProfileID: owner) }
+                }
+            }
+            try await cooperation.boundary()
+            return journal
+        }
+        func validate(_ archive: Data?) async throws {
+            _ = try await validatedJournal(archive)
+        }
+        fileprivate func index(_ journal: Journal) async throws -> [Data: [VortxJSON]] {
+            var result: [Data: [VortxJSON]] = [:]
+            for entry in try journal.records(evidenceKey) {
+                try await cooperation.boundary()
+                result[try identity(journal.fields(entry)), default: []].append(entry)
+            }
+            try await cooperation.boundary()
+            return result
+        }
+        func retaining(_ archive: Data, prior: Data? = nil) async throws -> Data {
+            try await cooperation.boundary()
+            let archive = try VortxNativeBootstrapArchive.mergingRecoveryEnvelope(archive, prior: prior)
+            let old = try await validatedJournal(prior)
+            let incoming = try await validatedJournal(archive)
+            var root = incoming.host
+            var sources: [String: String] = [:]
+            for key in [evidenceKey, pendingKey] {
+                var unique: [String: VortxJSON] = [:]
+                for journal in [old, incoming] {
+                    for entry in try journal.records(key) {
+                        try await cooperation.boundary()
+                        let bytes = try journal.expanded(entry), digest = sha256(bytes)
+                        let record = try compact(bytes, sources: &sources)
+                        guard unique[digest] == nil || unique[digest] == record else { throw Failure.malformed }
+                        unique[digest] = record
+                        guard unique.count <= maximumEntries else { throw Failure.malformed }
+                    }
+                }
+                if !unique.isEmpty { root[key] = .array(unique.keys.sorted().map { unique[$0]! }) }
+            }
+            if sources.isEmpty { root.removeValue(forKey: sourcesKey) }
+            else { root[sourcesKey] = .object(sources.mapValues(VortxJSON.string)) }
+            let fields = root.filter { [evidenceKey, pendingKey, sourcesKey].contains($0.key) }
+            guard try JSONEncoder().encode(VortxJSON.object(fields)).count <= maximumJournalBytes else { throw Failure.malformed }
+            try await cooperation.boundary()
+            let result = try VortxNativeBootstrapArchive.replacingHostDocument(in: archive,
+                with: JSONEncoder().encode(VortxJSON.object(root)))
+            try await validate(result)
+            return result
+        }
+        func evidenceLookup(_ archive: Data?) async throws -> VortxLegacyWatchedMigration.ArchivedEvidenceLookup {
+            let journal = try await validatedJournal(archive)
+            let index = try await index(journal)
+            let scope = scope, cooperation = cooperation
+            return { requested, digest, locator in
+                try cooperation.check()
+                guard Data(requested.accountID.utf8) == Data(scope.account.utf8),
+                      requested.ownerProfileID == UUID(uuidString: scope.ownerProfileID) else { throw Failure.malformed }
+                let key = try identity(["accountId": requested.accountID, "ownerProfileId": requested.ownerProfileID.uuidString,
+                    "profileId": requested.profileID.uuidString, "verifiedStreamingUid": requested.verifiedStreamingUID as Any? ?? NSNull(),
+                    "sourceDocumentSha256": digest, "row": VortxLegacyWatchedMigration.encodeLocator(locator)])
+                let matching = index[key] ?? []
+                guard matching.count <= 1 else { throw Failure.malformed }
+                let result = try matching.map(journal.expanded)
+                try cooperation.check()
+                return result
+            }
+        }
+        func pendingProfileIDs(_ archive: Data?) async throws -> [UUID] {
+            let journal = try await validatedJournal(archive)
+            let indexed = try await index(journal)
+            let completed = Set(indexed.filter { $0.value.count == 1 }.keys)
+            var ids = Set<UUID>()
+            for entry in try journal.records(pendingKey) {
+                try await cooperation.boundary()
+                let value = try journal.fields(entry)
+                guard !completed.contains(try identity(value)) else { continue }
+                guard let id = value["profileId"] as? String, let profile = UUID(uuidString: id) else { throw Failure.malformed }
+                ids.insert(profile)
+            }
+            try await cooperation.boundary()
+            return ids.sorted { $0.uuidString < $1.uuidString }
+        }
+        func stream(archive: Data, persist: (@Sendable (Data) async throws -> Void)? = nil) async throws -> Stream {
+            try await cooperation.boundary()
+            let stream = try Stream(archive: archive, scope: scope, isCurrent: cooperation.isCurrent,
+                persist: persist, checkpoint: cooperation.checkpoint)
+            try await stream.initialize()
+            try await cooperation.boundary()
+            return stream
+        }
+        func readDraft(_ store: VortxEncryptedCheckpointStore) async throws -> Data? {
+            try await cooperation.boundary()
+            let result = try await store.readMigrationDraftCooperatively(scope: scope,
+                isCurrent: cooperation.isCurrent, checkpoint: cooperation.checkpoint)
+            try await cooperation.boundary()
+            return result
+        }
+        /// Compatibility fallback for a protocol store that only implements the old
+        /// synchronous read. Its indivisible I/O/validation stays off the main actor;
+        /// we still replay the returned immutable bytes with the full strict inspector.
+        func readSynchronousDraft(_ store: any VortxCheckpointStore) async throws -> Data? {
+            try await cooperation.boundary()
+            try scope.validate()
+            let archive = try store.readMigrationDraft(scope: scope)
+            try await cooperation.boundary()
+            if let archive { try await validate(archive) }
+            try cooperation.check()
+            return archive
+        }
+        func authenticatedSourceArchive(_ store: VortxEncryptedCheckpointStore) async throws -> Data? {
+            try await cooperation.boundary()
+            let host = try store.readHostPreferences(scope: scope)
+            let result = try host.map { try JSONDecoder().decode(VortxNativeHostPreferences.Local.self, from: $0).authenticatedSourceArchive } ?? nil
+            try await cooperation.boundary()
+            return result
+        }
+        func hostDocument(_ archive: Data) async throws -> [String: VortxJSON] {
+            try await validatedJournal(archive).host
+        }
+        func firstImportRecovery(_ archive: Data?) async throws -> VortxNativeUnattributedOverlayArchive.FirstImportRecovery {
+            try await cooperation.boundary()
+            let result = try VortxNativeUnattributedOverlayArchive.firstImportRecovery(archive, scope: scope)
+            try await cooperation.boundary()
+            return result
+        }
+        func retainingUnattributed(_ archive: Data, prior: Data?, document: Data,
+            profileIDs: Set<UUID>, pendingOriginProfileIDs: Set<UUID> = []) async throws -> Data {
+            try await cooperation.boundary()
+            let result = try VortxNativeUnattributedOverlayArchive.retaining(archive, prior: prior, document: document,
+                profileIDs: profileIDs, pendingOriginProfileIDs: pendingOriginProfileIDs, scope: scope)
+            try await cooperation.boundary()
+            return result
+        }
+        func appendingMembership(_ receipts: Data?, to archive: Data, sourceDocument: Data) async throws -> Data {
+            try await cooperation.boundary()
+            let result = try VortxLegacyMembershipReceiptArchive.appending(receipts, to: archive,
+                scope: scope.account, ownerProfileID: scope.ownerProfileID, sourceDocumentSHA256: sha256(sourceDocument))
+            try await cooperation.boundary()
+            return result
+        }
+        func authenticatedCheckpoint(_ store: VortxEncryptedCheckpointStore) async throws -> String? {
+            try await cooperation.boundary()
+            let result = try store.authenticatedCheckpoint(scope: scope)
+            try await cooperation.boundary()
+            return result
+        }
+    }
+
+    /// Scoped CAS publication is separate from the native checkpoint/source fence. A draft
+    /// cannot import rows or authenticate an own account; it only makes validated recovery
+    /// receipts crash-resumable. No cursor can acknowledge or skip an unresolved tuple.
+    actor DraftPublisher {
+        private var expected: Data?
+        private let write: @Sendable (Data, Data?) async throws -> Void
+        init(expected: Data?, write: @escaping @Sendable (Data, Data?) async throws -> Void) {
+            self.expected = expected; self.write = write
+        }
+        func publish(_ archive: Data) async throws {
+            try Task.checkCancellation()
+            guard archive != expected else { return }
+            let prior = expected
+            try await write(archive, prior)
+            expected = archive
+        }
+    }
+
+    /// The only retained raw receipt is the one currently being admitted. Compact records and
+    /// exact pooled sources are bounded by the existing encoded journal cap. The batch counters
+    /// bound uncheckpointed work, not total lifetime history or measured process RSS.
+    actor Stream {
+        private let scope: VortxAccountScope
+        private let isCurrent: @Sendable () -> Bool
+        private let persist: (@Sendable (Data) async throws -> Void)?
+        private var archive: Data
+        private var host: [String: VortxJSON]
+        private var sources: [String: String] = [:]
+        private var evidence: [String: VortxJSON] = [:]
+        private var pending: [String: VortxJSON] = [:]
+        private var encodedBytes = 0
+        private var batchBytes = 0
+        private var batchCount = 0
+        private var operationActive = false
+        private var ready = false
+        private let cooperation: Cooperation
+        private static let maximumBatchCount = 64
+
+        init(archive: Data, scope: VortxAccountScope, isCurrent: @escaping @Sendable () -> Bool,
+             persist: (@Sendable (Data) async throws -> Void)? = nil,
+             checkpoint: (@Sendable () async throws -> Void)? = nil) throws {
+            self.archive = archive; self.scope = scope; self.isCurrent = isCurrent; self.persist = persist
+            self.host = [:]
+            cooperation = Cooperation(isCurrent: isCurrent, checkpoint: checkpoint)
+        }
+        /// Called on this actor, never in its synchronous initializer. Local working maps
+        /// become visible only after every old receipt has passed strict admission.
+        fileprivate func initialize() async throws {
+            guard !operationActive else { throw Failure.malformed }
+            operationActive = true
+            defer { operationActive = false }
+            try await loadIfNeeded()
+        }
+        private func loadIfNeeded() async throws {
+            if ready { try requireCurrent(); return }
+            let worker = RecoveryWorker(scope: scope, isCurrent: isCurrent, checkpoint: cooperation.checkpoint)
+            let journal = try await worker.validatedJournal(archive)
+            var pool: [String: String] = [:]
+            var captured: [String: VortxJSON] = [:], unresolved: [String: VortxJSON] = [:]
+            for (key, isPending) in [(evidenceKey, false), (pendingKey, true)] {
+                for record in try journal.records(key) {
+                    try await cooperation.boundary()
+                    let raw = try journal.expanded(record), digest = sha256(raw)
+                    let compacted = try compact(raw, sources: &pool)
+                    if isPending { unresolved[digest] = compacted } else { captured[digest] = compacted }
+                }
+            }
+            let value: [String: VortxJSON] = [evidenceKey: .array(Array(captured.values)),
+                pendingKey: .array(Array(unresolved.values)), sourcesKey: .object(pool.mapValues(VortxJSON.string))]
+            let size = try JSONEncoder().encode(VortxJSON.object(value)).count
+            guard size <= maximumJournalBytes else { throw Failure.processingLimit }
+            try await cooperation.boundary()
+            sources = pool; evidence = captured; pending = unresolved
+            host = journal.host; encodedBytes = size; ready = true
+        }
+        func append(_ receipt: Data, pending isPending: Bool) async throws {
+            guard !operationActive else { throw Failure.malformed }
+            operationActive = true
+            defer { operationActive = false }
+            try await loadIfNeeded()
+            try await cooperation.boundary()
+            guard receipt.count <= maximumExpandedJournalBytes else { throw Failure.processingLimit }
+            let digest = sha256(receipt)
+            if (isPending ? pending[digest] : evidence[digest]) != nil { return }
+            guard let owner = UUID(uuidString: scope.ownerProfileID) else { throw Failure.malformed }
+            if isPending { try VortxLegacyWatchedMigration.validateArchivedPending(receipt, accountID: scope.account, ownerProfileID: owner) }
+            else { try VortxLegacyWatchedMigration.validateArchivedEvidence(receipt, accountID: scope.account, ownerProfileID: owner) }
+            if receipt.count > maximumExpandedJournalBytes - batchBytes { try await flush() }
+            var pool = sources
+            let record = try compact(receipt, sources: &pool)
+            let count = isPending ? pending.count : evidence.count
+            guard count < maximumEntries else { throw Failure.processingLimit }
+            var additional = try JSONEncoder().encode(record).count + (count == 0 ? 0 : 1)
+            var poolCount = sources.count
+            for (key, value) in pool where sources[key] == nil {
+                let field = VortxJSON.object([key: .string(value)])
+                additional += try JSONEncoder().encode(field).count - 2 + (poolCount == 0 ? 0 : 1)
+                poolCount += 1
+            }
+            guard additional <= maximumJournalBytes - encodedBytes else { throw Failure.processingLimit }
+            // No mutable state changes until all per-receipt validation and storage admission pass.
+            sources = pool; encodedBytes += additional
+            if isPending { pending[digest] = record } else { evidence[digest] = record }
+            batchBytes += receipt.count; batchCount += 1
+            if batchCount >= Self.maximumBatchCount { try await flush() }
+            try requireCurrent()
+        }
+        func finish() async throws -> Data {
+            guard !operationActive else { throw Failure.malformed }
+            operationActive = true
+            defer { operationActive = false }
+            try await loadIfNeeded()
+            try await flush()
+            return archive
+        }
+        private func requireCurrent() throws {
+            try Task.checkCancellation()
+            guard isCurrent() else { throw LegacyWatchedBitfieldMigrationEvidence.Failure.admissionRevoked }
+        }
+        private func flush() async throws {
+            try await cooperation.boundary()
+            var document = host
+            document[evidenceKey] = .array(evidence.keys.sorted().map { evidence[$0]! })
+            document[pendingKey] = .array(pending.keys.sorted().map { pending[$0]! })
+            document[sourcesKey] = .object(sources.mapValues(VortxJSON.string))
+            let fields = document.filter { [evidenceKey, pendingKey, sourcesKey].contains($0.key) }
+            guard try JSONEncoder().encode(VortxJSON.object(fields)).count == encodedBytes,
+                  encodedBytes <= maximumJournalBytes else { throw Failure.malformed }
+            let candidate = try VortxNativeBootstrapArchive.replacingHostDocument(in: archive,
+                with: JSONEncoder().encode(VortxJSON.object(document)))
+            try await cooperation.boundary()
+            if let persist { try await persist(candidate) }
+            try requireCurrent()
+            archive = candidate; host = document; batchBytes = 0; batchCount = 0
+        }
     }
 }

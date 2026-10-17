@@ -1,7 +1,13 @@
 import Foundation
+import CryptoKit
 
 @main enum VortxNativeBootstrapArchiveTests {
-    static func check(_ condition: Bool, line: Int = #line) { precondition(condition, "bootstrap archive at \(line)") }
+    static func check(_ condition: Bool, line: Int = #line) {
+        guard condition else {
+            FileHandle.standardError.write(Data("FAIL: bootstrap archive at \(line)\n".utf8))
+            exit(1)
+        }
+    }
     static func data(_ object: Any) throws -> Data { try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) }
     static func main() throws {
         let configured = "https://addon.example/CaseSensitive?secret=fixture-only"
@@ -70,7 +76,10 @@ import Foundation
         let hashArchive = try VortxNativeBootstrapArchive.encode(document: evidence)
         try VortxNativeBootstrapArchive.validate(hashArchive)
         try ownAccountSlotSourceHistory()
+        try structuredCarrierAdmission()
         try archiveInspectionDiagnostics()
+        do { try literalProfileDisplayFields() }
+        catch { print("FAIL: producer-shaped literal profile text blocked account preparation: \(error)"); exit(1) }
         do { try literalAddonManifestLabels() }
         catch { print("FAIL: literal add-on manifest text blocked account preparation: \(error)"); exit(1) }
         let unchangedArchive = try JSONSerialization.jsonObject(with: VortxNativeBootstrapArchive.encode(document: data(["future": unchanged]))) as! [String: Any]
@@ -93,7 +102,236 @@ import Foundation
         var injected = object; injected["password"] = "not-allowed-at-archive-root"
         do { try VortxNativeBootstrapArchive.validate(data(injected)); fatalError("unknown archive root persisted") } catch {}
         try membershipReceiptRetention()
+        let exactMaterial = try data(["schemaVersion": 1, "original": 125.375])
+        let originalSource = try VortxNativeBootstrapArchive.encode(document: data(["original": ["exact": true], "token": "excluded"]), material: exactMaterial)
+        let enclosing = try VortxNativeBootstrapArchive.encode(document: data(["fresh": true, "password": "excluded"]), authenticatedSourceArchive: originalSource)
+        let enclosingObject = try JSONSerialization.jsonObject(with: enclosing) as! [String: Any]
+        check(try data(enclosingObject["legacyImportMaterial"]!) == exactMaterial)
+        check(Set(enclosingObject["excludedCredentialPaths"] as! [String]) == ["/token", "/password"])
+        _ = try VortxNativeBootstrapArchive.encode(document: data([:]), material: exactMaterial, authenticatedSourceArchive: originalSource)
+        do {
+            _ = try VortxNativeBootstrapArchive.encode(document: data([:]), material: data(["schemaVersion": 1, "different": true]), authenticatedSourceArchive: originalSource)
+            fatalError("flattening discarded a conflicting retained material witness")
+        } catch is VortxNativeBootstrapArchive.RecoveryConflict {}
+        do {
+            _ = try VortxNativeBootstrapArchive.encode(document: data([:]), authenticatedSourceArchive: enclosing)
+            fatalError("flattening discarded a distinct nested authenticated source")
+        } catch is VortxNativeBootstrapArchive.RecoveryConflict {}
+        let unchangedSource = try JSONSerialization.jsonObject(with: originalSource) as! [String: Any]
+        check(try data(unchangedSource["legacyImportMaterial"]!) == exactMaterial)
         print("Native bootstrap archive: exact fractional material, full noncredential settings/unknown fields, nested credential exclusions and ambiguity fences passed")
+    }
+
+    static func structuredCarrierAdmission() throws {
+        typealias Object = [String: Any]
+        func digest(_ bytes: Data) -> String { SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }
+        func quoted(_ text: String) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: text, options: [.fragmentsAllowed]), as: UTF8.self)
+        }
+        func rejects(_ operation: () throws -> Void) throws {
+            do { try operation(); check(false) }
+            catch VortxNativeBootstrapArchive.Failure.malformed {}
+        }
+        let empty = try VortxNativeBootstrapArchive.encode(document: data([:]))
+        let pairs = [
+            (#""future""#, #""future""#),
+            (#""\u0066uture""#, #""future""#),
+            (#""future""#, #""fut\u0075re""#),
+            (#""é""#, #""e\u0301""#),
+            (#""\u00e9""#, #""é""#),
+            (#""😀""#, #""\ud83d\ude00""#),
+            (#""a\\b""#, #""a\u005cb""#),
+            (#""""#, #""""#)
+        ]
+        var rejectedCarriers = 0
+        for (left, right) in pairs {
+            let secret = left + #":{"token":"fixture-shadow-only"}"#
+            let safe = right + #":{"keep":true}"#
+            for members in [[secret, safe], [safe, secret]] {
+                let object = "{" + members.joined(separator: ",") + "}"
+                for raw in [object, "[" + object + "]", "{\"outer\":[" + object + "]}"] {
+                    for carrier in [raw, try quoted(raw), Data(raw.utf8).base64EncodedString(), try quoted(Data(raw.utf8).base64EncodedString())] {
+                        let original: Object = ["future": carrier]
+                        let bytes = try data(original); let originalHash = digest(bytes)
+                        try rejects { _ = try VortxNativeBootstrapArchive.credentialFreeDocument(original) }
+                        try rejects { _ = try VortxNativeBootstrapArchive.encode(document: bytes) }
+                        try rejects { try VortxNativeBootstrapArchive.validate(data(["schemaVersion": 1,
+                            "hostDocument": original, "excludedCredentialPaths": []])) }
+                        try rejects { _ = try VortxNativeBootstrapArchive.replacingHostDocument(in: empty, with: bytes) }
+                        try rejects { _ = try VortxNativeBootstrapArchive.encode(document: data([:]), material: data([
+                            "schemaVersion": 1, "future": carrier])) }
+                        check(digest(bytes) == originalHash)
+                        check(try data(original) == bytes)
+                        rejectedCarriers += 1
+                    }
+                }
+                let raw = Data(object.utf8)
+                // Outer document/envelope and preference Data are also materialized by Foundation.
+                try rejects { _ = try VortxNativeBootstrapArchive.encode(document: raw) }
+                try rejects { _ = try VortxNativeBootstrapArchive.replacingHostDocument(in: empty, with: raw) }
+                let envelope = Data(("{\"schemaVersion\":1,\"hostDocument\":" + object + ",\"excludedCredentialPaths\":[]}").utf8)
+                try rejects { try VortxNativeBootstrapArchive.validate(envelope) }
+                let backup = try SettingsBackup.encode(domain: ["future": raw], bundleID: "fixture.bundle", app: "Fixture")
+                try rejects { _ = try VortxNativeBootstrapArchive.encode(document: data(["settings": backup.base64EncodedString()])) }
+            }
+        }
+        check(rejectedCarriers == 192)
+        // Reject even duplicate safe values: unchanged exclusion count is not uniqueness proof.
+        try rejects { _ = try VortxNativeBootstrapArchive.encode(document: data(["future": #"{"same":true,"same":true}"#])) }
+        let duplicateEnvelope = Data(#"{"format":"vortx-backup","schema":1,"payloadBase64":"YWJj","payloadBase64":"YWJj"}"#.utf8)
+        try rejects { _ = try VortxNativeBootstrapArchive.encode(document: data(["settings": duplicateEnvelope.base64EncodedString()])) }
+
+        let longNumber = "0." + String(repeating: "0", count: 80) + "1"
+        let exact = " \n{\"z\":[9007199254740992,-0.0,1e100," + longNumber + ",true,null],\"a\":\"slash\\/quote\\\"\",\"é\":1,\"A\":2,\"a2\":3} \t"
+        let positives = [exact, "[" + exact + "]", #"{"left":{"same":1},"right":{"same":2}}"#,
+                         #"{"a":1,"A":2,"\ud83d\ude00":"ordinary","unknown":{"keep":"yes"}}"#]
+        func preserved(_ carrier: String) throws {
+            let input = Data(carrier.utf8)
+            let sourceBytes = Data(base64Encoded: carrier) ?? input
+            let expectedHash = digest(sourceBytes)
+            let source: Object = ["sourceDocumentBase64": carrier, "sourceDocumentSha256": expectedHash,
+                                  "unknown": ["complete": true]]
+            let encoded = try VortxNativeBootstrapArchive.encode(document: data(source))
+            try VortxNativeBootstrapArchive.validate(encoded)
+            let result = try JSONSerialization.jsonObject(with: encoded) as! Object
+            let host = result["hostDocument"] as! Object
+            check(Data((host["sourceDocumentBase64"] as! String).utf8) == input)
+            let stored = host["sourceDocumentBase64"] as! String
+            check(digest(Data(base64Encoded: stored) ?? Data(stored.utf8)) == expectedHash)
+            check(host["sourceDocumentSha256"] as? String == expectedHash)
+            check((host["unknown"] as? [String: Bool])?["complete"] == true)
+            let retained = try VortxNativeBootstrapArchive.encode(document: data([:]), authenticatedSourceArchive: encoded)
+            try VortxNativeBootstrapArchive.validate(retained)
+            let retainedHost = (try JSONSerialization.jsonObject(with: retained) as! Object)["authenticatedSourceArchive"] as! Object
+            check(Data((retainedHost["sourceDocumentBase64"] as! String).utf8) == input)
+            check(source["sourceDocumentBase64"] as? String == carrier)
+        }
+        for positive in positives {
+            try preserved(positive)
+            try preserved(quoted(positive))
+            try preserved(Data(positive.utf8).base64EncodedString())
+        }
+        // Whitelist only the observed raw-Foundation quirks; a future decoder fix may succeed.
+        // Every matrix entry still runs the normalized production assertions; no dynamic skips.
+        let encodings: [(String.Encoding, [UInt8])] = [(.utf8, [0xef, 0xbb, 0xbf]),
+            (.utf16LittleEndian, [0xff, 0xfe]), (.utf16BigEndian, [0xfe, 0xff]),
+            (.utf32LittleEndian, [0xff, 0xfe, 0, 0]), (.utf32BigEndian, [0, 0, 0xfe, 0xff])]
+        var fragmentProbeFailures = 0
+        var objectProbeFailures = 0
+        var preservedFragments = 0
+        var checkedEncodings = 0
+        let safeBackup = try SettingsBackup.encode(domain: ["future": "safe"], bundleID: "fixture.bundle", app: "Fixture")
+        let archiveText = String(decoding: empty, as: UTF8.self)
+        for (encoding, bom) in encodings {
+            for prefix in [Data(), Data(bom)] {
+                func encoded(_ text: String) -> Data { prefix + text.data(using: encoding)! }
+                let rawObjectFailureAllowed = encoding == .utf32LittleEndian && !prefix.isEmpty
+                let fragments = [(#""日""#, "日"), (#""😀""#, "😀"),
+                    (#""\u65e5""#, "日"), (#""\ud83d\ude00""#, "😀"),
+                    (#""quote\"slash\\日""#, "quote\"slash\\日")]
+                for (fragmentIndex, (fragment, expected)) in fragments.enumerated() {
+                    let fragmentBytes = encoded(fragment)
+                    let rawFragmentFailureAllowed = rawObjectFailureAllowed || (prefix.isEmpty && fragmentIndex < 2
+                        && (encoding == .utf16LittleEndian || encoding == .utf16BigEndian))
+                    do {
+                        let decoded = try JSONSerialization.jsonObject(with: fragmentBytes, options: [.fragmentsAllowed]) as? String
+                        check(decoded == expected)
+                    } catch {
+                        let failure = error as NSError
+                        check(rawFragmentFailureAllowed && failure.domain == NSCocoaErrorDomain && failure.code == 3840)
+                        fragmentProbeFailures += 1
+                    }
+                    try preserved(fragmentBytes.base64EncodedString())
+                    preservedFragments += 1
+                }
+                let bytes = encoded(#"{"future":[1,true,"ordinary"]}"#)
+                do {
+                    let decoded = try JSONSerialization.jsonObject(with: bytes) as? Object
+                    check(decoded != nil)
+                    check(try data(decoded!) == data(["future": [1, true, "ordinary"] as [Any]]))
+                } catch {
+                    let failure = error as NSError
+                    check(rawObjectFailureAllowed && failure.domain == NSCocoaErrorDomain && failure.code == 3840)
+                    objectProbeFailures += 1
+                }
+                try preserved(bytes.base64EncodedString())
+                // Prove normalized production inspection, not just unchanged opaque fallback:
+                // every encoding/BOM form rejects duplicates in both orders and removes a unique
+                // explicit credential through the existing exclusion policy.
+                for raw in [#"{"future":{"token":"fixture-shadow-only"},"future":{"keep":true}}"#,
+                            #"{"future":{"keep":true},"future":{"token":"fixture-shadow-only"}}"#] {
+                    let ambiguous = encoded(raw)
+                    try rejects { _ = try VortxNativeBootstrapArchive.encode(document: data(["future": ambiguous.base64EncodedString()])) }
+                    try rejects { _ = try VortxNativeBootstrapArchive.encode(document: ambiguous) }
+                    let backup = try SettingsBackup.encode(domain: ["future": ambiguous], bundleID: "fixture.bundle", app: "Fixture")
+                    try rejects { _ = try VortxNativeBootstrapArchive.encode(document: data(["settings": backup.base64EncodedString()])) }
+                }
+                let unique = encoded(#"{"token":"fixture-excluded-only","keep":true}"#)
+                let uniqueHash = digest(unique)
+                let clean = try VortxNativeBootstrapArchive.encode(document: data(["future": unique.base64EncodedString()]))
+                try VortxNativeBootstrapArchive.validate(clean)
+                let cleanEnvelope = try JSONSerialization.jsonObject(with: clean) as! Object
+                let cleanHost = cleanEnvelope["hostDocument"] as! Object
+                let cleanBytes = Data(base64Encoded: cleanHost["future"] as! String)!
+                let cleanObject = try JSONSerialization.jsonObject(with: cleanBytes) as! Object
+                check(cleanObject["token"] == nil && cleanObject["keep"] as? Bool == true)
+                check(!String(decoding: cleanBytes, as: UTF8.self).contains("fixture-excluded-only"))
+                check((cleanEnvelope["excludedCredentialPaths"] as! [String]).contains("/future/token"))
+                check(digest(unique) == uniqueHash)
+
+                // Cover raw document/material/archive ingress and all archive reread paths.
+                let rawArchive = try VortxNativeBootstrapArchive.encode(document: bytes,
+                    material: encoded(#"{"schemaVersion":1,"future":{"keep":true}}"#))
+                try VortxNativeBootstrapArchive.validate(rawArchive)
+                let unicodeArchive = encoded(archiveText)
+                try VortxNativeBootstrapArchive.validate(unicodeArchive)
+                _ = try VortxNativeBootstrapArchive.replacingHostDocument(in: unicodeArchive, with: bytes)
+                _ = try VortxNativeBootstrapArchive.mergingRecoveryEnvelope(unicodeArchive, prior: unicodeArchive)
+                _ = try VortxNativeBootstrapArchive.encode(document: data([:]), authenticatedSourceArchive: unicodeArchive)
+                let unicodeSettings = encoded(String(decoding: safeBackup, as: UTF8.self))
+                let settingsArchive = try VortxNativeBootstrapArchive.encode(document: data(["settings": unicodeSettings.base64EncodedString()]))
+                try VortxNativeBootstrapArchive.validate(settingsArchive)
+                // Successfully transcoded but malformed brace containers must not become opaque.
+                do {
+                    _ = try VortxNativeBootstrapArchive.encode(document: data(["future": encoded("{").base64EncodedString()]))
+                    check(false)
+                } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+                checkedEncodings += 1
+            }
+        }
+        check(fragmentProbeFailures <= 9 && objectProbeFailures <= 1)
+        check(preservedFragments == 50 && checkedEncodings == 10)
+        print("Raw Foundation baseline: fragments accepted=\(50 - fragmentProbeFailures) rejected=\(fragmentProbeFailures); objects accepted=\(10 - objectProbeFailures) rejected=\(objectProbeFailures)")
+        // This guard must not inherit the unrelated watched parser's 2 MiB limit.
+        let large = "{\"future\":\"" + String(repeating: "x", count: 2 * 1024 * 1024 + 1) + "\"}"
+        try preserved(Data(large.utf8).base64EncodedString())
+        // The scanner's raw-JSON depth128 is a deliberate new fail-closed admission bound.
+        let deep = String(repeating: "[", count: 140) + "0" + String(repeating: "]", count: 140)
+        try rejects { _ = try VortxNativeBootstrapArchive.encode(document: data(["future": deep])) }
+        let deepExcluded = Data(("{\"token\":" + deep + ",\"keep\":true}").utf8)
+        let deepHash = digest(deepExcluded)
+        let decodedExcluded = try JSONSerialization.jsonObject(with: deepExcluded) as! Object
+        // The existing dictionary sanitizer excludes token before traversing its value. Preserve
+        // this positive to expose the stricter raw-admission behavior, not claim it is redundant.
+        let sanitizedExcluded = try VortxNativeBootstrapArchive.credentialFreeDocument(decodedExcluded)
+        let sanitizedObject = try JSONSerialization.jsonObject(with: sanitizedExcluded) as! Object
+        check(sanitizedObject["token"] == nil && sanitizedObject["keep"] as? Bool == true)
+        try rejects { _ = try VortxNativeBootstrapArchive.encode(document: deepExcluded) }
+        try rejects { _ = try VortxNativeBootstrapArchive.encode(document: data(["future": String(decoding: deepExcluded, as: UTF8.self)])) }
+        check(digest(deepExcluded) == deepHash)
+        // A credential-only subtree exceeding sanitizer64 but within scanner128 still takes the
+        // existing exclusion path; no blanket deep-credential rejection or numeric cap is added.
+        let within = String(repeating: "[", count: 100) + "0" + String(repeating: "]", count: 100)
+        let withinBytes = Data(("{\"token\":" + within + ",\"keep\":true}").utf8)
+        let withinHash = digest(withinBytes)
+        let withinArchive = try VortxNativeBootstrapArchive.encode(document: withinBytes)
+        try VortxNativeBootstrapArchive.validate(withinArchive)
+        let withinEnvelope = try JSONSerialization.jsonObject(with: withinArchive) as! Object
+        let withinHost = withinEnvelope["hostDocument"] as! Object
+        check(withinHost["token"] == nil && withinHost["keep"] as? Bool == true)
+        check((withinEnvelope["excludedCredentialPaths"] as! [String]).contains("/token"))
+        check(digest(withinBytes) == withinHash)
+        print("Structured JSON carriers: duplicate/canonical collision rejection and hash-bound original-byte retention passed")
     }
 
     static func ownAccountSlotSourceHistory() throws {
@@ -133,6 +371,242 @@ import Foundation
                 preconditionFailure("Nonprotocol sourceHistory fingerprint skipped credential inspection")
             } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
         }
+    }
+
+    static func literalProfileDisplayFields() throws {
+        // Uses the actual SettingsBackup.encode implementation extracted by the source-unit runner.
+        // The roster Data has ProfileStore.persist's JSON-array shape. Its deliberately noncanonical
+        // formatting must not affect semantic conservation; archive Data is inspected/re-encoded.
+        // Original input bytes remain unchanged. This is not a recovered customer leaf.
+        typealias Object = [String: Any]
+        let profileID = "00000000-0000-0000-0000-00000000A11C"
+        let privateKey = "fixture-private-preference"
+        func row(name: Any = "Fixture", avatar: Any = "🍿") -> Object {
+            ["id": profileID, "name": name, "avatar": avatar, "accentID": "ember",
+             "oled": false, "textScale": 1.0, "usesOwnAccount": false, "isOwner": true,
+             "familyEdit": false, "isKids": false, "future": ["safe": true]]
+        }
+        func roster(_ rows: Any) throws -> Data {
+            try JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        }
+        func document(_ preference: Any, key: String = "stremiox.profiles") throws -> Object {
+            var domain: Object = [privateKey: ["safe": "unchanged"],
+                                  "fixture-date": Date(timeIntervalSince1970: 42)]
+            // Negative cases deliberately use privateKey as the preference key. Assignment
+            // models that one persisted key without a duplicate-key dictionary-literal trap.
+            domain[key] = preference
+            let backup = try SettingsBackup.encode(domain: domain, bundleID: "fixture.bundle", app: "Fixture",
+                                                   now: Date(timeIntervalSince1970: 10))
+            return ["settings": backup.base64EncodedString(), "futureHost": ["safe": true]]
+        }
+        func domain(_ host: Object) throws -> Object {
+            let backup = try JSONSerialization.jsonObject(with: Data(base64Encoded: host["settings"] as! String)!) as! Object
+            return try PropertyListSerialization.propertyList(from: Data(base64Encoded: backup["payloadBase64"] as! String)!,
+                                                               options: [], format: nil) as! Object
+        }
+        func inspect(_ host: Object, expected: Data) throws {
+            let values = try domain(host)
+            check(values["stremiox.profiles"] is Data)
+            let actualRows = try JSONSerialization.jsonObject(with: values["stremiox.profiles"] as! Data)
+            let expectedRows = try JSONSerialization.jsonObject(with: expected)
+            check(try data(actualRows) == data(expectedRows))
+            check((values[privateKey] as? [String: String])?["safe"] == "unchanged")
+            check(values["fixture-date"] as? Date == Date(timeIntervalSince1970: 42))
+            check((host["futureHost"] as? [String: Bool])?["safe"] == true)
+        }
+        // First case must fail against the old owning inspector, before any new-policy assertions.
+        let positive: [(String, String)] = [("Fixture", "["), ("Fixture", "{"),
+            ("[Kids]", "🍿"), ("{Family} Room", "🍿"), ("[", "🍿"), ("{", "🍿"),
+            ("[Kids] Family viewing", "{"), ("[日本語] 家族", "["), ("[true]", "🍿"), ("Normal", "A")]
+        for (name, avatar) in positive {
+            let rawRoster = try roster([row(name: name, avatar: avatar)])
+            let original = try document(rawRoster)
+            let originalSettings = original["settings"] as! String
+            let clean = try VortxNativeBootstrapArchive.credentialFreeDocument(original)
+            try inspect(try JSONSerialization.jsonObject(with: clean) as! Object, expected: rawRoster)
+            let archive = try VortxNativeBootstrapArchive.encode(document: data(original))
+            try VortxNativeBootstrapArchive.validate(archive)
+            let envelope = try JSONSerialization.jsonObject(with: archive) as! Object
+            check((envelope["excludedCredentialPaths"] as! [String]).isEmpty)
+            try inspect(envelope["hostDocument"] as! Object, expected: rawRoster)
+            let retained = try VortxNativeBootstrapArchive.encode(document: data([:]), authenticatedSourceArchive: archive)
+            try VortxNativeBootstrapArchive.validate(retained)
+            try inspect((try JSONSerialization.jsonObject(with: retained) as! Object)["authenticatedSourceArchive"] as! Object,
+                        expected: rawRoster)
+            check(original["settings"] as? String == originalSettings)
+            check((try domain(original))["stremiox.profiles"] as? Data == rawRoster)
+        }
+        func refused(_ input: Object) throws {
+            let before = try data(input)
+            var messages: [String] = []
+            do {
+                _ = try VortxNativeBootstrapArchive.credentialFreeDocument(input, diagnostics: { messages.append($0) })
+                preconditionFailure("Profile context escaped into an opaque carrier")
+            } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+            check(try data(input) == before)
+            check(messages.count == 1)
+            // Diagnostics may contain only schema words and closed categories, never private inputs.
+            for hidden in [profileID, privateKey, "stremiox.profiles", "fixture-hidden", "bingeGroup"] {
+                check(!messages[0].contains(hidden))
+            }
+        }
+        let label = "[Kids] Family viewing"
+        for malformed in [#"{'token':'fixture-hidden'}"#, #"{token=fixture-hidden;}"#, #"{"token":"unfinished"#,
+                          #"[true] {"token":"fixture-hidden"}"#, "[[Kids]]", "[Kids]no separator",
+                          "[" + String(repeating: "x", count: 65) + "] Room", "bplist00broken"] {
+            try refused(document(roster([row(name: malformed)])))
+        }
+        try refused(document(roster([row(avatar: label)]))) // Avatar is not a manifest/name label.
+        try refused(document(roster([row(name: "Fixture", avatar: "[ ")])))
+        var unknown = row(); unknown["future"] = ["avatar": "["]
+        try refused(document(roster([unknown])))
+        var sibling = row(); sibling["accentID"] = "["
+        try refused(document(roster([sibling])))
+        var wrongIdentity = row(avatar: "["); wrongIdentity["id"] = "not-a-profile-uuid"
+        try refused(document(roster([wrongIdentity])))
+        var missingName = row(avatar: "["); missingName.removeValue(forKey: "name")
+        try refused(document(roster([missingName])))
+        try refused(document(roster(["0": row(avatar: "[")])))
+        try refused(document(roster([[row(avatar: "[")]])))
+        try refused(document(roster([row(avatar: ["avatar": "["])])))
+        try refused(document(roster([row(avatar: "[")]), key: privateKey))
+        try refused(document(["stremiox.profiles": try roster([row(avatar: "[")])], key: privateKey))
+        // Only the real JSON Data preference carrier establishes the new role.
+        let rawRoster = try roster([row(avatar: "[")])
+        try refused(document(String(decoding: rawRoster, as: UTF8.self)))
+        try refused(document(rawRoster.base64EncodedString()))
+        try refused(document([row(avatar: "[")]))
+        let plistRoster = try PropertyListSerialization.data(fromPropertyList: [row(avatar: "[")], format: .binary, options: 0)
+        try refused(document(plistRoster))
+        let quotedBracket = String(decoding: try JSONSerialization.data(withJSONObject: "[", options: [.fragmentsAllowed]), as: UTF8.self)
+        let quotedLabel = String(decoding: try JSONSerialization.data(withJSONObject: label, options: [.fragmentsAllowed]), as: UTF8.self)
+        for encoded in [quotedBracket, quotedLabel, Data("[".utf8).base64EncodedString(),
+                        Data(#"{"token":"unfinished"#.utf8).base64EncodedString(),
+                        Data("bplist00broken".utf8).base64EncodedString()] {
+            try refused(document(roster([row(name: encoded)])))
+            try refused(document(roster([row(avatar: encoded)])))
+        }
+        // Real nested credential carriers are still inspected and sanitized, not exempted as labels.
+        let secret = #"{"token":"fixture-hidden","keep":true}"#
+        let quotedSecret = String(decoding: try JSONSerialization.data(withJSONObject: secret, options: [.fragmentsAllowed]), as: UTF8.self)
+        let secretPlist = try PropertyListSerialization.data(fromPropertyList: ["password": "fixture-hidden", "keep": true],
+                                                            format: .binary, options: 0).base64EncodedString()
+        let carriers: [(String, (String) throws -> Object)] = [
+            (secret, { try JSONSerialization.jsonObject(with: Data($0.utf8)) as! Object }),
+            (quotedSecret, {
+                let inner = try JSONSerialization.jsonObject(with: Data($0.utf8), options: [.fragmentsAllowed]) as! String
+                return try JSONSerialization.jsonObject(with: Data(inner.utf8)) as! Object
+            }),
+            (Data(secret.utf8).base64EncodedString(), { try JSONSerialization.jsonObject(with: Data(base64Encoded: $0)!) as! Object }),
+            (secretPlist, { try PropertyListSerialization.propertyList(from: Data(base64Encoded: $0)!, options: [], format: nil) as! Object })
+        ]
+        for (carrier, unwrap) in carriers {
+            for field in ["name", "avatar"] {
+                var item = row(); item[field] = carrier
+                let input = try document(roster([item]))
+                let archive = try VortxNativeBootstrapArchive.encode(document: data(input))
+                try VortxNativeBootstrapArchive.validate(archive)
+                let envelope = try JSONSerialization.jsonObject(with: archive) as! Object
+                let safeDomain = try domain(envelope["hostDocument"] as! Object)
+                let safeRows = try JSONSerialization.jsonObject(with: safeDomain["stremiox.profiles"] as! Data) as! [Object]
+                let nested = try unwrap(safeRows[0][field] as! String)
+                check(nested["token"] == nil && nested["password"] == nil && nested["keep"] as? Bool == true)
+                check(!(envelope["excludedCredentialPaths"] as! [String]).isEmpty)
+                // The immutable original input still contains its exact source Data on failure/retry.
+                let originalRows = try JSONSerialization.jsonObject(with: (try domain(input))["stremiox.profiles"] as! Data) as! [Object]
+                check(originalRows[0][field] as? String == carrier)
+            }
+        }
+        // Build raw bytes: constructing a Swift Dictionary would erase the duplicate-key witness
+        // before the production inspector sees it. Both orders are required; Foundation's chosen
+        // duplicate member is deliberately not assumed. Escaped spellings collide after decoding.
+        let duplicateMembers: [[String]] = [
+            [#""future":{"token":"fixture-shadow-secret","keep":true}"#, #""future":{"safe":true}"#],
+            [#""future":{"futureCredentialBox":"fixture-shadow-secret"}"#, #""future":{"safe":true}"#],
+            [#""\u0066uture":{"token":"fixture-shadow-secret","keep":true}"#, #""future":{"safe":true}"#],
+            [#""futureCredentialBox":"fixture-shadow-secret""#, #""futureCredentialBox":{"safe":true}"#],
+            [#""to\u006ben":"fixture-shadow-secret""#, #""token":"fixture-other-secret""#]
+        ]
+        func containsCredentialKey(_ value: Any) -> Bool {
+            if let object = value as? Object {
+                return object.contains { key, child in
+                    key == "token" || key == "password" || key.lowercased().contains("credential") || containsCredentialKey(child)
+                }
+            }
+            if let array = value as? [Any] { return array.contains(where: containsCredentialKey) }
+            return false
+        }
+        var duplicateCases = 0
+        for pair in duplicateMembers {
+            for members in [pair, Array(pair.reversed())] {
+                let prefix = #"[{"id":"00000000-0000-0000-0000-00000000A11C","name":"Fixture","avatar":"[","sentinel":{"keep":true},"#
+                let raw = Data((prefix + members.joined(separator: ",") + "}]").utf8)
+                let input = try document(raw)
+                let inputBytes = try data(input)
+                func checkAccepted(_ host: Object) throws {
+                    let stored = (try domain(host))["stremiox.profiles"] as! Data
+                    let text = String(decoding: stored, as: UTF8.self)
+                    check(!text.contains("fixture-shadow-secret") && !text.contains("fixture-other-secret"))
+                    check(stored != raw) // Never preserve a collapsed raw duplicate-key carrier.
+                    let rows = try JSONSerialization.jsonObject(with: stored) as! [Object]
+                    check(!containsCredentialKey(rows))
+                    check(rows.count == 1 && rows[0]["id"] as? String == profileID)
+                    check(rows[0]["name"] as? String == "Fixture" && rows[0]["avatar"] as? String == "[")
+                    check((rows[0]["sentinel"] as? [String: Bool])?["keep"] == true)
+                }
+                do {
+                    let clean = try VortxNativeBootstrapArchive.credentialFreeDocument(input)
+                    try checkAccepted(try JSONSerialization.jsonObject(with: clean) as! Object)
+                    let archive = try VortxNativeBootstrapArchive.encode(document: data(input))
+                    try VortxNativeBootstrapArchive.validate(archive)
+                    let envelope = try JSONSerialization.jsonObject(with: archive) as! Object
+                    try checkAccepted(envelope["hostDocument"] as! Object)
+                    let retained = try VortxNativeBootstrapArchive.encode(document: data([:]), authenticatedSourceArchive: archive)
+                    try VortxNativeBootstrapArchive.validate(retained)
+                    try checkAccepted((try JSONSerialization.jsonObject(with: retained) as! Object)["authenticatedSourceArchive"] as! Object)
+                } catch VortxNativeBootstrapArchive.Failure.ambiguousCredentialCarrier {
+                    // A retained unknown credential-like key is a safe rejection, not an exemption.
+                } catch VortxNativeBootstrapArchive.Failure.opaquePreference {
+                    // A future stricter inspector may reject the entire ambiguous carrier.
+                } catch VortxNativeBootstrapArchive.Failure.malformed {
+                    // Structural rejection is also safe; no replacement archive was returned.
+                }
+                check(try data(input) == inputBytes)
+                check((try domain(input))["stremiox.profiles"] as? Data == raw)
+                duplicateCases += 1
+            }
+        }
+        check(duplicateCases == 10)
+        var ambiguous = row(avatar: "["); ambiguous["futureCredentialBox"] = "fixture-hidden"
+        do {
+            _ = try VortxNativeBootstrapArchive.credentialFreeDocument(document(roster([ambiguous])))
+            preconditionFailure("Unknown credential carrier was granted profile display semantics")
+        } catch VortxNativeBootstrapArchive.Failure.ambiguousCredentialCarrier {}
+        // Provider-authored opaque identities retain their existing fail-closed policy.
+        try refused(document(roster(["global": ["bingeGroup": label]]), key: "stremiox.sourcePins.fixture-profile"))
+        try refused(document(roster(["fixture-series": ["bingeGroup": label]]), key: "stremiox.seriesSourceSticky.fixture-profile"))
+        let classified: [(String, Any, String, String)] = [
+            ("stremiox.profiles", try roster([row(avatar: "[ ")]), "profile_roster", "/*/*/*"),
+            ("stremiox.profiles.watch.fixture-private-owner", try roster(["fixture-private-series": ["poster": "["]]), "profile_watch", "/*/*/*"),
+            ("stremiox.sourcePins.fixture-private-owner", try roster(["global": ["bingeGroup": "["]]), "source_pin", "/*/*/*"),
+            ("stremiox.seriesSourceSticky.fixture-private-owner", try roster(["fixture-private-series": ["bingeGroup": "["]]), "series_source_choice", "/*/*/*"),
+            ("vortx.owner.history.v1.fixture-private-owner", try roster([["v": "["]]), "owner_history", "/*/*/*"),
+            ("vortx.forYou.local", try roster(["fixture-private-owner": ["fixture-private-field": "["]]), "for_you_local", "/*/*/*")
+        ]
+        for (key, value, family, suffix) in classified {
+            var messages: [String] = []
+            do {
+                _ = try VortxNativeBootstrapArchive.credentialFreeDocument(document(value, key: key),
+                                                                          diagnostics: { messages.append($0) })
+                preconditionFailure("Diagnostic fixture was unexpectedly accepted")
+            } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+            check(messages == ["archive_inspection result=failed reason=opaque_preference field=/settings/payloadBase64" + suffix
+                               + " carrier=plain_text_prefix preference_family=" + family])
+            for hidden in [key, "fixture-private-owner", "fixture-private-series", "fixture-private-field", "bingeGroup"] {
+                check(!messages[0].contains(hidden))
+            }
+        }
+        print("Issue #262: profile display semantic conservation, unchanged inputs, duplicate-key credential fences and context controls passed")
     }
 
     static func literalAddonManifestLabels() throws {

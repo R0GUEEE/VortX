@@ -94,6 +94,52 @@ private final class SessionStore: VortxCheckpointStore, @unchecked Sendable {
     }
 }
 
+private enum MigrationDraftFixtureFailure: Error { case read, witnessReached, wrongDispatch }
+
+/// Deliberately implements only the old synchronous draft requirement, and returns
+/// unchecked bytes. The protocol default must isolate and fully inspect this result.
+private final class MigrationDraftFallbackStore: VortxCheckpointStore, @unchecked Sendable {
+    private let checkpoint = SessionStore()
+    private let lock = NSLock()
+    private var draft: Data?
+    private var failRead = false
+    private var reads = 0
+    private var readOnMain = false
+    init(_ draft: Data?) { self.draft = draft }
+    func setDraft(_ value: Data?, fail: Bool = false) { lock.withLock { draft = value; failRead = fail } }
+    var bytes: Data? { lock.withLock { draft } }
+    var draftReads: Int { lock.withLock { reads } }
+    var usedMainThread: Bool { lock.withLock { readOnMain } }
+    var commits: Int { checkpoint.commits }
+    func read(scope: VortxAccountScope) throws -> String? { try checkpoint.read(scope: scope) }
+    func readHostPreferences(scope: VortxAccountScope) throws -> Data? { try checkpoint.readHostPreferences(scope: scope) }
+    func commit(_ snapshot: String, scope: VortxAccountScope) throws { try checkpoint.commit(snapshot, scope: scope) }
+    func commit(_ snapshot: String, scope: VortxAccountScope, hostPreferences: Data) throws {
+        try checkpoint.commit(snapshot, scope: scope, hostPreferences: hostPreferences)
+    }
+    func readMigrationDraft(scope: VortxAccountScope) throws -> Data? {
+        try lock.withLock {
+            reads += 1; readOnMain = readOnMain || Thread.isMainThread
+            if failRead { throw MigrationDraftFixtureFailure.read }
+            return draft
+        }
+    }
+}
+
+/// Distinct markers prove existential dispatch selects the async witness rather than
+/// the compatibility extension. Neither path returns unvalidated fixture bytes.
+private struct MigrationDraftWitnessStore: VortxCheckpointStore {
+    let checkpoint = SessionStore()
+    func read(scope: VortxAccountScope) throws -> String? { try checkpoint.read(scope: scope) }
+    func commit(_ snapshot: String, scope: VortxAccountScope) throws { try checkpoint.commit(snapshot, scope: scope) }
+    func readMigrationDraft(scope: VortxAccountScope) throws -> Data? { throw MigrationDraftFixtureFailure.wrongDispatch }
+    func readMigrationDraftCooperatively(scope: VortxAccountScope,
+        isCurrent: @escaping @Sendable () -> Bool,
+        checkpoint: (@Sendable () async throws -> Void)?) async throws -> Data? {
+        throw MigrationDraftFixtureFailure.witnessReached
+    }
+}
+
 private final class SessionTransport: VortxResourceTransport, @unchecked Sendable {
     final class Token: VortxResourceCancellation, @unchecked Sendable { func cancel() {} }
     let entered = DispatchSemaphore(value: 0)
@@ -227,6 +273,78 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
 
 @main enum VortxNativeSessionTests {
     static func check(_ value: Bool, line: Int = #line) { precondition(value, "session assertion at line \(line)") }
+    @MainActor static func migrationDraftProtocolTests() async throws {
+        let scope = VortxAccountScope(account: "protocol-draft.fixture", ownerProfileID: "90000000-0000-0000-0000-000000000009")
+        let original = try VortxNativeBootstrapArchive.encode(document: Data(#"{"future":{"exact":"retained"}}"#.utf8))
+        // Keep noncanonical envelope whitespace too: readers may inspect, never rewrite.
+        let bytes = Data(" \n".utf8) + original + Data("\n".utf8)
+        let backing = MigrationDraftFallbackStore(bytes)
+        let erased: any VortxCheckpointStore = backing
+        check(try await erased.readMigrationDraftCooperatively(scope: scope, isCurrent: { true }, checkpoint: nil) == bytes)
+        check(backing.draftReads == 1 && !backing.usedMainThread)
+        let session = try VortxNativeSession(scope: scope, ownerName: "Owner", abi: SessionABI(),
+            store: erased, transport: SessionTransport(), allowNewAccount: true)
+        let initialCommits = backing.commits
+        check(try await session.migrationDraft() == bytes)
+        check(backing.bytes == bytes && !backing.usedMainThread && backing.commits == initialCommits)
+        let invalid = [Data("not-json".utf8),
+            Data(#"{"schemaVersion":1,"excludedCredentialPaths":[],"hostDocument":{"authKey":"synthetic-not-a-credential"}}"#.utf8),
+            Data(#"{"schemaVersion":1,"excludedCredentialPaths":[],"hostDocument":{"nativeWatchedMigrationEvidence":["not-base64"]}}"#.utf8)]
+        for bad in invalid {
+            backing.setDraft(bad)
+            do { _ = try await erased.readMigrationDraftCooperatively(scope: scope, isCurrent: { true }, checkpoint: nil)
+                preconditionFailure("Generic existential accepted malformed or credential-bearing draft") }
+            catch {}
+            do { _ = try await session.migrationDraft(); preconditionFailure("Session accepted malformed or credential-bearing draft") }
+            catch {}
+            check(backing.bytes == bad && backing.commits == initialCommits)
+        }
+        backing.setDraft(nil)
+        check(try await session.migrationDraft() == nil)
+        backing.setDraft(bytes, fail: true)
+        do { _ = try await session.migrationDraft(); preconditionFailure("Draft read error became absence") }
+        catch MigrationDraftFixtureFailure.read {}
+        backing.setDraft(bytes)
+        let readsBeforeRevocation = backing.draftReads
+        do { _ = try await session.migrationDraft(isCurrent: { false }); preconditionFailure("Revoked draft read admitted") }
+        catch {}
+        check(backing.draftReads == readsBeforeRevocation && backing.bytes == bytes)
+        // The second fallback boundary is after the immutable read but before replay.
+        // Deterministic callback cancellation needs no park continuation or timing claim.
+        let cancelVisits = MutationCounter()
+        let cancelled = Task {
+            try await erased.readMigrationDraftCooperatively(scope: scope, isCurrent: { true }, checkpoint: {
+                cancelVisits.increment()
+                if cancelVisits.value == 2 { withUnsafeCurrentTask { $0?.cancel() } }
+            })
+        }
+        do { _ = try await cancelled.value; preconditionFailure("Cancelled generic read returned bytes") }
+        catch is CancellationError {}
+        check(cancelVisits.value == 2 && backing.bytes == bytes && backing.commits == initialCommits)
+        let closeVisits = MutationCounter()
+        do {
+            _ = try await session.migrationDraft(checkpoint: {
+                closeVisits.increment()
+                // Actual session closure must be able to acquire its lease while the
+                // migrationDraft call is suspended; a held lease would deadlock here.
+                if closeVisits.value == 2 { await session.close() }
+            })
+            preconditionFailure("Closed session published a suspended draft read")
+        } catch {}
+        check(closeVisits.value == 2 && backing.bytes == bytes && backing.commits == initialCommits)
+        // A distinct conformer's witness must be reached through both existential and
+        // actual session dispatch, not replaced by the extension's synchronous fallback.
+        let witness: any VortxCheckpointStore = MigrationDraftWitnessStore()
+        do { _ = try await witness.readMigrationDraftCooperatively(scope: scope, isCurrent: { true }, checkpoint: nil)
+            preconditionFailure("Witness marker missing") }
+        catch MigrationDraftFixtureFailure.witnessReached {}
+        let witnessSession = try VortxNativeSession(scope: scope, ownerName: "Owner", abi: SessionABI(),
+            store: witness, transport: SessionTransport(), allowNewAccount: true)
+        do { _ = try await witnessSession.migrationDraft(); preconditionFailure("Session witness marker missing") }
+        catch MigrationDraftFixtureFailure.witnessReached {}
+        await witnessSession.close()
+        print("Migration draft protocol: strict generic fallback, existential witness, session revocation and exact bytes passed")
+    }
     static func eventually(_ predicate: () -> Bool, line: Int = #line) async throws {
         for _ in 0..<400 {
             if predicate() { return }
@@ -750,6 +868,7 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         print("Native progress writes: duplicate lane dropped, 30 s coalescing, immediate non-progress writes, flush and failure passed")
     }
     static func main() async throws {
+        try await migrationDraftProtocolTests()
         try hydrationPreservationTests()
         try await progressWriteTests()
 #if canImport(VortxEngine) && VORTX_ENGINE_STATE_BRIDGE

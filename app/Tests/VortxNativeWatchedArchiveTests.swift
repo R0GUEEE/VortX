@@ -45,8 +45,8 @@ import CryptoKit
                 return try metadata(request)
             })
     }
-    static func source(bytes: Int = 1_050_720) throws -> Data {
-        let rows: [Object] = (0..<24).map { index in
+    static func source(bytes: Int = 1_050_720, count: Int = 24) throws -> Data {
+        let rows: [Object] = (0..<count).map { index in
             let id = "tt\(2934286 + index)"
             return ["id": id, "type": "series", "watched": "\(id):1:5:5:eJyTZwAAAEAAIA=="]
         }
@@ -115,6 +115,20 @@ import CryptoKit
         let reread = try await VortxNativeWatchedArchive.retryHistorical(captured, scope: scope,
             isCurrent: { true }, fetch: { _ in preconditionFailure("Completed streamed retry fetched again") })!
         check(reread == captured, "streamed retry reread preserves archive bytes")
+        var alternate = try object(originals[0])
+        alternate["reason"] = "episode_inventory_ambiguous"
+        let alternateBytes = try encode(alternate)
+        let reasonVariants = try VortxNativeWatchedArchive.retaining(empty, pending: [originals[0], alternateBytes], scope: scope)
+        let variantFetches = FetchCounter()
+        let repairedVariants = try await VortxNativeWatchedArchive.retryHistorical(reasonVariants, scope: scope,
+            isCurrent: { true }, fetch: { request in
+                check(await variantFetches.next() == 1, "one exact tuple must never be captured twice for different pending reasons")
+                return try metadata(request)
+            })!
+        check(Set(try VortxNativeWatchedArchive.entries(repairedVariants, key: VortxNativeWatchedArchive.pendingKey)) == Set([originals[0], alternateBytes]),
+              "retry conserves both original pending reasons byte-for-byte")
+        check(try VortxNativeWatchedArchive.entries(repairedVariants, key: VortxNativeWatchedArchive.evidenceKey).count == 1,
+              "reason variants produce only one authoritative receipt")
 
         // Older inline receipts may use arbitrary JSON whitespace. Retain that spelling exactly.
         let noncanonical = Data(" \n".utf8) + complete.archives[0] + Data("\n".utf8)
@@ -126,6 +140,9 @@ import CryptoKit
         check(Set(try VortxNativeWatchedArchive.entries(mixed, key: VortxNativeWatchedArchive.evidenceKey)) == Set(complete.archives + [noncanonical]),
               "mixed old/new journal conserves even noncanonical receipt bytes")
         let ambiguousLookup = try VortxNativeWatchedArchive.evidenceLookup(mixed, scope: scope)
+        let ambiguousPending = try VortxNativeWatchedArchive.retaining(mixed, pending: [originals[0]], scope: scope)
+        check(try VortxNativeWatchedArchive.pendingProfileIDs(ambiguousPending) == [owner],
+              "ambiguous evidence cannot hide the unresolved original pending tuple")
         let firstRow = try object(complete.archives[0])["row"] as! Object
         try rejected("two exact-tuple receipts must not be overwritten in the lazy index") {
             _ = try ambiguousLookup(requested, digest(source), .authenticatedOwnerLibrary(index: firstRow["index"] as! Int))
@@ -215,8 +232,7 @@ import CryptoKit
         }
         try rejected("credential inside compact receipt") { try VortxNativeBootstrapArchive.validate(carrierCredential) }
 
-        // A few-MiB compact input must not authorize gigabytes of expanded allocations/work.
-        // Size arithmetic and error precedence prove rejection; no OOM experiment is needed.
+        // Compatibility arrays remain bounded even though production streams larger journals.
         let compactRecord = (host[VortxNativeWatchedArchive.evidenceKey] as! [Object])[0]
         let fullSize = restored[0].count
         let budget = 96 * 1_024 * 1_024
@@ -229,22 +245,32 @@ import CryptoKit
             }
         }
         let nearBudget = try budgetArchive(Array(repeating: compactRecord, count: fitting), [])
+        // Arrays share immutable fixture Data storage; this proves admission arithmetic without
+        // creating a source-per-row allocation or attempting an OOM experiment.
+        let repeatedInput = Array(repeating: restored[0], count: fitting)
+        do {
+            _ = try await VortxLegacyWatchedMigration.retryArchivedPending(repeatedInput,
+                accountID: scope.account, ownerProfileID: owner, archivedEvidence: [restored[0]],
+                isCurrent: { true }, fetch: { _ in preconditionFailure("Eager over-budget retry fetched metadata") })
+            preconditionFailure("Combined eager retry exceeded byte policy")
+        } catch VortxLegacyWatchedMigration.Failure.processingLimit {}
+        check(repeatedInput[0] == restored[0], "eager preflight preserves exact original input")
         check(try VortxNativeWatchedArchive.pendingProfileIDs(nearBudget).isEmpty,
               "exact canonical expanded-size accounting admits the last whole receipt below budget")
         let combined = try budgetArchive(Array(repeating: compactRecord, count: fitting / 2),
             Array(repeating: compactRecord, count: fitting - fitting / 2 + 1))
         check(combined.count < 3 * 1_024 * 1_024, "adversarial compact journal is small on disk")
-        try processingLimited("combined evidence+pending") { try VortxNativeWatchedArchive.validate(combined, scope: scope) }
+        try rejected("evidence carrier is not a pending receipt") { try VortxNativeWatchedArchive.validate(combined, scope: scope) }
         try processingLimited("eager compatibility entries") {
             _ = try VortxNativeWatchedArchive.entries(combined, key: VortxNativeWatchedArchive.evidenceKey)
         }
-        try processingLimited("pending display") { _ = try VortxNativeWatchedArchive.pendingProfileIDs(combined) }
-        try processingLimited("lazy preparation") { _ = try VortxNativeWatchedArchive.evidenceLookup(combined, scope: scope) }
+        try rejected("malformed pending display") { _ = try VortxNativeWatchedArchive.pendingProfileIDs(combined) }
+        try rejected("malformed lazy preparation") { _ = try VortxNativeWatchedArchive.evidenceLookup(combined, scope: scope) }
         do {
             _ = try await VortxNativeWatchedArchive.retryHistorical(combined, scope: scope,
-                isCurrent: { true }, fetch: { _ in preconditionFailure("Over-budget historical retry fetched") })
-            preconditionFailure("Over-budget retry proceeded")
-        } catch VortxNativeWatchedArchive.Failure.processingLimit {}
+                isCurrent: { true }, fetch: { _ in preconditionFailure("Malformed historical retry fetched") })
+            preconditionFailure("Malformed retry proceeded")
+        } catch {}
         let inlineContribution = try budgetArchive(Array(repeating: compactRecord, count: fitting),
             [restored[0].base64EncodedString()])
         try processingLimited("legacy inline bytes count toward the same total") {
@@ -256,19 +282,19 @@ import CryptoKit
         // Noncanonical compact header spelling must be counted after reconstruction, not ignored.
         brokenRecord["receiptBase64"] = (Data(" \n".utf8) + (try encode(brokenFields))).base64EncodedString()
         let malformedOverBudget = try budgetArchive(Array(repeating: brokenRecord, count: fitting + 1), [])
-        try processingLimited("preflight before even the first malformed metadata replay") {
+        try rejected("malformed metadata is still rejected without the total work fence") {
             try VortxNativeWatchedArchive.validate(malformedOverBudget, scope: scope)
         }
         var preferences = try VortxNativeHostPreferences(scope: scope, actor: UUID().uuidString.lowercased())
         try preferences.retainAuthenticatedSourceArchive(archive)
         let saved = preferences.local.authenticatedSourceArchive
-        try processingLimited("host retention") { try preferences.retainAuthenticatedSourceArchive(combined) }
+        try rejected("malformed host retention") { try preferences.retainAuthenticatedSourceArchive(combined) }
         check(preferences.local.authenticatedSourceArchive == saved, "budget rejection leaves authenticated recovery bytes unchanged")
         check(VortxNativeWatchedArchive.Failure.processingLimit.localizedDescription.contains("contact support or update"),
               "preserved-data error provides actionable recovery guidance")
-        print("Watched work budget: last admitted receipt count=\(fitting), combined compact bytes=\(combined.count); all consumers reject excess before replay/fetch and retain original data")
-        // Small sources do not excuse large fresh metadata: stop before fetching a second
-        // distinct tuple, rather than accumulate it until the final journal validation.
+        print("Watched eager compatibility budget: last admitted receipt count=\(fitting), combined compact bytes=\(combined.count); malformed consumers retain original data")
+        // A small compact pending journal with many exact duplicates may exceed aggregate
+        // expansion, but a streaming retry must fetch only its two distinct unresolved tuples.
         let smallSource = try Self.source(bytes: 65_536)
         let smallPreparation = try await prepare(smallSource, available: false)
         let smallPending = try smallPreparation.pendingArchives
@@ -284,22 +310,81 @@ import CryptoKit
         let captureDraft = try encode(captureEnvelope)
         check(captureDraft.count < 2 * 1_024 * 1_024, "fresh metadata budget fixture remains small on disk")
         let counter = FetchCounter()
-        do {
-            _ = try await VortxNativeWatchedArchive.retryHistorical(captureDraft, scope: scope,
+        let captureResult = try await VortxNativeWatchedArchive.retryHistorical(captureDraft, scope: scope,
                 isCurrent: { true }, fetch: { request in
-                    check(await counter.next() == 1, "over-budget first result must stop before a second provider fetch")
+                    check(await counter.next() <= 2, "duplicates must not trigger extra provider fetches")
                     var payload = try object(metadata(request).raw)
                     payload["padding"] = String(repeating: "m", count: 1_200_000)
                     return .init(request: request, raw: try encode(payload))
-                })
-            preconditionFailure("Fresh metadata exceeded the journal processing budget")
-        } catch VortxNativeWatchedArchive.Failure.processingLimit {}
-        check(await counter.next() == 2, "exactly one result was fetched before budget rejection")
+                })!
+        check(await counter.next() == 3, "exactly two distinct tuples were fetched")
+        check(try VortxNativeWatchedArchive.pendingProfileIDs(captureResult).isEmpty,
+              "both large metadata captures remain available in the compact result")
         check(try VortxNativeWatchedArchive.pendingProfileIDs(captureDraft) == [owner],
               "original pending journal remains readable after fresh result rejection")
-        print("Watched capture budget: \(pendingCount) compact small-source pending entries; first large result rejects before second fetch")
+        print("Watched streamed capture: \(pendingCount) duplicate pending entries, two unique large metadata results retained")
+        try await VortxNativeWatchedStreamTests.run()
 
         // Distinct exact sources still consume space: deduplication is not a cap exemption.
+        // Full HostPreferences retention, not only helper appenders, conserves opaque host
+        // values, outer material/source witnesses and both exclusion receipts through reopen.
+        let wrappedBase = try VortxNativeBootstrapArchive.encode(document: encode([
+            "ownAccountSources": Object(), "unknown": ["exact": " \\u0061 ", "clock": 123.125],
+            "explicitNull": NSNull(), "token": "fixture-only"]), material: encode(["schemaVersion": 1, "held": 123.125]),
+            authenticatedSourceArchive: VortxNativeBootstrapArchive.encode(document: encode(["original": "exact"])))
+        let wrapped = try VortxNativeWatchedArchive.retaining(wrappedBase,
+            evidence: [complete.archives[0]], pending: [originals[0]], scope: scope)
+        var conservative = try VortxNativeHostPreferences(scope: scope, actor: UUID().uuidString.lowercased())
+        try conservative.retainAuthenticatedSourceArchive(wrapped)
+        let updatedBase = try VortxNativeBootstrapArchive.encode(document: encode(["ownAccountSources": Object(),
+            "additional": ["safe": true], "password": "second-fixture-only"]))
+        let updated = try VortxNativeWatchedArchive.retaining(updatedBase,
+            evidence: [complete.archives[1]], pending: [originals[1]], scope: scope)
+        try conservative.retainAuthenticatedSourceArchive(updated)
+        let conserved = conservative.local.authenticatedSourceArchive!
+        let values = try object(conserved), originalValues = try object(wrapped)
+        for key in ["legacyImportMaterial", "authenticatedSourceArchive"] {
+            check(try encode(values[key]!) == encode(originalValues[key]!), "host persistence retains outer \(key)")
+        }
+        let conservedHost = values["hostDocument"] as! Object
+        check(Set(try VortxNativeWatchedArchive.entries(conserved, key: VortxNativeWatchedArchive.evidenceKey))
+              == Set(complete.archives.prefix(2)), "host persistence unions old and incoming watched evidence")
+        check(Set(try VortxNativeWatchedArchive.entries(conserved, key: VortxNativeWatchedArchive.pendingKey))
+              == Set(originals.prefix(2)), "host persistence unions old and incoming exact pending receipts")
+        check(conservedHost[VortxNativeWatchedArchive.sourcesKey] as? [String: String] == pool,
+              "host persistence retains the shared exact source pool beside unknown/outer fields")
+        check(try encode(conservedHost["unknown"]!) == encode((originalValues["hostDocument"] as! Object)["unknown"]!),
+              "host persistence retains unknown field values exactly")
+        check(conservedHost["explicitNull"] is NSNull && conservedHost["additional"] != nil,
+              "absence does not remove explicit null or disjoint unknown fields")
+        check(Set(values["excludedCredentialPaths"] as! [String]) == ["/token", "/password"], "exclusion receipts union")
+        let reopened = try VortxNativeHostPreferences(scope: scope, actor: UUID().uuidString.lowercased(), sealed: conservative.encoded())
+        check(reopened.local.authenticatedSourceArchive == conserved, "sealed host reopen retains exact recovery bytes")
+        var forgedLocal = conservative.local
+        var foreignRecord = try object(complete.archives[0])
+        foreignRecord["accountId"] = "foreign.fixture"
+        let foreignArchive = try VortxNativeBootstrapArchive.encode(document: encode(["ownAccountSources": Object(),
+            VortxNativeWatchedArchive.evidenceKey: [try encode(foreignRecord).base64EncodedString()]]))
+        forgedLocal.authenticatedSourceArchive = foreignArchive
+        try rejected("cold host preferences must bind retained watched evidence to the expected account") {
+            _ = try VortxNativeHostPreferences(scope: scope, actor: UUID().uuidString.lowercased(), sealed: JSONEncoder().encode(forgedLocal))
+        }
+        try conservative.retainAuthenticatedSourceArchive(updated)
+        check(conservative.local.authenticatedSourceArchive == conserved, "identical repeated envelope is idempotent")
+        let collisions = [try VortxNativeBootstrapArchive.encode(document: encode(["ownAccountSources": Object(), "explicitNull": "changed"])),
+            try VortxNativeBootstrapArchive.encode(document: encode(["ownAccountSources": Object()]), material: encode(["schemaVersion": 1, "held": 999]))]
+        for collision in collisions {
+            do { try conservative.retainAuthenticatedSourceArchive(collision); preconditionFailure("Recovery conflict silently replaced evidence") }
+            catch is VortxNativeBootstrapArchive.RecoveryConflict {}
+            check(conservative.local.authenticatedSourceArchive == conserved, "recovery conflict leaves previous exact bytes unchanged")
+        }
+        let inherited = try VortxNativeWatchedArchive.retaining(empty, prior: wrapped, scope: scope)
+        check(try object(inherited)["legacyImportMaterial"] != nil, "watched prior union preserves enclosing material")
+        let inheritedQuarantine = try VortxNativeUnattributedOverlayArchive.retaining(empty, prior: wrapped,
+            document: source, profileIDs: [], scope: scope)
+        check(try object(inheritedQuarantine)["authenticatedSourceArchive"] != nil, "quarantine prior union preserves enclosing source")
+        print("Recovery envelopes: unknown/null values, immutable outer fields, exclusion unions, idempotence, conflict atomicity and sealed reopen passed")
+
         var distinct = [Data]()
         for index in 0..<25 {
             var value = try object(source); value["distinct"] = index

@@ -250,7 +250,8 @@ struct SIMKLContinueWatchingShadow {
     static func withNativeProviderSnapshot(_ snapshot: VortxNativeProviderCredentials.Document, capture: CredentialScopeRegistry.Capture, mutation: @MainActor () -> Void) -> Bool { fatalError("provider snapshot was entered") }
     let providerRemoteApplyMaximumAttempts = 1
     func waitForProviderRemoteApplyRetry(capture: CredentialScopeRegistry.Capture) async -> Bool { false }
-    func publishNativeWatchedPending(_ archive: Data?, capture: CredentialScopeRegistry.Capture) throws {}
+    func publishNativeWatchedPending(_ archive: Data?, scope: VortxAccountScope,
+        capture: CredentialScopeRegistry.Capture, isCurrentSource: @escaping @Sendable () -> Bool) throws {}
     func publishNativeOwnOverlayPending(_ pending: VortxJSON, capture: CredentialScopeRegistry.Capture) throws {}
     func updateNativeOwnAccountAvailability(missing: [UUID], profiles: [UserProfile], capture: CredentialScopeRegistry.Capture) {}
     func request(_ method: String, _ path: String, body: [String: Any]? = nil, auth: Bool, credentialCapture: CredentialScopeRegistry.Capture,

@@ -5,6 +5,46 @@ import CoreFoundation
 /// This is deliberately NOT a byte-identical raw cloud backup: explicit credential carriers are
 /// excluded, while typed migration clocks and every inspectable noncredential host field survive.
 enum VortxNativeBootstrapArchive {
+    struct RecoveryConflict: LocalizedError {
+        var errorDescription: String? {
+            "Two saved recovery records disagree. Both original records are unchanged. Keep this account data and contact support before replacing either record."
+        }
+    }
+    // These fields have their own scoped append/replace policies. All other host fields are
+    // opaque recovery material: absence is not deletion, and a disagreement is not an ACK.
+    static let managedRecoveryHostKeys: Set<String> = ["ownAccountSources", "ownAccountOverlayPending",
+        "ownAccountOverlayQuarantine", "nativeLegacyMembershipPending", "nativeWatchedMigrationEvidence",
+        "nativeWatchedMigrationPending", "nativeWatchedMigrationSources"]
+    static func mergingRecoveryEnvelope(_ incoming: Data, prior: Data?) throws -> Data {
+        try validate(incoming)
+        guard let prior else { return incoming }
+        try validate(prior)
+        guard var result = try decodeJSON(with: incoming) as? [String: Any],
+              let old = try decodeJSON(with: prior) as? [String: Any],
+              var host = result["hostDocument"] as? [String: Any],
+              let oldHost = old["hostDocument"] as? [String: Any] else { throw Failure.malformed }
+        func equal(_ left: Any, _ right: Any) throws -> Bool {
+            let options: JSONSerialization.WritingOptions = [.sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed]
+            return try JSONSerialization.data(withJSONObject: left, options: options)
+                == JSONSerialization.data(withJSONObject: right, options: options)
+        }
+        for (key, value) in oldHost where !managedRecoveryHostKeys.contains(key) {
+            if let fresh = host[key] { guard try equal(value, fresh) else { throw RecoveryConflict() } }
+            else { host[key] = value }
+        }
+        for key in ["legacyImportMaterial", "authenticatedSourceArchive"] {
+            guard let value = old[key] else { continue }
+            if let fresh = result[key] { guard try equal(value, fresh) else { throw RecoveryConflict() } }
+            else { result[key] = value }
+        }
+        let exclusions = (old["excludedCredentialPaths"] as! [String]) + (result["excludedCredentialPaths"] as! [String])
+        let exactPaths = Dictionary(exclusions.map { (Data($0.utf8), $0) }, uniquingKeysWith: { first, _ in first })
+        result["excludedCredentialPaths"] = exactPaths.keys.sorted { $0.lexicographicallyPrecedes($1) }.map { exactPaths[$0]! }
+        result["hostDocument"] = host
+        let merged = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
+        try validate(merged)
+        return merged
+    }
     enum Failure: Error { case malformed, ambiguousCredentialCarrier, opaquePreference }
     private static let credentials: Set<String> = [
         "auth", "authkey", "password", "apikey", "apikeys", "authorization", "bearer", "datakey",
@@ -18,14 +58,16 @@ enum VortxNativeBootstrapArchive {
         return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes])
     }
     static func encode(document: Data, material: Data? = nil, authenticatedSourceArchive: Data? = nil) throws -> Data {
-        guard let source = try JSONSerialization.jsonObject(with: document) as? [String: Any] else { throw Failure.malformed }
+        guard let source = try decodeJSON(with: document) as? [String: Any] else { throw Failure.malformed }
+        try requireUnambiguousJSON(document)
         var exclusions: [String] = []
         let sanitized = try sanitize(source, path: "", exclusions: &exclusions)
         var archive: [String: Any] = ["schemaVersion": 1, "hostDocument": sanitized,
                                       "excludedCredentialPaths": exclusions.sorted()]
         if let material {
-            guard let typed = try JSONSerialization.jsonObject(with: material) as? [String: Any],
+            guard let typed = try decodeJSON(with: material) as? [String: Any],
                   [1, 2].contains(typed["schemaVersion"] as? Int ?? 0) else { throw Failure.malformed }
+            try requireUnambiguousJSON(material)
             var forbidden: [String] = []
             _ = try sanitize(typed, path: "/legacyImportMaterial", exclusions: &forbidden)
             guard forbidden.isEmpty else { throw Failure.ambiguousCredentialCarrier }
@@ -33,8 +75,25 @@ enum VortxNativeBootstrapArchive {
         }
         if let authenticatedSourceArchive {
             try validate(authenticatedSourceArchive)
-            guard let source = try JSONSerialization.jsonObject(with: authenticatedSourceArchive) as? [String: Any],
+            guard let source = try decodeJSON(with: authenticatedSourceArchive) as? [String: Any],
                   let host = source["hostDocument"] as? [String: Any] else { throw Failure.malformed }
+            // This field is historically a host document, not a recursively nested envelope.
+            // Preserve compatible outer witnesses, or fail before returning a lossy flattened
+            // replacement. Never create recursively growing recovery history.
+            let options: JSONSerialization.WritingOptions = [.sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed]
+            if let retainedMaterial = source["legacyImportMaterial"] {
+                if let freshMaterial = archive["legacyImportMaterial"] {
+                    guard try JSONSerialization.data(withJSONObject: retainedMaterial, options: options)
+                        == JSONSerialization.data(withJSONObject: freshMaterial, options: options) else { throw RecoveryConflict() }
+                } else { archive["legacyImportMaterial"] = retainedMaterial }
+            }
+            if let retainedSource = source["authenticatedSourceArchive"] {
+                guard try JSONSerialization.data(withJSONObject: retainedSource, options: options)
+                    == JSONSerialization.data(withJSONObject: host, options: options) else { throw RecoveryConflict() }
+            }
+            let paths = exclusions + (source["excludedCredentialPaths"] as! [String])
+            let uniquePaths = Dictionary(paths.map { (Data($0.utf8), $0) }, uniquingKeysWith: { first, _ in first })
+            archive["excludedCredentialPaths"] = uniquePaths.keys.sorted { $0.lexicographicallyPrecedes($1) }.map { uniquePaths[$0]! }
             archive["authenticatedSourceArchive"] = host
         }
         return try JSONSerialization.data(withJSONObject: archive, options: [.sortedKeys, .withoutEscapingSlashes])
@@ -44,21 +103,23 @@ enum VortxNativeBootstrapArchive {
     /// pass the complete inspector; the other envelope fields retain their original values.
     static func replacingHostDocument(in archive: Data, with document: Data) throws -> Data {
         try validate(archive)
-        guard var envelope = try JSONSerialization.jsonObject(with: archive) as? [String: Any],
-              let host = try JSONSerialization.jsonObject(with: document) as? [String: Any] else { throw Failure.malformed }
+        guard var envelope = try decodeJSON(with: archive) as? [String: Any],
+              let host = try decodeJSON(with: document) as? [String: Any] else { throw Failure.malformed }
+        try requireUnambiguousJSON(document)
         envelope["hostDocument"] = host
         let result = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys, .withoutEscapingSlashes])
         try validate(result)
         return result
     }
     static func validate(_ archive: Data) throws {
-        guard let object = try JSONSerialization.jsonObject(with: archive) as? [String: Any],
+        guard let object = try decodeJSON(with: archive) as? [String: Any],
               object["schemaVersion"] as? Int == 1, let host = object["hostDocument"] as? [String: Any],
               let excluded = object["excludedCredentialPaths"] as? [String],
               excluded.allSatisfy({ $0.hasPrefix("/") }),
               Set(object.keys).isSubset(of: ["schemaVersion", "hostDocument", "excludedCredentialPaths", "legacyImportMaterial", "authenticatedSourceArchive"])
         else { throw Failure.malformed }
         var forbidden: [String] = []
+        try requireUnambiguousJSON(archive)
         _ = try sanitize(host, path: "", exclusions: &forbidden)
         if let material = object["legacyImportMaterial"] {
             guard material is [String: Any] else { throw Failure.malformed }
@@ -85,6 +146,23 @@ enum VortxNativeBootstrapArchive {
         case depthLimit = "depth_limit", backupEnvelope = "backup_envelope", settingsEnvelope = "settings_envelope"
         case opaqueData = "opaque_data", base64Prefix = "base64_prefix", plainTextPrefix = "plain_text_prefix"
     }
+    private enum InspectionPreferenceFamily: String {
+        case profileRoster = "profile_roster", profileWatch = "profile_watch", sourcePin = "source_pin"
+        case seriesSourceChoice = "series_source_choice", ownerHistory = "owner_history", forYouLocal = "for_you_local"
+    }
+    private static func diagnosticPreferenceFamily(_ path: String) -> InspectionPreferenceFamily? {
+        // Classification only, never inspection authority. Return closed labels, not the raw
+        // preference name, profile/account suffix, dictionary key, value, or encoded bytes.
+        guard let marker = path.range(of: "/settings/payloadBase64/"),
+              let key = path[marker.upperBound...].split(separator: "/").first else { return nil }
+        if key == "stremiox.profiles" { return .profileRoster }
+        if key.hasPrefix("stremiox.profiles.watch.") { return .profileWatch }
+        if key.hasPrefix("stremiox.sourcePins.") { return .sourcePin }
+        if key.hasPrefix("stremiox.seriesSourceSticky.") { return .seriesSourceChoice }
+        if key.hasPrefix("vortx.owner.history.v1.") { return .ownerHistory }
+        if key == "vortx.forYou.local" { return .forYouLocal }
+        return nil
+    }
     private static func rejected(_ failure: Failure, path: String, diagnostics: ((String) -> Void)?,
                                  carrier: InspectionCarrier? = nil) -> Failure {
         if let diagnostics {
@@ -98,11 +176,22 @@ enum VortxNativeBootstrapArchive {
                 diagnosticFields.contains(String($0)) ? String($0) : "*"
             }.joined(separator: "/")
             let detail = carrier.map { " carrier=" + $0.rawValue } ?? ""
-            diagnostics("archive_inspection result=failed reason=\(reason) field=\(field)\(detail)")
+            let family = diagnosticPreferenceFamily(path).map { " preference_family=" + $0.rawValue } ?? ""
+            diagnostics("archive_inspection result=failed reason=\(reason) field=\(field)\(detail)\(family)")
         }
         return failure
     }
-    private enum TextContext { case ordinary, addonManifest, addonDisplayText }
+    private enum TextContext {
+        case ordinary, addonManifest, addonDisplayText
+        case settingsDomain, profileRosterData, profileRoster, profileRosterItem, profileName, profileAvatar
+    }
+    private static func isProfileRosterItem(_ object: [String: Any]) -> Bool {
+        // ProfileStore.persist writes JSON Data containing UUID/name/avatar roster records.
+        // Unknown fields are still inspected; a field name alone never grants display semantics.
+        guard let id = object["id"] as? String, UUID(uuidString: id) != nil,
+              object["name"] is String, object["avatar"] is String else { return false }
+        return true
+    }
     private static func isAddonDescriptor(_ object: [String: Any]) -> Bool {
         guard let transport = object["transportUrl"] as? String, let url = URLComponents(string: transport),
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host?.isEmpty == false,
@@ -126,7 +215,7 @@ enum VortxNativeBootstrapArchive {
                 // A valid JSON prefix followed by extra text is still a malformed container,
                 // not a literal tag: `[true] {"token":...}` must retain the rejection fence.
                 let prefix = String(scalars[...index])
-                return (try? JSONSerialization.jsonObject(with: Data(prefix.utf8), options: [.fragmentsAllowed])) == nil
+                return (try? decodeJSON(with: Data(prefix.utf8), options: [.fragmentsAllowed])) == nil
             }
             guard count < 64, allowed.contains(scalar) else { return false }
             count += 1
@@ -148,6 +237,7 @@ enum VortxNativeBootstrapArchive {
         if var object = value as? [String: Any] {
             let websiteEventID = typedWebsiteEventID(object)
             let addonDescriptor = isAddonDescriptor(object)
+            var inspectedBackupPayload: String?
             // Backups may be nested under future preference keys, not just `settings`. Recognize
             // their envelope by content and inspect the plist before traversing envelope metadata.
             if object["format"] as? String == "vortx-backup" {
@@ -155,9 +245,11 @@ enum VortxNativeBootstrapArchive {
                       let payload = object["payloadBase64"] as? String, let bytes = Data(base64Encoded: payload),
                       let domain = try PropertyListSerialization.propertyList(from: bytes, options: [], format: nil) as? [String: Any]
                 else { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .backupEnvelope) }
-                let safe = try sanitize(domain, path: path + "/payloadBase64", exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics)
+                let safe = try sanitize(domain, path: path + "/payloadBase64", exclusions: &exclusions, depth: depth + 1,
+                                        diagnostics: diagnostics, textContext: .settingsDomain)
                 guard let safe = safe as? [String: Any] else { throw rejected(.malformed, path: path, diagnostics: diagnostics) }
-                object["payloadBase64"] = try PropertyListSerialization.data(fromPropertyList: safe, format: .binary, options: 0).base64EncodedString()
+                inspectedBackupPayload = try PropertyListSerialization.data(fromPropertyList: safe, format: .binary, options: 0).base64EncodedString()
+                object["payloadBase64"] = inspectedBackupPayload
                 object["keyCount"] = safe.count
             }
             var result: [String: Any] = [:]
@@ -175,7 +267,12 @@ enum VortxNativeBootstrapArchive {
                     ["token", "password", "authkey", "apikey"].contains(where: { normalized.hasSuffix($0) })) {
                     throw rejected(.ambiguousCredentialCarrier, path: child, diagnostics: diagnostics)
                 }
-                if key == "eventId", let websiteEventID {
+                if key == "payloadBase64", let inspectedBackupPayload {
+                    // This exact replacement has already passed complete inspection above. A
+                    // second generic decode would discard the validated preference-domain role.
+                    // No sibling or unrecognized envelope receives this treatment.
+                    result[key] = inspectedBackupPayload
+                } else if key == "eventId", let websiteEventID {
                     // A validated protocol identifier is hexadecimal, not opaque base64. Other
                     // values, even alongside this identifier, still traverse the complete policy.
                     result[key] = websiteEventID
@@ -185,8 +282,17 @@ enum VortxNativeBootstrapArchive {
                     // Context is one-hop and content-typed, so the same descriptor remains valid in
                     // legacy material, native registers and retained independent-source archives.
                     // Never let a display-field exemption flow into another key or decoded carrier.
-                    let context: TextContext = key == "manifest" && addonDescriptor ? .addonManifest
-                        : textContext == .addonManifest && ["name", "description"].contains(key) && object[key] is String ? .addonDisplayText : .ordinary
+                    let context: TextContext
+                    if textContext == .settingsDomain, key == "stremiox.profiles", object[key] is Data {
+                        context = .profileRosterData
+                    } else if textContext == .profileRosterItem, object[key] is String, key == "name" {
+                        context = .profileName
+                    } else if textContext == .profileRosterItem, object[key] is String, key == "avatar" {
+                        context = .profileAvatar
+                    } else {
+                        context = key == "manifest" && addonDescriptor ? .addonManifest
+                            : textContext == .addonManifest && ["name", "description"].contains(key) && object[key] is String ? .addonDisplayText : .ordinary
+                    }
                     result[key] = try sanitize(object[key]!, path: child, exclusions: &exclusions, depth: depth + 1,
                                                diagnostics: diagnostics, textContext: context)
                 }
@@ -194,13 +300,23 @@ enum VortxNativeBootstrapArchive {
             return result
         }
         if let array = value as? [Any] {
-            return try array.enumerated().map { try sanitize($0.element, path: path + "/" + String($0.offset), exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics) }
+            return try array.enumerated().map {
+                let context: TextContext = textContext == .profileRoster && ($0.element as? [String: Any]).map(isProfileRosterItem) == true
+                    ? .profileRosterItem : .ordinary
+                return try sanitize($0.element, path: path + "/" + String($0.offset), exclusions: &exclusions, depth: depth + 1,
+                                    diagnostics: diagnostics, textContext: context)
+            }
         }
         if let data = value as? Data {
             // Preference Data is frequently JSON (full roster/playback fields) or a plist. Inspect
             // both, preserving its Data type. Unknown binary payloads require reconciliation.
-            if let object = try? JSONSerialization.jsonObject(with: data) {
-                let safe = try sanitize(object, path: path, exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics)
+            if let object = try? decodeJSON(with: data) {
+                try requireUnambiguousJSON(data)
+                let context: TextContext = textContext == .profileRosterData && object is [Any] ? .profileRoster : .ordinary
+                let safe = try sanitize(object, path: path, exclusions: &exclusions, depth: depth + 1,
+                                        diagnostics: diagnostics, textContext: context)
+                // Always serialize only the inspected value. Foundation may collapse duplicate
+                // JSON keys before inspection; returning raw Data could retain a hidden credential.
                 return try JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys, .withoutEscapingSlashes])
             }
             var format = PropertyListSerialization.PropertyListFormat.binary
@@ -209,8 +325,9 @@ enum VortxNativeBootstrapArchive {
             }
             throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .opaqueData)
         }
-        if let text = value as? String, let nested = try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed]),
+        if let text = value as? String, let nested = try? decodeJSON(with: Data(text.utf8), options: [.fragmentsAllowed]),
            nested is [String: Any] || nested is [Any] || nested is String {
+            try requireUnambiguousJSON(Data(text.utf8))
             let prior = exclusions.count
             let safe = try sanitize(nested, path: path, exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics)
             // Keep the original noncredential string byte-for-byte unless actual exclusions were
@@ -222,8 +339,9 @@ enum VortxNativeBootstrapArchive {
             // Inspect recognizable base64 JSON/plist containers wherever they occur. Ordinary
             // strings (including configured URLs) remain exact, and encoding stays base64.
             let prior = exclusions.count
-            if let nested = try? JSONSerialization.jsonObject(with: bytes, options: [.fragmentsAllowed]),
+            if let nested = try? decodeJSON(with: bytes, options: [.fragmentsAllowed]),
                nested is [String: Any] || nested is [Any] || nested is String {
+                try requireUnambiguousJSON(bytes)
                 let safe = try sanitize(nested, path: path, exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics)
                 if exclusions.count == prior { return text }
                 return try JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed]).base64EncodedString()
@@ -237,14 +355,151 @@ enum VortxNativeBootstrapArchive {
             if structuredPrefix(bytes) { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .base64Prefix) }
         }
         if let text = value as? String, structuredPrefix(Data(text.utf8)),
-           !(textContext == .addonDisplayText && hasLiteralDisplayLabel(text)) {
+           !(textContext == .addonDisplayText && hasLiteralDisplayLabel(text)),
+           !((textContext == .profileName || textContext == .profileAvatar) && (text == "[" || text == "{")),
+           !(textContext == .profileName && hasLiteralDisplayLabel(text)) {
             throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .plainTextPrefix)
         }
         guard value is String || value is NSNumber || value is NSNull || value is Date else { throw rejected(.malformed, path: path, diagnostics: diagnostics) }
         return value
     }
+    /// One encoding view for Foundation and the member scanner. Retain original caller bytes;
+    /// only UTF-16/32 require transcoding. BOM detection precedes zero-byte encoding detection.
+    private static func jsonUTF8View(_ data: Data) throws -> Data {
+        let raw = Array(data.prefix(4)) // Encoding sniff only: no whole-input byte-array copy.
+        let encoding: String.Encoding
+        let skip: Int
+        if raw.starts(with: [0, 0, 0xfe, 0xff]) { encoding = .utf32BigEndian; skip = 4 }
+        else if raw.starts(with: [0xff, 0xfe, 0, 0]) { encoding = .utf32LittleEndian; skip = 4 }
+        else if raw.starts(with: [0xef, 0xbb, 0xbf]) { encoding = .utf8; skip = 3 }
+        else if raw.starts(with: [0xfe, 0xff]) { encoding = .utf16BigEndian; skip = 2 }
+        else if raw.starts(with: [0xff, 0xfe]) { encoding = .utf16LittleEndian; skip = 2 }
+        else if raw.count >= 4, raw[0] == 0, raw[1] == 0, raw[2] == 0 { encoding = .utf32BigEndian; skip = 0 }
+        else if raw.count >= 4, raw[1] == 0, raw[2] == 0, raw[3] == 0 { encoding = .utf32LittleEndian; skip = 0 }
+        // JSON begins with ASCII syntax/whitespace; the next code unit may be non-ASCII.
+        else if raw.count >= 2, raw[0] == 0 { encoding = .utf16BigEndian; skip = 0 }
+        else if raw.count >= 2, raw[1] == 0 { encoding = .utf16LittleEndian; skip = 0 }
+        else { encoding = .utf8; skip = 0 }
+        let payload = skip == 0 ? data : Data(data.dropFirst(skip)) // Strip at most one BOM.
+        if encoding == .utf8 { return payload }
+        guard let text = String(data: payload, encoding: encoding) else { throw Failure.malformed }
+        return Data(text.utf8)
+    }
+    private static func decodeJSON(with data: Data, options: JSONSerialization.ReadingOptions = []) throws -> Any {
+        try JSONSerialization.jsonObject(with: jsonUTF8View(data), options: options)
+    }
+    /// Admission-only companion to a SUCCESSFUL normalized Foundation parse, not a value decoder.
+    /// Foundation dictionaries can erase duplicate/escaped/canonically equivalent member names.
+    /// Inspect the original member stream before admitting any raw carrier. Keep this throwing
+    /// call outside JSON probes' try? so ambiguity cannot fall through to another carrier policy.
+    /// No value tree, number conversion, credential policy, byte cap or key-count cap is added.
+    private static func requireUnambiguousJSON(_ data: Data) throws {
+        let bytes = Array(try jsonUTF8View(data))
+        var scanner = JSONMemberScanner(bytes: bytes)
+        try scanner.value(depth: 0)
+        scanner.whitespace()
+        guard scanner.index == bytes.count else { throw Failure.malformed }
+    }
+    private struct JSONMemberScanner {
+        let bytes: [UInt8]
+        var index = 0
+        mutating func whitespace() {
+            while index < bytes.count, [9, 10, 13, 32].contains(bytes[index]) { index += 1 }
+        }
+        mutating func value(depth: Int) throws {
+            // Deliberate raw-JSON admission tightening, not redundant with sanitizer depth 64:
+            // even a credential subtree the sanitizer would discard must fit this scan bound.
+            // Fail before replacement; never skip an uninspected deep subtree to preserve bytes.
+            guard depth <= 128 else { throw Failure.malformed }
+            whitespace()
+            guard index < bytes.count else { throw Failure.malformed }
+            switch bytes[index] {
+            case 123:
+                index += 1; whitespace()
+                var keys = Set<String>()
+                if take(125) { return }
+                while true {
+                    whitespace()
+                    let token = try stringToken()
+                    // Reuse Foundation's string escape/surrogate/UTF-8 decoding, as the existing
+                    // overlay witness does. Swift String equality also rejects canonical Unicode
+                    // collisions which byte-keyed legacy JSON intentionally treats as distinct.
+                    guard let key = (try? VortxNativeBootstrapArchive.decodeJSON(with: Data(bytes[token]), options: [.fragmentsAllowed])) as? String,
+                          keys.insert(key).inserted else { throw Failure.malformed }
+                    whitespace(); guard take(58) else { throw Failure.malformed }
+                    try value(depth: depth + 1); whitespace()
+                    if take(125) { return }
+                    guard take(44) else { throw Failure.malformed }
+                }
+            case 91:
+                index += 1; whitespace()
+                if take(93) { return }
+                while true {
+                    try value(depth: depth + 1); whitespace()
+                    if take(93) { return }
+                    guard take(44) else { throw Failure.malformed }
+                }
+            case 34: _ = try stringToken()
+            case 116: try literal("true")
+            case 102: try literal("false")
+            case 110: try literal("null")
+            case 45, 48...57: try number()
+            default: throw Failure.malformed
+            }
+        }
+        mutating func stringToken() throws -> Range<Int> {
+            let start = index
+            guard take(34) else { throw Failure.malformed }
+            while index < bytes.count {
+                let byte = bytes[index]; index += 1
+                if byte == 34 { return start..<index }
+                guard byte >= 32 else { throw Failure.malformed }
+                if byte != 92 { continue }
+                guard index < bytes.count else { throw Failure.malformed }
+                let escaped = bytes[index]; index += 1
+                switch escaped {
+                case 34, 92, 47, 98, 102, 110, 114, 116: break
+                case 117:
+                    for _ in 0..<4 {
+                        guard index < bytes.count else { throw Failure.malformed }
+                        let hex = bytes[index]; index += 1
+                        guard (48...57).contains(hex) || (65...70).contains(hex) || (97...102).contains(hex) else { throw Failure.malformed }
+                    }
+                default: throw Failure.malformed
+                }
+            }
+            throw Failure.malformed
+        }
+        mutating func number() throws {
+            // Lexical only. Do not import the witness's binary64 bound or legacy token cap.
+            _ = take(45)
+            if take(48) {
+                guard index == bytes.count || !(48...57).contains(bytes[index]) else { throw Failure.malformed }
+            } else {
+                guard digit() else { throw Failure.malformed }
+                while digit() {}
+            }
+            if take(46) { guard digit() else { throw Failure.malformed }; while digit() {} }
+            if take(101) || take(69) {
+                _ = take(43) || take(45)
+                guard digit() else { throw Failure.malformed }; while digit() {}
+            }
+        }
+        mutating func literal(_ text: String) throws {
+            for byte in text.utf8 { guard take(byte) else { throw Failure.malformed } }
+        }
+        mutating func digit() -> Bool {
+            guard index < bytes.count, (48...57).contains(bytes[index]) else { return false }
+            index += 1; return true
+        }
+        mutating func take(_ byte: UInt8) -> Bool {
+            guard index < bytes.count, bytes[index] == byte else { return false }
+            index += 1; return true
+        }
+    }
     private static func structuredPrefix(_ bytes: Data) -> Bool {
-        let prefix = String(decoding: bytes.prefix(32), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let view = (try? jsonUTF8View(bytes)) ?? bytes
+        let prefix = String(decoding: view.prefix(32), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         return ["{", "[", "bplist", "<?xml", "<!DOCTYPE", "<plist"].contains(where: prefix.hasPrefix)
     }
     private static func typedWebsiteEventID(_ object: [String: Any]) -> String? {
@@ -277,9 +532,10 @@ enum VortxNativeBootstrapArchive {
     private static func settings(_ encoded: String, path: String, exclusions: inout [String], depth: Int,
                                  diagnostics: ((String) -> Void)?) throws -> String {
         guard let bytes = Data(base64Encoded: encoded),
-              let envelope = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              let envelope = try decodeJSON(with: bytes) as? [String: Any],
               envelope["format"] as? String == "vortx-backup"
         else { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .settingsEnvelope) }
+        try requireUnambiguousJSON(bytes)
         let safeEnvelope = try sanitize(envelope, path: path, exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics)
         return try JSONSerialization.data(withJSONObject: safeEnvelope, options: [.sortedKeys, .withoutEscapingSlashes]).base64EncodedString()
     }
