@@ -11429,9 +11429,8 @@ struct TVPlayerView: View {
             // relying on the engine. Otherwise a libmpv play accumulates community frames off-main against
             // main-actor state and can contribute ZERO pool rows. `data` (Data) is Sendable.
             //
-            // The heavy JPEG decode runs HERE, off the main actor (this libmpv completion is on a background
-            // capture queue), so only the small main-actor tail (in-flight reset + record/upload of the
-            // already-decoded frame) hops to the main actor, keeping the ~10s decode off the UI thread.
+            // Engine callbacks can arrive on either queue. Explicitly schedule JPEG processing on a
+            // utility queue, then publish only if this capture generation still owns the result.
             guard let data else {
                 Task { @MainActor in
                     watchdog.cancel()
@@ -11447,15 +11446,17 @@ struct TVPlayerView: View {
                 return
             }
             VXProbe.log("tp", "\(engine) captured \(data.count) bytes at \(Int(time))s (tvOS)")
-            let decoded = ScrubThumbnailsStore.decodeCapturedFrame(data, at: time)   // heavy decode OFF main
-            Task { @MainActor in
-                watchdog.cancel()
-                guard self.ownsLocalTrickplayCapture(captureGeneration) else { return }
-                self.localTrickplayCaptureInFlight = false
-                self.trickplayCaptureCompletionsSinceReceipt &+= 1
-                _ = self.localTrickplayCaptureBreaker.recordCapture(hadData: true)
-                guard let decoded else { return }   // decode failed / near-black: already logged off-actor
-                self.scrubThumbnails.recordDecodedFrame(decoded, data: data, at: time)
+            DispatchQueue.global(qos: .utility).async {
+                let decoded = ScrubThumbnailsStore.decodeCapturedFrame(data, at: time)
+                Task { @MainActor in
+                    watchdog.cancel()
+                    guard self.ownsLocalTrickplayCapture(captureGeneration) else { return }
+                    self.localTrickplayCaptureInFlight = false
+                    self.trickplayCaptureCompletionsSinceReceipt &+= 1
+                    _ = self.localTrickplayCaptureBreaker.recordCapture(hadData: true)
+                    guard let decoded else { return }   // decode failed / near-black: already logged off-actor
+                    self.scrubThumbnails.recordDecodedFrame(decoded, data: data, at: time)
+                }
             }
         }
     }

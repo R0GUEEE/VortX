@@ -24,6 +24,51 @@ struct AVPlayerRemuxStartupSignal: Equatable {
     }
 }
 
+/// Owns a cold listener until its issuing load adopts it. No remux producer is started here.
+/// Cancellation may race the blocking listener factory, so a late result is retired on its worker queue.
+final class AVPlayerColdRemuxPreparation: @unchecked Sendable {
+    typealias Mount = (server: VortXRemuxHLSServer, playlistURL: URL)
+    private let lock = NSLock()
+    private var retired = false
+    private var mount: Mount?
+
+    var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return retired
+    }
+
+    func publish(_ result: Mount?) {
+        lock.lock()
+        if retired {
+            lock.unlock()
+            result?.server.invalidate()
+            return
+        }
+        mount = result
+        lock.unlock()
+    }
+
+    /// Only the main actor's current load can take ownership, immediately before starting the producer.
+    func take() -> Mount? {
+        lock.lock(); defer { lock.unlock() }
+        guard !retired else { return nil }
+        retired = true
+        defer { mount = nil }
+        return mount
+    }
+
+    func cancel() {
+        lock.lock()
+        retired = true
+        let abandoned = mount
+        mount = nil
+        lock.unlock()
+        abandoned?.server.invalidate()
+    }
+
+    deinit { cancel() }
+}
+
 // MARK: - PiP state machine (dependency-free)
 
 enum AVPlayerPictureInPictureCommand: Equatable, Sendable {
@@ -636,6 +681,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     // delivery AVFoundation supports for a growing fMP4 (the progressive loader path above never framed on
     // device). Held for the whole session; torn down in stop()/loadFile().
     private var remuxHLSServer: VortXRemuxHLSServer?
+    private var coldLocalRemuxPreparation: AVPlayerColdRemuxPreparation?
+    private var coldLocalRemuxMountTask: Task<Void, Never>?
     private struct ConfiguredPreparedRemux {
         let handle: VortXPreparedRemuxHandle
         let ownerIdentity: VortXPreparedRemuxOwnerIdentity
@@ -900,6 +947,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     // MARK: Loading + transport
 
     func invalidateLoadToken() {
+        cancelColdLocalRemuxPreparation()
         nativePreflightState.retire()
         #if os(tvOS)
         nativePreAttachTask?.cancel()
@@ -1348,25 +1396,17 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
             VXProbe.log(
                 "dv",
                 "\(lane) adopted (prepared local HLS) host=\(url.host ?? "?") -> 127.0.0.1:\(adopted.server.port)")
-        } else if wantsRemux, VortXRemuxHLSServer.deliveryEnabled,
-           let mounted = VortXRemuxHLSServer.make(input: url, headers: headers,
-                                                  mode: wantsPlainRemux ? .plain : .dolbyVision,
-                                                  startAtSeconds: requestedRemuxOrigin,
-                                                  selectedAudioStreamIndex: selectedRemuxAudioSourceIndex,
-                                                  preferredAudioLanguages: remuxPreferredAudioLanguages,
-                                                  audioRejectTerms: remuxAudioRejectTerms,
-                                                  onStartupTimeout: startupTimeout) {
-            remuxHLSServer = mounted.server
-            localRemuxPlaylistURL = mounted.playlistURL
-            mounted.server.start()
-            newAsset = AVURLAsset(url: mounted.playlistURL)
-            let lane = wantsPlainRemux ? "plain-remux" : "dv-remux"
-            DiagnosticsLog.log("avplayer", "\(lane) mount (local HLS) host=\(url.host ?? "?") -> 127.0.0.1:\(mounted.server.port)")
-            // [dv] the remux lane mounted: AVPlayer is now fed the remux as local HLS. If a classify
-            // fail-soft fires next (see VortXMKVRemuxStream), the item .failed demotion below ties the reason
-            // to the observed engine flip, giving one greppable [dv] trail (the plain lane logs on the same
-            // channel so one grep still shows route -> mount -> classify -> demote in order).
-            VXProbe.log("dv", "\(lane) mounted (local HLS) host=\(url.host ?? "?") -> 127.0.0.1:\(mounted.server.port)")
+        } else if wantsRemux, VortXRemuxHLSServer.deliveryEnabled {
+            beginColdLocalRemuxMount(
+                url: url, headers: headers,
+                wantsPlainRemux: wantsPlainRemux, wantsDVRemux: wantsDVRemux,
+                startAtSeconds: requestedRemuxOrigin,
+                selectedAudioStreamIndex: selectedRemuxAudioSourceIndex,
+                preferredAudioLanguages: remuxPreferredAudioLanguages,
+                audioRejectTerms: remuxAudioRejectTerms,
+                live: live, loadToken: issuedToken, generation: issuedGeneration,
+                onStartupTimeout: startupTimeout)
+            return issuedToken
         } else if wantsDVRemux, !VortXRemuxHLSServer.deliveryEnabled,
                   let built = VortXRemuxResourceLoader.make(
                     input: url,
@@ -1382,30 +1422,116 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
             DiagnosticsLog.log("avplayer", "dv-remux mount host=\(url.host ?? "?") -> \(built.assetURL.scheme ?? "?")")
             VXProbe.log("dv", "remux mounted host=\(url.host ?? "?") -> \(built.assetURL.scheme ?? "?")")
         } else if wantsRemux {
-            // The remux lane (DV or plain) was demanded but the mount could not be built (the local HLS
-            // server failed to bind, or the legacy loader could not be assembled). AVFoundation has no
-            // Matroska demuxer, so loading the raw MKV here would mount an item AVPlayer can never produce a
-            // frame from. Fail-soft immediately so the chrome demotes to libmpv instead of stalling on
-            // an un-demuxable asset. This ties into the [dv] demotion trail below.
-            let lane = wantsPlainRemux ? "plain-remux" : "dv-remux"
-            if recoverAudioReplacementIfNeeded(
-                generation: issuedGeneration,
-                reason: "\(lane) mount build failed") {
-                return issuedToken
-            }
-            DiagnosticsLog.log("avplayer", "\(lane) mount build failed host=\(url.host ?? "?") -> demoting to libmpv")
-            VXProbe.log("dv", "\(lane) mount build failed -> endFileError demote host=\(url.host ?? "?")")
-            guard terminalLatch.claim(generation: issuedGeneration) else { return issuedToken }
-            fatalErrorEmitted = true
-            emit(MPVProperty.endFileError,
-                 wantsPlainRemux ? "Remux unavailable" : "DV remux unavailable",
-                 loadToken: issuedToken)
+            failRemuxMount(url: url, wantsPlainRemux: wantsPlainRemux,
+                           loadToken: issuedToken, generation: issuedGeneration)
             return issuedToken
         } else {
             let safeHeaders = StreamRequestHeaderPolicy.sanitized(headers)
             let options = safeHeaders.isEmpty ? nil : ["AVURLAssetHTTPHeaderFieldsKey": safeHeaders]
             newAsset = AVURLAsset(url: url, options: options)
         }
+        finishLoadAsset(newAsset, url: url, headers: headers, live: live,
+                        wantsDVRemux: wantsDVRemux,
+                        loadToken: issuedToken, generation: issuedGeneration)
+        return issuedToken
+    }
+
+    private func cancelColdLocalRemuxPreparation() {
+        coldLocalRemuxPreparation?.cancel()
+        coldLocalRemuxPreparation = nil
+        coldLocalRemuxMountTask?.cancel()
+        coldLocalRemuxMountTask = nil
+    }
+
+    private func beginColdLocalRemuxMount(
+        url: URL, headers: [String: String]?,
+        wantsPlainRemux: Bool, wantsDVRemux: Bool,
+        startAtSeconds: Double,
+        selectedAudioStreamIndex: Int?,
+        preferredAudioLanguages: [String]?, audioRejectTerms: [String]?,
+        live: Bool, loadToken: PlayerLoadToken, generation: UInt64,
+        onStartupTimeout: @escaping @Sendable (VortXRemuxHLSServer) -> Void
+    ) {
+        cancelColdLocalRemuxPreparation()
+        let preparation = AVPlayerColdRemuxPreparation()
+        coldLocalRemuxPreparation = preparation
+        // make() waits for NWListener binding for up to two seconds. Only immutable request inputs
+        // cross to this worker; AVPlayerItem, display criteria and UI publication stay on the main actor.
+        let work = Task.detached(priority: .utility) {
+            guard !preparation.isCancelled else { return }
+            let mounted = VortXRemuxHLSServer.make(
+                input: url, headers: headers,
+                mode: wantsPlainRemux ? .plain : .dolbyVision,
+                startAtSeconds: startAtSeconds,
+                selectedAudioStreamIndex: selectedAudioStreamIndex,
+                preferredAudioLanguages: preferredAudioLanguages,
+                audioRejectTerms: audioRejectTerms,
+                onStartupTimeout: onStartupTimeout)
+            preparation.publish(mounted)
+        }
+        coldLocalRemuxMountTask = Task { @MainActor [weak self] in
+            await withTaskCancellationHandler {
+                await work.value
+            } onCancel: {
+                preparation.cancel()
+                work.cancel()
+            }
+            guard let self else { preparation.cancel(); return }
+            defer {
+                if self.coldLocalRemuxPreparation === preparation {
+                    self.coldLocalRemuxPreparation = nil
+                    self.coldLocalRemuxMountTask = nil
+                }
+            }
+            guard !Task.isCancelled,
+                  self.pendingLoadIsCurrent(loadToken: loadToken, generation: generation),
+                  !self.fatalErrorEmitted, !self.terminalLatch.hasEmitted else {
+                preparation.cancel()
+                return
+            }
+            guard let mounted = preparation.take() else {
+                self.failRemuxMount(url: url, wantsPlainRemux: wantsPlainRemux,
+                                    loadToken: loadToken, generation: generation)
+                return
+            }
+            // Before this exact ownership transfer there is only a listener, no producer or input
+            // connection. A cancelled mount therefore cannot overlap a later AV-to-MPV handoff.
+            self.remuxHLSServer = mounted.server
+            self.localRemuxPlaylistURL = mounted.playlistURL
+            mounted.server.start()
+            let lane = wantsPlainRemux ? "plain-remux" : "dv-remux"
+            DiagnosticsLog.log("avplayer", "\(lane) mount (local HLS) host=\(url.host ?? "?") -> 127.0.0.1:\(mounted.server.port)")
+            VXProbe.log("dv", "\(lane) mounted (local HLS) host=\(url.host ?? "?") -> 127.0.0.1:\(mounted.server.port)")
+            self.finishLoadAsset(AVURLAsset(url: mounted.playlistURL),
+                                 url: url, headers: headers, live: live,
+                                 wantsDVRemux: wantsDVRemux,
+                                 loadToken: loadToken, generation: generation)
+        }
+    }
+
+    private func failRemuxMount(url: URL, wantsPlainRemux: Bool,
+                               loadToken: PlayerLoadToken, generation: UInt64) {
+        guard pendingLoadIsCurrent(loadToken: loadToken, generation: generation) else { return }
+        let lane = wantsPlainRemux ? "plain-remux" : "dv-remux"
+        if recoverAudioReplacementIfNeeded(generation: generation, reason: "\(lane) mount build failed") {
+            return
+        }
+        DiagnosticsLog.log("avplayer", "\(lane) mount build failed host=\(url.host ?? "?") -> demoting to libmpv")
+        VXProbe.log("dv", "\(lane) mount build failed -> endFileError demote host=\(url.host ?? "?")")
+        guard terminalLatch.claim(generation: generation) else { return }
+        fatalErrorEmitted = true
+        emit(MPVProperty.endFileError,
+             wantsPlainRemux ? "Remux unavailable" : "DV remux unavailable",
+             loadToken: loadToken)
+    }
+
+    /// Common attachment tail for direct, prepared, legacy and newly constructed local assets.
+    private func finishLoadAsset(_ newAsset: AVURLAsset,
+                                 url: URL, headers: [String: String]?, live: Bool,
+                                 wantsDVRemux: Bool,
+                                 loadToken: PlayerLoadToken, generation: UInt64) {
+        guard pendingLoadIsCurrent(loadToken: loadToken, generation: generation),
+              !fatalErrorEmitted, !terminalLatch.hasEmitted else { return }
         let newItem = AVPlayerItem(asset: newAsset)
         // A10-ii: name the AVPlayer lane on the probe at the mount, so the first heartbeat after routing shows
         // engine=avplayer + the source host instead of a stale or blank lane. The KVO observers refine the
@@ -1472,17 +1598,16 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
                 asset: newAsset,
                 item: newItem,
                 output: output,
-                loadToken: issuedToken,
-                generation: issuedGeneration)
-            return issuedToken
+                loadToken: loadToken,
+                generation: generation)
+            return
         }
         #endif
         attachPreparedItem(
             newItem,
             output: output,
-            loadToken: issuedToken,
-            generation: issuedGeneration)
-        return issuedToken
+            loadToken: loadToken,
+            generation: generation)
     }
 
     private func pendingLoadIsCurrent(loadToken: PlayerLoadToken, generation: UInt64) -> Bool {
@@ -3622,17 +3747,26 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
             completion?(false)
             return
         }
-        let finish: (Bool) -> Void = { ok in DispatchQueue.main.async { completion?(ok) } }
+        let finish: @MainActor @Sendable (Bool) -> Void = { ok in completion?(ok) }
         SubtitleFileFetcher.fetch(remote, timeout: timeout) { [weak self] data in
-            guard let data else { finish(false); return }
+            guard let data else {
+                Task { @MainActor in finish(false) }
+                return
+            }
             Task { @MainActor in
-                // SubtitleCueRenderer is main-actor isolated (the engine owns it), so parse on the
-                // main actor. The parser is budget-bounded (max 2 MiB input, capped cue count), so
-                // this stays off the hot playback path.
-                let cues = SubtitleCueRenderer.parse(data: data)
-                guard !cues.isEmpty else { finish(false); return }
+                // A superseded fetch must not start parser work. Parsing is pure value work; keep it
+                // off the main actor, then recheck the same item and selection revision before commit.
                 guard let self,
                       self.owns(requestItem, loadToken: requestToken),
+                      self.externalSubtitleRequestRevision == requestRevision else {
+                    finish(false)
+                    return
+                }
+                let cues = await Task.detached(priority: .utility) {
+                    SubtitleCueRenderer.parse(data: data)
+                }.value
+                guard !cues.isEmpty else { finish(false); return }
+                guard self.owns(requestItem, loadToken: requestToken),
                       self.externalSubtitleRequestRevision == requestRevision else {
                     finish(false)
                     return
@@ -5401,6 +5535,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
 
     deinit {
         // stop() is the normal teardown; this is a safety net if the engine is released without it.
+        coldLocalRemuxPreparation?.cancel()
+        coldLocalRemuxMountTask?.cancel()
         remuxSubtitleInventoryRefreshTask?.cancel()
         if let timeObserver { player.removeTimeObserver(timeObserver) }
         if let playheadObserver { player.removeTimeObserver(playheadObserver) }

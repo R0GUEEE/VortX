@@ -1574,6 +1574,7 @@ struct PlayerScreen: View {
     @State private var unlockChipVisible = false
     @State private var unlockChipHideTask: Task<Void, Never>?
     @State private var scrubbing = false
+    @State private var editingVolume = false
     @State private var scrubTarget: Double = 0   // committed scrub position while dragging; avoids timePos fighting the thumb (#32)
     @State private var refreshTask: Task<Void, Never>?   // debounced panel/track refresh; cancellable so it can't outlive the player (#20)
     /// Session audio-language filter, matching the tvOS/iOS source-picker chip (#204). On Mac the
@@ -1603,6 +1604,12 @@ struct PlayerScreen: View {
     @State private var panelRows: [Row] = []   // cached so a 4×/s clock tick doesn't re-rank a thousand sources
     @State private var forcedLandscape = false
     @State private var hideTask: Task<Void, Never>?
+    // Plain reference state: pointer deadlines must not invalidate this entire player on every move.
+    private final class ControlsHideClock {
+        var deadline = Double.infinity
+        var lastPointerPresence = -Double.infinity
+    }
+    @State private var controlsHideClock = ControlsHideClock()
     // Sleep timer (#5): pause playback after a set time, or stop at the end of the current episode.
     @State private var sleepMinutes: Int? = nil        // nil = off (unless sleepAtEpisodeEnd)
     @State private var sleepAtEpisodeEnd = false        // stop at episode end instead of auto-advancing
@@ -2127,6 +2134,9 @@ struct PlayerScreen: View {
         .onAppear { FullscreenPlaybackGate.shared.playerDidAppear(playbackGateToken); LoopbackPlaybackAssertion.begin(for: url) }
         // Panels and the failure screen list sources, so they follow every engine change.
         .onChange(of: panel != nil || loadFailed) { listsSources in engineChanges.followAll(listsSources) }
+        // A first frame, remote resume or dismissed dialog re-arms a visible bar. The original
+        // one-shot timer could expire during loading/pausing and never run again until another tap.
+        .onChange(of: controlsAutoHideEligible) { _ in refreshControlsAutoHide() }
         .onChange(of: core.streamsEpoch) { _ in
             establishSubtitleTimingScopeIfAvailable()
             if appliedAutoTracks {
@@ -2478,6 +2488,11 @@ struct PlayerScreen: View {
         .tint(Theme.Palette.accent)
         // Mac: the window buttons show and auto-hide with these controls.
         .macPlayerChromeVisible(controlsVisible && !isLocked)
+        #if os(macOS)
+        .onContinuousHover { phase in
+            if case .active = phase { macPointerMoved() }
+        }
+        #endif
         .onAppear {
             refreshAutoSkipSettings()
             playbackExited = false
@@ -2583,7 +2598,7 @@ struct PlayerScreen: View {
             invalidateLocalTrickplayCapture()
             cancelAssetSanityObservationDeadline()
             core.setPlayerActive(false)   // balance the onAppear +1; re-enables the In-Library re-decode
-            hideTask?.cancel(); loadTimeout?.cancel(); autoRetryTask?.cancel()
+            hideTask?.cancel(); hideTask = nil; loadTimeout?.cancel(); autoRetryTask?.cancel()
             stallWatchdog?.cancel(); recoveryDeadline?.cancel(); skipFetchTask?.cancel()
             cancelPostFrameResumeSeekWatchdog()
             refreshTask?.cancel(); sleepTask?.cancel(); trickplayCaptureTimer?.cancel(); idleWatchTask?.cancel()
@@ -3999,10 +4014,8 @@ struct PlayerScreen: View {
             // ZERO rows from libmpv plays even though the LOCAL disk cache (its own ioQueue) still worked. Hop to
             // the main actor here so BOTH engines feed record+upload identically. `data` (Data) is Sendable.
             //
-            // The heavy JPEG decode + macOS near-black rasterization/sampling runs HERE, off the main actor (this
-            // libmpv completion is on a background capture queue; the AVPlayer engine already hops to main before
-            // calling back, so its decode is on main, which is unavoidable and cheap for that path). Only the small
-            // main-actor tail (in-flight reset + record/upload of the already-decoded frame) hops to the main actor.
+            // Engine callbacks can arrive on either queue. Explicitly schedule JPEG decode and black-frame
+            // inspection on a utility queue, then publish only for the capture generation that owns the result.
             guard let data else {
                 Task { @MainActor in
                     watchdog.cancel()
@@ -4016,14 +4029,16 @@ struct PlayerScreen: View {
                 return
             }
             VXProbe.log("tp", "\(engine) captured \(data.count) bytes at \(Int(time))s")
-            let decoded = ScrubThumbnailsStore.decodeCapturedFrame(data, at: time)   // heavy decode + black-check OFF main
-            Task { @MainActor in
-                watchdog.cancel()
-                guard self.ownsLocalTrickplayCapture(captureGeneration) else { return }
-                self.localTrickplayCaptureInFlight = false
-                _ = self.localTrickplayCaptureBreaker.recordCapture(hadData: true)
-                guard let decoded else { return }   // decode failed / near-black: already logged off-actor
-                self.scrubThumbnails.recordDecodedFrame(decoded, data: data, at: time)
+            DispatchQueue.global(qos: .utility).async {
+                let decoded = ScrubThumbnailsStore.decodeCapturedFrame(data, at: time)
+                Task { @MainActor in
+                    watchdog.cancel()
+                    guard self.ownsLocalTrickplayCapture(captureGeneration) else { return }
+                    self.localTrickplayCaptureInFlight = false
+                    _ = self.localTrickplayCaptureBreaker.recordCapture(hadData: true)
+                    guard let decoded else { return }   // decode failed / near-black: already logged off-actor
+                    self.scrubThumbnails.recordDecodedFrame(decoded, data: data, at: time)
+                }
             }
         }
     }
@@ -8414,7 +8429,7 @@ struct PlayerScreen: View {
             options: PlayerTouchOptionsButton(presented: $touchOptionsVisible,
                 content: { touchOptionsPanel },
                 onVisibilityChanged: { visible in
-                    if visible { hideTask?.cancel() } else { scheduleHide() }
+                    if visible { hideTask?.cancel(); hideTask = nil } else { scheduleHide() }
                 })
         )
     }
@@ -8457,7 +8472,7 @@ struct PlayerScreen: View {
             icon: "gearshape") { openPanel(.playerSettings) })
         actions.append(PlayerTouchOptionAction(id: "external", title: "Play in another app",
             icon: "arrow.up.forward.app") {
-                hideTask?.cancel()
+                hideTask?.cancel(); hideTask = nil
                 showExternalChooser = true
             })
         return actions
@@ -8609,7 +8624,7 @@ struct PlayerScreen: View {
             volumeControl   // D5: in-player volume slider + mute (libmpv `volume` / AVPlayer.volume), persisted
             iconButton("gearshape", label: "Player settings") { openPanel(.playerSettings) }   // decoder toggle + playback info (tvOS parity #22)
             iconButton("arrow.up.forward.app", label: "Play in another app") {       // hand off to Infuse / VLC / Share
-                hideTask?.cancel()
+                hideTask?.cancel(); hideTask = nil
                 showExternalChooser = true
             }
         }
@@ -8645,13 +8660,13 @@ struct PlayerScreen: View {
             // The macOS system slider ignores the app's tint and drew this in white; ours carries the accent.
             VortXSlider(value: Binding(get: { playerMuted ? 0 : playerVolume },
                                        set: { setPlayerVolume($0) }),
-                        range: 0...100) { editing in if editing { hideTask?.cancel() } else { scheduleHide() } }
+                        range: 0...100, onEditingChanged: setVolumeEditing)
                 .frame(width: 92)
                 .accessibilityLabel("Volume")
             #else
             Slider(value: Binding(get: { playerMuted ? 0 : playerVolume },
                                   set: { setPlayerVolume($0) }),
-                   in: 0...100) { editing in if editing { hideTask?.cancel() } else { scheduleHide() } }
+                   in: 0...100, onEditingChanged: setVolumeEditing)
                 .tint(Theme.Palette.accent)
                 #if os(iOS)
                 .frame(width: 204)   // the dedicated options popover keeps a usable continuous volume slider
@@ -8783,7 +8798,7 @@ struct PlayerScreen: View {
                     if editing { watchedDwell.reset() }
                     scrubbing = editing
                     if editing {
-                        scrubTarget = currentTime; hideTask?.cancel()
+                        scrubTarget = currentTime; hideTask?.cancel(); hideTask = nil
                         hoverPreviewTime = nil; hoverPreviewRatio = nil
                     } else {
                         let target = scrubTarget
@@ -10812,7 +10827,7 @@ struct PlayerScreen: View {
     }
 
     private func openPanel(_ p: Panel) {
-        hideTask?.cancel()
+        hideTask?.cancel(); hideTask = nil
         refreshTracks()
         if p == .info { infoRows = coordinator.player?.playbackStats() ?? [] }
         // Late add-on subtitle recovery: if the start-of-playback fetch raced an empty add-on collection (or
@@ -10856,7 +10871,7 @@ struct PlayerScreen: View {
         }
         invalidateLocalTrickplayCapture()
         cancelAssetSanityObservationDeadline()
-        hideTask?.cancel(); loadTimeout?.cancel(); autoRetryTask?.cancel(); idleWatchTask?.cancel()
+        hideTask?.cancel(); hideTask = nil; loadTimeout?.cancel(); autoRetryTask?.cancel(); idleWatchTask?.cancel()
         stallWatchdog?.cancel(); recoveryDeadline?.cancel(); skipFetchTask?.cancel()
         cancelPostFrameResumeSeekWatchdog()
         #if os(iOS) || os(macOS)
@@ -11277,7 +11292,7 @@ struct PlayerScreen: View {
         noteInteraction()            // a tap is presence: re-arm the "Still watching?" idle guard
         if panel != nil { return }   // a tap behind an open panel shouldn't flip the bar; the scrim handles dismissal
         withAnimation(.easeInOut(duration: 0.2)) { controlsVisible.toggle() }
-        if controlsVisible { scheduleHide() } else { hideTask?.cancel() }
+        if controlsVisible { scheduleHide() } else { hideTask?.cancel(); hideTask = nil }
     }
 
     // MARK: - Player Lock (touch-lock)
@@ -11285,7 +11300,7 @@ struct PlayerScreen: View {
     /// Engage the lock from the top bar: chrome drops immediately, the auto-hide timer stands down, and
     /// a brief unlock-chip flash teaches where the exit is.
     private func engageLock() {
-        hideTask?.cancel()
+        hideTask?.cancel(); hideTask = nil
         withAnimation(.easeInOut(duration: 0.2)) {
             isLocked = true
             controlsVisible = false
@@ -11314,17 +11329,68 @@ struct PlayerScreen: View {
         }
         scheduleHide()
     }
+    /// Engine lifecycle changes do not count as viewer presence. They only resume a visible bar's
+    /// deadline once its first frame arrives or the last interaction/paused/dialog hold ends.
+    private var controlsAutoHideEligible: Bool {
+        hasStartedPlaying && !isPaused && !scrubbing && !editingVolume && panel == nil &&
+        !touchOptionsVisible && !skipEditActive && !isLocked && !loadFailed && !playbackExited &&
+        !showExternalChooser && !showShare && grabbedFrame == nil &&
+        !externalLinkDead && !subtitleLoadFailed && !stillWatchingPrompt
+    }
+
+    private func refreshControlsAutoHide() {
+        hideTask?.cancel(); hideTask = nil
+        guard controlsVisible, controlsAutoHideEligible else { return }
+        controlsHideClock.deadline = ProcessInfo.processInfo.systemUptime + 4
+        startControlsHideIfNeeded()
+    }
+
+    private func setVolumeEditing(_ editing: Bool) {
+        editingVolume = editing
+        if editing {
+            hideTask?.cancel(); hideTask = nil
+        } else {
+            scheduleHide()
+        }
+    }
+
     private func scheduleHide() {
-        noteInteraction()            // every control interaction routes through here: re-arm the idle guard
-        hideTask?.cancel()
+        noteInteraction()            // actual input re-arms the idle guard; engine changes do not
+        guard !isLocked, !playbackExited else { return }
         controlsVisible = true
+        controlsHideClock.deadline = ProcessInfo.processInfo.systemUptime + 4
+        startControlsHideIfNeeded()
+    }
+
+    private func macPointerMoved() {
+        guard !isLocked, !playbackExited else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        controlsHideClock.deadline = now + 4
+        if !controlsVisible { controlsVisible = true }
+        // Presence affects the parent's idle guard; sample it at most once a second, while every
+        // pointer event extends the non-observed hide deadline without causing a body refresh.
+        if now - controlsHideClock.lastPointerPresence >= 1 {
+            controlsHideClock.lastPointerPresence = now
+            noteInteraction()
+        }
+        startControlsHideIfNeeded()
+    }
+
+    /// Mouse movement only extends a deadline: one sleeper owns a visible bar instead of creating
+    /// a task for every pointer event. Cancellation is checked before an old sleeper can touch state.
+    private func startControlsHideIfNeeded() {
+        guard hideTask == nil, controlsVisible, controlsAutoHideEligible else { return }
         hideTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(4))
-            // Never auto-hide before the first frame arrives: a stuck pre-start load must KEEP its
-            // controls (and their close button) on screen so the player is never a trap. Also hold
-            // while scrubbing, a panel is open, or paused.
-            guard !Task.isCancelled, hasStartedPlaying, !scrubbing, panel == nil, !touchOptionsVisible, !isPaused, !skipEditActive else { return }
-            withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = false }
+            while !Task.isCancelled {
+                let remaining = max(0, controlsHideClock.deadline - ProcessInfo.processInfo.systemUptime)
+                if remaining > 0 { try? await Task.sleep(for: .seconds(remaining)) }
+                guard !Task.isCancelled else { return }
+                guard controlsAutoHideEligible else { hideTask = nil; return }
+                if ProcessInfo.processInfo.systemUptime < controlsHideClock.deadline { continue }
+                withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = false }
+                hideTask = nil
+                return
+            }
         }
     }
 
@@ -11370,7 +11436,7 @@ struct PlayerScreen: View {
         // Always pause whatever is on screen so the prompt never plays over a running video (a boundary whose
         // file already ended pauses a no-op; a next episode that already began is stopped). Continue resumes.
         if !isPaused { viewerPause() }
-        hideTask?.cancel()
+        hideTask?.cancel(); hideTask = nil
         withAnimation(.easeInOut(duration: 0.2)) { stillWatchingPrompt = true }
     }
 
