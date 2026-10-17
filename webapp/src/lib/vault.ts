@@ -212,48 +212,58 @@ export interface Session {
 // lifetime of a tab (XSS or a malicious extension can no longer lift a key that persists forever). Matches
 // the vortx.tv dashboard. SESSION_KEY is shared across this origin's web clients and must not change.
 const SESSION_KEY = "vortx.session.v1";
-const DATAKEY_KEY = "vortx.dk.v1";
+const DATAKEY_KEY = "vortx.dk.v2";
+const LEGACY_DATAKEY_KEY = "vortx.dk.v1";
 let syncSessionGeneration = 0;
 
+function encodedSessionKey(session: Session): string {
+  return JSON.stringify({ schemaVersion: 2, accountId: session.account.id, token: session.token, dataKey: b64(session.dataKey) });
+}
 export function saveSession(s: Session): void {
   syncSessionGeneration++;
   try {
+    // Write the owned tab key first. A partial save must never publish an unowned descriptor.
+    sessionStorage.setItem(DATAKEY_KEY, encodedSessionKey(s));
     localStorage.setItem(SESSION_KEY, JSON.stringify({ token: s.token, account: s.account }));
-    sessionStorage.setItem(DATAKEY_KEY, b64(s.dataKey));
+    sessionStorage.removeItem(LEGACY_DATAKEY_KEY);
   } catch {
-    // Private-mode / quota: the in-memory session still works for this tab.
+    // Storage failure cannot attach another tab's descriptor to this key.
   }
 }
 export function loadSession(): Session | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY);
     if (!raw) return null;
-    const o = JSON.parse(raw) as { token?: string; account?: Account; dataKey?: string };
-    if (!o?.token || !o?.account) return null;
-    let dk = sessionStorage.getItem(DATAKEY_KEY);
-    // One-time migration off the legacy localStorage data key: move it to sessionStorage, then strip it
-    // from localStorage so the master key no longer persists across tab closes.
-    if (!dk && typeof o.dataKey === "string") {
-      dk = o.dataKey;
-      try {
-        sessionStorage.setItem(DATAKEY_KEY, dk);
-        localStorage.setItem(SESSION_KEY, JSON.stringify({ token: o.token, account: o.account }));
-      } catch { /* keep the in-memory session for this tab */ }
+    const stored = JSON.parse(raw) as { token?: string; account?: Account; dataKey?: string };
+    if (typeof stored.token !== "string" || !stored.token || !stored.account ||
+      typeof stored.account.id !== "string" || !stored.account.id) return null;
+    const encoded = sessionStorage.getItem(DATAKEY_KEY);
+    let dataKey: string;
+    if (encoded !== null) {
+      const envelope = JSON.parse(encoded);
+      if (envelope?.schemaVersion !== 2 || envelope.accountId !== stored.account.id ||
+        envelope.token !== stored.token || typeof envelope.dataKey !== "string") return null;
+      dataKey = envelope.dataKey;
+    } else {
+      // Only a key embedded in the same legacy descriptor has account/session ownership.
+      // A bare tab key may belong to a different account signed in through another tab.
+      if (typeof stored.dataKey !== "string") return null;
+      dataKey = stored.dataKey;
     }
-    if (!dk) return null; // token present but key gone (tab was closed): re-login to re-derive it
-    return { token: o.token, account: o.account, dataKey: unb64(dk) };
-  } catch {
-    return null;
-  }
+    const session: Session = { token: stored.token, account: stored.account, dataKey: unb64(dataKey) };
+    if (session.dataKey.length !== 32) return null;
+    if (encoded === null || Object.prototype.hasOwnProperty.call(stored, "dataKey")) {
+      sessionStorage.setItem(DATAKEY_KEY, encodedSessionKey(session));
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ token: session.token, account: session.account }));
+      sessionStorage.removeItem(LEGACY_DATAKEY_KEY);
+    }
+    return session;
+  } catch { return null; }
 }
 export function clearSession(): void {
   syncSessionGeneration++;
-  try {
-    localStorage.removeItem(SESSION_KEY);
-    sessionStorage.removeItem(DATAKEY_KEY);
-  } catch {
-    // Nothing to do: a failed remove leaves a stale blob that the next load tolerates.
-  }
+  try { localStorage.removeItem(SESSION_KEY); } catch {}
+  try { sessionStorage.removeItem(DATAKEY_KEY); sessionStorage.removeItem(LEGACY_DATAKEY_KEY); } catch {}
 }
 
 // --- Key derivation helpers ---------------------------------------------------------------------
