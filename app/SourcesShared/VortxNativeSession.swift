@@ -275,6 +275,10 @@ protocol VortxCheckpointStore: Sendable {
         isCurrent: @escaping @Sendable () -> Bool,
         checkpoint: (@Sendable () async throws -> Void)?) async throws -> Data?
     func retainMigrationDraft(_ archive: Data, scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws
+    /// The witness proves exact scoped bytes, never current ownership. Implementations
+    /// must retain their atomic authority, expected-byte CAS and durable-readback checks.
+    func retainValidatedMigrationDraft(_ draft: VortxNativeWatchedArchive.ValidatedDraft,
+        scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws
     func commit(_ snapshot: String, scope: VortxAccountScope, hostPreferences: Data) throws
 }
 /// Optional external-source authentication lease. Its implementation linearizes credential
@@ -298,6 +302,12 @@ extension VortxCheckpointStore {
     }
     func retainMigrationDraft(_ archive: Data, scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws {
         throw VortxNativeError.unavailable
+    }
+    /// Old protocol stores keep their existing strict synchronous writer, including
+    /// any repeated replay cost. Only an explicit witness implementation may skip it.
+    func retainValidatedMigrationDraft(_ draft: VortxNativeWatchedArchive.ValidatedDraft,
+        scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws {
+        try retainMigrationDraft(draft.bytes(for: scope), scope: scope, expected: expected, authority: authority)
     }
     func commit(_ snapshot: String, scope: VortxAccountScope, hostPreferences: Data) throws { throw VortxNativeError.unavailable }
 }
@@ -396,6 +406,10 @@ final class VortxEncryptedCheckpointStore: VortxCheckpointStore, @unchecked Send
     func retainMigrationDraft(_ archive: Data, scope: VortxAccountScope, expected: Data? = nil, authority: any VortxMutationAuthority) throws {
         try scope.validate(); try VortxNativeWatchedArchive.validate(archive, scope: scope)
         try installValidatedMigrationDraft(archive, scope: scope, expected: expected, authority: authority)
+    }
+    func retainValidatedMigrationDraft(_ draft: VortxNativeWatchedArchive.ValidatedDraft,
+        scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws {
+        try installValidatedMigrationDraft(draft.bytes(for: scope), scope: scope, expected: expected, authority: authority)
     }
     func retainMigrationDraftCooperatively(_ archive: Data, scope: VortxAccountScope, expected: Data? = nil,
         authority: any VortxMutationAuthority, checkpoint: (@Sendable () async throws -> Void)? = nil) async throws {
@@ -1313,11 +1327,27 @@ actor VortxNativeSession {
         try lease.withActive {}
         return result
     }
-    func retainMigrationProgress(_ archive: Data, expected: Data?, authority: any VortxMutationAuthority) throws {
+    func retainMigrationProgress(_ archive: Data, expected: Data?, authority: any VortxMutationAuthority,
+        checkpoint: (@Sendable () async throws -> Void)? = nil) async throws {
+        guard !closed else { throw VortxNativeError.closed }
+        guard !persistenceFailed else { throw VortxNativeError.checkpointUncertain }
+        try lease.withActive {}
+        try authority.withActive {}
+        let lease = lease
+        let worker = VortxNativeWatchedArchive.RecoveryWorker(scope: scope,
+            isCurrent: { (try? lease.withActive {}) != nil && (try? authority.withActive {}) != nil },
+            checkpoint: checkpoint)
+        // No session/authority/file lock spans this suspension. The witness binds
+        // strict validation to immutable bytes, not to a possibly retired admission.
+        let draft = try await worker.validatedDraft(archive)
         guard !closed else { throw VortxNativeError.closed }
         guard !persistenceFailed else { throw VortxNativeError.checkpointUncertain }
         try lease.withActive {
-            try store.retainMigrationDraft(archive, scope: scope, expected: expected, authority: authority)
+            try Task.checkCancellation()
+            // This lease belongs to this session instance and never reactivates on
+            // same-account reopen. The store separately checks source authority and
+            // exact current draft bytes inside its existing atomic durable sink.
+            try store.retainValidatedMigrationDraft(draft, scope: scope, expected: expected, authority: authority)
         }
     }
     @discardableResult func dispatch(_ actions: [String], now: UInt64, legacyMaterial: Data? = nil,

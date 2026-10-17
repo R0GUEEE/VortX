@@ -94,7 +94,7 @@ private final class SessionStore: VortxCheckpointStore, @unchecked Sendable {
     }
 }
 
-private enum MigrationDraftFixtureFailure: Error { case read, witnessReached, wrongDispatch }
+private enum MigrationDraftFixtureFailure: Error { case read, witnessReached, wrongDispatch, lostAcknowledgement }
 
 /// Deliberately implements only the old synchronous draft requirement, and returns
 /// unchecked bytes. The protocol default must isolate and fully inspect this result.
@@ -104,11 +104,13 @@ private final class MigrationDraftFallbackStore: VortxCheckpointStore, @unchecke
     private var draft: Data?
     private var failRead = false
     private var reads = 0
+    private var writes = 0
     private var readOnMain = false
     init(_ draft: Data?) { self.draft = draft }
     func setDraft(_ value: Data?, fail: Bool = false) { lock.withLock { draft = value; failRead = fail } }
     var bytes: Data? { lock.withLock { draft } }
     var draftReads: Int { lock.withLock { reads } }
+    var draftWrites: Int { lock.withLock { writes } }
     var usedMainThread: Bool { lock.withLock { readOnMain } }
     var commits: Int { checkpoint.commits }
     func read(scope: VortxAccountScope) throws -> String? { try checkpoint.read(scope: scope) }
@@ -123,6 +125,54 @@ private final class MigrationDraftFallbackStore: VortxCheckpointStore, @unchecke
             if failRead { throw MigrationDraftFixtureFailure.read }
             return draft
         }
+    }
+    func retainMigrationDraft(_ archive: Data, scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws {
+        try VortxNativeWatchedArchive.validate(archive, scope: scope)
+        try lock.withLock {
+            try authority.withActive {
+                guard draft == expected else { throw VortxNativeError.superseded }
+                draft = archive; writes += 1
+            }
+        }
+    }
+}
+
+private final class MigrationProgressAuthority: VortxMutationAuthority, @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation = 0
+    func retireThroughABA() { lock.withLock { generation += 2 } }
+    func withActive(_ operation: () throws -> Void) throws {
+        try lock.withLock {
+            guard generation == 0 else { throw VortxNativeError.superseded }
+            try operation()
+        }
+    }
+}
+
+/// This existential must reach the witness requirement. The old entry point fails
+/// loudly; the real encrypted store still owns exact CAS, sealing and readback.
+private struct MigrationProgressWitnessStore: VortxCheckpointStore {
+    let encrypted: VortxEncryptedCheckpointStore
+    let installs = MutationCounter()
+    let checkpointFailures = MutationCounter()
+    func read(scope: VortxAccountScope) throws -> String? { try encrypted.read(scope: scope) }
+    func readHostPreferences(scope: VortxAccountScope) throws -> Data? { try encrypted.readHostPreferences(scope: scope) }
+    func commit(_ snapshot: String, scope: VortxAccountScope) throws {
+        guard checkpointFailures.value == 0 else { throw VortxNativeError.unavailable }
+        try encrypted.commit(snapshot, scope: scope)
+    }
+    func commit(_ snapshot: String, scope: VortxAccountScope, hostPreferences: Data) throws {
+        guard checkpointFailures.value == 0 else { throw VortxNativeError.unavailable }
+        try encrypted.commit(snapshot, scope: scope, hostPreferences: hostPreferences)
+    }
+    func readMigrationDraft(scope: VortxAccountScope) throws -> Data? { try encrypted.readMigrationDraft(scope: scope) }
+    func retainMigrationDraft(_ archive: Data, scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws {
+        throw MigrationDraftFixtureFailure.wrongDispatch
+    }
+    func retainValidatedMigrationDraft(_ draft: VortxNativeWatchedArchive.ValidatedDraft,
+        scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws {
+        installs.increment()
+        try encrypted.retainValidatedMigrationDraft(draft, scope: scope, expected: expected, authority: authority)
     }
 }
 
@@ -273,6 +323,195 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
 
 @main enum VortxNativeSessionTests {
     static func check(_ value: Bool, line: Int = #line) { precondition(value, "session assertion at line \(line)") }
+    @MainActor static func migrationProgressLeaseTests() async throws {
+        let owner = UUID(uuidString: "90000000-0000-0000-0000-000000000009")!
+        let scope = VortxAccountScope(account: "lease-draft.fixture", ownerProfileID: owner.uuidString)
+        let source = Data(#"{"vortx":{"library":[{"id":"tt2934286","type":"series","watched":"tt2934286:1:5:5:eJyTZwAAAEAAIA=="},{"id":"tt2934287","type":"series","watched":"tt2934287:1:5:5:eJyTZwAAAEAAIA=="}],"addons":[{"transportUrl":"https://original.invalid/manifest.json","manifest":{"id":"original","name":"Original","version":"1.0.0","resources":["meta"],"types":["series"]}}]},"futureSource":{"keep":42}}"#.utf8)
+        let pending = try await VortxLegacyWatchedMigration.prepare(accountID: scope.account, ownerProfileID: owner,
+            document: source, profileIDs: [owner], isCurrent: { true }, fetch: { _ in
+                throw URLError(.notConnectedToInternet) // Synthetic failure; no provider/network call.
+            })
+        let originalPending = try pending.pendingArchives
+        check(originalPending.count == 2)
+        let originalSource = try VortxNativeBootstrapArchive.encode(document: Data(#"{"originalFuture":{"kept":true}}"#.utf8))
+        let envelope = try VortxNativeBootstrapArchive.encode(document: Data(#"{"future":{"keep":42},"apiKeys":{"provider":"fixture-excluded"}}"#.utf8),
+            material: Data(#"{"schemaVersion":1,"sourceClock":1000.125}"#.utf8), authenticatedSourceArchive: originalSource)
+        let pooled = try VortxNativeWatchedArchive.retaining(envelope, pending: originalPending, scope: scope)
+        let archive = Data(" \n".utf8) + pooled + Data("\n".utf8)
+        let candidate = archive + Data(" \n".utf8), winner = archive + Data(" \t\n".utf8)
+        let worker = VortxNativeWatchedArchive.RecoveryWorker(scope: scope, isCurrent: { true })
+        var callerBytes = archive
+        let proof = try await worker.validatedDraft(callerBytes)
+        callerBytes.append(0x20)
+        check(try proof.bytes(for: scope) == archive)
+        check(callerBytes != archive)
+        for foreign in [VortxAccountScope(account: "foreign", ownerProfileID: owner.uuidString),
+                        VortxAccountScope(account: scope.account, ownerProfileID: UUID().uuidString)] {
+            do { _ = try proof.bytes(for: foreign); preconditionFailure("Witness escaped its exact owner/account scope") }
+            catch VortxNativeError.invalidSnapshot {}
+            do {
+                _ = try await VortxNativeWatchedArchive.RecoveryWorker(scope: foreign, isCurrent: { true }).validatedDraft(archive)
+                preconditionFailure("Full replay accepted another scope's pending records")
+            } catch {}
+        }
+        let composed = VortxAccountScope(account: "caf\u{e9}", ownerProfileID: owner.uuidString)
+        let decomposed = VortxAccountScope(account: "cafe\u{301}", ownerProfileID: owner.uuidString)
+        check(composed.account == decomposed.account && composed.authenticatedData != decomposed.authenticatedData)
+        let exactScopeProof = try await VortxNativeWatchedArchive.RecoveryWorker(scope: composed, isCurrent: { true }).validatedDraft(envelope)
+        do { _ = try exactScopeProof.bytes(for: decomposed); preconditionFailure("Witness compared Unicode-canonical scope instead of exact bytes") }
+        catch VortxNativeError.invalidSnapshot {}
+        let fallback = MigrationDraftFallbackStore(nil)
+        let generic: any VortxCheckpointStore = fallback
+        try generic.retainValidatedMigrationDraft(proof, scope: scope, expected: nil, authority: MigrationProgressAuthority())
+        check(fallback.bytes == archive && fallback.draftWrites == 1)
+        do { try generic.retainValidatedMigrationDraft(proof, scope: scope, expected: nil, authority: MigrationProgressAuthority())
+            preconditionFailure("Generic fallback bypassed expected bytes") }
+        catch VortxNativeError.superseded {}
+        check(fallback.bytes == archive && fallback.draftWrites == 1)
+
+        let directory = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("phase-b-session-draft")
+        let key = SymmetricKey(data: Data(repeating: 0x52, count: 32))
+        let encrypted = try VortxEncryptedCheckpointStore(directory: directory, key: key)
+        let witness = MigrationProgressWitnessStore(encrypted: encrypted)
+        let erased: any VortxCheckpointStore = witness
+        let session = try VortxNativeSession(scope: scope, ownerName: "Owner", abi: SessionABI(),
+            store: erased, transport: SessionTransport(), allowNewAccount: true)
+        let initialState = try encrypted.read(scope: scope), initialHost = try encrypted.readHostPreferences(scope: scope)
+        let digest = SHA256.hash(data: scope.authenticatedData).map { String(format: "%02x", $0) }.joined()
+        let draftURL = directory.appendingPathComponent("native-migration-draft-v1-\(digest).sealed")
+        let visits = MutationCounter(), sentinel = MutationCounter()
+        try await session.retainMigrationProgress(archive, expected: nil, authority: MigrationProgressAuthority(), checkpoint: {
+            visits.increment()
+            // For this one-source/two-pending journal, boundary 10 is between the
+            // strict pending replays. No continuation or elapsed threshold is used.
+            if visits.value == 10 {
+                await MainActor.run { sentinel.increment() }
+                _ = try await session.authenticatedSourceArchive() // Must acquire the session lease now.
+            }
+        })
+        check(visits.value >= 10 && sentinel.value == 1 && witness.installs.value == 1)
+        check(try encrypted.readMigrationDraft(scope: scope) == archive)
+        check(Set(try VortxNativeWatchedArchive.entries(archive, key: VortxNativeWatchedArchive.pendingKey)) == Set(originalPending))
+        check(try encrypted.read(scope: scope) == initialState)
+        check(try encrypted.readHostPreferences(scope: scope) == initialHost)
+        let originalCiphertext = try Data(contentsOf: draftURL)
+        let sourceDigest = SHA256.hash(data: source).map { String(format: "%02x", $0) }.joined()
+        let mismatchedPool = Data(String(decoding: archive, as: UTF8.self)
+            .replacingOccurrences(of: sourceDigest, with: String(repeating: "0", count: 64)).utf8)
+        check(mismatchedPool != archive)
+        let invalid = [Data("not-json".utf8), mismatchedPool,
+            Data(#"{"schemaVersion":1,"excludedCredentialPaths":[],"hostDocument":{"authKey":"synthetic-not-a-credential"}}"#.utf8),
+            Data(#"{"schemaVersion":1,"excludedCredentialPaths":[],"hostDocument":{"nativeWatchedMigrationEvidence":["not-base64"]}}"#.utf8)]
+        for bad in invalid {
+            do { try await session.retainMigrationProgress(bad, expected: archive, authority: MigrationProgressAuthority())
+                preconditionFailure("Session minted an invalid or credential-bearing draft witness") }
+            catch {}
+            check(witness.installs.value == 1)
+            check(try Data(contentsOf: draftURL) == originalCiphertext)
+        }
+        let cancelledVisits = MutationCounter()
+        let cancelled = Task {
+            try await session.retainMigrationProgress(candidate, expected: archive, authority: MigrationProgressAuthority(), checkpoint: {
+                cancelledVisits.increment()
+                if cancelledVisits.value == 10 { withUnsafeCurrentTask { $0?.cancel() } }
+            })
+        }
+        do { try await cancelled.value; preconditionFailure("Cancelled leased retention installed bytes") }
+        catch is CancellationError {}
+        check(cancelledVisits.value == 10 && witness.installs.value == 1)
+        let retired = MigrationProgressAuthority(), retiredVisits = MutationCounter()
+        do {
+            try await session.retainMigrationProgress(candidate, expected: archive, authority: retired, checkpoint: {
+                retiredVisits.increment()
+                if retiredVisits.value == 10 { retired.retireThroughABA() }
+            })
+            preconditionFailure("Retired source generation installed bytes")
+        } catch LegacyWatchedBitfieldMigrationEvidence.Failure.admissionRevoked {}
+        check(retiredVisits.value == 10 && witness.installs.value == 1)
+        check(try Data(contentsOf: draftURL) == originalCiphertext)
+        let refusedVisits = MutationCounter()
+        do { try await session.retainMigrationProgress(candidate, expected: archive, authority: retired,
+                checkpoint: { refusedVisits.increment() })
+            preconditionFailure("Already-retired source started validation") }
+        catch VortxNativeError.superseded {}
+        check(refusedVisits.value == 0 && witness.installs.value == 1)
+        do { try encrypted.retainValidatedMigrationDraft(proof, scope: scope, expected: archive, authority: retired)
+            preconditionFailure("Validation witness substituted for live source authority") }
+        catch VortxNativeError.superseded {}
+        check(try Data(contentsOf: draftURL) == originalCiphertext)
+
+        // Semantic equality cannot replace exact expected bytes. A concurrent winner
+        // is installed while replay is suspended, and must survive the losing CAS.
+        let conflictVisits = MutationCounter()
+        do {
+            try await session.retainMigrationProgress(candidate, expected: archive, authority: MigrationProgressAuthority(), checkpoint: {
+                conflictVisits.increment()
+                if conflictVisits.value == 10 {
+                    try encrypted.retainMigrationDraft(winner, scope: scope, expected: archive, authority: MigrationProgressAuthority())
+                }
+            })
+            preconditionFailure("Stale prevalidated bytes replaced a concurrent winner")
+        } catch VortxNativeError.superseded {}
+        check(conflictVisits.value >= 10)
+        check(try encrypted.readMigrationDraft(scope: scope) == winner)
+        let afterWinner = try Data(contentsOf: draftURL)
+        do { try encrypted.retainValidatedMigrationDraft(proof, scope: scope, expected: archive, authority: MigrationProgressAuthority())
+            preconditionFailure("Witness bypassed concrete expected-byte CAS") }
+        catch VortxNativeError.superseded {}
+        check(try Data(contentsOf: draftURL) == afterWinner)
+        let lost = VortxNativeWatchedArchive.DraftPublisher(expected: winner) { bytes, expected in
+            try await session.retainMigrationProgress(bytes, expected: expected, authority: MigrationProgressAuthority())
+            throw MigrationDraftFixtureFailure.lostAcknowledgement
+        }
+        do { try await lost.publish(candidate); preconditionFailure("Missing lost-ACK fixture error") }
+        catch MigrationDraftFixtureFailure.lostAcknowledgement {}
+        let afterLostACK = try Data(contentsOf: draftURL)
+        do { try await lost.publish(candidate); preconditionFailure("Lost ACK advanced publisher expected bytes") }
+        catch VortxNativeError.superseded {}
+        check(try Data(contentsOf: draftURL) == afterLostACK)
+        check(try encrypted.readMigrationDraft(scope: scope) == candidate)
+        let abaVisits = MutationCounter()
+        do {
+            try await session.retainMigrationProgress(archive, expected: candidate, authority: MigrationProgressAuthority(), checkpoint: {
+                abaVisits.increment()
+                if abaVisits.value == 10 {
+                    await session.close()
+                    let replacement = try VortxNativeSession(scope: scope, ownerName: "Owner", abi: SessionABI(),
+                        store: erased, transport: SessionTransport())
+                    do { try await replacement.retainMigrationProgress(winner, expected: candidate, authority: MigrationProgressAuthority()) }
+                    catch { await replacement.close(); throw error }
+                    await replacement.close()
+                }
+            })
+            preconditionFailure("Same-account reopen reactivated the old session lease")
+        } catch LegacyWatchedBitfieldMigrationEvidence.Failure.admissionRevoked {}
+        check(abaVisits.value == 10)
+        check(try encrypted.readMigrationDraft(scope: scope) == winner)
+        let uncertain = try VortxNativeSession(scope: scope, ownerName: "Owner", abi: SessionABI(),
+            store: erased, transport: SessionTransport())
+        let uncertainVisits = MutationCounter(), installsBeforeUncertain = witness.installs.value
+        let beforeUncertain = try Data(contentsOf: draftURL)
+        do {
+            try await uncertain.retainMigrationProgress(candidate, expected: winner, authority: MigrationProgressAuthority(), checkpoint: {
+                uncertainVisits.increment()
+                if uncertainVisits.value == 10 {
+                    witness.checkpointFailures.increment()
+                    do { _ = try await uncertain.dispatch([#"{"type":"fixture-change","value":99}"#], now: 1)
+                        preconditionFailure("Missing checkpoint-failure fixture error") }
+                    catch VortxNativeError.checkpointUncertain {}
+                }
+            })
+            preconditionFailure("Suspended validation ignored newly uncertain checkpoint")
+        } catch VortxNativeError.checkpointUncertain {}
+        check(uncertainVisits.value >= 10 && witness.installs.value == installsBeforeUncertain)
+        check(try Data(contentsOf: draftURL) == beforeUncertain)
+        await uncertain.close()
+        let cold = try VortxEncryptedCheckpointStore(directory: directory, key: key)
+        check(try cold.readMigrationDraft(scope: scope) == winner)
+        check(try cold.read(scope: scope) == initialState)
+        check(try cold.readHostPreferences(scope: scope) == initialHost)
+        print("Leased draft retention: strict witness, existential/fallback, cancellation, source/session ABA, exact CAS, lost ACK and conservation passed")
+    }
     @MainActor static func migrationDraftProtocolTests() async throws {
         let scope = VortxAccountScope(account: "protocol-draft.fixture", ownerProfileID: "90000000-0000-0000-0000-000000000009")
         let original = try VortxNativeBootstrapArchive.encode(document: Data(#"{"future":{"exact":"retained"}}"#.utf8))
@@ -869,6 +1108,7 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
     }
     static func main() async throws {
         try await migrationDraftProtocolTests()
+        try await migrationProgressLeaseTests()
         try hydrationPreservationTests()
         try await progressWriteTests()
 #if canImport(VortxEngine) && VORTX_ENGINE_STATE_BRIDGE

@@ -131,6 +131,23 @@ enum VortxNativeWatchedArchive {
     private static let maximumExpandedJournalBytes = 96 * 1_024 * 1_024
     private static let maximumEntries = 10_000
 
+    /// In-process proof of full strict replay, not publication authority. Only this
+    /// file can construct it; no Codable/memberwise initializer accepts caller bytes.
+    /// It retains the exact immutable envelope, including unknown/source/pending fields.
+    struct ValidatedDraft: Sendable {
+        private let archive: Data
+        private let scopeBytes: Data
+        fileprivate init(archive: Data, scope: VortxAccountScope) {
+            self.archive = archive; scopeBytes = scope.authenticatedData
+        }
+        func bytes(for scope: VortxAccountScope) throws -> Data {
+            try scope.validate()
+            // Do not use String's Unicode-canonical equality for an exact AAD scope.
+            guard scope.authenticatedData == scopeBytes else { throw VortxNativeError.invalidSnapshot }
+            return archive
+        }
+    }
+
     /// Version-1 inline receipts remain readable. Version-2 entries omit only the repeated
     /// source field, whose exact bytes are held once by SHA-256. The migration API still sees
     /// the original version-1 bytes and performs its complete source/UID/metadata validation.
@@ -523,6 +540,12 @@ enum VortxNativeWatchedArchive {
         }
         func validate(_ archive: Data?) async throws {
             _ = try await validatedJournal(archive)
+        }
+        func validatedDraft(_ archive: Data) async throws -> ValidatedDraft {
+            try scope.validate()
+            try await validate(archive)
+            try cooperation.check()
+            return ValidatedDraft(archive: archive, scope: scope)
         }
         fileprivate func index(_ journal: Journal) async throws -> [Data: [VortxJSON]] {
             var result: [Data: [VortxJSON]] = [:]

@@ -67,3 +67,32 @@ final leased replay and repeated whole-history work remain a separate Phase B re
 one indivisible decode/hash/encode/file operation is not made preemptible by these
 cooperative item boundaries. Whole-app/UI typechecking and physical performance remain
 unverified. No SDK/application package or real account is exercised by these fixtures.
+
+## 18 October final-session replay slice
+
+The concrete encrypted-store path now completes strict journal replay on the recovery
+worker before acquiring the session's final write lease. An in-process immutable
+validated-draft witness binds the original envelope bytes to exact authenticated
+account/owner bytes. It is not current write authority or a durable acknowledgement.
+After suspension the session rechecks closure, checkpoint certainty and its original
+lease; the unchanged storage sink still checks live source authority, exact expected
+plaintext bytes, encryption, durable installation and readback. No lock spans the await.
+
+The new writer is a protocol requirement with a concrete witness, not an extension-only
+optimization. Older generic stores still delegate to their original strict writer and
+may repeat validation under the lease. The existing synchronous/cooperative readers and
+writers remain available; no saved-data schema or admission limit changes.
+
+Actual-source session fixtures pass for existential and generic dispatch, exact-byte
+and Unicode-distinct scope binding, caller Data-copy conservation, cancellation, source
+retirement, session close/reopen, checkpoint uncertainty, stale expected-byte conflict
+and lost acknowledgement. Their main-actor/session-read sentinel is source-bound to a
+particular cooperative replay boundary, not a wall-clock latency or future control-flow
+guarantee. Tests use a synthetic ABI/key and disposable encrypted files, not a real
+account or actual disk-failure injection.
+
+This closes only the concrete final leased full-replay slice. Every offered draft still
+receives a complete cooperative validation; other overlapping history passes remain.
+The final sink still synchronously reads, decrypts, compares, encrypts, writes, fsyncs
+and reads back. Indivisible parsing/hashing/serialization, CPU/RSS/UI-latency measurement,
+generic fallback cost, whole-app/SDK compilation and device performance remain open.
