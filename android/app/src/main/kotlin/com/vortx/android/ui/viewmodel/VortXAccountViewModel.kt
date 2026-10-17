@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vortx.android.sync.VortXSyncManager
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -342,7 +343,10 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
         clearAuthInputs()
         when (sync.reconcileAfterSignIn()) {
             VortXSyncManager.SignInReconcile.SEEDED_FROM_DEVICE -> _syncNotice.value = null
-            VortXSyncManager.SignInReconcile.HAS_ACCOUNT_DATA -> sync.useAccountData()
+            VortXSyncManager.SignInReconcile.HAS_ACCOUNT_DATA -> {
+                if (!sync.useAccountData()) _syncNotice.value = sync.syncProblem.value
+                    ?: "Signed in. Your saved data is preserved, but the account restore could not finish yet. Try Sync now again."
+            }
             VortXSyncManager.SignInReconcile.UNREACHABLE ->
                 _syncNotice.value = sync.syncProblem.value ?: "Signed in. Your synced data wasn't reachable yet; it will catch up automatically."
         }
@@ -368,13 +372,34 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
     /// Keep this device's data (a push; still merged into the pulled doc, never a blind overwrite).
     fun reconcileKeepDevice() = resolveReconcile { sync.importThisDeviceLibraryAndPush() }
 
-    private fun resolveReconcile(action: suspend () -> Unit) {
-        _showReconcile.value = false
+    private fun resolveReconcile(action: suspend () -> Boolean) {
+        if (_syncing.value || !_showReconcile.value) return
+        // Reuse invocation ownership so a delayed choice cannot publish into a replacement session.
+        val admit = sync.captureLocalLibraryMutationAdmission() ?: return
+        _syncing.value = true
+        _syncNotice.value = null
         viewModelScope.launch {
-            _syncing.value = true
-            action()
-            _syncing.value = false
-            sync.startRealtime()   // the question is settled; open the live channel
+            try {
+                val reconciled = action()
+                admit {
+                    if (_showReconcile.value) {
+                        if (reconciled) {
+                            _showReconcile.value = false
+                            _syncNotice.value = null
+                            sync.startRealtime() // Only a confirmed choice settles reconciliation.
+                        } else {
+                            _syncNotice.value = sync.syncProblem.value ?: RECONCILE_RETRY_NOTICE
+                        }
+                    }
+                    true
+                }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) {
+                admit {
+                    if (_showReconcile.value) _syncNotice.value = sync.syncProblem.value ?: RECONCILE_RETRY_NOTICE
+                    true
+                }
+            } finally { _syncing.value = false }
         }
     }
 
@@ -416,6 +441,7 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
 
     private companion object {
         /// Floor for a NEW password (register/recover). Sign-in never gates: existing accounts rule.
+        const val RECONCILE_RETRY_NOTICE = "Couldn't finish syncing. Your saved data is preserved. Choose an option to retry."
         const val MIN_PASSWORD_LENGTH = 8
         const val QR_POLL_INTERVAL_MS = 2_000L
     }

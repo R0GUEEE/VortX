@@ -3,6 +3,8 @@ package com.vortx.android.sync
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
+import androidx.lifecycle.viewModelScope
+import com.vortx.android.ui.viewmodel.VortXAccountViewModel
 import com.vortx.android.integrations.NativeProviderAccess
 import com.vortx.android.integrations.NativeProviderTestStore
 import com.vortx.android.profile.UserProfile
@@ -14,6 +16,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.*
 import okhttp3.Request
 import okhttp3.WebSocket
@@ -377,6 +381,91 @@ class AndroidRealtimeSyncTest {
         } finally { second.close() }
     }
 
+    @Test fun `global setting alone schedules native upload and acknowledgement does not echo`() = test {
+        val f = Fixture(testScheduler, MemoryContext(notifyChanges = true))
+        try {
+            f.enableConditionalTransport()
+            assertTrue(f.routinePull())
+            assertTrue(f.routinePull()); assertEquals("\"10\"", f.validators.last())
+            assertFalse(f.dirty()); assertEquals(0, f.puts)
+            // This is the real preference listener; no library/native edit or manual sync is used.
+            f.context.getSharedPreferences("vortx_settings", 0).edit()
+                .putBoolean("vortx.player.matchFrameRate", true).commit()
+            assertTrue(f.dirty()); assertTrue(f.settingsDirty().has("vortx.player.matchFrameRate"))
+            runCurrent(); advanceTimeBy(2_501); runCurrent()
+            assertEquals(1, f.puts); assertFalse(f.dirty())
+            assertFalse(f.settingsDirty().has("vortx.player.matchFrameRate"))
+            assertTrue(f.cloud.getJSONObject("nativeHostPreferences").getJSONObject("globals")
+                .getJSONObject("fields").getJSONObject("vortx.player.matchFrameRate").getBoolean("value"))
+            assertTrue(f.routinePull()); advanceTimeBy(10_000); runCurrent()
+            assertEquals(1, f.puts); assertFalse(f.dirty())
+        } finally { f.close() }
+    }
+
+    @Test fun `remote globals and profile mirrors do not arm native upload through preference listener`() = test {
+        val f = Fixture(testScheduler, MemoryContext(notifyChanges = true))
+        try {
+            f.gateway.host = JSONObject().put("globals", JSONObject().put("fields", JSONObject()
+                .put("vortx.player.matchFrameRate", JSONObject().put("value", true))))
+            f.cloud.put("nativeHostPreferences", JSONObject(f.gateway.host!!.toString()))
+            assertTrue(f.routinePull())
+            assertTrue(f.context.getSharedPreferences("vortx_settings", 0).getBoolean("vortx.player.matchFrameRate", false))
+            // These are the same flat mirror writes made by ProfileStore.applyPlayback after a
+            // native projection, outside the manager's applyingRemote window.
+            f.context.getSharedPreferences("vortx_settings", 0).edit()
+                .putString("stremiox.theme.accent", "fixture").putString("stremiox.sub.color", "yellow").commit()
+            runCurrent(); advanceTimeBy(10_000); runCurrent()
+            assertEquals(0, f.puts); assertFalse(f.dirty())
+            assertFalse(f.settingsDirty().has("vortx.player.matchFrameRate"))
+            // A later real global edit must not export the retained profile mirror stamp either.
+            f.context.getSharedPreferences("vortx_settings", 0).edit().putBoolean("vortx.player.matchFrameRate", false).commit()
+            runCurrent(); advanceTimeBy(2_501); runCurrent()
+            assertEquals(1, f.puts)
+            assertFalse(f.cloud.getJSONObject("nativeHostPreferences").getJSONObject("globals")
+                .getJSONObject("fields").has("stremiox.sub.color"))
+        } finally { f.close() }
+    }
+
+    private fun pendingReconcile(manager: VortXSyncManager): VortXAccountViewModel = VortXAccountViewModel(manager).also { model ->
+        // Set only the already-visible choice state; transport, crypto, manager and VM action are real.
+        val field = VortXAccountViewModel::class.java.getDeclaredField("_showReconcile").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        (field.get(model) as MutableStateFlow<Boolean>).value = true
+    }
+
+    @Test fun `failed reconcile choices remain visible and actionable until confirmed retry`() = test {
+        val choices: List<(VortXAccountViewModel) -> Unit> = listOf(
+            { it.reconcileUseAccount() }, { it.reconcileMergeBoth() }, { it.reconcileKeepDevice() })
+        for (choose in choices) {
+            val f = Fixture(testScheduler)
+            val model = pendingReconcile(f.manager)
+            try {
+                f.getFails = true
+                choose(model); runCurrent()
+                assertTrue(model.showReconcile.value); assertFalse(model.syncing.value)
+                assertNotNull(model.syncNotice.value); assertFalse(f.realtime.isActive())
+                // The same visible card can now retry a confirmed account restore.
+                f.getFails = false
+                model.reconcileUseAccount(); runCurrent()
+                assertFalse(model.showReconcile.value); assertFalse(model.syncing.value)
+                assertNull(model.syncNotice.value)
+            } finally { model.viewModelScope.cancel(); f.close() }
+        }
+    }
+
+    @Test fun `reconcile keeps choice visible while suspended and ignores duplicate submits`() = test {
+        val f = Fixture(testScheduler)
+        val model = pendingReconcile(f.manager)
+        try {
+            f.getGate = CompletableDeferred(); f.getFails = true
+            model.reconcileUseAccount(); runCurrent()
+            assertTrue(model.showReconcile.value); assertTrue(model.syncing.value); assertEquals(1, f.gets)
+            model.reconcileMergeBoth(); runCurrent(); assertEquals(1, f.gets)
+            f.getGate!!.complete(Unit); runCurrent()
+            assertTrue(model.showReconcile.value); assertFalse(model.syncing.value); assertNotNull(model.syncNotice.value)
+        } finally { model.viewModelScope.cancel(); f.close() }
+    }
+
     @Test fun `filtered global acknowledgement preserves newer edit and profile stamp during PUT`() = test {
         val f = Fixture(testScheduler)
         try {
@@ -738,13 +827,15 @@ class AndroidRealtimeSyncTest {
         fun fail() = listener.onFailure(this, IllegalStateException("fixture-only disconnect"), null)
     }
 
-    private class MemoryContext : ContextWrapper(null) {
+    private class MemoryContext(private val notifyChanges: Boolean = false) : ContextWrapper(null) {
         private val stores = mutableMapOf<String, SharedPreferences>()
         var rejectCommitKey: String? = null
         override fun getApplicationContext(): Context = this
         override fun getPackageName() = "com.vortx.android.sync.fixture"
         override fun getSharedPreferences(name: String, mode: Int) = stores.getOrPut(name) {
             val values = linkedMapOf<String, Any?>()
+            val listeners = linkedSetOf<SharedPreferences.OnSharedPreferenceChangeListener>()
+            lateinit var preferences: SharedPreferences
             fun editor(): SharedPreferences.Editor {
                 val edits = linkedMapOf<String, Any?>(); var clear = false
                 return Proxy.newProxyInstance(SharedPreferences.Editor::class.java.classLoader, arrayOf(SharedPreferences.Editor::class.java)) { proxy, method, args ->
@@ -755,22 +846,31 @@ class AndroidRealtimeSyncTest {
                             val rejected = method.name == "commit" && rejectCommitKey?.let { prefix ->
                                 prefix == "$name:" || edits.keys.any { "$name:$it".startsWith(prefix) }
                             } == true
-                            if (!rejected) { if (clear) values.clear(); edits.forEach { (key, value) -> if (value == null) values.remove(key) else values[key] = value } }
+                            if (!rejected) {
+                                val before = values.toMap()
+                                if (clear) values.clear()
+                                edits.forEach { (key, value) -> if (value == null) values.remove(key) else values[key] = value }
+                                if (notifyChanges) (before.keys + values.keys).filter { before[it] != values[it] }.forEach { key ->
+                                    listeners.toList().forEach { it.onSharedPreferenceChanged(preferences, key) }
+                                }
+                            }
                             if (method.name == "commit") !rejected else null
                         }
                         else -> if (method.name.startsWith("put")) { edits[args!![0] as String] = args[1]; proxy } else null
                     }
                 } as SharedPreferences.Editor
             }
-            Proxy.newProxyInstance(SharedPreferences::class.java.classLoader, arrayOf(SharedPreferences::class.java)) { _, method, args ->
+            preferences = Proxy.newProxyInstance(SharedPreferences::class.java.classLoader, arrayOf(SharedPreferences::class.java)) { _, method, args ->
                 when (method.name) {
                     "getAll" -> values.toMap()
                     "contains" -> values.containsKey(args!![0])
                     "edit" -> editor()
-                    "registerOnSharedPreferenceChangeListener", "unregisterOnSharedPreferenceChangeListener" -> null
+                    "registerOnSharedPreferenceChangeListener" -> { listeners.add(args!![0] as SharedPreferences.OnSharedPreferenceChangeListener); null }
+                    "unregisterOnSharedPreferenceChangeListener" -> { listeners.remove(args!![0] as SharedPreferences.OnSharedPreferenceChangeListener); null }
                     else -> if (method.name.startsWith("get")) values[args!![0]] ?: args[1] else null
                 }
             } as SharedPreferences
+            preferences
         }
     }
 }

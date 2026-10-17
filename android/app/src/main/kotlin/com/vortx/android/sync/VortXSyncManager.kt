@@ -935,18 +935,28 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
      * durable), and re-baseline. No-op marking while signed out (nothing to protect).
      */
     private fun noteLocalSettingsChange() {
+        // A callback must keep its original account across the domain read/diff as well as the write.
+        val lease = captureSyncLease()
         val current = currentSyncableDomain()
-        val signedIn = isSignedIn
+        val signedIn = lease != null
         val changed = if (!applyingRemote && signedIn) {
             SettingsDirtyKeys.changedSyncableKeys(settingsShadow, current) { SettingsBackup.isSyncable(it) }
         } else {
             emptySet()
         }
         settingsShadow = current
-        if (changed.isEmpty()) return
-        val dirty = readDirtySettings()
-        SettingsDirtyKeys.mark(changed, at = System.currentTimeMillis() / 1000.0, into = dirty)
-        writeDirtySettings(dirty)
+        if (changed.isEmpty() || lease == null) return
+        if (!publishIfSyncLeaseCurrent(lease) {
+            val dirty = readDirtySettings()
+            SettingsDirtyKeys.mark(changed, at = System.currentTimeMillis() / 1000.0, into = dirty)
+            writeDirtySettings(dirty)
+        }) return
+        // Native receives can remain bodyless indefinitely. Exportable global edits must own
+        // their own durable retry instead of waiting for an unrelated library/profile mutation.
+        // Profile mirrors and remote application do not create a second upload intent.
+        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED && changed.any {
+            it in SettingsBackup.SYNCABLE_SETTING_TYPES && it !in NATIVE_PROFILE_SETTING_KEYS
+        }) armPendingSync(lease, recordEdit = true)
     }
 
     /**
@@ -2594,6 +2604,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         lease: SyncSessionLease,
         force: Boolean = false,
         routineReceive: Boolean = false,
+        onComparisonReceiveCompleted: () -> Unit = {},
     ): Boolean {
         if (!isSyncLeaseCurrent(lease)) return false
         if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { nativeSyncMutex.withLock { nativeSyncDown(lease, force, routineReceive) } }
@@ -2740,6 +2751,10 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         // debounced push never landed) needs its own push so the account converges on the local value.
         // Debounced and self-gated; the push reads LOCAL values (local wins) and clears the stamps it carries.
         if (readDirtySettings().isNotEmpty()) requestSyncSoon()
+        // Comparison mode's return value describes changed fields, not admission. A valid no-op
+        // restore is complete only here, after publication/library receipts and durable revision ACK.
+        if (!isSyncLeaseCurrent(lease)) return false
+        onComparisonReceiveCompleted()
         return restored
     }
 
@@ -3101,9 +3116,13 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     }
 
     /** Conflict resolution: adopt the account's roster (forced). Still UNIONs, so no local-only profile is lost. */
-    suspend fun useAccountData() {
-        val lease = captureSyncLease() ?: return
-        syncDown(lease, force = true)
+    suspend fun useAccountData(): Boolean {
+        val lease = captureSyncLease() ?: return false
+        var comparisonReceiveCompleted = false
+        val restored = syncDown(lease, force = true,
+            onComparisonReceiveCompleted = { comparisonReceiveCompleted = true })
+        val received = if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) restored else comparisonReceiveCompleted
+        return received && isSyncLeaseCurrent(lease)
     }
 
     /** Conflict resolution / "Sync now": push this device's roster + overlays to the account. */
@@ -3145,7 +3164,10 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     suspend fun mergeBoth(): Boolean {
         val lease = captureSyncLease() ?: return false
         if (retryPendingPushBeforePull(lease)) return false
-        syncDown(lease, force = true)
+        val received = syncDown(lease, force = true)
+        // Native receive reports admission/publication success. A later push cannot settle a failed
+        // account restore. The comparison path's Boolean still means "some field was restored".
+        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED && !received) return false
         if (!isSyncLeaseCurrent(lease)) return false
         if (retryPendingPushBeforePull(lease)) return false
         val pushed = syncUp(lease)
@@ -3456,7 +3478,13 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         }
 
         private const val BASE = "https://api.vortx.tv"
-        private val NATIVE_PROFILE_SETTING_KEYS = setOf("stremiox.theme.accent", "stremiox.theme.oled", "stremiox.theme.textScale")
+        // Flat mirrors of native profile preferences must not become account-global registers.
+        // Keep receive, export and settings-only scheduling on the same ownership boundary.
+        private val NATIVE_PROFILE_SETTING_KEYS = setOf(
+            "stremiox.theme.accent", "stremiox.theme.oled", "stremiox.theme.textScale",
+            "stremiox.sub.font", "stremiox.sub.size", "stremiox.sub.color",
+            "stremiox.sub.brightness", "stremiox.sub.background", "stremiox.sub.sizeScale",
+        )
         private const val TIMEOUT_MS = 20_000
         private const val SESSION_STORAGE_FAILURE =
             "Secure storage is unavailable. Your VortX session was not changed. Please try again."
