@@ -410,6 +410,35 @@ test("validateReleaseFeedArtifact accepts Apple-only release (android null)", ()
   assert.equal(result.hasApple, true);
 });
 
+test("validateReleaseFeedArtifact rejects missing or malformed Apple artifacts", () => {
+  assert.throws(() => validateReleaseFeedArtifact(validManifest({ hasApple: false })), /at least one/);
+  for (const platform of ["ios", "tvos", "mac"]) {
+    for (const value of ["garbage", [], 1]) {
+      const manifest = validManifest();
+      manifest[platform] = value;
+      assert.throws(() => validateReleaseFeedArtifact(manifest), /artifact object/);
+    }
+    for (const [field, value] of [["url", "https://example.invalid/other.ipa"], ["size", -1], ["sha256", "bad"], ["build", BUILD + 1]]) {
+      const manifest = validManifest();
+      manifest[platform][field] = value;
+      assert.throws(() => validateReleaseFeedArtifact(manifest), undefined, `${platform}.${field}`);
+    }
+  }
+});
+
+test("validateReleaseFeedArtifact accepts the generated assets container", () => {
+  const manifest = validManifest();
+  manifest.assets = {};
+  for (const platform of ["ios", "tvos", "mac"]) {
+    const { tag, version, build, ...artifact } = manifest[platform];
+    manifest.assets[platform] = artifact;
+    delete manifest[platform];
+  }
+  assert.equal(validateReleaseFeedArtifact(manifest).hasApple, true);
+  manifest.assets.ios.size = 0;
+  assert.throws(() => validateReleaseFeedArtifact(manifest), /positive integer/);
+});
+
 test("validateReleaseFeedArtifact accepts full+play Android with Apple", () => {
   const result = validateReleaseFeedArtifact(validManifest({
     android: { full: VALID_ANDROID_FULL, play: VALID_ANDROID_PLAY },

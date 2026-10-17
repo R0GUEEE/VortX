@@ -949,14 +949,29 @@ export function validateReleaseFeedArtifact(artifact, options = {}) {
     }
   }
   // Detect Apple platforms
-  const hasIos = manifest.ios !== undefined && manifest.ios !== null;
-  const hasTvos = manifest.tvos !== undefined && manifest.tvos !== null;
-  const hasMac = manifest.mac !== undefined && manifest.mac !== null;
-  const hasApple = hasIos || hasTvos || hasMac;
+  // Built manifest.json stores these under assets; compatibility fixtures use direct entries.
+  const appleEntries = ["ios", "tvos", "mac"].map((key) => [key, manifest[key] ?? manifest.assets?.[key]]);
+  const hasApple = appleEntries.some(([, entry]) => entry !== undefined && entry !== null);
+  for (const [platform, entry] of appleEntries) {
+    if (entry === undefined || entry === null) continue;
+    if (typeof entry !== "object" || Array.isArray(entry)) {
+      die(`manifest.${platform} must be an artifact object`, "feed-schema");
+    }
+    for (const [field, expected] of [["tag", tag], ["version", version], ["build", build]]) {
+      if (entry[field] !== undefined && entry[field] !== expected) {
+        die(`manifest.${platform}.${field} differs from the release identity`, "feed-coherence");
+      }
+    }
+    const slug = platform === "ios" ? "iOS" : platform === "tvos" ? "tvOS" : "macOS";
+    requireDownloadURL(`${platform}-url`, entry.url, tag, slug, platform === "mac" ? "dmg" : "ipa");
+    assertPositiveInt(entry.size, `manifest.${platform}.size`, FEED_CAPS.artifactBytes);
+    assertLowerHex64(entry.sha256, `manifest.${platform}.sha256`);
+  }
   // Android validation
   const android = manifest.android;
   if (android === null || android === undefined) {
     // No Android entry at all: acceptable (Apple-only release)
+    if (!hasApple) die("manifest must contain at least one Apple or Android artifact", "feed-schema");
     return { valid: true, androidFlavors: [], hasApple };
   }
   // Reject flat root.android (must be split into full/play sub-objects)
