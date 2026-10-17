@@ -73,6 +73,17 @@ private final class AddonCheckpointStore: VortxCheckpointStore, @unchecked Senda
         let braceID = "e9" + String(repeating: "0", count: 30)
         let typedBrace = replacing(first, "eventId", .string(braceID))
         try VortxNativeWebsiteAddonEdits.validateSource([typedBrace])
+        let literalAddon = replacing(mutation(url)["addon"]!, "manifest",
+            replacing(replacing(mutation(url)["addon"]!["manifest"]!, "name", .string("[4K] Community catalog")),
+                      "description", .string("{Public} Films and shows")))
+        let literalMutation = replacing(mutation(url), "addon", literalAddon)
+        let literalEvent = event(99, mutations: [literalMutation])
+        try VortxNativeWebsiteAddonEdits.validateSource([literalEvent])
+        var literalHost = try VortxNativeHostPreferences(scope: scope, actor: actor)
+        literalHost.local.websiteAddonPending = [literalEvent]
+        let literalReopened = try VortxNativeHostPreferences(scope: scope, actor: actor, sealed: literalHost.encoded())
+        check(literalReopened.local.websiteAddonPending == [literalEvent])
+        print("Issue #263 website add-on validation and sealed pending reopen preserve exact literal manifest labels")
         do {
             try VortxNativeWebsiteAddonEdits.validateSource([.object(["eventId": .string(braceID)])])
             fatalError("untyped event identifier bypassed opaque inspection")

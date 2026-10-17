@@ -65,9 +65,16 @@ enum VortxNativeBootstrapArchive {
     private static let diagnosticFields: Set<String> = [
         "settings", "payloadBase64", "nativeSync", "legacyImport", "accountSlots", "slots",
         "sourceHistory", "ownAccountSourceHistory", "acceptedFingerprints", "roster", "profiles",
-        "library", "watches", "valueHash", "fingerprint"
+        "library", "watches", "valueHash", "fingerprint", "vortx", "addons", "manifest", "name", "description",
+        "byProfile", "records", "value", "items", "sourceBaseline", "baseline", "ownAccountSources",
+        "sourceDocumentBase64", "addonsResponseBase64", "result", "webAddonEdits", "events", "mutations", "addon", "observed"
     ]
-    private static func rejected(_ failure: Failure, path: String, diagnostics: ((String) -> Void)?) -> Failure {
+    private enum InspectionCarrier: String {
+        case depthLimit = "depth_limit", backupEnvelope = "backup_envelope", settingsEnvelope = "settings_envelope"
+        case opaqueData = "opaque_data", base64Prefix = "base64_prefix", plainTextPrefix = "plain_text_prefix"
+    }
+    private static func rejected(_ failure: Failure, path: String, diagnostics: ((String) -> Void)?,
+                                 carrier: InspectionCarrier? = nil) -> Failure {
         if let diagnostics {
             let reason: String
             switch failure {
@@ -78,13 +85,45 @@ enum VortxNativeBootstrapArchive {
             let field = "/" + path.split(separator: "/").prefix(12).map {
                 diagnosticFields.contains(String($0)) ? String($0) : "*"
             }.joined(separator: "/")
-            diagnostics("archive_inspection result=failed reason=\(reason) field=\(field)")
+            let detail = carrier.map { " carrier=" + $0.rawValue } ?? ""
+            diagnostics("archive_inspection result=failed reason=\(reason) field=\(field)\(detail)")
         }
         return failure
     }
+    private enum TextContext { case ordinary, addonManifest, addonDisplayText }
+    private static func isAddonDescriptor(_ object: [String: Any]) -> Bool {
+        guard let transport = object["transportUrl"] as? String, let url = URLComponents(string: transport),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host?.isEmpty == false,
+              let manifest = object["manifest"] as? [String: Any] else { return false }
+        return ["id", "name", "version"].allSatisfy { (manifest[$0] as? String)?.isEmpty == false }
+    }
+    private static func hasLiteralDisplayLabel(_ text: String) -> Bool {
+        // A public manifest label such as [4K], [Community] or {Public} is not a broken JSON
+        // document. Admit only a short balanced label with no key/value, quoting or nested syntax.
+        // All real JSON/plist/base64 decoding happens first; this never exempts encoded bytes.
+        let scalars = text.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars
+        guard let first = scalars.first, first == "[" || first == "{" else { return false }
+        let closing: Unicode.Scalar = first == "[" ? "]" : "}"
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " ._-+&"))
+        var count = 0
+        for index in scalars.indices.dropFirst() {
+            let scalar = scalars[index]
+            if scalar == closing {
+                let next = scalars.index(after: index)
+                guard count > 0, next == scalars.endIndex || CharacterSet.whitespacesAndNewlines.contains(scalars[next]) else { return false }
+                // A valid JSON prefix followed by extra text is still a malformed container,
+                // not a literal tag: `[true] {"token":...}` must retain the rejection fence.
+                let prefix = String(scalars[...index])
+                return (try? JSONSerialization.jsonObject(with: Data(prefix.utf8), options: [.fragmentsAllowed])) == nil
+            }
+            guard count < 64, allowed.contains(scalar) else { return false }
+            count += 1
+        }
+        return false
+    }
     private static func sanitize(_ value: Any, path: String, exclusions: inout [String], depth: Int = 0,
-                                 diagnostics: ((String) -> Void)? = nil) throws -> Any {
-        guard depth <= 64 else { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics) }
+                                 diagnostics: ((String) -> Void)? = nil, textContext: TextContext = .ordinary) throws -> Any {
+        guard depth <= 64 else { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .depthLimit) }
         // Typed SHA-256 evidence is hexadecimal, not a base64 JSON carrier. Some valid hashes
         // (for example e9...) decode to a leading brace plus arbitrary bytes under base64 probing.
         let typedDigest = ["/valueHash", "/fingerprint", "/sourceDocumentSha256", "/metadataResponseSha256", "/profileOverlaySha256", "/typedCarrierFingerprint"].contains(where: path.hasSuffix)
@@ -95,13 +134,14 @@ enum VortxNativeBootstrapArchive {
            text.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil { return text }
         if var object = value as? [String: Any] {
             let websiteEventID = typedWebsiteEventID(object)
+            let addonDescriptor = isAddonDescriptor(object)
             // Backups may be nested under future preference keys, not just `settings`. Recognize
             // their envelope by content and inspect the plist before traversing envelope metadata.
             if object["format"] as? String == "vortx-backup" {
                 guard object["schema"] as? Int == 1,
                       let payload = object["payloadBase64"] as? String, let bytes = Data(base64Encoded: payload),
                       let domain = try PropertyListSerialization.propertyList(from: bytes, options: [], format: nil) as? [String: Any]
-                else { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics) }
+                else { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .backupEnvelope) }
                 let safe = try sanitize(domain, path: path + "/payloadBase64", exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics)
                 guard let safe = safe as? [String: Any] else { throw rejected(.malformed, path: path, diagnostics: diagnostics) }
                 object["payloadBase64"] = try PropertyListSerialization.data(fromPropertyList: safe, format: .binary, options: 0).base64EncodedString()
@@ -128,7 +168,15 @@ enum VortxNativeBootstrapArchive {
                     result[key] = websiteEventID
                 } else if key == "settings", let encoded = object[key] as? String {
                     result[key] = try settings(encoded, path: child, exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics)
-                } else { result[key] = try sanitize(object[key]!, path: child, exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics) }
+                } else {
+                    // Context is one-hop and content-typed, so the same descriptor remains valid in
+                    // legacy material, native registers and retained independent-source archives.
+                    // Never let a display-field exemption flow into another key or decoded carrier.
+                    let context: TextContext = key == "manifest" && addonDescriptor ? .addonManifest
+                        : textContext == .addonManifest && ["name", "description"].contains(key) && object[key] is String ? .addonDisplayText : .ordinary
+                    result[key] = try sanitize(object[key]!, path: child, exclusions: &exclusions, depth: depth + 1,
+                                               diagnostics: diagnostics, textContext: context)
+                }
             }
             return result
         }
@@ -146,7 +194,7 @@ enum VortxNativeBootstrapArchive {
             if let object = try? PropertyListSerialization.propertyList(from: data, options: [], format: &format) {
                 return try PropertyListSerialization.data(fromPropertyList: sanitize(object, path: path, exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics), format: format, options: 0)
             }
-            throw rejected(.opaquePreference, path: path, diagnostics: diagnostics)
+            throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .opaqueData)
         }
         if let text = value as? String, let nested = try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed]),
            nested is [String: Any] || nested is [Any] || nested is String {
@@ -173,9 +221,12 @@ enum VortxNativeBootstrapArchive {
                 if exclusions.count == prior { return text }
                 return try PropertyListSerialization.data(fromPropertyList: safe, format: format, options: 0).base64EncodedString()
             }
-            if structuredPrefix(bytes) { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics) }
+            if structuredPrefix(bytes) { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .base64Prefix) }
         }
-        if let text = value as? String, structuredPrefix(Data(text.utf8)) { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics) }
+        if let text = value as? String, structuredPrefix(Data(text.utf8)),
+           !(textContext == .addonDisplayText && hasLiteralDisplayLabel(text)) {
+            throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .plainTextPrefix)
+        }
         guard value is String || value is NSNumber || value is NSNull || value is Date else { throw rejected(.malformed, path: path, diagnostics: diagnostics) }
         return value
     }
@@ -215,7 +266,7 @@ enum VortxNativeBootstrapArchive {
         guard let bytes = Data(base64Encoded: encoded),
               let envelope = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               envelope["format"] as? String == "vortx-backup"
-        else { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics) }
+        else { throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .settingsEnvelope) }
         let safeEnvelope = try sanitize(envelope, path: path, exclusions: &exclusions, depth: depth + 1, diagnostics: diagnostics)
         return try JSONSerialization.data(withJSONObject: safeEnvelope, options: [.sortedKeys, .withoutEscapingSlashes]).base64EncodedString()
     }

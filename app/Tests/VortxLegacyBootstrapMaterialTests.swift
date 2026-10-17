@@ -24,10 +24,39 @@ enum VortxLegacyBootstrapMaterialTests {
         try fractionalPlaybackPrecision()
         try conflictingWatchPreparation()
         try legacyAccountHolds()
+        try literalAddonManifestArchive()
     }
 
     static func check(_ condition: @autoclosure () -> Bool, _ message: String) {
         precondition(condition(), message)
+    }
+    static func literalAddonManifestArchive() throws {
+        // Exercise the actual account-preparation order, not just a handwritten material shape.
+        let label = "[4K] Community catalog"
+        let description = "{Public} Films and shows"
+        let addon: Object = ["transportUrl": "https://addon.example/manifest.json", "manifest": [
+            "id": "fixture.community", "version": "1.0.0", "name": label, "description": description
+        ]]
+        let document = doc(["addons": [addon], "library": [movie()]])
+        let clean = try VortxNativeBootstrapArchive.credentialFreeDocument(document)
+        let projected = try VortxLegacyBootstrapMaterial.encode(document: clean, roster: [owner, child], ownerProfileID: owner.id,
+                                                                rosterModifiedSeconds: 1720000000.1234)
+        let result = try JSONSerialization.jsonObject(with: projected) as! Object
+        let ownerAddons = (result["addons"] as! [String: Object])[owner.id.uuidString]!
+        let manifest = (ownerAddons["items"] as! [Object])[0]["manifest"] as! Object
+        check(manifest["name"] as? String == label && manifest["description"] as? String == description,
+              "Literal public labels survive the actual legacy projection")
+        check((result["roster"] as! [Object]).count == 2, "One display label must not block either profile")
+        let archive = try VortxNativeBootstrapArchive.encode(document: clean, material: projected)
+        try VortxNativeBootstrapArchive.validate(archive)
+        let retained = try VortxNativeBootstrapArchive.encode(document: clean, material: projected, authenticatedSourceArchive: archive)
+        try VortxNativeBootstrapArchive.validate(retained)
+        let root = try JSONSerialization.jsonObject(with: retained) as! Object
+        check(NSDictionary(dictionary: root["legacyImportMaterial"] as! Object).isEqual(to: result),
+              "Archive retention does not rewrite legacy evidence")
+        check(NSDictionary(dictionary: root["authenticatedSourceArchive"] as! Object).isEqual(to: document),
+              "Retained account source preserves labels and unrelated library data")
+        print("Issue #263 actual legacy preparation: both profiles, exact manifest labels, library and retained material survive capture/projection/archive validation")
     }
     static func material(_ document: Object, roster: [UserProfile] = [owner, child], modified: Double? = 1720000000.1234,
                          documentData: Data? = nil,

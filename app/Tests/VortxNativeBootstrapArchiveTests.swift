@@ -71,6 +71,8 @@ import Foundation
         try VortxNativeBootstrapArchive.validate(hashArchive)
         try ownAccountSlotSourceHistory()
         try archiveInspectionDiagnostics()
+        do { try literalAddonManifestLabels() }
+        catch { print("FAIL: literal add-on manifest text blocked account preparation: \(error)"); exit(1) }
         let unchangedArchive = try JSONSerialization.jsonObject(with: VortxNativeBootstrapArchive.encode(document: data(["future": unchanged]))) as! [String: Any]
         check((unchangedArchive["hostDocument"] as! [String: String])["future"] == unchanged)
         let malformedBackup = try data(["format": "vortx-backup", "schema": 1, "payloadBase64": "opaque"]).base64EncodedString()
@@ -133,34 +135,153 @@ import Foundation
         }
     }
 
+    static func literalAddonManifestLabels() throws {
+        // #263's five masked path segments match /vortx/addons/0/manifest/name.
+        // Add-on display labels are text, not necessarily JSON just because they start with '['.
+        // This is a synthetic reproduction, not a recovered customer value.
+        typealias Object = [String: Any]
+        let profile = "00000000-0000-0000-0000-00000000A11C"
+        let url = "https://addon.example/manifest.json"
+        func descriptor(_ name: Any, description: Any = "Fixture", extra: Object = [:]) -> Object {
+            var manifest: Object = ["id": "fixture.community", "version": "1.0.0", "name": name, "description": description]
+            manifest.merge(extra) { _, value in value }
+            return ["transportUrl": url, "manifest": manifest]
+        }
+        func journey(_ document: Object, material: Object? = nil) throws {
+            var messages: [String] = []
+            let clean = try VortxNativeBootstrapArchive.credentialFreeDocument(document, diagnostics: { messages.append($0) })
+            check(messages.isEmpty)
+            check(NSDictionary(dictionary: try JSONSerialization.jsonObject(with: clean) as! Object).isEqual(to: document))
+            let archive = try VortxNativeBootstrapArchive.encode(document: clean, material: material.map { try data($0) })
+            try VortxNativeBootstrapArchive.validate(archive)
+            let root = try JSONSerialization.jsonObject(with: archive) as! Object
+            check(NSDictionary(dictionary: root["hostDocument"] as! Object).isEqual(to: document))
+            if let material { check(NSDictionary(dictionary: root["legacyImportMaterial"] as! Object).isEqual(to: material)) }
+            let retained = try VortxNativeBootstrapArchive.encode(document: data([:]), authenticatedSourceArchive: archive)
+            try VortxNativeBootstrapArchive.validate(retained)
+            let retainedRoot = try JSONSerialization.jsonObject(with: retained) as! Object
+            check(NSDictionary(dictionary: retainedRoot["authenticatedSourceArchive"] as! Object).isEqual(to: document))
+        }
+        let labels = ["[4K] Community catalog", "[Community]", "{Public} Catalog", " \n[EN] Films and shows.", "[日本語] アニメ", "[true]", "[123]"]
+        var journeys = 0
+        for label in labels {
+            let addon = descriptor(label, description: label)
+            let items: Object = ["items": [addon], "order": [url]]
+            let register: Object = ["records": [url: ["value": addon]]]
+            let response = try data(["result": ["addons": [addon]]]).base64EncodedString()
+            let sourceEnvelope = try data(["addonsResponseBase64": response]).base64EncodedString()
+            let documents: [Object] = [
+                ["addons": [addon]], ["vortx": ["addons": [addon]]],
+                ["nativeSync": ["legacyImport": ["baseline": ["addons": [profile: items]]]]],
+                ["nativeSync": ["addons": [profile: register]]],
+                ["nativeSync": ["accountSlots": [profile: ["slots": ["own:fixture": ["sourceBaseline": ["addons": items]]]]]]],
+                ["ownAccountSources": [profile: ["sourceDocumentBase64": sourceEnvelope]]],
+                ["webAddonEdits": ["events": [["mutations": [["addon": addon]], "observed": register]]]],
+                ["future": ["descriptor": addon]] // Full descriptors are content-typed, not tied to one account path.
+            ]
+            for document in documents { try journey(document); journeys += 1 }
+            try journey(["vortx": ["addons": [addon]]], material: ["schemaVersion": 1, "addons": [profile: items]])
+            journeys += 1
+        }
+        func refused(_ document: Object) throws {
+            do {
+                _ = try VortxNativeBootstrapArchive.credentialFreeDocument(document)
+                preconditionFailure("Opaque or non-display carrier was admitted")
+            } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+        }
+        let label = labels[0]
+        try refused(["future": label])
+        try refused(["name": label])
+        try refused(["addons": [descriptor("Fixture", extra: ["future": label])]])
+        try refused(["addons": [descriptor("Fixture", extra: ["extension": ["name": label]])]])
+        // Missing descriptor identity is not sufficient evidence for display semantics.
+        try refused(["addons": [["manifest": ["name": label, "id": "fixture", "version": "1.0.0"]]]])
+        try refused(["addons": [["transportUrl": "file:///private/fixture", "manifest": ["name": label, "id": "fixture", "version": "1.0.0"]]]])
+        let malformed = [#"{"token":"unfinished"#, #"[{"password":"unfinished"#, #"{'token':'fixture'}"#, "{token=fixture;}",
+                         "[[Community]]", "[Community]no separator", "[" + String(repeating: "x", count: 65) + "] Label",
+                         #"[true] {"token":"fixture-hidden"}"#, #"[123] {"password":"fixture-hidden"}"#,
+                         #"[ ] {"token":"fixture-hidden"}"#, "[null] trailing"]
+        for value in malformed {
+            for field in ["name", "description"] {
+                let addon = field == "name" ? descriptor(value) : descriptor("Fixture", description: value)
+                try refused(["vortx": ["addons": [addon]]])
+            }
+        }
+        for bytes in [Data("[Community]".utf8), Data(#"{"token":"unfinished"#.utf8), Data([0x7b, 0xff, 0]), Data("bplist00broken".utf8)] {
+            try refused(["addons": [descriptor(bytes.base64EncodedString())]])
+        }
+        // Context never flows through arrays/objects or into an encoded container's inner strings.
+        try refused(["addons": [descriptor([label])]])
+        try refused(["addons": [descriptor(["name": label])]])
+        let quotedLabel = String(decoding: try JSONSerialization.data(withJSONObject: label, options: [.fragmentsAllowed]), as: UTF8.self)
+        try refused(["addons": [descriptor(quotedLabel)]])
+
+        let secretJSON = #"{"token":"fixture-hidden","keep":true}"#
+        let quotedSecret = String(decoding: try JSONSerialization.data(withJSONObject: secretJSON, options: [.fragmentsAllowed]), as: UTF8.self)
+        let secretPlist = try PropertyListSerialization.data(fromPropertyList: ["password": "fixture-hidden", "keep": true], format: .binary, options: 0)
+        let encoded: [(String, (String) throws -> Object)] = [
+            (secretJSON, { try JSONSerialization.jsonObject(with: Data($0.utf8)) as! Object }),
+            (quotedSecret, { raw in
+                let inner = try JSONSerialization.jsonObject(with: Data(raw.utf8), options: [.fragmentsAllowed]) as! String
+                return try JSONSerialization.jsonObject(with: Data(inner.utf8)) as! Object
+            }),
+            (Data(secretJSON.utf8).base64EncodedString(), { try JSONSerialization.jsonObject(with: Data(base64Encoded: $0)!) as! Object }),
+            (secretPlist.base64EncodedString(), { try PropertyListSerialization.propertyList(from: Data(base64Encoded: $0)!, options: [], format: nil) as! Object })
+        ]
+        for (value, unwrap) in encoded {
+            for field in ["name", "description"] {
+                let addon = field == "name" ? descriptor(value) : descriptor("Fixture", description: value)
+                let clean = try VortxNativeBootstrapArchive.credentialFreeDocument(["addons": [addon]])
+                let root = try JSONSerialization.jsonObject(with: clean) as! Object
+                let manifest = ((root["addons"] as! [Object])[0]["manifest"] as! Object)
+                let safe = try unwrap(manifest[field] as! String)
+                check(safe["token"] == nil && safe["password"] == nil && safe["keep"] as? Bool == true)
+            }
+        }
+        let sibling: Object = ["transportUrl": url, "token": "fixture-hidden", "manifest": [
+            "id": "fixture.community", "version": "1.0.0", "name": label, "password": "fixture-hidden"
+        ]]
+        let cleanSibling = try JSONSerialization.jsonObject(with: VortxNativeBootstrapArchive.credentialFreeDocument(["addons": [sibling]])) as! Object
+        let safeSibling = (cleanSibling["addons"] as! [Object])[0]
+        check(safeSibling["token"] == nil && (safeSibling["manifest"] as! Object)["password"] == nil)
+
+        var messages: [String] = []
+        do {
+            _ = try VortxNativeBootstrapArchive.credentialFreeDocument(["vortx": ["addons": [descriptor("[private:token]")]]], diagnostics: { messages.append($0) })
+            preconditionFailure("Malformed display label was admitted")
+        } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+        check(messages == ["archive_inspection result=failed reason=opaque_preference field=/vortx/addons/*/manifest/name carrier=plain_text_prefix"])
+        print("Issue #263: \(journeys) exact display-text carrier journeys, nested credential inspection and malformed/opaque rejection controls passed")
+    }
+
     static func archiveInspectionDiagnostics() throws {
         var messages: [String] = []
         _ = try VortxNativeBootstrapArchive.credentialFreeDocument(["library": [["name": "Fixture title"]]],
                                                                  diagnostics: { messages.append($0) })
         check(messages.isEmpty)
 
-        func rejected(_ source: [String: Any], field: String) throws {
+        func rejected(_ source: [String: Any], field: String, carrier: String) throws {
             messages = []
             do {
                 _ = try VortxNativeBootstrapArchive.credentialFreeDocument(source, diagnostics: { messages.append($0) })
                 preconditionFailure("Opaque source unexpectedly accepted")
             } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
-            check(messages == ["archive_inspection result=failed reason=opaque_preference field=" + field])
+            check(messages == ["archive_inspection result=failed reason=opaque_preference field=" + field + " carrier=" + carrier])
         }
-        try rejected(["settings": "fixture-private-malformed-settings"], field: "/settings")
+        try rejected(["settings": "fixture-private-malformed-settings"], field: "/settings", carrier: "settings_envelope")
 
         let privateKey = "https://private-user.example/Personal/manifest.json?key=fixture-private-value"
         let preferences = try PropertyListSerialization.data(fromPropertyList: [privateKey: Data([0, 255, 0])], format: .binary, options: 0)
         let backup = try data(["format": "vortx-backup", "schema": 1, "payloadBase64": preferences.base64EncodedString()])
-        try rejected(["settings": backup.base64EncodedString()], field: "/settings/payloadBase64/*")
+        try rejected(["settings": backup.base64EncodedString()], field: "/settings/payloadBase64/*", carrier: "opaque_data")
 
         let profile = "00000000-0000-0000-0000-00000000B22C"
         let sourceDigest = String(repeating: "a", count: 64)
         try rejected(["nativeSync": ["accountSlots": [profile: ["slots": [privateKey: [
             "sourceHistory": [sourceDigest: Data([0, 255, 0])]
-        ]]]]]], field: "/nativeSync/accountSlots/*/slots/*/sourceHistory/*")
+        ]]]]]], field: "/nativeSync/accountSlots/*/slots/*/sourceHistory/*", carrier: "opaque_data")
         try rejected(["private-personal-field": ["sourceHistory": [sourceDigest: "e9" + String(repeating: "0", count: 62)]]],
-                     field: "/*/sourceHistory/*")
+                     field: "/*/sourceHistory/*", carrier: "base64_prefix")
     }
 
     static func membershipReceiptRetention() throws {
