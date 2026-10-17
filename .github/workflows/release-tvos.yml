@@ -31,6 +31,11 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
+      publish_existing_055:
+        description: "One-shot, independently reviewed publication recovery for the existing 0.5.5/274 CI bytes. No app build. Only the pinned v0.5.5-publication.1 operational tag is admitted."
+        required: false
+        type: boolean
+        default: false
       native_only:
         description: "Use the reviewed native data/resource/streaming engines and omit legacy core/Node payloads. Set false only for an artifact-only legacy comparison; release targets are rejected in that mode."
         required: false
@@ -93,8 +98,84 @@ permissions:
   contents: read
 
 jobs:
+  publish-existing-055:
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish_existing_055 == true &&
+      github.repository == 'VortXTV/VortX' && github.ref == 'refs/tags/v0.5.5-publication.1' &&
+      inputs.release_tag == '' && inputs.resume_handoff == '' && inputs.recovery_source_commit == '' &&
+      inputs.publish_release != true && inputs.tvos_test_only != true && inputs.native_only == true
+    concurrency:
+      group: vortx-release-v0.5.5
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    environment: release-approval
+    permissions:
+      contents: write
+      actions: read
+    timeout-minutes: 35
+    steps:
+      # No checkout, app builder or mutable repository execution in this write job.
+      # These hashes bind the independently reviewed coordinator and its exact prepared data.
+      - name: Fetch and verify the exact one-release publication plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = VortXTV/VortX
+          test "$GITHUB_REF" = refs/tags/v0.5.5-publication.1
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          gh api -H 'Accept: application/vnd.github.raw+json' "repos/VortXTV/VortX/contents/scripts/recover-publication-055.mjs?ref=$GITHUB_SHA" > "$RUNNER_TEMP/publication-055.mjs"
+          gh api -H 'Accept: application/vnd.github.raw+json' "repos/VortXTV/VortX/contents/.github/release055/publication-plan.json?ref=$GITHUB_SHA" > "$RUNNER_TEMP/publication-plan.json"
+          echo "65cd5d18a86cbcb7486c1d9d6bc431caea2236ca81b12e68ca4dad74bb4d39b0  $RUNNER_TEMP/publication-055.mjs" | sha256sum --check --strict
+          echo "e0ca40062d06f3b49cc2b7153fa944157249cd6fc3c6febf01958495b7201dc2  $RUNNER_TEMP/publication-plan.json" | sha256sum --check --strict
+      - name: Stage and prove the normal feed, then publish the accepted packages last
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_FEED_RECEIPT_SECRET: ${{ secrets.RELEASE_FEED_RECEIPT_SECRET }}
+        run: |
+          set -euo pipefail
+          node "$RUNNER_TEMP/publication-055.mjs" publish "$RUNNER_TEMP/publication-plan.json" e0ca40062d06f3b49cc2b7153fa944157249cd6fc3c6febf01958495b7201dc2 "$RUNNER_TEMP/publication-result.json"
+      - name: Retain the public-only publication receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VortX-055-publication-receipt
+          path: ${{ runner.temp }}/publication-result.json
+          if-no-files-found: error
+          retention-days: 90
+
+  verify-existing-055:
+    needs: [publish-existing-055]
+    if: needs.publish-existing-055.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 35761135a71867d23a9c4ee83cbdb31fe65747bd
+          persist-credentials: false
+      - name: Run the unchanged published-release checks from the actual release source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: VortXTV/VortX
+          RELEASE_ID: '415681390'
+          EVENT_TAG: v0.5.5
+          APPLE_ONLY_INPUT: 'false'
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import {readFileSync} from 'node:fs';
+          import {execFileSync} from 'node:child_process';
+          const text=readFileSync('.github/workflows/release-tvos.yml','utf8').split('  verify-published:\n')[1];
+          if(!text)throw new Error('original published-release job missing');
+          const blocks=[...text.matchAll(/^        run: \|\n((?:          .*\n|\n)+)/gm)];
+          if(blocks.length!==2)throw new Error('original verification step count differs');
+          for(const block of blocks)execFileSync('bash',['-euo','pipefail','-c',block[1].replace(/^          /gm,'')],{stdio:'inherit',env:process.env});
+          NODE
+
   build-tvos:
-    if: github.event_name != 'release' && inputs.resume_handoff == ''
+    if: github.event_name != 'release' && inputs.resume_handoff == '' && inputs.publish_existing_055 != true
     outputs:
       source_sha: ${{ env.BUILD_SOURCE_SHA }}
       apps_id: ${{ steps.apps_handoff.outputs.artifact-id }}
