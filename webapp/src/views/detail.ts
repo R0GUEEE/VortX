@@ -18,7 +18,7 @@ import {
 import { fetchSkipSegments } from "../lib/skip";
 import { paginateSourceRows, sourceRows } from "../lib/sourcePaging";
 import { defaultSeason, episodesForSeason, isSeries, seasonsOf, sortedVideos } from "../lib/series";
-import { actionOf, escapeHtml, httpUrl } from "../lib/dom";
+import { actionOf, escapeHtml, httpUrl, cssImageURL } from "../lib/dom";
 import { icon } from "../lib/icons";
 import { play, setSkipSegments, currentPlayToken } from "../lib/player";
 import { cwPosition, cwProgress, cwResumeId, inLibrary, toggleLibrary, hasNativeAccountProjection,
@@ -359,7 +359,7 @@ function moreLikeThis(): string {
 function detailShell(bg: string, back: string, body: string): string {
   return `
     <div class="detail detail-immersive">
-      <div class="detail-bg"${bg ? ` style="background-image:url('${escapeHtml(bg)}')"` : ""}></div>
+      <div class="detail-bg"${bg ? ` style="background-image:${escapeHtml(cssImageURL(bg))}"` : ""}></div>
       <div class="detail-scrim"></div>
       ${back}
       <div class="detail-body">${body}</div>

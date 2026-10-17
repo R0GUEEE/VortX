@@ -1,6 +1,6 @@
 import type { Addon, MetaItem } from "../lib/types";
 import { catalogRefs, fetchCatalog, fetchTopPicks, type CatalogRef } from "../lib/addon";
-import { escapeHtml, httpUrl } from "../lib/dom";
+import { escapeHtml, httpUrl, cssImageURL } from "../lib/dom";
 import { hashFor } from "../lib/router";
 import { icon } from "../lib/icons";
 import { continueWatching, hiddenRailCount, isRailHidden, libraryItems } from "../lib/store";
@@ -168,7 +168,7 @@ function featuredHero(item: MetaItem): string {
     ? `<p class="featured-synopsis">${escapeHtml(item.description)}</p>`
     : "";
   return `
-    <div class="featured-bg" style="background-image:url('${escapeHtml(bg)}')"></div>
+    <div class="featured-bg" style="background-image:${escapeHtml(cssImageURL(bg))}"></div>
     <div class="featured-scrim" aria-hidden="true"></div>
     <div class="featured-content">
       ${title}

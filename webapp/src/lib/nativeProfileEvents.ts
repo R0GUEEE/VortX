@@ -113,7 +113,7 @@ function copyValue<T>(value: T): T {
   if (isObject(value)) {
     const copy: JsonObject = {};
     for (const [key, child] of Object.entries(value)) {
-      if (child !== undefined) copy[key] = copyValue(child);
+      if (child !== undefined) Object.defineProperty(copy, key, { value: copyValue(child), enumerable: true, writable: true, configurable: true });
     }
     return copy as T;
   }
@@ -301,7 +301,7 @@ export function canonicalJSON(value: unknown): string {
       const object: JsonObject = {};
       for (const key of Object.keys(input).sort()) {
         if (input[key] === undefined) throw new TypeError("Canonical JSON cannot encode undefined.");
-        object[key] = normalize(input[key]);
+        Object.defineProperty(object, key, { value: normalize(input[key]), enumerable: true, writable: true, configurable: true });
       }
       return object;
     }
