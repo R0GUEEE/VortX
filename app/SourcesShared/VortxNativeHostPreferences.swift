@@ -69,6 +69,8 @@ struct VortxNativeHostPreferences: Sendable {
             if let archive = value.authenticatedSourceArchive {
                 try VortxNativeBootstrapArchive.validate(archive)
                 let source = try JSONDecoder().decode(VortxJSON.self, from: archive)
+                _ = try VortxNativeUnattributedOverlayArchive.merge(nil,
+                    source["hostDocument"]?[VortxNativeUnattributedOverlayArchive.key], scope: scope)
                 let pending = try source["hostDocument"]?[VortxLegacyMembershipReceiptArchive.key].map { try JSONEncoder().encode($0) }
                 _ = try VortxLegacyMembershipReceiptArchive.merging(nil, with: pending,
                     scope: scope.account, ownerProfileID: scope.ownerProfileID)
@@ -86,11 +88,13 @@ struct VortxNativeHostPreferences: Sendable {
         var retained: [String: VortxJSON] = [:]
         var pending: VortxJSON?
         var pendingMembership: Data?
+        var quarantined: VortxJSON?
         if let prior = local.authenticatedSourceArchive {
             let old = try JSONDecoder().decode(VortxJSON.self, from: prior)
             guard case .object(let values) = old["hostDocument"]?["ownAccountSources"] else { throw VortxNativeError.invalidSnapshot }
             retained = values
             pending = old["hostDocument"]?["ownAccountOverlayPending"]
+            quarantined = old["hostDocument"]?[VortxNativeUnattributedOverlayArchive.key]
             pendingMembership = try old["hostDocument"]?[VortxLegacyMembershipReceiptArchive.key].map { try JSONEncoder().encode($0) }
         }
         for (id, source) in sources { retained[id] = source }
@@ -99,6 +103,9 @@ struct VortxNativeHostPreferences: Sendable {
             pending = incomingPending
         }
         var documentFields: [String: VortxJSON] = ["ownAccountSources": .object(retained)]
+        documentFields[VortxNativeUnattributedOverlayArchive.key] = try VortxNativeUnattributedOverlayArchive.merge(
+            quarantined, incoming["hostDocument"]?[VortxNativeUnattributedOverlayArchive.key],
+            scope: .init(account: local.document.scope, ownerProfileID: local.document.ownerProfileId))
         if let pending { documentFields["ownAccountOverlayPending"] = pending }
         let incomingMembership = try incoming["hostDocument"]?[VortxLegacyMembershipReceiptArchive.key].map { try JSONEncoder().encode($0) }
         if let membership = try VortxLegacyMembershipReceiptArchive.merging(pendingMembership, with: incomingMembership,

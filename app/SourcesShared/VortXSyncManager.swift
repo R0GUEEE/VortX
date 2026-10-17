@@ -919,6 +919,7 @@ final class VortXSyncManager: ObservableObject {
         let material: Data
         let authority: VortxNativeOwnAccountProducer.Authority?
         let sourceArchive: Data?
+        var initialPendingOwnProfileIDs: Set<UUID> = []
     }
     /// Keys this device's own native export writes; a change in them is never a 0.4 change.
     private static let nativeExportKeys = ["nativeSync", "nativeHostPreferences", "profileEditResults",
@@ -1030,13 +1031,17 @@ final class VortXSyncManager: ObservableObject {
         let scope = VortxAccountScope(account: capture.namespace, ownerProfileID: owner.id.uuidString)
         let directory = try VortxNativeStorage.root()
             .appendingPathComponent("VortX/native-engine-v1", isDirectory: true)
-        let probe = try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(data: keyBytes))
+        let probe = try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(data: keyBytes),
+                                                     installationKey: VortxNativeInstallationKey.loadOrCreate())
         let remote = try document["nativeSync"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
         let validatedSync = try VortxNativeSession.authenticatedAccountSync(scope: scope, ownerName: owner.name,
             snapshot: probe.authenticatedCheckpoint(scope: scope), nativeSync: remote, abi: VortxCABI())
         let retainedBaseline = try validatedSync?["legacyImport"]?["baseline"].flatMap { baseline in
-            baseline["schemaVersion"] == .integer(2) ? try JSONEncoder().encode(baseline) : nil
+            guard [VortxJSON.integer(1), .unsigned(1), .integer(2), .unsigned(2)].contains(baseline["schemaVersion"] ?? .null) else { throw VortxNativeError.invalidSnapshot }
+            return try JSONEncoder().encode(baseline)
         }
+        let origins = try VortxLegacyBootstrapMaterial.accountOrigins(retainedBaseline)
+        let isolatedOrigins = Set(origins.compactMap { $0.value == .isolated ? $0.key : nil })
         let retainedSlots = try validatedSync.flatMap { native in
             [VortxJSON.integer(4), .unsigned(4), .integer(5), .unsigned(5)].contains(native["schemaVersion"] ?? .null)
                 ? try VortxNativeProfiles.activeOwnAccountSlotBaselines(nativeSync: native) : nil
@@ -1046,6 +1051,7 @@ final class VortXSyncManager: ObservableObject {
             preferredSources = historical
         }
         for slot in retainedSlots {
+            if origins[slot.profileID] == .shared || origins[slot.profileID] == .isolated { continue }
             let carrier = try JSONDecoder().decode(VortxJSON.self, from: slot.sourceBaseline)
             guard let source = carrier["source"] else { throw VortxNativeError.invalidSnapshot }
             let historical = preferredSources[slot.profileID.uuidString]
@@ -1056,14 +1062,31 @@ final class VortXSyncManager: ObservableObject {
         }
         var retainedEnvelopes: [VortxLegacyBootstrapMaterial.RetainedOwnAccountSourceEnvelope] = []
         var pendingOverlays: [String: VortxJSON] = [:]
+        var priorSourceArchive: Data?
         let priorWatchedDraft = try probe.readMigrationDraft(scope: scope)
+        if validatedSync == nil, let priorWatchedDraft {
+            let draft = try JSONDecoder().decode(VortxJSON.self, from: priorWatchedDraft)
+            if let pending = draft["hostDocument"]?["ownAccountOverlayPending"] {
+                guard case .object(let values) = pending else { throw VortxNativeError.invalidSnapshot }
+                pendingOverlays = values
+            }
+        }
+        priorSourceArchive = priorWatchedDraft
         var watchedArchive = priorWatchedDraft
         if let host = try probe.readHostPreferences(scope: scope),
            let archive = try JSONDecoder().decode(VortxNativeHostPreferences.Local.self, from: host).authenticatedSourceArchive {
+            priorSourceArchive = try VortxNativeUnattributedOverlayArchive.retaining(archive,
+                prior: priorSourceArchive, document: Data("{}".utf8), profileIDs: [], scope: scope)
             watchedArchive = try VortxNativeWatchedArchive.retaining(archive, prior: watchedArchive, scope: scope)
             try VortxNativeBootstrapArchive.validate(archive)
             let value = try JSONDecoder().decode(VortxJSON.self, from: archive)
-            if case .object(let pending) = value["hostDocument"]?["ownAccountOverlayPending"] { pendingOverlays = pending }
+            if case .object(let pending) = value["hostDocument"]?["ownAccountOverlayPending"] {
+                for (id, record) in pending {
+                    // An unattributed draft remains unattributed even if the current host map
+                    // has a different source. Its immutable raw records remain in quarantine.
+                    if pendingOverlays[id] == nil || pendingOverlays[id]?["verifiedStreamingUid"] != nil { pendingOverlays[id] = record }
+                }
+            }
             if case .object(let retained) = value["hostDocument"]?["ownAccountSources"] {
                 for (id, source) in retained {
                     if let profile = UUID(uuidString: id), case .string(let encoded) = source["sourceDocumentBase64"], let data = Data(base64Encoded: encoded) {
@@ -1080,13 +1103,34 @@ final class VortXSyncManager: ObservableObject {
             DiagnosticsLog.log("native-profiles", $0)
         })
         let sourceDocument = try JSONDecoder().decode(VortxJSON.self, from: documentBytes)
+        let firstImportRecovery = try VortxNativeUnattributedOverlayArchive.firstImportRecovery(priorSourceArchive, scope: scope)
+        let resumedPendingOwn = validatedSync == nil ? Set(firstImportRecovery.pending.keys.compactMap(UUID.init(uuidString:))) : []
+        if validatedSync == nil {
+            // A changed/removed roster cannot reinterpret a sealed own slice as shared or owner.
+            guard firstImportRecovery.quarantinedProfiles.isSubset(of: Set(profiles.map(\.id))) else { throw VortxNativeError.invalidSnapshot }
+            for (id, record) in firstImportRecovery.pending { pendingOverlays[id] = record }
+        }
         func hasAttribution(_ profileID: UUID) throws -> Bool {
             try VortxNativeOwnAccountProducer.hasOverlayAttribution(proof: preferredSources[profileID.uuidString],
                 sealedEnvelope: retainedEnvelopes.first(where: { $0.profileID == profileID })?.sourceDocument)
         }
         struct Captured: Sendable { let profileID: UUID; let slot: String; let token: String; let generation: VortxNativeOwnAccountProducer.Generation; let framing: VortxNativeOwnAccountProducer.SourceFraming }
         var unavailable: [UUID] = []
+        var missingOwn = Set<UUID>()
+        var newlyMissingOwn = Set<UUID>()
+        var missingOwnCredentials: [String: VortxNativeOwnAccountProducer.Generation] = [:]
+        var resumedPendingCredentials: [VortxNativeOwnAccountProducer.Generation] = []
         let captured = try profiles.compactMap { profile -> Captured? in
+            if resumedPendingOwn.contains(profile.id) {
+                // Resume the sealed first-import decision. Credential availability cannot bind
+                // the old UUID slice; only an explicit post-import account CAS may connect it.
+                let slot = ProfileStore.legacyKeychainAccount(for: profile)
+                guard slot != ProfileStore.primaryTokenAccount else { throw VortxNativeError.invalidSnapshot }
+                resumedPendingCredentials.append(VortxNativeOwnAccountProducer.capture(slot: slot))
+                missingOwn.insert(profile.id); unavailable.append(profile.id)
+                return nil
+            }
+            if origins[profile.id] == .shared || origins[profile.id] == .isolated { return nil }
             // After a rebind the old legacy carrier belongs to its original source, not the
             // currently active external UID. Refresh active own slots only through explicit CAS.
             if validatedSync?["accountSlots"]?[profile.id.uuidString] != nil { return nil }
@@ -1106,7 +1150,15 @@ final class VortXSyncManager: ObservableObject {
             } else if validatedSync == nil { slot = ProfileStore.legacyKeychainAccount(for: profile) }
             else { slot = "vortx.native.streaming.unavailable." + profile.id.uuidString }
             guard slot != ProfileStore.primaryTokenAccount else { throw VortxNativeError.invalidSnapshot }
-            guard case .value(let token) = Keychain.confirmedString(slot), !token.isEmpty else {
+            let credential = Keychain.confirmedString(slot)
+            guard case .value(let token) = credential, !token.isEmpty else {
+                if validatedSync == nil {
+                    guard case .missing = credential else { throw VortxNativeError.unavailable }
+                    newlyMissingOwn.insert(profile.id)
+                    missingOwn.insert(profile.id); unavailable.append(profile.id)
+                    missingOwnCredentials[slot] = VortxNativeOwnAccountProducer.capture(slot: slot)
+                    return nil
+                }
                 guard preferredSources[profile.id.uuidString] != nil else {
                     // Name this exact failure (issue #262): the whole restore stops here when a profile linked to
                     // its own Stremio account has no credential on this device and no earlier source copy.
@@ -1116,12 +1168,18 @@ final class VortXSyncManager: ObservableObject {
                 }
                 unavailable.append(profile.id); return nil
             }
+            // An old schema-1 journal is recovery evidence only. In the absence of a native
+            // baseline or typed pending origin it cannot be retroactively authenticated by UUID.
+            if validatedSync == nil && firstImportRecovery.quarantinedProfiles.contains(profile.id) { throw VortxNativeError.unavailable }
             return Captured(profileID: profile.id, slot: slot, token: token, generation: VortxNativeOwnAccountProducer.capture(slot: slot),
                 framing: validatedSync == nil || attributed ? .authenticatedOverlay : .independentNetworkOnly)
         }
-        let authority = VortxNativeOwnAccountProducer.Authority(generations: captured.map(\.generation), validate: {
+        let missingCredentialBindings = missingOwnCredentials
+        let authority = VortxNativeOwnAccountProducer.Authority(generations: captured.map(\.generation) + Array(missingCredentialBindings.values) + resumedPendingCredentials, validate: {
             CredentialScopeRegistry.shared.isCurrent(capture) && (!enforceMountedFence || mountedSourceFence()) && captured.allSatisfy {
                 if case .value(let current) = Keychain.confirmedString($0.slot) { return current == $0.token }; return false
+            } && missingCredentialBindings.keys.allSatisfy {
+                if case .missing = Keychain.confirmedString($0) { return true }; return false
             }
         })
         var sources: [VortxLegacyBootstrapMaterial.OwnAccountSource] = []
@@ -1146,15 +1204,22 @@ final class VortXSyncManager: ObservableObject {
         let deferred = try VortxLegacyBootstrapMaterial.classifyDeferredOwnAccountOverlays(document: documentBytes,
             roster: roster.profiles, ownerProfileID: owner.id, rosterModifiedSeconds: roster.modified,
             retainedOwnAccountBaseline: retainedBaseline, retainedOwnAccountSourceEnvelopes: envelopes,
-            retainedOwnAccountSlotBaselines: retainedSlots).filter { !freshIDs.contains($0.profileID) }
+            retainedOwnAccountSlotBaselines: retainedSlots).filter { !freshIDs.contains($0.profileID) && !missingOwn.contains($0.profileID) }
+        for id in missingOwn.union(isolatedOrigins) where pendingOverlays[id.uuidString] == nil {
+            let slice = try VortxNativeOwnAccountProducer.overlay(document: sourceDocument, profileID: id)
+            pendingOverlays[id.uuidString] = .object(["profileOverlayBase64": .string(slice.base64EncodedString()), "reason": .string("missing_witness")])
+        }
         for disposition in deferred {
             switch disposition.status {
             case .matchedWitness, .matchedSealedEnvelope:
-                pendingOverlays.removeValue(forKey: disposition.profileID.uuidString)
+                if pendingOverlays[disposition.profileID.uuidString]?["verifiedStreamingUid"] != nil {
+                    pendingOverlays.removeValue(forKey: disposition.profileID.uuidString)
+                }
             case .missingWitness, .changedWitness:
                 guard disposition.sourceDocumentSHA256 != nil,
                       case .string(let uid) = preferredSources[disposition.profileID.uuidString]?["verifiedStreamingUid"] else { throw VortxNativeError.invalidSnapshot }
                 let slice = try VortxNativeOwnAccountProducer.overlay(document: sourceDocument, profileID: disposition.profileID)
+                if pendingOverlays[disposition.profileID.uuidString] != nil && pendingOverlays[disposition.profileID.uuidString]?["verifiedStreamingUid"] == nil { continue }
                 pendingOverlays[disposition.profileID.uuidString] = try VortxNativeOwnAccountProducer.pendingRecord(disposition: disposition,
                     verifiedUID: uid, overlay: slice, attributed: hasAttribution(disposition.profileID), previous: pendingOverlays[disposition.profileID.uuidString])
             case .missingRetainedSource:
@@ -1167,7 +1232,8 @@ final class VortXSyncManager: ObservableObject {
             let slice = try VortxNativeOwnAccountProducer.overlay(document: sourceDocument, profileID: source.profileID)
             // Omitted carriers do not acknowledge a previously pending edit. An explicit current
             // slice consumed by this verified source may replace its older pending version.
-            if !(try VortxProfileOverlayWitness.decodeObject(json: slice)).isEmpty {
+            if !(try VortxProfileOverlayWitness.decodeObject(json: slice)).isEmpty,
+               pendingOverlays[source.profileID.uuidString]?["verifiedStreamingUid"] != nil {
                 pendingOverlays.removeValue(forKey: source.profileID.uuidString)
             }
         }
@@ -1175,17 +1241,25 @@ final class VortXSyncManager: ObservableObject {
             isCurrent: { (try? authority.withActive {}) != nil }, fetch: { try await VortxLegacyWatchedMetadataTransport.fetch($0) })
         try authority.withActive {}
         let watched = try await VortxLegacyWatchedMigration.prepare(accountID: capture.namespace, ownerProfileID: owner.id,
-            document: documentBytes, profileIDs: roster.profiles.filter { $0.isOwner || !$0.usesOwnAccount }.map(\.id),
+            document: documentBytes, profileIDs: roster.profiles.filter {
+                $0.isOwner || origins[$0.id] == .shared || (origins[$0.id] == nil && !$0.usesOwnAccount)
+            }.map(\.id),
             ownAccountSources: sources, archivedEvidence: VortxNativeWatchedArchive.entries(watchedArchive, key: VortxNativeWatchedArchive.evidenceKey),
             isCurrent: { (try? authority.withActive {}) != nil }, fetch: { try await VortxLegacyWatchedMetadataTransport.fetch($0) })
         try authority.withActive {}
-        let baseArchive = try VortxNativeOwnAccountProducer.archive(sources, pendingOverlays: pendingOverlays)
+        let unattributedIDs = Set(pendingOverlays.compactMap { key, value in value["verifiedStreamingUid"] == nil ? UUID(uuidString: key) : nil })
+        let baseArchive = try VortxNativeUnattributedOverlayArchive.retaining(
+            VortxNativeOwnAccountProducer.archive(sources, pendingOverlays: pendingOverlays), prior: priorSourceArchive,
+            document: documentBytes, profileIDs: unattributedIDs, pendingOriginProfileIDs: newlyMissingOwn, scope: scope)
         let archive = try VortxNativeWatchedArchive.retaining(baseArchive, prior: watchedArchive,
             evidence: watched.archives, pending: watched.pendingArchives, scope: scope)
         if !watched.unresolved.isEmpty {
             // Never pair an unimported own source with the existing kernel receipt. Only the
             // self-contained metadata/pending sidecars enter this no-op checkpoint transaction.
-            let pendingArchive = try VortxNativeWatchedArchive.retaining(VortxNativeOwnAccountProducer.archive([]), prior: watchedArchive,
+            let pendingSources = try VortxNativeUnattributedOverlayArchive.retaining(
+                VortxNativeOwnAccountProducer.archive([], pendingOverlays: pendingOverlays), prior: baseArchive,
+                document: documentBytes, profileIDs: [], scope: scope)
+            let pendingArchive = try VortxNativeWatchedArchive.retaining(pendingSources, prior: watchedArchive,
                 evidence: watched.archives, pending: watched.pendingArchives, scope: scope)
             if enforceMountedFence, CoreBridge.shared.hasNativeSession {
                 _ = try await CoreBridge.shared.mergeNativeAccountDocument(nil, hostRemote: nil, capture: capture,
@@ -1201,7 +1275,8 @@ final class VortXSyncManager: ObservableObject {
             roster: roster.profiles, ownerProfileID: owner.id, rosterModifiedSeconds: roster.modified,
             deferProfileEdits: true, ownAccountSources: sources, retainedOwnAccountBaseline: retainedBaseline,
             retainedOwnAccountSourceEnvelopes: envelopes, retainedOwnAccountSlotBaselines: retainedSlots,
-            deferredOwnAccountOverlays: deferred, accountID: capture.namespace, watchedEvidence: watched.rows)
+            deferredOwnAccountOverlays: deferred, missingOwnAccountProfileIDs: missingOwn,
+            accountID: capture.namespace, watchedEvidence: watched.rows)
         // Historical orphan receipts are not permission to fetch/reinstall an add-on or guess a
         // removed title's type. Retain them atomically with this account's encrypted checkpoint.
         // Native exports continue to preserve every original legacy cloud carrier unchanged.
@@ -1216,7 +1291,8 @@ final class VortXSyncManager: ObservableObject {
             guard let binding = captured.first(where: { $0.profileID == source.profileID }) else { throw VortxNativeError.invalidSnapshot }
             try CoreBridge.stageNativeCredential(token: binding.token, source: source, transactionID: nil, capture: capture, authority: authority)
         }
-        return .init(material: preparation.material, authority: authority, sourceArchive: preparedArchive)
+        return .init(material: preparation.material, authority: authority, sourceArchive: preparedArchive,
+                     initialPendingOwnProfileIDs: missingOwn)
     }
     private static func nativeWebsiteEvents(_ document: [String: Any]) throws -> [VortxJSON] {
         let carrier = try document["profileEditEvents"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
@@ -1362,6 +1438,21 @@ final class VortXSyncManager: ObservableObject {
         return await restoreAccountDocIfNeeded()
     }
 
+    /// A picker retry prepares only a missing session; selection remains a separate acknowledged action.
+    @MainActor
+    func prepareNativeProfileSelection(credentialCapture capture: CredentialScopeRegistry.Capture) async -> Bool {
+        let profileID = ProfileStore.shared.activeID
+        return await NativeForegroundSyncPolicy.ensureSession(isCurrent: {
+            self.isCurrent(capture) && ProfileStore.shared.activeID == profileID
+        }, hasCertifiedSession: {
+            CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: profileID)
+        }, settleResident: {
+            await CoreBridge.shared.settleResidentNativeSession(capture: capture)
+        }, restore: {
+            await self.restoreNativeCheckpoint(credentialCapture: capture, userInitiated: true)
+        })
+    }
+
     /// Routine foreground hydration keeps a certified current session and its resource selections.
     @MainActor
     @discardableResult
@@ -1505,6 +1596,10 @@ final class VortXSyncManager: ObservableObject {
                                            "material": try JSONDecoder().decode(VortxJSON.self, from: material)])
                     }
                     initialActions = [String(decoding: try JSONEncoder().encode(initial), as: UTF8.self)]
+                    if remoteNative == nil {
+                        initialActions += try VortxNativeProfiles.pendingLegacyImportActions(material: material,
+                            profileIDs: prepared?.initialPendingOwnProfileIDs ?? [], scope: scope)
+                    }
                 }
                 let archive = try material.map { try VortxNativeBootstrapArchive.encode(document: documentBytes, material: $0, authenticatedSourceArchive: prepared?.sourceArchive) }
                 // Keep an already validated session visible while authentication/source parsing

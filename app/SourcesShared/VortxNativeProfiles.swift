@@ -219,6 +219,26 @@ enum VortxNativeProfiles {
                         "transactionId": .string(request.transactionID), "expectedBinding": request.expected.document,
                         "target": request.target.document])
     }
+    /// Only for the fresh import_legacy_sync candidate, before VortxNativeSession's first commit.
+    /// The caller must not append these to merge_native_sync or checkpoint hydration.
+    static func pendingLegacyImportActions(material: Data, profileIDs: Set<UUID>, scope: VortxAccountScope) throws -> [String] {
+        let value = try JSONDecoder().decode(VortxJSON.self, from: material)
+        guard let roster = value["roster"]?.array, let deleted = value["deletedProfileIds"]?.array else { throw VortxNativeError.invalidSnapshot }
+        return try profileIDs.sorted { $0.uuidString < $1.uuidString }.compactMap { profile in
+            let id = profile.uuidString
+            let matches = roster.filter { $0["id"] == .string(id) }
+            guard id != scope.ownerProfileID, matches.count == 1, matches[0]["owner"] == .bool(false),
+                  matches[0]["account"] == .object(["kind": .string("local_only")]), matches[0]["addons"] == .string("own"),
+                  value["ownAccountSources"]?[id] == nil,
+                  value["addons"]?[id] == .object(["items": .array([]), "order": .array([]), "intents": .array([])]),
+                  value["libraries"]?[id] == .object(["items": .array([]), "intents": .array([])]),
+                  value["watches"]?[id] == .array([]), value["identityLinks"]?[id] == .array([]) else { throw VortxNativeError.invalidSnapshot }
+            if deleted.contains(.string(id)) { return nil }
+            let request = try AccountRebindRequest.initial(scope: scope.account, ownerProfileID: scope.ownerProfileID,
+                transactionID: "legacy-pending-" + UUID().uuidString.lowercased(), target: .pendingOwn)
+            return String(decoding: try JSONEncoder().encode(rebindAction(profileID: profile, request: request)), as: UTF8.self)
+        }
+    }
     static func project(state: VortxJSON, host: VortxJSON, baseline: [UserProfile]) throws -> [UserProfile] {
         guard case .object(let records) = state["roster"]?["profiles"] else { throw VortxNativeError.invalidSnapshot }
         let prior = Dictionary(uniqueKeysWithValues: baseline.map { ($0.id.uuidString, $0) })

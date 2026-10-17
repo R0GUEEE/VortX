@@ -79,6 +79,14 @@ struct ProfilePickerView: View {
     @StateObject private var artwork = ProfilePickerArtwork.shared
     #if VORTX_NATIVE_DATA_ENGINE
     @ObservedObject private var nativeSync = VortXSyncManager.shared
+    @State private var deferredSelection = NativeProfileActionPreparation.DeferredSelection<CredentialScopeRegistry.Capture>()
+    @State private var pinCredential: CredentialScopeRegistry.Capture?
+    @State private var signInCredential: CredentialScopeRegistry.Capture?
+    @State private var signInProfileID: UUID?
+
+    private var profilesArePreparing: Bool {
+        nativeSync.nativeCheckpointStatus == "restoring" || nativeSync.accountRestoreState == .restoring
+    }
 
     /// The device log spans every profile's activity. With a PIN-protected profile here, export waits until
     /// a profile is unlocked (Settings has it), unless profiles failed to load, the stuck case it exists for.
@@ -92,6 +100,20 @@ struct ProfilePickerView: View {
     #endif
 
     init(core: CoreBridge = .shared) { self.core = core }
+
+    private var visibleProfileError: String? {
+        #if VORTX_NATIVE_DATA_ENGINE
+        if profilesArePreparing { return nil }
+        #endif
+        return profileAction.errorMessage
+    }
+
+    private var profileActionStatus: String {
+        #if VORTX_NATIVE_DATA_ENGINE
+        if profilesArePreparing { return "Preparing your profiles—please wait…" }
+        #endif
+        return "Opening profile…"
+    }
 
     var body: some View {
         ZStack {
@@ -127,18 +149,23 @@ struct ProfilePickerView: View {
                                 Text("Sign in to your VortX account to load your profiles.")
                                     .font(.callout).foregroundStyle(.white)
                                     .multilineTextAlignment(.center)
-                                Button("Sign in") { accountHelpNeeded = true }
+                                Button("Sign in") { deferredSelection.cancel(); accountHelpNeeded = true }
                                     .buttonStyle(.borderedProminent)
                                     .tint(theme.accent)
                             }
                             #endif
                             if profileAction.isRunning {
-                                ProgressView("Opening profile…").tint(Theme.Palette.accent).foregroundStyle(.white)
+                                ProgressView(profileActionStatus).tint(Theme.Palette.accent).foregroundStyle(.white)
                             }
                             #if VORTX_NATIVE_DATA_ENGINE
                             if !profileAction.isRunning, nativeSync.isSignedIn {
-                                if nativeSync.accountRestoreState == .restoring {
-                                    ProgressView("Loading your profiles…").tint(Theme.Palette.accent).foregroundStyle(.white)
+                                if profilesArePreparing {
+                                    ProgressView("Preparing your profiles—please wait…").tint(Theme.Palette.accent).foregroundStyle(.white)
+                                    Text(deferredSelection.profileID != nil
+                                         ? "Your saved data is safe. Your selected profile will open when preparation finishes."
+                                         : "Your saved data is safe. You can choose a profile while preparation finishes.")
+                                        .font(.callout).foregroundStyle(.white)
+                                        .multilineTextAlignment(.center)
                                 } else if nativeSync.accountRestoreState == .failed, profileAction.errorMessage == nil {
                                     Text("Couldn't finish loading your profiles. Tap a profile to try again.")
                                         .font(.callout).foregroundStyle(.white)
@@ -146,14 +173,14 @@ struct ProfilePickerView: View {
                                 }
                             }
                             #endif
-                            if let error = profileAction.errorMessage {
+                            if let error = visibleProfileError {
                                 Text(error).font(.callout).foregroundStyle(.white)
                                     .multilineTextAlignment(.center)
                                     .padding(12)
                                     .background(.red.opacity(0.22), in: RoundedRectangle(cornerRadius: 16))
                                     .accessibilityIdentifier("profile-picker-error")
                                 #if VORTX_NATIVE_DATA_ENGINE
-                                Button("Account settings") { accountHelpNeeded = true }
+                                Button("Account settings") { deferredSelection.cancel(); accountHelpNeeded = true }
                                     .buttonStyle(.bordered)
                                     .tint(.white)
                                 #endif
@@ -188,10 +215,14 @@ struct ProfilePickerView: View {
             if let target = pinTarget {
                 PinGateOverlay(profile: target,
                                onUnlock: {
-                                   if pinIsForEditing { pinTarget = nil; editorProfile = target }
-                                   else { commit(target) }
+                                   finishPIN(target)
                                },
-                               onCancel: { pinTarget = nil; pinIsForEditing = false })
+                               onCancel: {
+                                   pinTarget = nil; pinIsForEditing = false
+                                   #if VORTX_NATIVE_DATA_ENGINE
+                                   pinCredential = nil
+                                   #endif
+                               })
             }
         }
         .profileCover(item: $editorProfile) { ProfileEditorView(original: $0) }
@@ -220,10 +251,26 @@ struct ProfilePickerView: View {
         .onDisappear {
             artwork.stopRotation()
             profileAction.cancel()
+            #if VORTX_NATIVE_DATA_ENGINE
+            deferredSelection.cancel()
+            // A full-screen child can hide its presenter without removing its identity.
+            if !signInNeeded { signInCredential = nil; signInProfileID = nil }
+            #endif
         }
         #if VORTX_NATIVE_DATA_ENGINE
         .onChange(of: nativeSync.accountRestoreState) { state in
+            if state == .failed { deferredSelection.cancel() }
             if state == .ready, !profileAction.isRunning { profileAction.cancel() }
+            resumeDeferredSelection()
+        }
+        .onChange(of: nativeSync.nativeCheckpointStatus) { _ in resumeDeferredSelection() }
+        .onChange(of: profileAction.errorMessage) { _ in resumeDeferredSelection() }
+        .onChange(of: signInNeeded) { presented in if !presented { finishPendingSignIn() } }
+        .onChange(of: scenePhase) { phase in if phase == .active { resumeDeferredSelection() } }
+        .onReceive(NotificationCenter.default.publisher(for: VortXSyncManager.credentialScopeDidChangeNote)) { _ in
+            deferredSelection.cancel()
+            pinTarget = nil; pinCredential = nil; pinIsForEditing = false
+            signInCredential = nil; signInProfileID = nil
         }
         #endif
     }
@@ -302,34 +349,123 @@ struct ProfilePickerView: View {
                               isEditing: isEditing, side: side, nameTextSize: nameTextSize) { pick(profile) }
         } else if index == store.profiles.count {
             ProfilePickerActionTile(title: "Add", symbol: "plus", side: side, nameTextSize: nameTextSize) {
+                #if VORTX_NATIVE_DATA_ENGINE
+                deferredSelection.cancel()
+                #endif
                 editorProfile = UserProfile(name: "", avatar: "🎬", accentID: theme.accentID)
             }
         } else {
             ProfilePickerActionTile(title: isEditing ? "Done" : "Edit",
                                     symbol: isEditing ? "checkmark" : "pencil", side: side, nameTextSize: nameTextSize) {
+                #if VORTX_NATIVE_DATA_ENGINE
+                deferredSelection.cancel()
+                #endif
                 isEditing.toggle()
             }
         }
     }
 
     private func pick(_ profile: UserProfile) {
+        #if VORTX_NATIVE_DATA_ENGINE
+        let capture = CredentialScopeRegistry.shared.capture()
+        if !isEditing, profilesArePreparing || !core.hasCertifiedNativeSession(capture: capture, profileID: store.activeID) {
+            profileAction.cancel()
+            deferredSelection.request(profile.id, owner: capture, preparing: true,
+                                      accountRestorePreparing: nativeSync.accountRestoreState == .restoring)
+            if !profilesArePreparing {
+                // Only preparation runs here. A failed selection/checkpoint write is never
+                // enqueued for an automatic mutation retry.
+                profileAction.start(operation: { await nativeSync.prepareNativeProfileSelection(credentialCapture: capture) },
+                    failureMessage: { core.nativeProfileRecoveryMessage }, onSuccess: { resumeDeferredSelection() })
+            }
+            return
+        }
+        deferredSelection.cancel()
+        #endif
         // The editor already gates an inactive profile's switch. Do not ask for its PIN twice.
         if isEditing, profile.id != store.activeID { editorProfile = profile; return }
         pinIsForEditing = isEditing
-        if profile.hasPin { pinTarget = profile }
+        if profile.hasPin {
+            #if VORTX_NATIVE_DATA_ENGINE
+            pinCredential = CredentialScopeRegistry.shared.capture()
+            #endif
+            pinTarget = profile
+        }
         else if isEditing { editorProfile = profile }
         else { commit(profile) }
+    }
+
+    #if VORTX_NATIVE_DATA_ENGINE
+    private func resumeDeferredSelection() {
+        deferredSelection.observePreparation(profilesArePreparing,
+                                             accountRestorePreparing: nativeSync.accountRestoreState == .restoring)
+        // Observer delivery order is not an authority. A failed restore must cancel its
+        // waiting intent even if a checkpoint, scene or error callback arrives first.
+        if deferredSelection.waitedForAccountRestore, nativeSync.accountRestoreState == .failed {
+            deferredSelection.cancel()
+            return
+        }
+        guard scenePhase == .active, !profileAction.isRunning, !isEditing, pinTarget == nil,
+              editorProfile == nil, !signInNeeded, !accountHelpNeeded else { return }
+        let capture = CredentialScopeRegistry.shared.capture()
+        guard let id = deferredSelection.take(owner: capture, preparing: profilesArePreparing,
+            ready: core.hasCertifiedNativeSession(capture: capture, profileID: store.activeID),
+            profileExists: { id in store.profiles.contains { $0.id == id } }),
+              let profile = store.profiles.first(where: { $0.id == id }) else { return }
+        // Resolve the freshly authenticated roster and its current PIN, not the cached tile.
+        pick(profile)
+    }
+
+    private func finishPendingSignIn() {
+        defer { signInCredential = nil; signInProfileID = nil }
+        guard let capture = signInCredential, let profileID = signInProfileID,
+              CredentialScopeRegistry.shared.isCurrent(capture), store.activeID == profileID,
+              core.hasCertifiedNativeSession(capture: capture, profileID: profileID),
+              core.nativeAccountMode(profileID: profileID) == "own",
+              account.isSignedIn, account.signInError == nil else { return }
+        store.pickedThisLaunch = true
+    }
+    #endif
+
+    private func finishPIN(_ target: UserProfile) {
+        #if VORTX_NATIVE_DATA_ENGINE
+        guard let capture = pinCredential, CredentialScopeRegistry.shared.isCurrent(capture),
+              let current = store.profiles.first(where: { $0.id == target.id }) else {
+            pinTarget = nil; pinCredential = nil; pinIsForEditing = false
+            return
+        }
+        pinTarget = nil; pinCredential = nil
+        guard !profilesArePreparing, core.hasCertifiedNativeSession(capture: capture, profileID: store.activeID) else {
+            pick(current) // Re-prepare, then require a PIN against the newly loaded roster.
+            return
+        }
+        guard current.pin == target.pin else { pick(current); return }
+        if pinIsForEditing { editorProfile = current }
+        else { commit(current) }
+        #else
+        if pinIsForEditing { pinTarget = nil; editorProfile = target }
+        else { commit(target) }
+        #endif
     }
 
     private func commit(_ profile: UserProfile) {
         pinTarget = nil
         #if VORTX_NATIVE_DATA_ENGINE
         let admission = core.captureNativeProfileActionAdmission()
-        profileAction.start(operation: { await store.selectNative(profile, admission: admission) },
+        // Keep the parent picker alive until the selected profile is usable. In particular,
+        // pending-own setup is a child presentation and must not lose its presenting view.
+        profileAction.start(operation: { await store.selectNative(profile, admission: admission, finishPicker: false) },
                             failureMessage: { store.nativeProfileError ?? "Couldn't open this profile. Tap it to try again." },
                             onSuccess: {
+                                guard CredentialScopeRegistry.shared.isCurrent(admission.credential),
+                                      store.activeID == profile.id,
+                                      core.hasCertifiedNativeSession(capture: admission.credential, profileID: profile.id) else { return }
+                                deferredSelection.cancel()
                                 account.reloadForActiveProfile()
-                                if core.nativeAccountMode(profileID: profile.id) == "pending_own" { signInNeeded = true }
+                                if core.nativeAccountMode(profileID: profile.id) == "pending_own" {
+                                    signInCredential = admission.credential; signInProfileID = profile.id
+                                    signInNeeded = true
+                                } else { store.pickedThisLaunch = true }
                             })
         #else
         switch store.select(profile) {

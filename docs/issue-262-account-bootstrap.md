@@ -62,3 +62,13 @@ import. If a rejection remains, export fresh diagnostics immediately after that 
 and use its `archive_inspection` breadcrumb, when present, to distinguish it from this
 confirmed defect. Earlier retained-archive reads, later archive validation, and Foundation
 parser errors still use the existing stage/domain/code diagnostics.
+
+## 17 October follow-up
+
+The new diagnostic export shows a profile-open attempt superseded during an active
+restore, followed by a successful mount; it does not repeat the archive-inspection
+failure described above. Waiting/automatic-open behavior, duplicate startup hydration,
+missing-credential first import, parser cost and cross-platform audit findings are
+tracked separately in [the recovery audit](issue-262-recovery-audit-20261017.md).
+That document distinguishes checked source changes, safety holds and remaining work.
+There is no new app build or affected-reporter acceptance from this source work.

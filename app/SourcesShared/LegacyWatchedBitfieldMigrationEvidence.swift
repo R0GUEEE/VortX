@@ -602,24 +602,32 @@ private enum StrictJSON {
             while true { values.append(try value(depth: depth)); whitespace(); if take(93) { return .array(values) }; guard take(44) else { throw failure("Array separator is missing") } }
         }
         mutating func string() throws -> String {
-            guard take(34) else { throw failure("String is missing") }; var scalar = String.UnicodeScalarView()
+            guard take(34) else { throw failure("String is missing") }
+            var utf8: [UInt8] = []
             while index < bytes.count {
-                let byte = bytes[index]; index += 1
-                if byte == 34 { return String(scalar) }
+                let byte = bytes[index]
+                if byte == 34 {
+                    index += 1
+                    guard let text = String(bytes: utf8, encoding: .utf8) else { throw failure("Invalid UTF-8 string") }
+                    return text
+                }
                 guard byte >= 32 else { throw failure("Control byte in JSON string") }
                 if byte != 92 {
-                    let start = index - 1; while index < bytes.count, bytes[index] >= 128 { index += 1 }
-                    guard let text = String(bytes: bytes[start..<index], encoding: .utf8) else { throw failure("Invalid UTF-8 string") }
-                    scalar.append(contentsOf: text.unicodeScalars); continue
+                    // Copy an unescaped run once. Appending a newly constructed scalar view for
+                    // each ASCII byte repeatedly copied megabyte settings strings during import.
+                    let start = index
+                    while index < bytes.count, bytes[index] >= 32, bytes[index] != 34, bytes[index] != 92 { index += 1 }
+                    utf8.append(contentsOf: bytes[start..<index]); continue
                 }
+                index += 1
                 guard index < bytes.count else { throw failure("Truncated JSON escape") }; let escaped = bytes[index]; index += 1
                 switch escaped {
-                case 34, 92, 47: scalar.append(UnicodeScalar(escaped))
-                case 98: scalar.append("\u{08}")
-                case 102: scalar.append("\u{0c}")
-                case 110: scalar.append("\n")
-                case 114: scalar.append("\r")
-                case 116: scalar.append("\t")
+                case 34, 92, 47: utf8.append(escaped)
+                case 98: utf8.append(8)
+                case 102: utf8.append(12)
+                case 110: utf8.append(10)
+                case 114: utf8.append(13)
+                case 116: utf8.append(9)
                 case 117:
                     let first = try hex16(); var code = first
                     if (0xD800...0xDBFF).contains(first) {
@@ -627,7 +635,8 @@ private enum StrictJSON {
                         let second = try hex16(); guard (0xDC00...0xDFFF).contains(second) else { throw failure("Unpaired JSON surrogate") }
                         code = 0x10000 + (first - 0xD800) * 0x400 + second - 0xDC00
                     } else if (0xDC00...0xDFFF).contains(first) { throw failure("Unpaired JSON surrogate") }
-                    guard let value = UnicodeScalar(code) else { throw failure("Invalid JSON scalar") }; scalar.append(value)
+                    guard let value = UnicodeScalar(code) else { throw failure("Invalid JSON scalar") }
+                    utf8.append(contentsOf: String(value).utf8)
                 default: throw failure("Invalid JSON escape")
                 }
             }

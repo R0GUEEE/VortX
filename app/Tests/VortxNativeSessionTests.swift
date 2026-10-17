@@ -901,6 +901,13 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         check(try indexedA.authenticatedCheckpoint(scope: scope) == before)
         try indexedA.rememberAuthenticatedScope(scope)
         check(try indexedB.authenticatedCheckpoint(scope: scopeB) == nil)
+        // A preparation probe must carry the installation proof, just like the opener.
+        // Without it, another account's healthy indexed history cannot prove B is absent.
+        let unindexedPreparationProbe = try VortxEncryptedCheckpointStore(directory: indexedDirectory, key: keyB)
+        do {
+            _ = try unindexedPreparationProbe.authenticatedCheckpoint(scope: scopeB)
+            fatalError("account-only preparation probe admitted unrelated indexed history")
+        } catch VortxNativeError.invalidSnapshot {}
         do { _ = try indexedB.recovery(account: scope.account); fatalError("inventory key decrypted another account") } catch {}
         let stateB = before.replacingOccurrences(of: "account-a", with: "account-b")
         try indexedB.commit(stateB, scope: scopeB)

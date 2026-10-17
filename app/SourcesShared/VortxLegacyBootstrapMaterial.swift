@@ -50,6 +50,62 @@ enum VortxLegacyBootstrapMaterial {
     }
     static let maximumPendingMembershipReceipts = 10_000
 
+    /// Global legacy account policy is historical. An active account slot is a separate CAS
+    /// authority and must never manufacture a new ownAccountSources entry for an existing ID.
+    enum AccountOrigin: Sendable, Equatable { case own, shared, isolated }
+    static func accountOrigins(_ bytes: Data?) throws -> [UUID: AccountOrigin] {
+        guard let bytes else { return [:] }
+        let root = try VortxProfileOverlayWitness.decodeObject(json: bytes)
+        guard let version = root["schemaVersion"] as? NSNumber,
+              CFGetTypeID(version) != CFBooleanGetTypeID(), [1.0, 2.0].contains(version.doubleValue),
+              let rows = root["roster"] as? [[String: Any]],
+              let addons = root["addons"] as? [String: Any],
+              let libraries = root["libraries"] as? [String: Any],
+              let watches = root["watches"] as? [String: Any],
+              let links = root["identityLinks"] as? [String: Any] else {
+            throw ReconciliationRequired(reason: "Retained account origin requires a complete baseline")
+        }
+        let sources = root["ownAccountSources"] as? [String: Any] ?? [:]
+        let owners = rows.filter { ($0["owner"] as? Bool) == true }
+        guard owners.count == 1, let ownerID = owners[0]["id"] as? String else {
+            throw ReconciliationRequired(reason: "Retained account origin requires a unique owner")
+        }
+        var result: [UUID: AccountOrigin] = [:]
+        var seen = Set<UUID>()
+        for row in rows {
+            guard let raw = row["id"] as? String, let id = UUID(uuidString: raw), id.uuidString == raw,
+                  seen.insert(id).inserted, let account = row["account"] as? [String: Any],
+                  let kind = account["kind"] as? String, let policy = row["addons"] as? String else {
+                throw ReconciliationRequired(reason: "Retained account origin is malformed")
+            }
+            if raw == ownerID { continue }
+            switch kind {
+            case "own":
+                guard sources[raw] != nil, policy == "own" else {
+                    throw ReconciliationRequired(reason: "Retained own-account baseline has a partial absent profile tuple")
+                }
+                result[id] = .own
+            case "shared":
+                guard sources[raw] == nil, policy == "share_primary", account["value"] as? String == ownerID else {
+                    throw ReconciliationRequired(reason: "Retained shared account origin is malformed")
+                }
+                result[id] = .shared
+            case "local_only":
+                guard sources[raw] == nil, policy == "own", Set(account.keys) == ["kind"],
+                      let a = addons[raw] as? [String: Any], Set(a.keys) == ["items", "order", "intents"],
+                      let l = libraries[raw] as? [String: Any], Set(l.keys) == ["items", "intents"],
+                      [a["items"], a["order"], a["intents"], l["items"], l["intents"], watches[raw], links[raw]]
+                        .allSatisfy({ ($0 as? [Any])?.isEmpty == true }) else {
+                    throw ReconciliationRequired(reason: "Retained isolated account origin is not empty")
+                }
+                result[id] = .isolated
+            default:
+                throw ReconciliationRequired(reason: "Retained account origin is unsupported")
+            }
+        }
+        return result
+    }
+
     /// A caller-owned, server-authenticated source receipt for one secondary profile's independent
     /// streaming account. The caller must keep its credential-generation proof private; neither a
     /// token nor a token-derived fingerprint may enter this value or the native material.
@@ -159,6 +215,7 @@ enum VortxLegacyBootstrapMaterial {
                        retainedOwnAccountSourceEnvelopes: [RetainedOwnAccountSourceEnvelope] = [],
                        retainedOwnAccountSlotBaselines: [RetainedOwnAccountSlotBaseline] = [],
                        deferredOwnAccountOverlays: [RetainedOwnAccountOverlayDisposition] = [],
+                       missingOwnAccountProfileIDs: Set<UUID> = [],
                        accountID: String? = nil,
                        watchedEvidence: [VortxLegacyWatchedMigration.ValidatedRow] = []) throws -> Data {
         try project(document: document, roster: roster, ownerProfileID: ownerProfileID,
@@ -166,7 +223,8 @@ enum VortxLegacyBootstrapMaterial {
             ownAccountSources: ownAccountSources, retainedOwnAccountBaseline: retainedOwnAccountBaseline,
             retainedOwnAccountSourceEnvelopes: retainedOwnAccountSourceEnvelopes,
             retainedOwnAccountSlotBaselines: retainedOwnAccountSlotBaselines,
-            deferredOwnAccountOverlays: deferredOwnAccountOverlays, accountID: accountID,
+            deferredOwnAccountOverlays: deferredOwnAccountOverlays,
+            missingOwnAccountProfileIDs: missingOwnAccountProfileIDs, accountID: accountID,
             watchedEvidence: watchedEvidence, preparePendingMembership: false).material
     }
 
@@ -179,6 +237,7 @@ enum VortxLegacyBootstrapMaterial {
                         retainedOwnAccountSourceEnvelopes: [RetainedOwnAccountSourceEnvelope] = [],
                         retainedOwnAccountSlotBaselines: [RetainedOwnAccountSlotBaseline] = [],
                         deferredOwnAccountOverlays: [RetainedOwnAccountOverlayDisposition] = [],
+                        missingOwnAccountProfileIDs: Set<UUID> = [],
                         accountID: String? = nil,
                         watchedEvidence: [VortxLegacyWatchedMigration.ValidatedRow] = []) throws -> Preparation {
         try project(document: document, roster: roster, ownerProfileID: ownerProfileID,
@@ -186,7 +245,8 @@ enum VortxLegacyBootstrapMaterial {
             ownAccountSources: ownAccountSources, retainedOwnAccountBaseline: retainedOwnAccountBaseline,
             retainedOwnAccountSourceEnvelopes: retainedOwnAccountSourceEnvelopes,
             retainedOwnAccountSlotBaselines: retainedOwnAccountSlotBaselines,
-            deferredOwnAccountOverlays: deferredOwnAccountOverlays, accountID: accountID,
+            deferredOwnAccountOverlays: deferredOwnAccountOverlays,
+            missingOwnAccountProfileIDs: missingOwnAccountProfileIDs, accountID: accountID,
             watchedEvidence: watchedEvidence, preparePendingMembership: true)
     }
 
@@ -197,6 +257,7 @@ enum VortxLegacyBootstrapMaterial {
                        retainedOwnAccountSourceEnvelopes: [RetainedOwnAccountSourceEnvelope] = [],
                        retainedOwnAccountSlotBaselines: [RetainedOwnAccountSlotBaseline] = [],
                        deferredOwnAccountOverlays: [RetainedOwnAccountOverlayDisposition] = [],
+                       missingOwnAccountProfileIDs: Set<UUID> = [],
                        accountID: String? = nil,
                        watchedEvidence: [VortxLegacyWatchedMigration.ValidatedRow] = [],
                        preparePendingMembership: Bool) throws -> Preparation {
@@ -217,6 +278,7 @@ enum VortxLegacyBootstrapMaterial {
                                                                          retainedOwnAccountSourceEnvelopes: retainedOwnAccountSourceEnvelopes,
                                                                          retainedOwnAccountSlotBaselines: retainedOwnAccountSlotBaselines,
                                                                          deferredOwnAccountOverlays: deferredOwnAccountOverlays,
+                                                                         missingOwnAccountProfileIDs: missingOwnAccountProfileIDs,
                                                                          rootDocumentSHA256: sha256(document)), options: [.sortedKeys, .withoutEscapingSlashes])
         return Preparation(material: material, pendingMembershipReceipts: try adapter.pendingMembershipData(),
                            pendingCount: adapter.pendingMembership.count, held: adapter.held)
@@ -430,6 +492,7 @@ enum VortxLegacyBootstrapMaterial {
                    retainedOwnAccountSourceEnvelopes: [RetainedOwnAccountSourceEnvelope],
                    retainedOwnAccountSlotBaselines: [RetainedOwnAccountSlotBaseline],
                    deferredOwnAccountOverlays: [RetainedOwnAccountOverlayDisposition],
+                   missingOwnAccountProfileIDs: Set<UUID>,
                    rootDocumentSHA256: String) throws -> Object {
             if let modified { _ = try validClock(modified, "rosterModifiedSeconds") }
             // The native `own` binding represents a secondary independently authenticated
@@ -446,15 +509,37 @@ enum VortxLegacyBootstrapMaterial {
                 }
             }
             try require(!deleted.contains(owner.id.uuidString), "Owner profile is tombstoned")
+            let origins = try VortxLegacyBootstrapMaterial.accountOrigins(retainedOwnAccountBaseline)
+            let ownIDs = Set(roster.filter { !$0.isOwner && $0.usesOwnAccount }.map(\.id))
+            try require(missingOwnAccountProfileIDs.isSubset(of: ownIDs), "Missing source profile is not an independent non-owner")
+            try require(missingOwnAccountProfileIDs.isEmpty || retainedOwnAccountBaseline == nil,
+                        "Missing source deferral is limited to the first legacy import")
+            try require(missingOwnAccountProfileIDs.isDisjoint(with: Set(ownAccountSources.map(\.profileID))),
+                        "Missing source profile conflicts with an authenticated source")
+            try require(missingOwnAccountProfileIDs.isDisjoint(with: Set(retainedOwnAccountSlotBaselines.map(\.profileID)))
+                        && missingOwnAccountProfileIDs.isDisjoint(with: Set(retainedOwnAccountSourceEnvelopes.map(\.profileID))),
+                        "Missing source profile conflicts with retained source evidence")
+            try require(Set(retainedOwnAccountSlotBaselines.map(\.profileID)).isSubset(of: Set(roster.map(\.id))),
+                        "Retained slot belongs to an unknown profile")
+            let isolatedIDs = missingOwnAccountProfileIDs.union(origins.compactMap { $0.value == .isolated ? $0.key : nil })
             let resolved = try resolveOwnAccountSources(ownAccountSources, retainedBaseline: retainedOwnAccountBaseline,
                                                         retainedSourceEnvelopes: retainedOwnAccountSourceEnvelopes,
-                                                        retainedSlotBaselines: retainedOwnAccountSlotBaselines)
+                                                        retainedSlotBaselines: retainedOwnAccountSlotBaselines,
+                                                        origins: origins, isolatedIDs: isolatedIDs)
             let sources = resolved.material
             for profile in roster {
                 watches[profile.id.uuidString] = []
                 titles[profile.id.uuidString] = [:]
             }
-            let nativeRoster = try roster.map { try projectProfile($0, ownSource: sources[$0.id.uuidString]) }
+            let nativeRoster = try roster.map { profile -> Object in
+                var row = try projectProfile(profile, ownSource: sources[profile.id.uuidString])
+                if isolatedIDs.contains(profile.id) {
+                    row["account"] = ["kind": "local_only"]; row["addons"] = "own"
+                } else if origins[profile.id] == .shared {
+                    row["account"] = ["kind": "shared", "value": owner.id.uuidString]; row["addons"] = "share_primary"
+                }
+                return row
+            }
             let addons = try addonBucket()
             let library = try ownerLibrary()
             try validateOwnProfileOverlayBindings(resolved.overlayAuthority, deferred: deferredOwnAccountOverlays,
@@ -462,7 +547,7 @@ enum VortxLegacyBootstrapMaterial {
             // An independent source owns its profile's overlay context. Avoid parsing the root
             // bucket first: watched-only rows can rely on metadata in that independent library,
             // and accepting then overwriting them would make a stale root slice authoritative.
-            try importOverlays(excluding: Set(sources.keys))
+            try importOverlays(excluding: Set(sources.keys).union(isolatedIDs.map(\.uuidString)))
             try importOwnerIntents()
             if !deferProfileEdits { try validateProfileEdits(ownerLibrary: library) }
             var addonBuckets: [String: Object] = [owner.id.uuidString: addons]
@@ -470,6 +555,13 @@ enum VortxLegacyBootstrapMaterial {
             var ownSourceMaterial: [String: Object] = [:]
             var identityLinks = Dictionary(uniqueKeysWithValues: roster.map { ($0.id.uuidString, [[String]]()) })
             var retainedWatchProfiles = Set<String>()
+            // These exact empty buckets are the permanent global legacy baseline for a pending
+            // origin. A later own/shared CAS may populate a slot, never these legacy buckets.
+            for id in isolatedIDs.map(\.uuidString) where profiles[id] != nil {
+                addonBuckets[id] = ["items": [], "order": [], "intents": []]
+                libraryBuckets[id] = ["items": [], "intents": []]
+                watches[id] = []; identityLinks[id] = []
+            }
             for (profileID, source) in sources {
                 let buckets = try source.buckets(accountID: accountID, watchedEvidence: watchedEvidence)
                 held += buckets.held
@@ -761,10 +853,14 @@ enum VortxLegacyBootstrapMaterial {
         }
         private func resolveOwnAccountSources(_ rawSources: [OwnAccountSource], retainedBaseline: Data?,
                                               retainedSourceEnvelopes: [RetainedOwnAccountSourceEnvelope],
-                                              retainedSlotBaselines: [RetainedOwnAccountSlotBaseline]) throws -> ResolvedOwnSources {
-            let ownProfiles = roster.filter { !$0.isOwner && $0.usesOwnAccount }
+                                              retainedSlotBaselines: [RetainedOwnAccountSlotBaseline],
+                                              origins: [UUID: AccountOrigin], isolatedIDs: Set<UUID>) throws -> ResolvedOwnSources {
+            let ownProfiles = roster.filter { !$0.isOwner && !isolatedIDs.contains($0.id)
+                && (origins[$0.id] == .own || (origins[$0.id] == nil && $0.usesOwnAccount)) }
+            let requiredIDs = Set(ownProfiles.map(\.id))
             var sources: [String: ResolvedOwnAccountSource] = [:]
             for source in rawSources {
+                try require(requiredIDs.contains(source.profileID), "Authenticated source conflicts with original account policy")
                 let profileID = source.profileID.uuidString
                 try require(sources[profileID] == nil, "Duplicate own-account source receipt")
                 try require(source.verifiedStreamingUID == source.verifiedStreamingUID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -791,7 +887,7 @@ enum VortxLegacyBootstrapMaterial {
             }
             let freshSourceIDs = Set(sources.keys)
             let historical = try retainedOwnAccountSources(retainedBaseline, requiredProfiles: ownProfiles)
-            let activeSlots = try retainedOwnAccountSlotSources(retainedSlotBaselines, requiredProfiles: ownProfiles)
+            let activeSlots = try retainedOwnAccountSlotSources(retainedSlotBaselines.filter { requiredIDs.contains($0.profileID) }, requiredProfiles: ownProfiles)
             var overlayAuthority = sources
             for profile in ownProfiles where sources[profile.id.uuidString] == nil {
                 let id = profile.id.uuidString
@@ -804,6 +900,8 @@ enum VortxLegacyBootstrapMaterial {
                 // those events as new legacy edits and can reject on equal native clocks.
                 // Reconcile against the latest acknowledged global receipt, not the immutable
                 // first bootstrap. The active tuple remains authority for exact overlay proofs.
+                try require(retainedBaseline == nil || historical[id] != nil,
+                            "An active own slot cannot become a new global legacy source")
                 sources[id] = historical[id] ?? acknowledgedOverlay
                 overlayAuthority[id] = acknowledgedOverlay
             }
@@ -866,9 +964,12 @@ enum VortxLegacyBootstrapMaterial {
                                                         retainedSourceEnvelopes: [RetainedOwnAccountSourceEnvelope],
                                                         retainedSlotBaselines: [RetainedOwnAccountSlotBaseline],
                                                         rootDocumentSHA256: String) throws -> [RetainedOwnAccountOverlayDisposition] {
-            let ownProfiles = roster.filter { !$0.isOwner && $0.usesOwnAccount }
+            let origins = try VortxLegacyBootstrapMaterial.accountOrigins(retainedBaseline)
+            let ownProfiles = roster.filter { !$0.isOwner
+                && (origins[$0.id] == .own || (origins[$0.id] == nil && $0.usesOwnAccount)) }
+            let requiredIDs = Set(ownProfiles.map(\.id))
             let historical = try retainedOwnAccountSources(retainedBaseline, requiredProfiles: ownProfiles)
-            let activeSlots = try retainedOwnAccountSlotSources(retainedSlotBaselines, requiredProfiles: ownProfiles)
+            let activeSlots = try retainedOwnAccountSlotSources(retainedSlotBaselines.filter { requiredIDs.contains($0.profileID) }, requiredProfiles: ownProfiles)
             var envelopes: [String: Object] = [:]
             for envelope in retainedSourceEnvelopes {
                 let id = envelope.profileID.uuidString

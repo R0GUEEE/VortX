@@ -915,6 +915,9 @@ actor VortxNativeSession {
               case .string(let owner) = state["nativeSync"]?["ownerProfileId"] else { throw VortxNativeError.invalidSnapshot }
         try VortxNativeWatchedArchive.validate(archive, scope: .init(account: account, ownerProfileID: owner))
         let decoded = try JSONDecoder().decode(VortxJSON.self, from: archive)
+        _ = try VortxNativeUnattributedOverlayArchive.merge(nil,
+            decoded["hostDocument"]?[VortxNativeUnattributedOverlayArchive.key],
+            scope: .init(account: account, ownerProfileID: owner), state: state)
         guard case .object(let sources) = decoded["hostDocument"]?["ownAccountSources"] else { throw VortxNativeError.invalidSnapshot }
         for (id, value) in sources {
             guard case .object(let fields) = value, Set(fields.keys) == ["verifiedStreamingUid", "sourceDocumentBase64"],

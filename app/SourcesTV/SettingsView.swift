@@ -850,6 +850,7 @@ struct SettingsView: View {
                 .confirmationDialog("Restart VortX?", isPresented: $showRestartConfirm, titleVisibility: .visible) {
                     Button("Quit Now", role: .destructive) {
                         DiagnosticsLog.logSync("app", "user requested app restart from Settings")
+                        TerminationReceipt.markTerminating()
                         exit(0)
                     }
                     Button("Cancel", role: .cancel) {}
@@ -1090,6 +1091,7 @@ struct SettingsView: View {
         .confirmationDialog("Apply language?", isPresented: $showLangRestart, titleVisibility: .visible) {
             Button("Quit Now", role: .destructive) {
                 DiagnosticsLog.logSync("app", "user requested app restart to apply language")
+                TerminationReceipt.markTerminating()
                 exit(0)
             }
             Button("Later", role: .cancel) {}

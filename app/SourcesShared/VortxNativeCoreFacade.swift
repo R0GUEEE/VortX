@@ -1287,35 +1287,41 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     /// The Library: every saved title, then every title watched or started, most recent
     /// first. A watched title leaves only when the viewer removed it from the Library after its last
     /// watch; watching it again brings it back.
-    private func projectedLibraryItems(_ state: VortxJSON) throws -> [VortxJSON] {
+    private func projectedLibraryItems(_ state: VortxJSON, formatter: ISO8601DateFormatter = ISO8601DateFormatter()) throws -> [VortxJSON] {
         guard let active = string(state["activeProfileId"]), let library = state["libraries"]?[active] else { throw VortxNativeError.invalidSnapshot }
+        // Preserve the selected-unit, first-match semantics even if an input repeats a title.
+        // One index replaces a full Continue Watching scan for every saved/history row.
+        var resumeByID: [String: VortxJSON] = [:]
+        for row in playback?["continueWatching"]?.array ?? [] {
+            if case .string(let id)? = row["metaId"], resumeByID[id] == nil { resumeByID[id] = row }
+        }
         let saved = (library["items"]?.array ?? []).filter { $0["kind"] == .string("standard") }.compactMap { item -> VortxJSON? in
             guard let id = string(item["id"]), let type = string(item["type"]) else { return nil }
-            return libraryRow(id: id, type: type, name: item["name"] ?? .string(id), poster: item["poster"] ?? .null)
+            return libraryRow(id: id, type: type, name: item["name"] ?? .string(id), poster: item["poster"] ?? .null, resume: resumeByID[id], formatter: formatter)
         }
         let savedIDs = Set(saved.compactMap { string($0["_id"]) })
         let records = state["nativeSync"]?["libraries"]?[active]?["records"]
         return saved + VortxNativePreviouslyWatched.titles(playback: playback, excluding: savedIDs) { type, id in
             try? records?[type + ":" + id]?["removedAt"]?.decode(UInt64.self)
-        }.map { libraryRow(id: $0.id, type: $0.type, name: $0.name, poster: $0.poster, previouslyWatched: true) }
+        }.map { libraryRow(id: $0.id, type: $0.type, name: $0.name, poster: $0.poster, previouslyWatched: true, resume: resumeByID[$0.id], formatter: formatter) }
     }
     /// `previouslyWatched` marks a watched-only row: listed in the Library, but not saved membership, so Detail
     /// still offers Add to Library and a removal never edits a Trakt/SIMKL watchlist.
-    private func libraryRow(id: String, type: String, name: VortxJSON, poster: VortxJSON, previouslyWatched: Bool = false) -> VortxJSON {
+    private func libraryRow(id: String, type: String, name: VortxJSON, poster: VortxJSON, previouslyWatched: Bool = false,
+                            resume: VortxJSON?, formatter: ISO8601DateFormatter) -> VortxJSON {
         // Exact native selected-unit projection, never max(old episode offsets). A saved
         // membership without watch evidence stays unwatched and out of Continue Watching.
-        let resume = playback?["continueWatching"]?.array?.first { $0["metaId"] == .string(id) }
         let offset = resume?["offsetMs"] ?? .integer(0)
         let duration = resume?["durationMs"] ?? .integer(0)
         let watched = playback?["watchedTitles"]?[id] ?? .integer(0)
         var row: [String: VortxJSON] = ["_id": .string(id), "type": .string(type), "name": name, "poster": poster,
                         "state": .object(["timeOffset": offset, "duration": duration,
-                                          "video_id": resume?["videoId"] ?? .null, "lastWatched": isoTimestamp(resume?["updatedAt"]),
+                                          "video_id": resume?["videoId"] ?? .null, "lastWatched": isoTimestamp(resume?["updatedAt"], formatter: formatter),
                                           "flaggedWatched": watched, "timesWatched": watched])]
         if previouslyWatched { row["previouslyWatched"] = .bool(true) }
         return .object(row)
     }
-    private func libraryProjection(state: VortxJSON, request: VortxJSON?) -> VortxJSON? {
+    private func libraryProjection(state: VortxJSON, request: VortxJSON?, projected: [VortxJSON]? = nil) -> VortxJSON? {
         let requestedType: String?
         switch request?["type"] {
         case nil, .some(.null): requestedType = nil
@@ -1330,7 +1336,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         }
         guard ["lastwatched", "name", "namereverse", "timeswatched", "watched", "notwatched"].contains(sort),
               request?["page"] == nil || request?["page"] == .integer(1),
-              let all = try? projectedLibraryItems(state) else { return nil }
+              let all = projected ?? (try? projectedLibraryItems(state)) else { return nil }
         var availableTypes = Array(Set(all.compactMap { string($0["type"]) })).sorted()
         if let requestedType, !availableTypes.contains(requestedType) { availableTypes.append(requestedType); availableTypes.sort() }
         var rows = all.enumerated().map { (index: $0.offset, row: $0.element) }
@@ -1369,13 +1375,15 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         return .object(["searchResults": .array(Array(matches))])
     }
     private func stateFields(_ state: VortxJSON) throws -> [String: VortxJSON] {
-        let projected = try projectedLibraryItems(state)
+        // The formatter is local to this complete pass: no mutable formatter crosses threads.
+        let formatter = ISO8601DateFormatter()
+        let projected = try projectedLibraryItems(state, formatter: formatter)
         let descriptors = (lock.withLock { resourceRegistryValid ? registry : [] }).map { addon in VortxJSON.object(["transportUrl": .string(addon.transportUrl), "manifest": addon.manifest ?? .object([:])]) }
         var fields: [String: VortxJSON] = ["native_state": state, "ctx": .object(["profile": .object(["addons": .array(descriptors)])]),
                 "native_playback": playback ?? .null,
-                "continue_watching_preview": .object(["items": .array((playback?["continueWatching"]?.array ?? []).compactMap(playbackRow))]),
-                "native_history": .object(["items": .array((playback?["history"]?.array ?? []).compactMap(playbackRow))]),
-                "library": libraryProjection(state: state, request: libraryRequest) ?? .object(["catalog": .array(projected), "selectable": .object(["types": .array([]), "sorts": .array([])])])]
+                "continue_watching_preview": .object(["items": .array((playback?["continueWatching"]?.array ?? []).compactMap { playbackRow($0, formatter: formatter) })]),
+                "native_history": .object(["items": .array((playback?["history"]?.array ?? []).compactMap { playbackRow($0, formatter: formatter) })]),
+                "library": libraryProjection(state: state, request: libraryRequest, projected: projected) ?? .object(["catalog": .array(projected), "selectable": .object(["types": .array([]), "sorts": .array([])])])]
         if let detail = values["meta_details"] { fields["meta_details"] = metaWithPlayback(detail, library: projected) }
         return fields
     }
@@ -1386,17 +1394,17 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         fields["watchedVideoIds"] = playback?["watchedVideoIdsByTitle"]?[id] ?? .array([])
         return .object(fields)
     }
-    private func isoTimestamp(_ value: VortxJSON?) -> VortxJSON {
+    private func isoTimestamp(_ value: VortxJSON?, formatter: ISO8601DateFormatter) -> VortxJSON {
         guard let seconds = try? value?.decode(UInt64.self), seconds <= 253_402_300_799 else { return .null }
-        return .string(ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: Double(seconds))))
+        return .string(formatter.string(from: Date(timeIntervalSince1970: Double(seconds))))
     }
-    private func playbackRow(_ row: VortxJSON) -> VortxJSON? {
+    private func playbackRow(_ row: VortxJSON, formatter: ISO8601DateFormatter) -> VortxJSON? {
         guard let id = string(row["metaId"]), let type = string(row["type"]), !type.isEmpty,
               let offset = try? row["offsetMs"]?.decode(UInt64.self), let duration = try? row["durationMs"]?.decode(UInt64.self),
               let count = try? row["timesWatched"]?.decode(UInt64.self), case .bool(let watched) = row["watched"] else { return nil }
         return .object(["_id": .string(id), "type": .string(type), "name": row["name"] ?? .string(id), "poster": row["poster"] ?? .null,
                         "state": .object(["timeOffset": .unsigned(offset), "duration": .unsigned(duration),
-                                          "video_id": row["videoId"] ?? .null, "lastWatched": isoTimestamp(row["updatedAt"]),
+                                          "video_id": row["videoId"] ?? .null, "lastWatched": isoTimestamp(row["updatedAt"], formatter: formatter),
                                           "flaggedWatched": .integer(watched ? 1 : 0), "timesWatched": .unsigned(count)])])
     }
 }

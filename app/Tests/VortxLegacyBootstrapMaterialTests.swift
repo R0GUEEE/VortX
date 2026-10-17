@@ -367,28 +367,47 @@ enum VortxLegacyBootstrapMaterialTests {
         check(NSDictionary(dictionary: slottedWithEnvelope).isEqual(to: slottedCold),
               "Active sealed envelope proves the overlay without relabelling the older typed source")
 
-        // Material 1 predates a profile that later became independently authenticated. Its
-        // complete schema-4 active slot is sufficient; historical absence is not a malformed
-        // partial material-2 tuple.
-        let oldNoOwnBaseline = Data("{\"schemaVersion\":1}".utf8)
+        // A profile that was shared in the acknowledged migration remains shared in global
+        // material after an independent native CAS. A slot is not a new legacy import receipt.
+        do {
+            _ = try material(root, roster: [owner, own],
+                retainedOwnAccountBaseline: Data("{\"schemaVersion\":1}".utf8), retainedOwnAccountSlotBaselines: [activeSlot])
+            preconditionFailure("Partial schema-only origin baseline admitted")
+        } catch let error as VortxLegacyBootstrapMaterial.ReconciliationRequired {
+            check(error.reason.contains("complete baseline"), "Origin classification requires the complete validated material")
+        }
+        var originalShared = own; originalShared.usesOwnAccount = false
+        let oldNoOwnBaseline = try JSONSerialization.data(withJSONObject: material(root, roster: [owner, originalShared]))
         let lateOwnDisposition = try VortxLegacyBootstrapMaterial.classifyDeferredOwnAccountOverlays(document: rootWithOwnOverlayBytes,
             roster: [owner, own], ownerProfileID: owner.id, retainedOwnAccountBaseline: oldNoOwnBaseline,
             retainedOwnAccountSlotBaselines: [activeSlot])
-        check(lateOwnDisposition.count == 1 && lateOwnDisposition[0].status == .matchedWitness,
-              "A new own persona may use a complete active slot when historical material predates it")
+        check(lateOwnDisposition.isEmpty, "A native own slot does not attribute the original shared overlay")
         let lateOwnMaterial = try material(rootWithOwnOverlay, roster: [owner, own], documentData: rootWithOwnOverlayBytes,
                                            retainedOwnAccountBaseline: oldNoOwnBaseline,
                                            retainedOwnAccountSlotBaselines: [activeSlot], deferredOwnAccountOverlays: lateOwnDisposition)
-        check(((lateOwnMaterial["ownAccountSources"] as! [String: Object])[own.id.uuidString]!)["sourceDocumentSha256"] as? String == witnessedOverlayReceipt.sourceDocumentSHA256,
-              "Late own persona retains the active slot's exact source proof")
+        check(lateOwnMaterial["ownAccountSources"] == nil,
+              "A native own slot never adds a source for a baseline-existing shared profile")
+        let originalPolicy = (lateOwnMaterial["roster"] as! [Object]).first { $0["id"] as? String == own.id.uuidString }!
+        check((originalPolicy["account"] as! Object)["kind"] as? String == "shared",
+              "The original global policy survives a native rebind")
         let retainedClockCarrier = Data(("{\"source\":{\"verifiedStreamingUid\":\"verified-own-uid\",\"sourceDocumentSha256\":\""
             + String(repeating: "d", count: 64)
             + "\"},\"addons\":{\"items\":[],\"order\":[],\"intents\":[]},\"library\":{\"items\":[],\"intents\":[]},\"watches\":[{\"metaId\":\"tt-retained-clock-a\",\"type\":\"movie\",\"videoId\":\"tt-retained-clock-a\",\"positionMs\":1,\"lastPlayedAtMs\":0.039304369631583576},{\"metaId\":\"tt-retained-clock-b\",\"type\":\"movie\",\"videoId\":\"tt-retained-clock-b\",\"positionMs\":1,\"lastPlayedAtMs\":0.039304369631583587}],\"identityLinks\":[]}").utf8)
         let retainedClockSlot = VortxLegacyBootstrapMaterial.RetainedOwnAccountSlotBaseline(profileID: own.id,
             sourceBaseline: retainedClockCarrier)
+        // Precision is tested through a real historical own tuple; a fake schema-only baseline
+        // must not grant permission to promote a current slot into the global import receipt.
+        let clockCarrier = try VortxProfileOverlayWitness.decodeObject(json: retainedClockCarrier)
+        var clockBaseline = witnessedOverlayMaterial
+        for (materialField, carrierField) in [("ownAccountSources", "source"), ("addons", "addons"),
+                                               ("libraries", "library"), ("watches", "watches"), ("identityLinks", "identityLinks")] {
+            var bucket = clockBaseline[materialField] as! Object
+            bucket[own.id.uuidString] = clockCarrier[carrierField]
+            clockBaseline[materialField] = bucket
+        }
         let retainedClockMaterial = try VortxLegacyBootstrapMaterial.encode(document: try JSONSerialization.data(withJSONObject: root),
             roster: [owner, own], ownerProfileID: owner.id, rosterModifiedSeconds: nil,
-            retainedOwnAccountBaseline: oldNoOwnBaseline, retainedOwnAccountSlotBaselines: [retainedClockSlot])
+            retainedOwnAccountBaseline: JSONSerialization.data(withJSONObject: clockBaseline), retainedOwnAccountSlotBaselines: [retainedClockSlot])
         let retainedClockOutput = try VortxProfileOverlayWitness.decodeObject(json: retainedClockMaterial)
         let retainedClockRows = ((retainedClockOutput["watches"] as? [String: Any])?[own.id.uuidString] as? [[String: Any]])
         let retainedClockA = retainedClockRows?.first { $0["metaId"] as? String == "tt-retained-clock-a" }?["lastPlayedAtMs"] as? NSNumber

@@ -1206,11 +1206,13 @@ final class CoreBridge: ObservableObject {
             forName: VortXSyncManager.credentialScopeDidChangeNote, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            let capture = CredentialScopeRegistry.shared.capture()
             let previous = self.nativeFacade
             self.revokeNativeSession()
             Task { @MainActor in
                 await previous?.shutdown()
-                _ = await VortXSyncManager.shared.restoreNativeCheckpoint()
+                guard CredentialScopeRegistry.shared.isCurrent(capture) else { return }
+                await VortXSyncManager.shared.hydrateEngineFromOwnedAddons(credentialCapture: capture)
             }
         }
 #else
@@ -1280,7 +1282,7 @@ final class CoreBridge: ObservableObject {
         // A compiled native lane cannot initialize Stremio, even when migration is not yet bound.
         Task {
             await RemoteConfig.shared.bootstrap()
-            _ = await VortXSyncManager.shared.restoreNativeCheckpoint()
+            await VortXSyncManager.shared.hydrateEngineFromOwnedAddons()
         }
         return
 #else

@@ -32,6 +32,11 @@ node --input-type=module <<'JS'
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 const source = fs.readFileSync('app/SourcesShared/CoreBridge.swift', 'utf8');
+const sync = fs.readFileSync('app/SourcesShared/VortXSyncManager.swift', 'utf8');
+const preparation = sync.split('private func prepareNativeLegacyMaterial')[1].split('private static func nativeWebsiteEvents')[0];
+const probe = preparation.split('let probe = try VortxEncryptedCheckpointStore(')[1].split('\n        let remote')[0];
+assert.ok(probe.includes('installationKey: VortxNativeInstallationKey.loadOrCreate()'),
+    'legacy preparation must authenticate the same multi-account inventory as the opener');
 const board = source.split('private func scheduleBoardRebuild(capturedPublicationToken')[1].split('private func buildBoardRows()')[0];
 assert.equal((board.match(/decode\(CoreBoardState\.self, field: "board"\)/g) || []).length, 1);
 assert.ok(board.includes('boardState.map { self.buildBoardRows($0) }'));

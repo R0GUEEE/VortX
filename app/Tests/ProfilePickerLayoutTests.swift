@@ -52,12 +52,18 @@ enum ProfilePickerLayoutTests {
         precondition(picker.contains("LazyVGrid(columns:"))
         precondition(picker.contains("layout.rows(itemCount:"), "Large devices center actual populated avatar rows")
         precondition(picker.contains("pinIsForEditing = isEditing"))
-        precondition(picker.contains("if profile.hasPin { pinTarget = profile }"))
+        let pick = picker.components(separatedBy: "private func pick(_ profile: UserProfile)")[1]
+            .components(separatedBy: "private func resumeDeferredSelection()")[0]
+        let pin = pick.components(separatedBy: "if profile.hasPin {")[1]
+            .components(separatedBy: "else if isEditing")[0]
+        precondition(pin.contains("pinTarget = profile"))
+        precondition(pin.contains("pinCredential = CredentialScopeRegistry.shared.capture()"),
+                     "A PIN prompt retains the credential generation it was opened under")
         precondition(picker.contains(".disabled(pinTarget != nil || profileAction.isRunning)"))
         precondition(!picker.contains("nativeUnsupportedSettings"))
         precondition(!picker.contains("Reconnect the owner's Stremio account"))
         precondition(picker.contains("if !nativeSync.isSignedIn"))
-        precondition(picker.contains("Button(\"Sign in\") { accountHelpNeeded = true }"))
+        precondition(picker.contains("Button(\"Sign in\") { deferredSelection.cancel(); accountHelpNeeded = true }"))
         precondition(picker.contains(".disabled(!nativeSync.isSignedIn)"))
         precondition(picker.contains("isPhone: profilePickerIsPhone"))
         precondition(picker.contains("isTV: profilePickerIsTV"))
@@ -91,6 +97,6 @@ enum ProfilePickerLayoutTests {
         precondition(backdrop.contains(".easeInOut(duration: 0.8)"))
         precondition(artwork.components(separatedBy: "guard rotationToken == token, !Task.isCancelled else { return }").count - 1 >= 2,
                      "rotation rechecks generation after prewarm and each candidate load")
-        print("PASS profile picker: phone/tablet/Mac/TV grid bounds, large text, PIN-preserving Edit, public-only artwork, no migration paragraphs")
+        print("PASS profile picker: phone/tablet/Mac/TV grid bounds, large text, scope-bound PIN, PIN-preserving Edit, public-only artwork and transient preparation status")
     }
 }
