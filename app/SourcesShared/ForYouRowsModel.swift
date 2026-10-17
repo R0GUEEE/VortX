@@ -23,6 +23,7 @@ final class ForYouRowsModel: ObservableObject {
     private static let rowLimit = 20
     private var interestKey: String?
     private var collectionKey: String?
+    private var collectionDay: String?
     private var interestRaw: [(plan: ForYouRowPlan, items: [MetaPreview])] = []
     private var collectionRaw: [String: [MetaPreview]] = [:]
     private var interestTask: Task<Void, Never>?
@@ -34,11 +35,11 @@ final class ForYouRowsModel: ObservableObject {
     /// `enabled` is false for a kids profile, a device without the profile's saved choices yet, or no
     /// TMDB route: the rows are cleared rather than showing another profile's results.
     func refresh(profileID: UUID?, interests: ForYouInterests?, collections: [SmartCollection],
-                 owned: Set<String>, watched: Set<String>, enabled: Bool) {
+                 owned: Set<String>, watched: Set<String>, enabled: Bool, now: Date = Date()) {
         self.owned = owned
         self.watched = watched
         guard enabled, let profileID else { clear(); return }
-        let day = ForYouQuery.day(Date())
+        let day = ForYouQuery.day(now)
         refreshInterests(profileID: profileID, interests: interests, day: day)
         refreshCollections(profileID: profileID, collections: collections.filter(\.home), day: day)
         publish()
@@ -48,6 +49,7 @@ final class ForYouRowsModel: ObservableObject {
         interestTask?.cancel(); collectionTask?.cancel()
         interestTask = nil; collectionTask = nil
         interestKey = nil; collectionKey = nil
+        collectionDay = nil
         interestRaw = []; collectionRaw = [:]; pinned = []
         if !interestRows.isEmpty { interestRows = [] }
         if !collectionRows.isEmpty { collectionRows = [] }
@@ -88,6 +90,12 @@ final class ForYouRowsModel: ObservableObject {
 
     private func refreshCollections(profileID: UUID, collections: [SmartCollection], day: String) {
         pinned = collections
+        // Rules include a released-by-today cutoff. Cached titles must age with that query,
+        // while same-day renames and pin changes can continue to reuse successful rows.
+        if collectionDay != day {
+            collectionRaw = [:]
+            collectionDay = day
+        }
         let key = "\(profileID.uuidString)|\(day)|" + collections.map { "\($0.id)=\(String(describing: $0.rules))" }.joined(separator: ",")
         guard key != collectionKey else { return }
         collectionTask?.cancel()
@@ -102,6 +110,12 @@ final class ForYouRowsModel: ObservableObject {
                 guard !Task.isCancelled, let self, self.collectionKey == key else { return }
                 if !items.isEmpty { self.collectionRaw[Self.rawKey(collection)] = items }
                 self.publish()
+            }
+            // Empty results also represent transport failures. Keep successful rows, but let
+            // the next refresh retry just the missing collections under the same query key.
+            guard !Task.isCancelled, let self, self.collectionKey == key else { return }
+            if collections.contains(where: { self.collectionRaw[Self.rawKey($0)] == nil }) {
+                self.collectionKey = nil
             }
         }
     }

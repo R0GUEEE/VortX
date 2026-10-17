@@ -80,6 +80,31 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String, line: Int =
     expect(TMDBClient.calls.count == afterEmpty + 2, "an all-empty fetch is retried on the next refresh")
     expect(model.interestRows.count == 2, "the retry fills the rows")
 
+    let collectionModel = ForYouRowsModel()
+    let dayOne = ISO8601DateFormatter().date(from: "2026-10-16T12:00:00Z")!
+    let dayTwo = dayOne.addingTimeInterval(24 * 60 * 60)
+    TMDBClient.empty = true
+    collectionModel.refresh(profileID: other, interests: nil, collections: [pinned], owned: [], watched: [], enabled: true, now: dayOne)
+    await settle(collectionModel)
+    let failedCollectionCalls = TMDBClient.calls.count
+    expect(collectionModel.collectionRows.isEmpty, "an empty collection fetch shows no row")
+    TMDBClient.empty = false
+    collectionModel.refresh(profileID: other, interests: nil, collections: [pinned], owned: [], watched: [], enabled: true, now: dayOne)
+    await settle(collectionModel)
+    expect(TMDBClient.calls.count == failedCollectionCalls + 1, "same-key collection refresh retries an empty fetch")
+    expect(collectionModel.collectionRows.count == 1, "collection retry publishes a recovered row")
+    let successfulCollectionCalls = TMDBClient.calls.count
+    collectionModel.refresh(profileID: other, interests: nil, collections: [renamed], owned: [], watched: [], enabled: true, now: dayOne)
+    await settle(collectionModel)
+    expect(TMDBClient.calls.count == successfulCollectionCalls, "same-day rename retains the successful collection cache")
+    let agingModel = ForYouRowsModel()
+    agingModel.refresh(profileID: other, interests: nil, collections: [pinned], owned: [], watched: [], enabled: true, now: dayOne)
+    await settle(agingModel)
+    let firstDayCalls = TMDBClient.calls.count
+    agingModel.refresh(profileID: other, interests: nil, collections: [pinned], owned: [], watched: [], enabled: true, now: dayTwo)
+    await settle(agingModel)
+    expect(TMDBClient.calls.count == firstDayCalls + 1, "a new day refetches a collection's date-bounded query")
+
     print("for-you rows model: \(checks) checks, \(failures) failed")
     exit(failures == 0 ? 0 : 1)
 }
