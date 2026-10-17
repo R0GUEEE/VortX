@@ -101,9 +101,14 @@ struct PlaybackCompletionEvidence<Token: Equatable> {
         duration = seconds
     }
 
-    mutating func consumeEOF(owner: Token, isLive: Bool, isTrailer: Bool) -> Decision {
+    mutating func consumeEOF(owner: Token, isLive: Bool, isTrailer: Bool,
+                             knownDurationFallback: Double? = nil) -> Decision {
         guard self.owner == owner, !rejectedEOF else { return .ignore }
-        guard !isLive, !isTrailer, let position, let duration else { return .allowCompletion }
+        // A same-source reopen can end before its duration notification arrives. Only a caller's
+        // exact owned finite source receipt may provide this fallback; a current duration wins.
+        let finiteFallback = knownDurationFallback.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        guard !isLive, !isTrailer, let position,
+              let duration = duration ?? finiteFallback else { return .allowCompletion }
         let tailTolerance = min(30, max(2, duration * 0.01))
         guard position < duration - tailTolerance else { return .allowCompletion }
         rejectedEOF = true

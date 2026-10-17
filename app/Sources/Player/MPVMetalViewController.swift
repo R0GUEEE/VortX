@@ -186,6 +186,7 @@ final class MPVMetalViewController: PlatformViewController {
         let audioSidecar: URL?
     }
     private var seekEOFRecovery = SeekEOFRecoveryPolicy<PlayerLoadToken>()
+    private var seekEOFTerminalPark = SeekEOFTerminalParkPolicy<PlayerLoadToken>()
     /// Protected by loadTokenLock, including command admission and raw event dequeue.
     private var seekSettlement = MPVSeekSettlementPolicy<PlayerLoadToken>()
     private var latestAcceptedAbsoluteSeek: MPVResumeSeekTicket<PlayerLoadToken>?
@@ -197,6 +198,15 @@ final class MPVMetalViewController: PlatformViewController {
         loadTokenLock.lock(); defer { loadTokenLock.unlock() }
         return seekSettlement.acceptsAttributedEvent(evidence, owner: owner)
     }
+    /// Terminal callbacks need generation ownership, not settled/non-EOF proof: EOF itself cannot
+    /// be a settled playback sample. Capture this evidence beside raw dequeue under loadTokenLock.
+    private func acceptsCurrentTerminalSeekEvent(_ evidence: MPVSeekSettlementEvidence?,
+                                                  owner: PlayerLoadToken) -> Bool {
+        guard let evidence else { return false }
+        loadTokenLock.lock(); defer { loadTokenLock.unlock() }
+        return seekSettlement.accepts(evidence, owner: owner)
+    }
+
     private func acceptsSettledPosition(_ evidence: MPVSeekSettlementEvidence?,
                                         owner: PlayerLoadToken) -> Bool {
         guard let evidence, evidence.settled else { return false }
@@ -1379,6 +1389,7 @@ final class MPVMetalViewController: PlatformViewController {
     /// prevents it from firing into a deallocated controller (the crash on close), and
     /// destruction is serialized onto the event queue so it can't race `readEvents`.
     func stop() {
+        seekEOFTerminalPark.reset()
         loadTokenLock.lock()
         initializationFailure.stop()
         loadTokenLock.unlock()
@@ -1845,6 +1856,9 @@ final class MPVMetalViewController: PlatformViewController {
             if !preservingSeekEOFRecovery {
                 seekEOFRecoveryTimeout?.cancel(); seekEOFRecoveryTimeout = nil
                 seekEOFRecovery.reset()
+                // Only an accepted fresh load releases terminal parking. A refused Retry keeps the
+                // old source parked; captured requestedPauseIntent remains the viewer's prior choice.
+                if let paused = seekEOFTerminalPark.acceptedFreshLoad() { _ = setFlag(MPVProperty.pause, paused) }
             }
             seekEOFReloadSource = SeekEOFReloadSource(
                 url: url, headers: headers, live: live, audioSidecar: audioSidecar
@@ -2032,6 +2046,10 @@ final class MPVMetalViewController: PlatformViewController {
     }
 
     func togglePause() {
+        if let paused = seekEOFTerminalPark.pausedIntent {
+            paused ? play() : pause()
+            return
+        }
         // During seek-EOF recovery mpv is deliberately forced paused to avoid presenting the reopened file
         // at zero. Toggle the desired transport state, not that temporary implementation pause.
         if let intent = seekEOFRecovery.current,
@@ -3106,6 +3124,7 @@ final class MPVMetalViewController: PlatformViewController {
     }
     
     func play() {
+        if seekEOFTerminalPark.updateIntent(paused: false) { return }
         if let owner = activeLoadToken,
            seekEOFRecovery.updateTransportIntent(owner: owner, paused: false) != nil {
             return
@@ -3118,10 +3137,11 @@ final class MPVMetalViewController: PlatformViewController {
     /// Internal EOF repair temporarily pauses the core; replacement recovery must carry the
     /// viewer's latest transport intent rather than that implementation pause.
     var requestedPauseIntent: Bool {
-        seekEOFRecovery.current?.wasPaused ?? getFlag(MPVProperty.pause)
+        seekEOFTerminalPark.pausedIntent ?? seekEOFRecovery.current?.wasPaused ?? getFlag(MPVProperty.pause)
     }
     
     func pause() {
+        if seekEOFTerminalPark.updateIntent(paused: true) { return }
         if let owner = activeLoadToken,
            seekEOFRecovery.updateTransportIntent(owner: owner, paused: true) != nil {
             return
@@ -4397,6 +4417,8 @@ final class MPVMetalViewController: PlatformViewController {
                   PlayerLoadProvenanceState.accepts(
                     callbackToken: capturedToken, activeToken: self.activeLoadToken
                   ) else { return }
+            if let exhaustion = data as? SeekEOFRecoveryExhaustion,
+               !self.seekEOFRecovery.acceptsExhaustion(exhaustion, owner: capturedToken) { return }
             var deliveredData = data
             if let position = data as? PlayerTimePositionEvent,
                let evidence = position.mpvSeekSettlement {
@@ -4416,12 +4438,17 @@ final class MPVMetalViewController: PlatformViewController {
 
     /// Deliver every EOF as terminal media state. Cache maintenance uses a normal low-level seek and must never
     /// hide an EOF from a finite source.
-    private func emitEndFileEOF(loadToken: PlayerLoadToken) {
+    private func emitEndFileEOF(loadToken: PlayerLoadToken, seekEvidence: MPVSeekSettlementEvidence?) {
+        let exhaustion = seekEOFRecovery.exhaustion(owner: loadToken,
+            reason: "source ended again after its seek reopen")
         DispatchQueue.main.async { [weak self] in
             guard let self, self.mpv != nil,
                   PlayerLoadProvenanceState.accepts(
                     callbackToken: loadToken, activeToken: self.activeLoadToken
                   ) else { return }
+            guard self.acceptsCurrentTerminalSeekEvent(seekEvidence, owner: loadToken) else { return }
+            if let exhaustion,
+               !self.seekEOFRecovery.acceptsExhaustion(exhaustion, owner: loadToken) { return }
             self.failFreshOriginCorrection(owner: loadToken, reason: "EOF before opening position")
             self.loadTokenLock.lock()
             let originFailed = self.freshOrigin.hasFailed(owner: loadToken)
@@ -4437,7 +4464,8 @@ final class MPVMetalViewController: PlatformViewController {
             #endif
             VXProbe.event(self.probeChannel, "endfile eof")
             self.playDelegate?.propertyChange(
-                propertyName: MPVProperty.endFileEof, data: nil, loadToken: loadToken
+                propertyName: MPVProperty.endFileEof,
+                data: exhaustion, loadToken: loadToken
             )
         }
     }
@@ -4446,8 +4474,8 @@ final class MPVMetalViewController: PlatformViewController {
     /// completion. Only finite VOD is reopened once; live/unknown-duration sources keep their normal terminal
     /// semantics. A failed reopen becomes an error so the UI can offer source recovery without marking the
     /// episode watched or advancing it.
-    private func handleEndFileEOF(loadToken: PlayerLoadToken) {
-        guard mpv != nil,
+    private func handleEndFileEOF(loadToken: PlayerLoadToken, seekEvidence: MPVSeekSettlementEvidence?) {
+        guard acceptsCurrentTerminalSeekEvent(seekEvidence, owner: loadToken), mpv != nil,
               PlayerLoadProvenanceState.accepts(
                 callbackToken: loadToken, activeToken: activeLoadToken
               ) else { return }
@@ -4467,7 +4495,7 @@ final class MPVMetalViewController: PlatformViewController {
         guard let source = seekEOFReloadSource, !source.live,
               seekEOFRecovery.shouldRecoverEOF(owner: loadToken, now: now),
               let intent = seekEOFRecovery.consumeEOFForReload(owner: loadToken) else {
-            emitEndFileEOF(loadToken: loadToken)
+            emitEndFileEOF(loadToken: loadToken, seekEvidence: seekEvidence)
             return
         }
         DiagnosticsLog.log("player", "seek-eof-recovery begin origin=\(intent.origin) target=\(String(format: "%.3f", intent.target)) paused=\(intent.wasPaused) loadToken=\(loadToken.hashValue)")
@@ -4485,6 +4513,16 @@ final class MPVMetalViewController: PlatformViewController {
         }
         seekEOFRecoveryTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.seekEOFRecoveryTimeoutSeconds, execute: timeout)
+    }
+
+    /// Keep a timed-out reopen from starting late behind its terminal overlay without destroying the
+    /// reusable mpv core. Play/Pause updates intent only; an accepted deliberate fresh load releases it.
+    func parkAfterExhaustedSeekEOF(_ exhaustion: SeekEOFRecoveryExhaustion) {
+        guard let owner = activeLoadToken, mpv != nil,
+              seekEOFRecovery.acceptsExhaustion(exhaustion, owner: owner) else { return }
+        let paused = requestedPauseIntent
+        seekEOFTerminalPark.park(owner: owner, pausedIntent: paused)
+        _ = setFlag(MPVProperty.pause, true)
     }
 
     private func beginSeekEOFRecoveryReloadSeek(loadToken: PlayerLoadToken) {
@@ -4516,12 +4554,14 @@ final class MPVMetalViewController: PlatformViewController {
            activeLoadToken == loadToken, let intent {
             setFlag(MPVProperty.pause, intent.wasPaused)
         }
+        let exhaustion = seekEOFRecovery.exhaustion(owner: loadToken, reason: reason)
         seekEOFRecovery.cancel(owner: loadToken)
         guard PlayerLoadProvenanceState.accepts(callbackToken: loadToken, activeToken: activeLoadToken) else { return }
         finishCacheFlushFlight(cacheFlushFlight.reset(owner: loadToken))
         mpvLog.error("seek-adjacent EOF recovery failed: \(reason, privacy: .public)")
         VXProbe.event(probeChannel, "seek-eof-recovery failed \(reason)")
-        emit(MPVProperty.endFileError, "Seek recovery failed: \(reason)", loadToken: loadToken)
+        emit(MPVProperty.endFileError,
+             exhaustion.map { $0 as Any } ?? "Seek recovery failed: \(reason)", loadToken: loadToken)
     }
 
     /// mpv emits time-pos changes far faster than the UI needs (often per decoded
@@ -4609,6 +4649,10 @@ final class MPVMetalViewController: PlatformViewController {
                 }
                 let rawSeekEvidence = rawSeekOwner.map {
                     self.seekSettlement.evidence(owner: $0, seeking: rawSeeking, eofReached: rawEOF)
+                }
+                let rawTerminalOwner = eventID == MPV_EVENT_END_FILE ? self.loadProvenance.activeToken : nil
+                let rawTerminalSeekEvidence = rawTerminalOwner.map {
+                    self.seekSettlement.evidence(owner: $0, seeking: nil, eofReached: nil)
                 }
                 #if os(tvOS)
                 let rawSeekCommandGeneration = self.seekSettlement.lastAcceptedCommandGeneration
@@ -4885,6 +4929,11 @@ final class MPVMetalViewController: PlatformViewController {
                                                self.seekEOFRecovery.current?.positionAfterSeek != nil {
                                                 DiagnosticsLog.log("playback", "resume seek observed position=\(value) target=\(receipt.target) generation=\(receipt.transportGeneration)")
                                             }
+                                            self.seekEOFRecovery.observeRecoveredProgress(
+                                                owner: loadToken, position: value,
+                                                now: ProcessInfo.processInfo.systemUptime,
+                                                settled: self.acceptsSettledPosition(rawSeekEvidence, owner: loadToken)
+                                            )
                                             self.completeSeekEOFRecovery(
                                                 loadToken: loadToken, position: value,
                                                 settlement: rawSeekEvidence
@@ -5062,10 +5111,23 @@ final class MPVMetalViewController: PlatformViewController {
                             let msg = String(cString: mpv_error_string(ef.error))
                             self.mpvLog.error("end-file error: \(msg, privacy: .public)")
                             VXProbe.event(self.probeChannel, "endfile error \(msg) code=\(ef.error)")
-                            self.emit(MPVProperty.endFileError, msg, loadToken: loadToken)
+                            DispatchQueue.main.async { [weak self] in
+                                guard let self, rawTerminalOwner == loadToken,
+                                      self.acceptsCurrentTerminalSeekEvent(rawTerminalSeekEvidence, owner: loadToken) else { return }
+                                if self.seekEOFRecovery.reloadIsInFlight(owner: loadToken) {
+                                    self.failSeekEOFRecovery(loadToken: loadToken,
+                                        reason: "reopen failed before seek restoration")
+                                } else if let exhaustion = self.seekEOFRecovery.exhaustion(owner: loadToken,
+                                    reason: "source failed again after its seek reopen") {
+                                    self.emit(MPVProperty.endFileError, exhaustion, loadToken: loadToken)
+                                } else {
+                                    self.emit(MPVProperty.endFileError, msg, loadToken: loadToken)
+                                }
+                            }
                         } else if ef.reason == MPV_END_FILE_REASON_EOF {
                             DispatchQueue.main.async { [weak self] in
-                                self?.handleEndFileEOF(loadToken: loadToken)
+                                guard let self, rawTerminalOwner == loadToken else { return }
+                                self.handleEndFileEOF(loadToken: loadToken, seekEvidence: rawTerminalSeekEvidence)
                             }
                         }
                     }

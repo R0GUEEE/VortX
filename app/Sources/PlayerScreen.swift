@@ -3591,6 +3591,8 @@ struct PlayerScreen: View {
             case .persistOutgoingCompletionOnly:
                 return
             }
+            if let exhaustion = data as? SeekEOFRecoveryExhaustion,
+               handleExhaustedSeekEOFRecovery(exhaustion, loadToken: loadToken) { return }
             #if os(iOS) || os(macOS)
             // ANY AVPlayer failure, pre-start (a Profile 7 / TrueHD-only DV remux, a container AVPlayer
             // can't open) or MID-PLAY, demotes to libmpv IN PLACE: flipping avEngineFailed swaps
@@ -3669,7 +3671,8 @@ struct PlayerScreen: View {
                 srcProbe("endFileError IGNORED (live stream owns its own reconnect) reason=\((data as? String) ?? "-")")
             }
         case MPVProperty.endFileEof:
-            if let loadToken, rejectPrematureEOFIfNeeded(loadToken: loadToken) { return }
+            if let loadToken, rejectPrematureEOFIfNeeded(loadToken: loadToken,
+                seekEOF: data as? SeekEOFRecoveryExhaustion) { return }
             let completionOnly: Bool
             switch terminalAction(for: loadToken, kind: .eof) {
             case .handleCommitted:
@@ -4704,14 +4707,19 @@ struct PlayerScreen: View {
 
     /// A known early EOF is a source failure, not permission to mark watched or advance. Live/trailer and
     /// unknown-duration semantics are left intact. Mirrors TVPlayerView's ownership-fenced path.
-    private func rejectPrematureEOFIfNeeded(loadToken: PlayerLoadToken) -> Bool {
+    private func rejectPrematureEOFIfNeeded(loadToken: PlayerLoadToken,
+                                            seekEOF: SeekEOFRecoveryExhaustion? = nil) -> Bool {
         guard loadToken == coordinator.player?.activeLoadToken else { return true }
-        switch completionEvidence.consumeEOF(owner: loadToken, isLive: effectivelyLive, isTrailer: isTrailer) {
+        switch completionEvidence.consumeEOF(owner: loadToken, isLive: effectivelyLive, isTrailer: isTrailer,
+                                             knownDurationFallback: seekEOF?.duration) {
         case .allowCompletion:
             return false
         case .ignore:
             return true
         case let .premature(position, duration):
+            if let seekEOF,
+               handleExhaustedSeekEOFRecovery(seekEOF, loadToken: loadToken,
+                                             resumeOverride: position) { return true }
             DiagnosticsLog.log("player", "premature EOF rejected position=\(position) duration=\(duration); retaining episode")
             switch terminalAction(for: loadToken, kind: .error) {
             case .handleCommitted:
@@ -4734,6 +4742,36 @@ struct PlayerScreen: View {
             }
             return true
         }
+    }
+
+    /// The engine has already reopened this exact seek once. Retain this episode and resume intent;
+    /// do not send the same failed region through the independent startup/mid-play retry ladder again.
+    private func handleExhaustedSeekEOFRecovery(_ exhaustion: SeekEOFRecoveryExhaustion,
+                                               loadToken: PlayerLoadToken?,
+                                               resumeOverride: Double? = nil) -> Bool {
+        guard let loadToken, loadToken == coordinator.player?.activeLoadToken else { return false }
+        guard case .handleCommitted = terminalAction(for: loadToken, kind: .error) else { return false }
+        let action = SeekEOFRecoveryContinuationPolicy.action(exhaustion: exhaustion,
+            live: effectivelyLive, trailer: isTrailer,
+            explicitPick: currentPickWasExplicit, resumedPlayback: currentPlaybackIsResume)
+        guard action != .ordinaryRecovery else { return false }
+        // A timeout retains requested transport intent, not a fabricated confirmed-position receipt.
+        let resume = resumeOverride.map { retryResumeTarget(confirmedPositionOverride: $0) }
+            ?? exhaustion.target
+        midPlayFailureOwner = loadToken
+        midPlayFailureResume = resume
+        hasStartedPlaying = false
+        autoRetryTask?.cancel(); autoRetryTask = nil
+        loadTimeout?.cancel(); loadTimeout = nil
+        recoveryDeadline?.cancel(); recoveryDeadline = nil
+        reconnecting = false
+        loadErrorMsg = "This source stopped near the seek position. Choose another source or retry."
+        DiagnosticsLog.log("player", "seek recovery exhausted; retaining episode and resume intent")
+        if action == .tryAlternateSource,
+           hopToNextSource(reason: "seek recovery exhausted", resumeOverride: resume) { return true }
+        (coordinator.player as? MPVMetalViewController)?.parkAfterExhaustedSeekEOF(exhaustion)
+        presentTerminalLoadFailure()
+        return true
     }
 
     /// Preserve the actual play head, reopen the existing bounded recovery ladder, and spend its separate
