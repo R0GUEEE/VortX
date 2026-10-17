@@ -1041,6 +1041,7 @@ require_grep "release feed commits retain Mamaclapper committer identity" \
 node --test "$REPO_ROOT/scripts/tests/release-resume-contract.test.mjs"
 node --test "$REPO_ROOT/scripts/tests/release-upload-provenance.test.mjs"
 node --test "$REPO_ROOT/scripts/tests/release-source-recovery-contract.test.mjs"
+node --test "$REPO_ROOT/scripts/tests/android-feed-055-alias.test.mjs"
 
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
     for wf in "$RELEASE_WF" "$VALIDATION_WF" "$ANDROID_CI_WF" "$APPLE_RELEASE_WF" "$RECOVERY_WF" "$ANDROID_AUGMENT_WF"; do
