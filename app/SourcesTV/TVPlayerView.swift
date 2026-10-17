@@ -8983,13 +8983,21 @@ struct TVPlayerView: View {
     }
 
     private func upNextButton(_ title: String, systemImage: String?, highlighted: Bool) -> some View {
+        playbackPromptButton(title, systemImage: systemImage, highlighted: highlighted,
+                             horizontalPadding: 24, verticalPadding: 13)
+    }
+
+    /// Shared rendering for the remote-driven playback prompts. Keep their intentional layout
+    /// differences at the callers; colour, typography, glass and focus treatment have one owner.
+    private func playbackPromptButton(_ title: String, systemImage: String?, highlighted: Bool,
+                                      horizontalPadding: CGFloat, verticalPadding: CGFloat) -> some View {
         HStack(spacing: 8) {
             if let img = systemImage { Image(systemName: img) }
             Text(title).lineLimit(1)
         }
         .font(.headline.weight(.semibold))
         .foregroundStyle(highlighted ? Theme.Palette.onAccent : Theme.Palette.textPrimary)
-        .padding(.horizontal, 24).padding(.vertical, 13)
+        .padding(.horizontal, horizontalPadding).padding(.vertical, verticalPadding)
         // Highlighted (Play Now / focused) stays a prominent solid-ember pill for 10-foot legibility;
         // the idle pill (Watch Credits) rides the warm glass. The opaque accent layer sits above the
         // glass so, when highlighted, it reads as solid ember rather than tinted glass.
@@ -11723,18 +11731,8 @@ struct TVPlayerView: View {
     }
 
     private func stillWatchingButton(_ title: String, systemImage: String?, highlighted: Bool) -> some View {
-        HStack(spacing: 8) {
-            if let img = systemImage { Image(systemName: img) }
-            Text(title).lineLimit(1)
-        }
-        .font(.headline.weight(.semibold))
-        .foregroundStyle(highlighted ? Theme.Palette.onAccent : Theme.Palette.textPrimary)
-        .padding(.horizontal, 28).padding(.vertical, 14)
-        .background { if highlighted { Capsule().fill(Theme.Palette.accent) } }
-        .vortxGlass(in: Capsule(), fillAlpha: VortXGlass.pillFillAlpha, shadow: .flat)
-        .overlay(Capsule().stroke(Theme.Palette.canvas, lineWidth: highlighted ? 3 : 0))
-        .scaleEffect(accessibilityReduceMotion ? 1.0 : (highlighted ? 1.06 : 1.0))
-        .fixedSize(horizontal: true, vertical: false)
+        playbackPromptButton(title, systemImage: systemImage, highlighted: highlighted,
+                             horizontalPadding: 28, verticalPadding: 14)
     }
 
     // MARK: - Remote-catcher accessibility bridge
