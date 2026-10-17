@@ -112,7 +112,8 @@ enum VortxNativeUnattributedOverlayArchive {
         }
         let retained = try merge(old, host[key], scope: scope)
         host[key] = try merge(retained, .object(added), scope: scope)
-        return try VortxNativeBootstrapArchive.encode(document: JSONEncoder().encode(VortxJSON.object(host)))
+        return try VortxNativeBootstrapArchive.replacingHostDocument(in: archive,
+            with: JSONEncoder().encode(VortxJSON.object(host)))
     }
 }
 
@@ -121,6 +122,137 @@ enum VortxNativeUnattributedOverlayArchive {
 enum VortxNativeWatchedArchive {
     static let evidenceKey = "nativeWatchedMigrationEvidence"
     static let pendingKey = "nativeWatchedMigrationPending"
+    static let sourcesKey = "nativeWatchedMigrationSources"
+    private static let maximumJournalBytes = 32 * 1_024 * 1_024
+    // A compact file bounds disk bytes, not replay work. Preflight both journals before any
+    // receipt expansion/replay. This separate processing budget admits the 24+24 regression
+    // while refusing source-reference amplification without discarding recovery evidence.
+    private static let maximumExpandedJournalBytes = 96 * 1_024 * 1_024
+    private static let maximumEntries = 10_000
+
+    /// Version-1 inline receipts remain readable. Version-2 entries omit only the repeated
+    /// source field, whose exact bytes are held once by SHA-256. The migration API still sees
+    /// the original version-1 bytes and performs its complete source/UID/metadata validation.
+    /// Noncanonical older receipt spellings remain inline rather than being rewritten.
+    private struct Journal: Sendable {
+        var host: [String: VortxJSON] = [:]
+        var sources: [String: String] = [:]
+        var expandedByteCount = 0
+
+        init(_ archive: Data?) throws {
+            guard let archive else { return }
+            try VortxNativeBootstrapArchive.validate(archive)
+            host = try JSONDecoder().decode(VortxJSON.self, from: archive)["hostDocument"]!.decode([String: VortxJSON].self)
+            if let field = host[sourcesKey] {
+                let journal = host.filter { [evidenceKey, pendingKey, sourcesKey].contains($0.key) }
+                guard try JSONEncoder().encode(VortxJSON.object(journal)).count <= maximumJournalBytes else { throw Failure.malformed }
+                guard case .object(let values) = field, values.count <= 2 * maximumEntries else { throw Failure.malformed }
+                for (digest, value) in values {
+                    guard digest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+                          case .string(let raw) = value, let bytes = Data(base64Encoded: raw),
+                          bytes.count <= maximumJournalBytes, bytes.base64EncodedString() == raw,
+                          sha256(bytes) == digest else { throw Failure.malformed }
+                    sources[digest] = raw
+                }
+            }
+            var used = Set<String>()
+            for key in [evidenceKey, pendingKey] {
+                for entry in try records(key) {
+                    if case .object(let fields) = entry {
+                        guard Set(fields.keys) == ["schemaVersion", "sourceDocumentSha256", "receiptBase64"],
+                              fields["schemaVersion"] == .integer(2),
+                              case .string(let digest) = fields["sourceDocumentSha256"], sources[digest] != nil,
+                              case .string = fields["receiptBase64"] else { throw Failure.malformed }
+                        used.insert(digest)
+                    } else if case .string = entry {} else { throw Failure.malformed }
+                }
+            }
+            // Unreferenced sources are not silently removed on the next retention pass.
+            guard used == Set(sources.keys) else { throw Failure.malformed }
+            var remaining = maximumExpandedJournalBytes
+            for key in [evidenceKey, pendingKey] {
+                for entry in try records(key) {
+                    let size = try expandedSize(entry)
+                    guard size <= remaining else { throw Failure.processingLimit }
+                    remaining -= size
+                }
+            }
+            expandedByteCount = maximumExpandedJournalBytes - remaining
+        }
+
+        func records(_ key: String) throws -> [VortxJSON] {
+            guard [evidenceKey, pendingKey].contains(key) else { throw Failure.malformed }
+            guard let value = host[key] else { return [] }
+            guard let records = value.array, records.count <= maximumEntries else { throw Failure.malformed }
+            return records
+        }
+
+        func fields(_ entry: VortxJSON) throws -> [String: Any] {
+            let raw: String
+            switch entry {
+            case .string(let inline): raw = inline
+            case .object(let compact):
+                guard case .string(let encoded) = compact["receiptBase64"] else { throw Failure.malformed }
+                raw = encoded
+            default: throw Failure.malformed
+            }
+            guard let bytes = Data(base64Encoded: raw), bytes.base64EncodedString() == raw else { throw Failure.malformed }
+            let fields = try VortxProfileOverlayWitness.decodeObject(json: bytes)
+            if case .object(let compact) = entry {
+                guard fields["sourceDocumentBase64"] == nil,
+                      let digest = fields["sourceDocumentSha256"] as? String,
+                      compact["sourceDocumentSha256"] == .string(digest), sources[digest] != nil else { throw Failure.malformed }
+            }
+            return fields
+        }
+
+        func expandedSize(_ entry: VortxJSON) throws -> Int {
+            if case .string(let raw) = entry {
+                guard let bytes = Data(base64Encoded: raw), bytes.base64EncodedString() == raw else { throw Failure.malformed }
+                return bytes.count
+            }
+            let object = try fields(entry)
+            guard let digest = object["sourceDocumentSha256"] as? String, let source = sources[digest] else { throw Failure.malformed }
+            // Base64 needs no JSON escaping with withoutEscapingSlashes. The object is nonempty
+            // (it contains the source digest), so adding one field adds exactly one comma.
+            let header = try canonical(object).count
+            let overhead = Data(",\"sourceDocumentBase64\":\"\"".utf8).count
+            let (withSource, overflow) = header.addingReportingOverflow(source.utf8.count)
+            let (total, overheadOverflow) = withSource.addingReportingOverflow(overhead)
+            guard !overflow, !overheadOverflow else { throw Failure.processingLimit }
+            return total
+        }
+
+        func expanded(_ entry: VortxJSON) throws -> Data {
+            if case .string(let inline) = entry {
+                guard let bytes = Data(base64Encoded: inline), bytes.base64EncodedString() == inline else { throw Failure.malformed }
+                return bytes
+            }
+            var object = try fields(entry)
+            guard let digest = object["sourceDocumentSha256"] as? String, let source = sources[digest] else { throw Failure.malformed }
+            object["sourceDocumentBase64"] = source
+            return try canonical(object)
+        }
+    }
+
+    private static func canonical(_ object: [String: Any]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+    private static func sha256(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+    private static func compact(_ bytes: Data, sources: inout [String: String]) throws -> VortxJSON {
+        var object = try VortxProfileOverlayWitness.decodeObject(json: bytes)
+        guard let raw = object["sourceDocumentBase64"] as? String, let source = Data(base64Encoded: raw),
+              source.base64EncodedString() == raw, let digest = object["sourceDocumentSha256"] as? String,
+              sha256(source) == digest else { throw Failure.malformed }
+        guard try canonical(object) == bytes else { return .string(bytes.base64EncodedString()) }
+        guard sources[digest] == nil || sources[digest] == raw else { throw Failure.malformed }
+        sources[digest] = raw
+        object.removeValue(forKey: "sourceDocumentBase64")
+        return .object(["schemaVersion": .integer(2), "sourceDocumentSha256": .string(digest),
+                        "receiptBase64": .string(try canonical(object).base64EncodedString())])
+    }
     /// Resolve historical pending snapshots in their original scope, even if the current cloud
     /// document changed or removed the row. No validated import rows escape this operation.
     /// The caller commits the returned immutable union under its captured source authority.
@@ -129,73 +261,149 @@ enum VortxNativeWatchedArchive {
                                 fetch: LegacyWatchedBitfieldMigrationEvidence.MetadataFetcher) async throws -> Data? {
         guard let archive else { return nil }
         try validate(archive, scope: scope)
-        let pending = try entries(archive, key: pendingKey)
+        let journal = try Journal(archive)
+        let pending = try journal.records(pendingKey)
         guard !pending.isEmpty, let owner = UUID(uuidString: scope.ownerProfileID) else { return archive }
-        let retried = try await VortxLegacyWatchedMigration.retryArchivedPending(pending,
-            accountID: scope.account, ownerProfileID: owner,
-            archivedEvidence: entries(archive, key: evidenceKey), isCurrent: isCurrent, fetch: fetch)
-        // Never replace pending with unresolved: every original raw snapshot remains recoverable.
-        return try retaining(archive, evidence: retried.archives, pending: retried.unresolved, scope: scope)
+        let indexed = try evidenceIndex(journal)
+        var sources = journal.sources
+        var added: [String: VortxJSON] = [:]
+        var remaining = maximumExpandedJournalBytes - journal.expandedByteCount
+        var seen = Set<String>()
+        for record in pending {
+            try Task.checkCancellation()
+            guard isCurrent() else { throw LegacyWatchedBitfieldMigrationEvidence.Failure.admissionRevoked }
+            let bytes = try journal.expanded(record)
+            guard seen.insert(sha256(bytes)).inserted else { continue }
+            let matching = indexed[try identity(journal.fields(record))] ?? []
+            guard matching.count <= 1 else { throw Failure.malformed }
+            // Only one pending tuple and its matching evidence are expanded at a time. Each
+            // captured result is compacted immediately; old pending bytes stay in the journal.
+            let retried = try await VortxLegacyWatchedMigration.retryArchivedPending([bytes],
+                accountID: scope.account, ownerProfileID: owner,
+                archivedEvidence: matching.map(journal.expanded), isCurrent: isCurrent, fetch: fetch)
+            if matching.isEmpty {
+                for receipt in retried.archives {
+                    let digest = sha256(receipt)
+                    guard added[digest] == nil else { continue }
+                    // Newly fetched metadata also consumes the aggregate work budget. Check
+                    // before accumulating it; a failed retry leaves the original archive intact.
+                    guard receipt.count <= remaining else { throw Failure.processingLimit }
+                    remaining -= receipt.count
+                    added[digest] = try compact(receipt, sources: &sources)
+                }
+            }
+        }
+        try Task.checkCancellation()
+        guard isCurrent() else { throw LegacyWatchedBitfieldMigrationEvidence.Failure.admissionRevoked }
+        guard !added.isEmpty else { return archive }
+        var host = journal.host
+        host[evidenceKey] = .array(try journal.records(evidenceKey) + added.keys.sorted().map { added[$0]! })
+        host[sourcesKey] = .object(sources.mapValues(VortxJSON.string))
+        let candidate = try VortxNativeBootstrapArchive.replacingHostDocument(in: archive,
+            with: JSONEncoder().encode(VortxJSON.object(host)))
+        return try retaining(candidate, prior: archive, scope: scope)
     }
     enum Failure: LocalizedError, Equatable {
-        case pending, malformed
+        case pending, malformed, processingLimit
         var errorDescription: String? {
             switch self {
             case .pending: return "Watched history is preserved, but episode metadata from an original addon is unavailable. Retry watched-history migration before completing this account connection."
             case .malformed: return "The saved watched-history migration evidence could not be verified. No history was replaced."
+            case .processingLimit: return "Watched-history recovery exceeds this version's processing limit. Your original history is preserved. Keep this account data and contact support or update the app before trying recovery again."
             }
         }
     }
-    static func pendingProfileIDs(_ archive: Data?) throws -> [UUID] {
-        func identity(_ bytes: Data) throws -> VortxJSON {
-            let value = try JSONDecoder().decode(VortxJSON.self, from: bytes)
-            return .array([value["accountId"] ?? .null, value["ownerProfileId"] ?? .null,
-                value["profileId"] ?? .null, value["verifiedStreamingUid"] ?? .null,
-                value["sourceDocumentSha256"] ?? .null, value["row"] ?? .null])
+    private static func identity(_ value: [String: Any]) throws -> Data {
+        var fields = Dictionary(uniqueKeysWithValues: ["accountId", "ownerProfileId", "profileId",
+            "verifiedStreamingUid", "sourceDocumentSha256", "row"].map { ($0, value[$0] ?? NSNull()) })
+        for key in ["ownerProfileId", "profileId"] {
+            if let raw = fields[key] as? String, let id = UUID(uuidString: raw) { fields[key] = id.uuidString }
         }
-        let completed = try entries(archive, key: evidenceKey).map(identity)
+        return try canonical(fields)
+    }
+    private static func evidenceIndex(_ journal: Journal) throws -> [Data: [VortxJSON]] {
+        var index: [Data: [VortxJSON]] = [:]
+        for entry in try journal.records(evidenceKey) {
+            index[try identity(journal.fields(entry)), default: []].append(entry)
+        }
+        return index
+    }
+    /// Current preparation only expands the receipt for its exact current tuple. Historical
+    /// evidence remains in the sealed journal and cannot inflate an eager input array.
+    static func evidenceLookup(_ archive: Data?, scope: VortxAccountScope) throws -> VortxLegacyWatchedMigration.ArchivedEvidenceLookup {
+        try validate(archive, scope: scope)
+        let journal = try Journal(archive)
+        let index = try evidenceIndex(journal)
+        return { requested, digest, locator in
+            guard Data(requested.accountID.utf8) == Data(scope.account.utf8),
+                  requested.ownerProfileID == UUID(uuidString: scope.ownerProfileID) else { throw Failure.malformed }
+            let key = try identity(["accountId": requested.accountID, "ownerProfileId": requested.ownerProfileID.uuidString,
+                "profileId": requested.profileID.uuidString, "verifiedStreamingUid": requested.verifiedStreamingUID as Any? ?? NSNull(),
+                "sourceDocumentSha256": digest, "row": VortxLegacyWatchedMigration.encodeLocator(locator)])
+            let matching = index[key] ?? []
+            guard matching.count <= 1 else { throw Failure.malformed }
+            return try matching.map(journal.expanded)
+        }
+    }
+    static func pendingProfileIDs(_ archive: Data?) throws -> [UUID] {
+        let journal = try Journal(archive)
+        let completed = try Set(journal.records(evidenceKey).map { try identity(journal.fields($0)) })
         var ids = Set<UUID>()
-        for bytes in try entries(archive, key: pendingKey) where !completed.contains(try identity(bytes)) {
-            let value = try JSONDecoder().decode(VortxJSON.self, from: bytes)
-            guard case .string(let id) = value["profileId"], let profile = UUID(uuidString: id) else { throw Failure.malformed }
+        for entry in try journal.records(pendingKey) {
+            let value = try journal.fields(entry)
+            guard !completed.contains(try identity(value)) else { continue }
+            guard let id = value["profileId"] as? String, let profile = UUID(uuidString: id) else { throw Failure.malformed }
             ids.insert(profile)
         }
         return ids.sorted { $0.uuidString < $1.uuidString }
     }
 
     static func entries(_ archive: Data?, key: String) throws -> [Data] {
-        guard let archive else { return [] }
-        try VortxNativeBootstrapArchive.validate(archive)
-        let value = try JSONDecoder().decode(VortxJSON.self, from: archive)
-        guard let field = value["hostDocument"]?[key] else { return [] }
-        guard let entries = field.array, entries.count <= 10_000 else { throw Failure.malformed }
-        return try entries.map {
-            guard case .string(let raw) = $0, let bytes = Data(base64Encoded: raw),
-                  bytes.base64EncodedString() == raw else { throw Failure.malformed }
-            return bytes
-        }
+        let journal = try Journal(archive)
+        return try journal.records(key).map(journal.expanded)
     }
     static func validate(_ archive: Data?, scope: VortxAccountScope) throws {
         guard let owner = UUID(uuidString: scope.ownerProfileID) else { throw Failure.malformed }
-        for bytes in try entries(archive, key: evidenceKey) {
-            try VortxLegacyWatchedMigration.validateArchivedEvidence(bytes, accountID: scope.account, ownerProfileID: owner)
+        let journal = try Journal(archive)
+        // Expand one receipt at a time during checkpoint validation. A compact on-disk journal
+        // must not require allocating its entire source-per-row representation just to open it.
+        for entry in try journal.records(evidenceKey) {
+            try VortxLegacyWatchedMigration.validateArchivedEvidence(journal.expanded(entry), accountID: scope.account, ownerProfileID: owner)
         }
-        for bytes in try entries(archive, key: pendingKey) {
-            try VortxLegacyWatchedMigration.validateArchivedPending(bytes, accountID: scope.account, ownerProfileID: owner)
+        for entry in try journal.records(pendingKey) {
+            try VortxLegacyWatchedMigration.validateArchivedPending(journal.expanded(entry), accountID: scope.account, ownerProfileID: owner)
         }
     }
     static func retaining(_ archive: Data, prior: Data? = nil, evidence: [Data] = [], pending: [Data] = [],
                           scope: VortxAccountScope) throws -> Data {
         try validate(prior, scope: scope)
         try validate(archive, scope: scope)
-        var root = try JSONDecoder().decode(VortxJSON.self, from: archive)["hostDocument"]?.decode([String: VortxJSON].self) ?? [:]
+        let journals = try [Journal(prior), Journal(archive)]
+        var root = journals[1].host
+        var sources: [String: String] = [:]
         for (key, added) in [(evidenceKey, evidence), (pendingKey, pending)] {
-            let combined = try entries(prior, key: key) + entries(archive, key: key) + added
-            let unique = Set(combined).sorted { $0.lexicographicallyPrecedes($1) }
-            guard unique.count <= 10_000, unique.reduce(0, { $0 + $1.count }) <= 32 * 1_024 * 1_024 else { throw Failure.malformed }
-            if !unique.isEmpty { root[key] = .array(unique.map { .string($0.base64EncodedString()) }) }
+            var unique: [String: VortxJSON] = [:]
+            func retain(_ bytes: Data) throws {
+                let digest = sha256(bytes)
+                let record = try compact(bytes, sources: &sources)
+                guard unique[digest] == nil || unique[digest] == record else { throw Failure.malformed }
+                unique[digest] = record
+                guard unique.count <= maximumEntries else { throw Failure.malformed }
+            }
+            for journal in journals {
+                for entry in try journal.records(key) { try retain(journal.expanded(entry)) }
+            }
+            for bytes in added { try retain(bytes) }
+            if !unique.isEmpty { root[key] = .array(unique.keys.sorted().map { unique[$0]! }) }
         }
-        let result = try VortxNativeBootstrapArchive.encode(document: JSONEncoder().encode(VortxJSON.object(root)))
+        if sources.isEmpty { root.removeValue(forKey: sourcesKey) }
+        else { root[sourcesKey] = .object(sources.mapValues(VortxJSON.string)) }
+        let journal = root.filter { [evidenceKey, pendingKey, sourcesKey].contains($0.key) }
+        guard try JSONEncoder().encode(VortxJSON.object(journal)).count <= maximumJournalBytes else { throw Failure.malformed }
+        // Retention only changes the journal. Preserve the enclosing material, original-source
+        // archive and exclusion receipt instead of rebuilding an empty bootstrap envelope.
+        let result = try VortxNativeBootstrapArchive.replacingHostDocument(in: archive,
+            with: JSONEncoder().encode(VortxJSON.object(root)))
         try validate(result, scope: scope)
         return result
     }

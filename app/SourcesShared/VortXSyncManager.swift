@@ -1244,7 +1244,7 @@ final class VortXSyncManager: ObservableObject {
             document: documentBytes, profileIDs: roster.profiles.filter {
                 $0.isOwner || origins[$0.id] == .shared || (origins[$0.id] == nil && !$0.usesOwnAccount)
             }.map(\.id),
-            ownAccountSources: sources, archivedEvidence: VortxNativeWatchedArchive.entries(watchedArchive, key: VortxNativeWatchedArchive.evidenceKey),
+            ownAccountSources: sources, archivedEvidenceLookup: VortxNativeWatchedArchive.evidenceLookup(watchedArchive, scope: scope),
             isCurrent: { (try? authority.withActive {}) != nil }, fetch: { try await VortxLegacyWatchedMetadataTransport.fetch($0) })
         try authority.withActive {}
         let unattributedIDs = Set(pendingOverlays.compactMap { key, value in value["verifiedStreamingUid"] == nil ? UUID(uuidString: key) : nil })

@@ -7,6 +7,7 @@ import CryptoKit
 enum VortxLegacyWatchedMigration {
     typealias Evidence = LegacyWatchedBitfieldMigrationEvidence
     typealias Object = [String: Any]
+    typealias ArchivedEvidenceLookup = @Sendable (Evidence.Scope, String, Evidence.SourceRowLocator) throws -> [Data]
 
     enum Failure: Error, Equatable { case malformedArchive, staleBinding, ambiguousInventory }
 
@@ -89,7 +90,8 @@ enum VortxLegacyWatchedMigration {
     /// through their independently authenticated envelope; retained own slots need no reimport.
     static func prepare(accountID: String, ownerProfileID: UUID, document: Data,
                         profileIDs: [UUID], ownAccountSources: [VortxLegacyBootstrapMaterial.OwnAccountSource] = [],
-                        archivedEvidence: [Data] = [], isCurrent: @escaping @Sendable () -> Bool,
+                        archivedEvidence: [Data] = [], archivedEvidenceLookup: ArchivedEvidenceLookup? = nil,
+                        isCurrent: @escaping @Sendable () -> Bool,
                         fetch: Evidence.MetadataFetcher) async throws -> Preparation {
         try Task.checkCancellation()
         guard isCurrent() else { throw Evidence.Failure.admissionRevoked }
@@ -137,6 +139,7 @@ enum VortxLegacyWatchedMigration {
             }
         }
         guard candidates.count <= 10_000, archivedEvidence.count <= 10_000 else { throw Failure.malformedArchive }
+        guard archivedEvidence.isEmpty || archivedEvidenceLookup == nil else { throw Failure.malformedArchive }
         var rows = [ValidatedRow](), archives = [Data](), pending = [Pending]()
         // Invalid sidecars are not converted to network misses: a corrupt authenticated archive
         // must remain a visible reconciliation failure. Unrelated retained source tuples are okay.
@@ -149,11 +152,17 @@ enum VortxLegacyWatchedMigration {
             guard isCurrent() else { throw Evidence.Failure.admissionRevoked }
             try Evidence.validateSource(scope: candidate.scope, source: candidate.source, rowLocator: candidate.locator)
             let digest = sha256(candidate.source)
-            let matches = retained.filter { sameScope($0.scope, candidate.scope)
-                && exact($0.sourceSHA256, digest) && $0.locator == candidate.locator }
+            let matches: [Archive]
+            if let archivedEvidenceLookup {
+                matches = try archivedEvidenceLookup(candidate.scope, digest, candidate.locator).map(decodeArchive)
+            } else {
+                matches = retained.filter { sameScope($0.scope, candidate.scope)
+                    && exact($0.sourceSHA256, digest) && $0.locator == candidate.locator }
+            }
             guard matches.count <= 1 else { throw Failure.malformedArchive }
             if let archive = matches.first {
-                guard sameScope(archive.scope, candidate.scope), archive.source == candidate.source else { throw Failure.staleBinding }
+                guard sameScope(archive.scope, candidate.scope), archive.source == candidate.source,
+                      exact(archive.sourceSHA256, digest), archive.locator == candidate.locator else { throw Failure.staleBinding }
                 let replayed = try Evidence.replay(scope: candidate.scope, source: candidate.source,
                     rowLocator: candidate.locator, addon: archive.addon, metadata: archive.metadata, isCurrent: isCurrent)
                 try Task.checkCancellation()
@@ -388,7 +397,7 @@ enum VortxLegacyWatchedMigration {
                        locator: locator, addon: descriptor, metadata: metadata)
     }
 
-    private static func encodeLocator(_ row: Evidence.SourceRowLocator) -> Object {
+    static func encodeLocator(_ row: Evidence.SourceRowLocator) -> Object {
         switch row {
         case .authenticatedOwnerLibrary(let index): return ["kind": "owner_library", "index": index]
         case .authenticatedLegacyRootLibrary(let index): return ["kind": "legacy_root_library", "index": index]

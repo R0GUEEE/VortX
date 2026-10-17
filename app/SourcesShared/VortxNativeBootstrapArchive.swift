@@ -39,6 +39,18 @@ enum VortxNativeBootstrapArchive {
         }
         return try JSONSerialization.data(withJSONObject: archive, options: [.sortedKeys, .withoutEscapingSlashes])
     }
+    /// Updating a device-local journal must not discard the rest of its recovery envelope or
+    /// sanitize new credentials into apparently valid evidence. Both old and updated envelopes
+    /// pass the complete inspector; the other envelope fields retain their original values.
+    static func replacingHostDocument(in archive: Data, with document: Data) throws -> Data {
+        try validate(archive)
+        guard var envelope = try JSONSerialization.jsonObject(with: archive) as? [String: Any],
+              let host = try JSONSerialization.jsonObject(with: document) as? [String: Any] else { throw Failure.malformed }
+        envelope["hostDocument"] = host
+        let result = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys, .withoutEscapingSlashes])
+        try validate(result)
+        return result
+    }
     static func validate(_ archive: Data) throws {
         guard let object = try JSONSerialization.jsonObject(with: archive) as? [String: Any],
               object["schemaVersion"] as? Int == 1, let host = object["hostDocument"] as? [String: Any],
@@ -298,7 +310,7 @@ enum VortxLegacyMembershipReceiptArchive {
         let existing = try host[key].map { try canonical($0) }
         let merged = try merging(existing, with: canonical(incoming), scope: scope, ownerProfileID: ownerProfileID)
         if let merged { host[key] = try JSONSerialization.jsonObject(with: merged) }
-        return try VortxNativeBootstrapArchive.encode(document: canonical(host))
+        return try VortxNativeBootstrapArchive.replacingHostDocument(in: archive, with: canonical(host))
     }
 
     static func merging(_ prior: Data?, with incoming: Data?, scope: String,

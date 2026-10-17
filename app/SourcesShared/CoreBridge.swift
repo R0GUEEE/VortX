@@ -635,7 +635,7 @@ final class CoreBridge: ObservableObject {
         try authority.withActive {}
         let watched = try await VortxLegacyWatchedMigration.prepare(accountID: capture.namespace, ownerProfileID: owner.id,
             document: consumedOverlay, profileIDs: [owner.id], ownAccountSources: [source],
-            archivedEvidence: VortxNativeWatchedArchive.entries(previousArchive, key: VortxNativeWatchedArchive.evidenceKey),
+            archivedEvidenceLookup: VortxNativeWatchedArchive.evidenceLookup(previousArchive, scope: scope),
             isCurrent: { (try? authority.withActive {}) != nil }, fetch: { try await VortxLegacyWatchedMetadataTransport.fetch($0) })
         try authority.withActive {}
         if !watched.unresolved.isEmpty {
