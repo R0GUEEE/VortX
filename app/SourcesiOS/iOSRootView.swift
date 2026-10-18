@@ -212,6 +212,7 @@ struct iOSRootView: View {
             #endif
         }
         .environment(\.cinemaQuickViewPresenter, quickViewPresenter)
+        .vortxNativeNavigationAppearance()
         .allowsHitTesting(quickViewPresenter.presentation == nil)
         .accessibilityHidden(quickViewPresenter.presentation != nil)
         .overlay { CinemaQuickViewOverlay(presenter: quickViewPresenter) }
@@ -1599,11 +1600,15 @@ struct iOSHomeView: View {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Button(action: onBrowse) {
                             Label("Discover", systemImage: "safari")
-                                .labelStyle(.iconOnly)
-                                .font(.system(size: 17, weight: .semibold))
+                                .labelStyle(.titleAndIcon)
+                                .font(.body.weight(.semibold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                                .fixedSize(horizontal: false, vertical: true)
                                 .foregroundStyle(Theme.Palette.textPrimary)
-                                .frame(width: 44, height: 44)
-                                .vortxGlassControl(in: Circle(), shadow: .disc)
+                                .padding(.horizontal, Theme.Space.sm)
+                                .frame(minWidth: 44, minHeight: 44)
+                                .vortxGlassControl(in: Capsule(), shadow: .disc)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Discover")
@@ -6449,30 +6454,10 @@ extension View {
             // `.toolbarBackground` only accepts a ShapeStyle, so the glass tint goes on via the same
             // UIKit appearance-proxy idiom RootTabView already uses for the tvOS tab bar.
             .toolbarBackground(.visible, for: .navigationBar)
-            .onAppear { Self.applyVortXNavBarAppearance() }
         #else
         self
         #endif
     }
-
-    #if os(iOS)
-    /// Tint the system nav bar's own blur with `VortXGlass.toolbarAppearance()`'s SAME warm fill /
-    /// Reduce-Transparency fallback, via the global `UINavigationBar.appearance()` proxy (mirrors the
-    /// `UITabBar.appearance()` proxy RootTabView already uses for the tvOS tab bar). `UIToolbarAppearance`
-    /// and `UINavigationBarAppearance` both derive from `UIBarAppearance`, so its `backgroundEffect` /
-    /// `backgroundColor` carry over directly: ONE glass source of truth for both bar kinds. Idempotent
-    /// property assignment, safe to call from every `onAppear`.
-    fileprivate static func applyVortXNavBarAppearance() {
-        let toolbar = VortXGlass.toolbarAppearance()
-        let nav = UINavigationBarAppearance()
-        nav.backgroundEffect = toolbar.backgroundEffect
-        nav.backgroundColor = toolbar.backgroundColor
-        nav.shadowColor = .clear
-        UINavigationBar.appearance().standardAppearance = nav
-        UINavigationBar.appearance().scrollEdgeAppearance = nav
-        UINavigationBar.appearance().compactAppearance = nav
-    }
-    #endif
 
     /// A scroll/drag on a browse screen quiets the ambient hero rotation; the model resumes it after a
     /// spell of inactivity (#53). Implemented as a non-blocking `simultaneousGesture` so it observes

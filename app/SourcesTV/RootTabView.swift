@@ -267,6 +267,7 @@ struct RootTabView: View {
     let launchReady: Bool
 
     @Environment(\.scenePhase) private var scenePhase
+    @GlassEligibility private var glassEnabled
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var theme: ThemeManager
     @ObservedObject private var updates = UpdateChecker.shared
@@ -504,6 +505,10 @@ struct RootTabView: View {
         .onChange(of: hideSearchTab) { _, hidden in
             if hidden, selection == 4 { selection = 0 }
         }
+        // The mounted native bar does not rebuild with SwiftUI material changes. Refresh only its
+        // appearance when glass, Performance Auto or system transparency changes effective eligibility.
+        // This does not change selection/reset tokens or capture account/profile/theme preferences.
+        .onChange(of: glassEnabled) { _, _ in applyTabBarAccent() }
         // The active profile owns the theme: mirror Settings changes into it so they survive a switch.
         .onChange(of: theme.accentID) { applyTabBarAccent(); ProfileStore.shared.captureTheme() }
         .onChange(of: theme.oled) { applyTabBarAccent(); ProfileStore.shared.captureTheme() }
@@ -590,6 +595,8 @@ struct RootTabView: View {
     }
 
     private func applyTabBarAccent() {
+        // One observation drives both the background and every live bar's shadow in this pass.
+        let useGlass = glassEnabled
         let item = UITabBarItemAppearance()
         item.normal.titleTextAttributes = [.foregroundColor: UIColor(Theme.Palette.textSecondary)]
         item.normal.iconColor = UIColor(Theme.Palette.textSecondary)
@@ -600,7 +607,7 @@ struct RootTabView: View {
         let appearance = UITabBarAppearance()
         // Warm liquid-glass top nav (redesign Phase A): keep the system's blurred bar and give it the REAL
         // VortX glass treatment, so the tvOS top nav reads as VortX glass and matches the Mac / iOS chrome.
-        // Under Reduce Transparency, stand down to an opaque warm surface for legibility. RE-SKIN ONLY: this
+        // When glass is ineligible, stand down to an opaque warm surface for legibility. RE-SKIN ONLY: this
         // changes the bar's BACKGROUND appearance; the native TabView, its focus engine, tab tags/order, and
         // the ember selection indicator below are all untouched.
         //
@@ -614,7 +621,7 @@ struct RootTabView: View {
         // a SwiftUI material), over the system blur that `configureWithDefaultBackground` supplies, so content
         // scrolling behind the bar is still sampled. The drop shadow is applied per-bar in `retintTabBars`,
         // where the real `UITabBar` layer is in hand.
-        if UIAccessibility.isReduceTransparencyEnabled {
+        if !useGlass {
             appearance.configureWithOpaqueBackground()
             appearance.backgroundColor = UIColor(Theme.Palette.surface1)
         } else {
@@ -628,20 +635,23 @@ struct RootTabView: View {
         UITabBar.appearance().standardAppearance = appearance
         UITabBar.appearance().scrollEdgeAppearance = appearance
         for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
-            for window in scene.windows { retintTabBars(under: window.rootViewController, with: appearance) }
+            for window in scene.windows {
+                retintTabBars(under: window.rootViewController, with: appearance, glassEnabled: useGlass)
+            }
         }
     }
 
-    private func retintTabBars(under controller: UIViewController?, with appearance: UITabBarAppearance) {
+    private func retintTabBars(under controller: UIViewController?, with appearance: UITabBarAppearance,
+                               glassEnabled: Bool) {
         guard let controller else { return }
         if let tabs = controller as? UITabBarController {
             tabs.tabBar.standardAppearance = appearance
             tabs.tabBar.scrollEdgeAppearance = appearance
-            applyTabBarShadow(to: tabs.tabBar)
+            applyTabBarShadow(to: tabs.tabBar, glassEnabled: glassEnabled)
             tabs.tabBar.setNeedsLayout()
         }
-        controller.children.forEach { retintTabBars(under: $0, with: appearance) }
-        retintTabBars(under: controller.presentedViewController, with: appearance)
+        controller.children.forEach { retintTabBars(under: $0, with: appearance, glassEnabled: glassEnabled) }
+        retintTabBars(under: controller.presentedViewController, with: appearance, glassEnabled: glassEnabled)
     }
 
     /// Float the tvOS tab bar on the SAME drop shadow every other VortX glass surface casts.
@@ -655,10 +665,10 @@ struct RootTabView: View {
     /// `shadowPath` is deliberately left nil: Core Animation then derives the shadow from the layer's
     /// composited alpha, which means it follows the bar's actual ROUNDED floating platter instead of the
     /// square bounds a hand-built path would give. One bar, once per appearance pass, so the cost of the
-    /// alpha-derived shadow is irrelevant here. Skipped under Reduce Transparency, where the bar stands down
+    /// alpha-derived shadow is irrelevant here. Skipped whenever glass is ineligible, where the bar stands down
     /// to a flat opaque surface and a float shadow would be off-message.
-    private func applyTabBarShadow(to tabBar: UITabBar) {
-        guard !UIAccessibility.isReduceTransparencyEnabled else {
+    private func applyTabBarShadow(to tabBar: UITabBar, glassEnabled: Bool) {
+        guard glassEnabled else {
             tabBar.layer.shadowOpacity = 0
             return
         }

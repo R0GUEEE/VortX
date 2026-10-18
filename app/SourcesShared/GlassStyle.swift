@@ -311,6 +311,7 @@ enum VortXGlass {
     /// system-white focused pill: neutralize the tvOS default, then let the VortX surface show. Every VortX
     /// field background is preserved exactly as authored, so this reveals the design system rather than
     /// changing it.
+    @MainActor
     static func applyTextFieldAppearance() {
         UITextField.appearance().backgroundColor = .clear
         UITextField.appearance().borderStyle = .none
@@ -322,9 +323,11 @@ enum VortXGlass {
     /// the iOS top nav bar / toolbar reads as VortX glass and matches the bottom tab bar. Under Reduce
     /// Transparency it stands down to an opaque warm `surface1` surface for legibility. Re-skin only: the
     /// caller keeps its bar's items, tint, and behavior; this only supplies the background material.
-    static func toolbarAppearance() -> UIToolbarAppearance {
+    @MainActor
+    static func toolbarAppearance(glassEnabled: Bool? = nil) -> UIToolbarAppearance {
         let appearance = UIToolbarAppearance()
-        if UIAccessibility.isReduceTransparencyEnabled {
+        let useGlass = glassEnabled ?? (!UIAccessibility.isReduceTransparencyEnabled && VisualEffects.glassEnabled)
+        if !useGlass {
             appearance.configureWithOpaqueBackground()
             appearance.backgroundColor = UIColor(Theme.Palette.surface1)
         } else {
@@ -333,7 +336,129 @@ enum VortXGlass {
         }
         return appearance
     }
+
+    /// The same material/color recipe as the toolbar, preserving the existing navigation shadow rule.
+    /// `glassEnabled` is resolved by the observed eligibility owner, not a second stored preference.
+    @MainActor
+    static func navigationBarAppearance(glassEnabled: Bool) -> UINavigationBarAppearance {
+        let toolbar = toolbarAppearance(glassEnabled: glassEnabled)
+        let appearance = UINavigationBarAppearance()
+        appearance.backgroundEffect = toolbar.backgroundEffect
+        appearance.backgroundColor = toolbar.backgroundColor
+        appearance.shadowColor = .clear
+        return appearance
+    }
     #endif
+}
+
+#if os(iOS)
+/// One shell-owned bridge refreshes current native bars as well as future bars' appearance proxy.
+/// It does not replace navigation stacks, routes, selection, profile state or player overlays.
+@MainActor
+private struct VortXNativeNavigationAppearanceModifier: ViewModifier {
+    @EnvironmentObject private var theme: ThemeManager
+    @GlassEligibility private var glassEnabled
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    func body(content: Content) -> some View {
+        content.background {
+            VortXNavigationBarAppearanceBridge(
+                glassEnabled: glassEnabled && contrast != .increased,
+                accentID: theme.accentID, oled: theme.oled)
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+@MainActor
+private struct VortXNavigationBarAppearanceBridge: UIViewControllerRepresentable {
+    let glassEnabled: Bool
+    // Values, not objectWillChange/willSet callbacks: resolve colors after the published values settle.
+    let accentID: String
+    let oled: Bool
+
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+
+    func updateUIViewController(_ controller: Controller, context: Context) {
+        controller.refresh(with: VortXGlass.navigationBarAppearance(glassEnabled: glassEnabled))
+    }
+
+    final class Controller: UIViewController {
+        private var appearance: UINavigationBarAppearance?
+
+        private final class AttachmentView: UIView {
+            var onAttach: (() -> Void)?
+            override func didMoveToWindow() {
+                super.didMoveToWindow()
+                if window != nil { onAttach?() }
+            }
+        }
+
+        override func loadView() {
+            let attachment = AttachmentView(frame: .zero)
+            attachment.onAttach = { [weak self] in self?.applyCurrentAppearance() }
+            view = attachment
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            applyCurrentAppearance()
+        }
+
+        func refresh(with appearance: UINavigationBarAppearance) {
+            self.appearance = appearance
+            applyCurrentAppearance()
+        }
+
+        private func applyCurrentAppearance() {
+            guard let appearance else { return }
+            Self.apply(appearance, to: UINavigationBar.appearance())
+            // A make/update pass can precede attachment; didMoveToWindow/viewDidAppear apply the saved recipe.
+            guard let root = viewIfLoaded?.window?.rootViewController else { return }
+            Self.retint(under: root, with: appearance)
+        }
+
+        static func apply(_ appearance: UINavigationBarAppearance, to bar: UINavigationBar) {
+            bar.standardAppearance = appearance
+            bar.scrollEdgeAppearance = appearance
+            bar.compactAppearance = appearance
+            bar.compactScrollEdgeAppearance = appearance
+        }
+
+        static func retint(under controller: UIViewController?, with appearance: UINavigationBarAppearance) {
+            var visited = Set<ObjectIdentifier>()
+            retint(under: controller, with: appearance, visited: &visited)
+        }
+
+        private static func retint(under controller: UIViewController?,
+                                   with appearance: UINavigationBarAppearance,
+                                   visited: inout Set<ObjectIdentifier>) {
+            guard let controller, visited.insert(ObjectIdentifier(controller)).inserted else { return }
+            if let navigation = controller as? UINavigationController {
+                apply(appearance, to: navigation.navigationBar)
+                navigation.navigationBar.setNeedsLayout()
+            }
+            controller.children.forEach { retint(under: $0, with: appearance, visited: &visited) }
+            retint(under: controller.presentedViewController, with: appearance, visited: &visited)
+        }
+    }
+}
+#endif
+
+extension View {
+    /// Apply once to the stable shell: every tab's NavigationStack and presented native bars share it.
+    @MainActor @ViewBuilder
+    func vortxNativeNavigationAppearance() -> some View {
+        #if os(iOS)
+        modifier(VortXNativeNavigationAppearanceModifier())
+        #else
+        self
+        #endif
+    }
 }
 
 // MARK: - Settings and Library inline surfaces
@@ -467,8 +592,10 @@ private struct VortXGlassModifier<S: InsettableShape>: ViewModifier {
     /// own dark chrome; the three presets that float over bright media (disc / badge / panel) pass `.scrim`.
     var tone: VortXGlass.Tone = .lift
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @GlassEligibility private var observedGlassEligibility
 
     func body(content: Content) -> some View {
+        let _ = observedGlassEligibility
         content.background { glass }
     }
 
@@ -546,8 +673,10 @@ private struct VortXGlassProminentModifier<S: InsettableShape>: ViewModifier {
     let shape: S
     let tint: Color
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @GlassEligibility private var observedGlassEligibility
 
     func body(content: Content) -> some View {
+        let _ = observedGlassEligibility
         content.background { glass }
     }
 
@@ -581,8 +710,10 @@ private struct VortXGlassStripModifier: ViewModifier {
     let edge: Edge
     let fillAlpha: Double
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @GlassEligibility private var observedGlassEligibility
 
     func body(content: Content) -> some View {
+        let _ = observedGlassEligibility
         content.background { glass }
     }
 
@@ -627,8 +758,10 @@ private struct VortXGlassControlModifier<S: InsettableShape>: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.isEnabled) private var enabled
+    @GlassEligibility private var observedGlassEligibility
 
     func body(content: Content) -> some View {
+        let _ = observedGlassEligibility
         let accent = Theme.Palette.accent
         let opaque = reduceTransparency || contrast == .increased || !enabled
         content
