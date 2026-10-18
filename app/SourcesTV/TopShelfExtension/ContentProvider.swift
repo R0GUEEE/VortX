@@ -7,33 +7,36 @@ import TVServices
 /// It therefore does exactly one thing: read the JSON snapshot the app left in the shared App Group
 /// container (`TopShelfSnapshot`) and turn it into `TVTopShelfSectionedContent`. It boots no engine,
 /// opens no socket, and reads no `UserDefaults.standard` (all of which belong to the app's container,
-/// not ours). The system will fall back to the static Top Shelf image if we are slow or return
-/// nothing, so the whole path is a file read with no work that can block.
+/// not ours). The system falls back to the static Top Shelf image if we are slow or return nothing.
+/// Snapshot I/O and JSON decoding are synchronous; this path can still block and must finish promptly.
 ///
 /// This target compiles exactly two files: this one and `SourcesShared/TopShelfSnapshot.swift`.
 final class ContentProvider: TVTopShelfContentProvider {
 
-    /// The ASYNC override of `loadTopShelfContentWithCompletionHandler:`.
+    /// Implement the SDK's original completion-handler entry point.
     ///
-    /// Swift imports the ObjC completion-handler method as `async` and maps this override back onto
-    /// the original selector, so the system's call site is unchanged. Overriding the async form (in
-    /// place of the completion-handler form) keeps the whole body on one isolation domain and leaves
-    /// no escaping closure to hop out of, which is what the completion-handler form would force us to
-    /// reason about under stricter concurrency checking later.
-    override func loadTopShelfContent() async -> (any TVTopShelfContent)? {
+    /// The content protocol is not Sendable, so do not return it across an async isolation boundary.
+    /// Build the content and invoke the supplied callback in this call, without a task or queue hop.
+    /// The SDK permits the callback on any queue and requires it promptly; we neither store nor
+    /// capture it. The completion-handler form does not make the snapshot read or decoding nonblocking.
+    /// Both normal paths invoke the callback exactly once.
+    override func loadTopShelfContent(completionHandler: @escaping ((any TVTopShelfContent)?) -> Void) {
         let items = TopShelfSnapshot.read()
 
         // No snapshot, no App Group container (an unsigned / sideloaded build whose profile carries no
-        // group), or the user turned the row off: return nil, which is the system's documented cue to
+        // group), or the user turned the row off: deliver nil, which is the system's documented cue to
         // show the app's static Top Shelf image. This is the degrade path, and it must never be a
         // crash or an empty row.
-        guard !items.isEmpty else { return nil }
+        guard !items.isEmpty else {
+            completionHandler(nil)
+            return
+        }
 
         let shelfItems = items.map(sectionedItem)
         let collection = TVTopShelfItemCollection(items: shelfItems)
         // Names the row on the Home screen, above the posters.
         collection.title = String(localized: "Continue Watching")
-        return TVTopShelfSectionedContent(sections: [collection])
+        completionHandler(TVTopShelfSectionedContent(sections: [collection]))
     }
 
     /// One Continue Watching entry as a Top Shelf tile.

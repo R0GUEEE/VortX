@@ -670,6 +670,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stremiox.tv.topshelf
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
         MARKETING_VERSION: "0.5.5"
         CURRENT_PROJECT_VERSION: "274"
         # BASE plist carrying the NSExtension dict (the extension point + principal class), which has no
