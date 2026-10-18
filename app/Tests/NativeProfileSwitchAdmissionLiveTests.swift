@@ -312,8 +312,11 @@ final class ProfileStore: @unchecked Sendable {
     var nativePublishedDiscoverySource: NativeDiscoveryProjectionSource?
     struct NativeThemeProjection: Equatable { let accentID: String; let oled: Bool; let textScale: Double }
     var nativePublishedTheme: NativeThemeProjection?
-    struct ContinueWatchingMigrationWitness { let profileID: UUID; let target: PlaybackMutationTarget; let session: TraktSessionID }
+    struct ContinueWatchingMigrationWitness { let id = UUID(); let profileID: UUID; let target: PlaybackMutationTarget; let session: TraktSessionID }
     var continueWatchingMigration: ContinueWatchingMigrationWitness?
+    var continueWatchingMigrationAttempt: UUID?
+    // Legacy-only shell for --baseline-ref: old extracted reset bodies still use this name.
+    // Current production migration ownership uses only the UUID attempt above.
     var continueWatchingMigrationInFlight = false
     let continueWatchingLegacyAccount = CredentialScopeRegistry.shared.capture()
 

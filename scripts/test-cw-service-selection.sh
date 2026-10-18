@@ -61,7 +61,7 @@ enum FixturePreferenceGroup { case playback, discovery, theme }
     private let continueWatchingLegacyAccount = CredentialScopeRegistry.shared.capture()
     ${block(profiles, 'private struct ContinueWatchingMigrationWitness')}
     private var continueWatchingMigration: ContinueWatchingMigrationWitness?
-    private var continueWatchingMigrationInFlight = false
+    private var continueWatchingMigrationAttempt: UUID?
     var failSave = false; var suspendSave = false; var saveCount = 0
     var saving: CheckedContinuation<Void, Never>?
     init(profiles: [UserProfile], activeID: UUID?) { self.profiles = profiles; self.activeID = activeID }

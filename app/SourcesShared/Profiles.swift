@@ -278,12 +278,14 @@ final class ProfileStore: ObservableObject {
     }
     private let continueWatchingLegacyAccount = CredentialScopeRegistry.shared.capture()
     private struct ContinueWatchingMigrationWitness {
+        let id = UUID() // Reinstalling equal profile/target/session values is a new witness.
         let profileID: UUID
         let target: PlaybackMutationTarget
         let session: TraktSessionID
     }
     private var continueWatchingMigration: ContinueWatchingMigrationWitness?
-    private var continueWatchingMigrationInFlight = false
+    // A retired task may finish after a successor starts; cleanup owns only its attempt.
+    private var continueWatchingMigrationAttempt: UUID?
     static var nativePlaybackProjectionKeys: Set<String> {
         [TrackPreferences.Key.audio, TrackPreferences.Key.subtitle, TrackPreferences.Key.forced,
          SubtitleStyle.Key.font, SubtitleStyle.Key.size, SubtitleStyle.Key.color, SubtitleStyle.Key.background,
@@ -404,7 +406,7 @@ final class ProfileStore: ObservableObject {
         // installation, not an inferred owner/default credential slot.
         if let witness = continueWatchingMigration,
            witness.profileID != selected || witness.target != target || TraktAuth.storedSessionID != witness.session {
-            continueWatchingMigration = nil; continueWatchingMigrationInFlight = false
+            continueWatchingMigration = nil; continueWatchingMigrationAttempt = nil
         }
         if continueWatchingMigration == nil,
            CredentialScopeRegistry.shared.isMigrationEligible(continueWatchingLegacyAccount),
@@ -479,26 +481,34 @@ final class ProfileStore: ObservableObject {
         guard profile.discovery?.continueWatchingSource == nil else {
             continueWatchingMigration = nil; return
         }
-        guard !continueWatchingMigrationInFlight, profile.id == witness.profileID,
+        guard continueWatchingMigrationAttempt == nil, profile.id == witness.profileID,
               profile.usesEngineHistory, witness.target.stillOwnsCurrentContext(core: .shared),
               TraktAuth.storedSessionID == witness.session else { return }
-        continueWatchingMigrationInFlight = true
+        let attempt = UUID()
+        continueWatchingMigrationAttempt = attempt
         var migrated = profile
         var discovery = profile.discovery ?? ProfileDiscoveryPreferences()
         discovery.continueWatchingSource = ContinueWatchingService.trakt.rawValue
         discovery.continueWatchingWindow = discovery.continueWatchingWindow ?? ContinueWatchingWindow.twenty.rawValue
         migrated.discovery = discovery
         Task { @MainActor in
-            guard self.activeID == witness.profileID,
-                  self.continueWatchingMigration?.target == witness.target,
-                  witness.target.stillOwnsCurrentContext(core: .shared),
-                  TraktAuth.storedSessionID == witness.session else {
-                self.continueWatchingMigrationInFlight = false; return
+            defer {
+                if self.continueWatchingMigrationAttempt == attempt {
+                    self.continueWatchingMigrationAttempt = nil
+                }
             }
+            guard self.continueWatchingMigrationAttempt == attempt,
+                  let currentWitness = self.continueWatchingMigration,
+                  currentWitness.id == witness.id,
+                  currentWitness.profileID == witness.profileID,
+                  currentWitness.target == witness.target,
+                  currentWitness.session == witness.session,
+                  self.activeID == witness.profileID,
+                  witness.target.stillOwnsCurrentContext(core: .shared),
+                  TraktAuth.storedSessionID == witness.session else { return }
             // Publication comes only from saveNative's existing checkpoint-acknowledged projection.
             // On failure retain this exact witness for a later same-installation retry.
             _ = await self.saveNative(migrated, creating: false, target: witness.target)
-            self.continueWatchingMigrationInFlight = false
         }
     }
     @MainActor
