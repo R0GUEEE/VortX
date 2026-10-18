@@ -3171,7 +3171,9 @@ struct TVPlayerView: View {
                 SeekBarTrack(style: SeekBarStyle.current, progress: frac,
                              accent: Theme.Palette.accent,
                              track: Theme.Palette.textPrimary.opacity(0.22),
-                             buffered: duration > 0 ? min(1, max(0, bufferedTime / duration)) : 0)
+                             buffered: duration > 0 ? min(1, max(0, bufferedTime / duration)) : 0,
+                             animated: showInfo && !showOptions && !loadFailed
+                                 && !isPaused && !scrubbing && !accessibilityReduceMotion)
                     .frame(width: w, height: focused ? 24 : 16)
                 // Chapter boundary ticks along the bar (decorative; the knob still reads over them).
                 ForEach(chapterFractions, id: \.self) { f in
