@@ -78,7 +78,21 @@ enum LegacyWatchOwnershipTests {
         check(scheduling.contains("CredentialScopeRegistry.shared.capture()") && scheduling.contains("LegacyWatchOwnership.session()"), "actual caller binds account generation and streaming session epoch")
         check(scheduling.contains("Keychain.confirmedString(slot)") && scheduling.contains("Keychain.confirmedString(currentSlot)"), "missing or uncertain durable credentials cannot authorize a mirror write")
         check(profiles.contains("CredentialScopeRegistry.shared.isCurrent(inspectionOwner)") && profiles.contains("LegacyWatchOwnership.session() == inspectionSession"), "late recovery inspection also cannot publish across owner/session ABA")
-        check(profiles.contains("if oldValue != activeID {") && profiles.contains("Self.legacyWatchBinding(in: oldValue, activeID: activeID)"), "profile selection and same-ID roster binding changes retire queued authority")
+        let lifecycleParts = profiles.components(separatedBy: "// BEGIN legacy-watch lifecycle projection")
+        check(lifecycleParts.count == 2, "actual lifecycle projection has one entry marker")
+        let lifecycleTail = lifecycleParts[1].components(separatedBy: "// END legacy-watch lifecycle projection.")
+        check(lifecycleTail.count == 2, "actual lifecycle projection has one exit marker")
+        let lifecycle = lifecycleTail[0]
+        check(lifecycle.contains("let retiresSession = activeID != newValue")
+            && lifecycle.contains("!= Self.legacyWatchBinding(in: newValue, activeID: activeID)"),
+              "profile selection and same-ID roster binding changes compare identity before publication")
+        for stack in ["legacyRosterMutationRetirements", "legacySelectionMutationRetirements"] {
+            check(lifecycle.contains(stack + ".append(retiresSession)") && lifecycle.contains(stack + ".removeLast()"),
+                  "nested profile publication retains each setter entry decision in its own LIFO stack")
+        }
+        check(lifecycle.components(separatedBy: "LegacyWatchOwnership.beginProfileMutation(retire: retiresSession)").count == 3
+            && lifecycle.components(separatedBy: "LegacyWatchOwnership.endProfileMutation()").count == 3,
+              "every roster and selection assignment brackets publication, including nonmaterial setters")
         let auth = try String(contentsOf: root.appendingPathComponent("app/SourcesShared/StremioAccount.swift"), encoding: .utf8)
         for boundary in ["private static func storeAuthKey(_ value: String?, account: String) {", "private func beginAuthOperation() -> AuthOperationContext {", "func reloadForActiveProfile(preservingSignInError message: String? = nil) {", "func signOut() {"] {
             check(auth.contains(boundary + "\n        LegacyWatchOwnership.invalidateSession()"), "actual credential lifecycle advances epoch: \(boundary)")

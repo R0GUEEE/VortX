@@ -199,22 +199,34 @@ final class ProfileStore: ObservableObject {
     static let shared = ProfileStore()
 
     // BEGIN legacy-watch lifecycle projection (also extracted by the focused regression).
+    // Every assignment blocks transient capture, including a nonmaterial outer setter whose
+    // synchronous Published subscriber changes the selection. Only identity/eligibility retires.
+    // Keep each setter's entry comparison across nested publication; do not recompute in didSet.
+    private var legacyRosterMutationRetirements: [Bool] = []
+    private var legacySelectionMutationRetirements: [Bool] = []
     @Published private(set) var profiles: [UserProfile] = [] {
+        willSet {
+            let retiresSession = Self.legacyWatchBinding(in: profiles, activeID: activeID)
+                != Self.legacyWatchBinding(in: newValue, activeID: activeID)
+            legacyRosterMutationRetirements.append(retiresSession)
+            LegacyWatchOwnership.beginProfileMutation(retire: retiresSession)
+        }
         didSet {
-            // Array element writeback and every whole-roster restore/adopt/merge pass here.
-            if Self.legacyWatchBinding(in: oldValue, activeID: activeID)
-                != Self.legacyWatchBinding(in: profiles, activeID: activeID) {
-                LegacyWatchOwnership.invalidateSession()
-                retireLegacyHistoryNotices()
-            }
+            let retiresSession = legacyRosterMutationRetirements.removeLast()
+            if retiresSession { retireLegacyHistoryNotices() }
+            LegacyWatchOwnership.endProfileMutation()
         }
     }
     @Published private(set) var activeID: UUID? {
+        willSet {
+            let retiresSession = activeID != newValue
+            legacySelectionMutationRetirements.append(retiresSession)
+            LegacyWatchOwnership.beginProfileMutation(retire: retiresSession)
+        }
         didSet {
-            if oldValue != activeID {
-                LegacyWatchOwnership.invalidateSession()
-                retireLegacyHistoryNotices()
-            }
+            let retiresSession = legacySelectionMutationRetirements.removeLast()
+            if retiresSession { retireLegacyHistoryNotices() }
+            LegacyWatchOwnership.endProfileMutation()
         }
     }
     private static func legacyWatchBinding(in roster: [UserProfile], activeID: UUID?) -> LegacyWatchOwnership.ProfileBinding? {
