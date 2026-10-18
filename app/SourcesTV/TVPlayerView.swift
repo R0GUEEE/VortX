@@ -9462,10 +9462,11 @@ struct TVPlayerView: View {
     /// Seconds left until auto-advance, when the Up Next band should be on screen: a next episode queued,
     /// a real runtime, the play head in the final stretch, and the user hasn't chosen to watch the credits.
     private var upNextRemaining: Int? {
-        guard hasStartedPlaying, !loadFailed, hasNextEpisode, !upNextSuppressed,
+        guard hasStartedPlaying, !loadFailed, !upNextSuppressed,
               duration > 60, currentTime > 0 else { return nil }
         let remaining = duration - currentTime
         guard remaining > 0, remaining <= 20 else { return nil }
+        guard hasNextEpisode else { return nil }
         return Int(remaining.rounded(.up))
     }
     /// Show the Up Next band IN PLACE of the credits Skip pill: the moment the play head enters a
@@ -9475,7 +9476,7 @@ struct TVPlayerView: View {
     /// next) keeps its plain Skip pill. Its countdown line still appears only inside the last-20s window.
     private var isCreditsUpNext: Bool {
         hasStartedPlaying && !loadFailed && currentSkip?.kind == .credits
-            && hasNextEpisode && !upNextSuppressed && duration > 60
+            && !upNextSuppressed && duration > 60 && hasNextEpisode
     }
     /// Label of the episode that plays next, for the Up Next band.
     private var nextEpisodeLabel: String? {
