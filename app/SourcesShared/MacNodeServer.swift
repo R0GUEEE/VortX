@@ -24,8 +24,7 @@ enum MacNodeRestartPolicy {
     }
 }
 
-/// The UI reads this independently of the lifecycle queue. Only this failure snapshot is new;
-/// existing started/exitCode synchronization is a separate boundary, not repaired here.
+/// The UI reads this restart-failure snapshot independently of the lifecycle queue.
 final class MacNodeRestartStatus: Sendable {
     private struct Failure: Sendable {
         let owner: ObjectIdentifier
@@ -89,44 +88,66 @@ final class MacNodeRestartStatus: Sendable {
 /// same HTTP contract, same LAN-bind toggle; see spawnNative(binPath:). Native selection fails
 /// explicitly if its binary is missing. Legacy selection retains the Node path.
 enum NodeServer {
-    private(set) static var started = false
-    /// Set when the node process exits. A relaunch (or toggling Direct Links Only off) restarts it.
-    private(set) static var exitCode: Int32?
+    private struct QuitAttempt: Sendable {
+        let id: UUID
+        let completion: @MainActor @Sendable (Bool) -> Void
+        var termAdmitted = false
+    }
 
-    /// The running child process, kept alive for the app's lifetime (and so we can terminate it).
-    private static var process: Process?
-    /// Unique to the currently spawned native child. Never read the legacy Node port file.
-    private static var nativePortReceipt: String?
-    // Endpoint readers must never wait for process launch/reaping on the lifecycle queue.
-    private static let nativePublicationLock = NSLock()
-    private static var nativePublication: (process: Process, receipt: String)?
-    /// The bound port of the current publication. Every stream URL asks for the base URL, so reading the receipt
-    /// file each time cost a disk read per source on every redraw. The port only changes when the child is
-    /// (re)published, which clears this; while still unbound the file is re-read at most every 0.5 s.
-    private static var nativeBoundPort: Int?
-    private static var nativeReceiptReadAt: TimeInterval = -1
+    /// All mutable static state has checked storage. The lifecycle queue still serializes
+    /// process operations; readers and the independent quit deadline never join that queue.
+    private struct RuntimeState: Sendable {
+        var started = false
+        var exitCode: Int32?
+        var process: Process?
+        var nativePortReceipt: String?
+        var nativePublication: (process: Process, receipt: String)?
+        var nativeBoundPort: Int?
+        var nativeReceiptReadAt: TimeInterval = -1
+        var shutdownRequested = false
+        var quitAttempt: QuitAttempt?
+        var quitFailure: String?
+    }
+    private static let runtime = OSAllocatedUnfairLock(initialState: RuntimeState())
 
-    /// Serializes all access to the mutable child state (`process`, `started`, `exitCode`,
-    /// `shutdownRequested`). startIfNeeded/restart dispatch their work to this queue ASYNC so neither
-    /// app launch (which runs `reclaimStalePort`'s lsof/ps) nor the LAN-sharing toggle (which reaps
-    /// and respawns the child) ever blocks the main thread; stop() runs synchronously because it must
-    /// finish reaping the child before the app process exits. The process's terminationHandler fires
-    /// on an arbitrary background thread. Funnelling every mutation through one serial queue keeps
-    /// them race-free without sprinkling locks. Matches the serial-queue pattern used elsewhere in
-    /// the shared sources (DiagnosticsLog, Keychain).
+    private(set) static var started: Bool {
+        get { runtime.withLock { $0.started } }
+        set { runtime.withLock { $0.started = newValue } }
+    }
+    private(set) static var exitCode: Int32? {
+        get { runtime.withLock { $0.exitCode } }
+        set { runtime.withLock { $0.exitCode = newValue } }
+    }
+    private static var process: Process? {
+        get { runtime.withLock { $0.process } }
+        set {
+            let previous = runtime.withLock { state in
+                let previous = state.process
+                state.process = newValue
+                return previous
+            }
+            withExtendedLifetime(previous) {}
+        }
+    }
+    private static var nativePortReceipt: String? {
+        get { runtime.withLock { $0.nativePortReceipt } }
+        set { runtime.withLock { $0.nativePortReceipt = newValue } }
+    }
+    private static var shutdownRequested: Bool {
+        runtime.withLock { $0.shutdownRequested }
+    }
+
+    /// Serializes launch/restart/termination operations. No public reader or AppKit quit hook
+    /// synchronously joins this queue. A launch/helper/Foundation call can still stall it;
+    /// the independent quit deadline then cancels quit while the app keeps its child handle.
     private static let queue = DispatchQueue(label: "com.stremiox.mac.nodeserver")
     private static let restartStatus = MacNodeRestartStatus()
 
-    /// Set by `stop()` so the terminationHandler treats the kill as an intentional app-exit
-    /// shutdown, NOT a crash to surface in Settings. A `restart()` does NOT set this (it nils the
-    /// handler before terminating, so the handler never fires for a restart). Once set, the server
-    /// is considered down for good for this process lifetime.
-    private static var shutdownRequested = false
-
-    /// How long we wait for the child to exit after SIGTERM before escalating to SIGKILL on app
-    /// quit. Foundation's `Process.terminate()` sends SIGTERM, which a wedged node may ignore; the
-    /// SIGKILL escalation guarantees the port is released and nothing is reparented to launchd.
+    /// TERM grace; it does not authorize a numeric-PID force signal or an unbounded wait.
     private static let terminateGrace: TimeInterval = 2.0
+    /// Ordinary quit gives the native child's 3 s graceful + 1 s runtime-stop path margin.
+    /// Restart keeps its separately reviewed two-second grace and explicit retry behavior.
+    private static let quitGrace: TimeInterval = 5.0
 
     // MARK: - LAN sharing ("act as a server for others on this network")
 
@@ -167,7 +188,7 @@ enum NodeServer {
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count),
                               nil, 0, NI_NUMERICHOST) == 0 else { continue }
-            let ip = String(cString: host)
+            let ip = String(decoding: host.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
             guard !ip.hasPrefix("169.254"), !ip.isEmpty else { continue }   // skip link-local
 
             let rank = name.hasPrefix("en") ? 0 : 1
@@ -225,25 +246,41 @@ enum NodeServer {
     /// Node listener on 11470 cannot become the native endpoint while the child retries its bind.
     static var nativeBaseURL: String? {
         guard usingNativeServer else { return nil }
-        nativePublicationLock.lock(); defer { nativePublicationLock.unlock() }
-        // A dead child drops to nil at once; the running check is cheap and stays on every call.
-        guard let published = nativePublication, published.process.isRunning else { return nil }
-        if let port = nativeBoundPort { return "http://127.0.0.1:\(port)" }
         let now = ProcessInfo.processInfo.systemUptime
-        guard nativeReceiptReadAt < 0 || now - nativeReceiptReadAt >= 0.5 else { return nil }
-        nativeReceiptReadAt = now
-        let receipt = try? String(contentsOfFile: published.receipt, encoding: .utf8)
+        let snapshot = runtime.withLock { state -> (Process, String, Int?, Bool)? in
+            guard !state.shutdownRequested, let published = state.nativePublication else { return nil }
+            let mayRead = state.nativeBoundPort == nil &&
+                (state.nativeReceiptReadAt < 0 || now - state.nativeReceiptReadAt >= 0.5)
+            if mayRead { state.nativeReceiptReadAt = now }
+            return (published.process, published.receipt, state.nativeBoundPort, mayRead)
+        }
+        guard let (child, receiptPath, cachedPort, mayRead) = snapshot,
+              child.isRunning else { return nil }
+        if let port = cachedPort { return "http://127.0.0.1:\(port)" }
+        guard mayRead else { return nil }
+        // Foundation status and filesystem I/O never execute while holding runtime's lock.
+        let receipt = try? String(contentsOfFile: receiptPath, encoding: .utf8)
         guard let port = NativeTransportPolicy.boundNativePort(processRunning: true, receipt: receipt) else { return nil }
-        nativeBoundPort = port
+        let stillPublished = runtime.withLock { state in
+            guard !state.shutdownRequested, let published = state.nativePublication,
+                  published.process === child, published.receipt == receiptPath else { return false }
+            state.nativeBoundPort = port
+            return true
+        }
+        guard stillPublished, child.isRunning else { return nil }
         return "http://127.0.0.1:\(port)"
     }
 
     private static func publishNativeProcess(_ process: Process?, receipt: String? = nil) {
-        nativePublicationLock.lock()
-        if let process, let receipt { nativePublication = (process, receipt) }
-        else { nativePublication = nil }
-        nativeBoundPort = nil; nativeReceiptReadAt = -1
-        nativePublicationLock.unlock()
+        let previous = runtime.withLock { state in
+            let previous = state.nativePublication
+            if let process, let receipt { state.nativePublication = (process, receipt) }
+            else { state.nativePublication = nil }
+            state.nativeBoundPort = nil
+            state.nativeReceiptReadAt = -1
+            return previous
+        }
+        withExtendedLifetime(previous) {}
     }
 
     /// Locate an ffmpeg/ffprobe pair the server can use for VideoToolbox transcoding. server.js
@@ -285,19 +322,21 @@ enum NodeServer {
     /// One-line state for the Settings diagnostics (mirrors the iOS/tvOS NodeServer wording).
     static var statusDescription: String {
         if PlaybackSettings.torrentsDisabled { return "Disabled by Direct Links Only" }
+        let status = runtime.withLock { ($0.started, $0.exitCode, $0.quitFailure) }
+        if let failure = status.2 { return failure }
         if let message = restartFailureDescription { return message }
         if usingNativeServer {
             if nativeServerBinary == nil { return "Native streaming server is missing from this build." }
-            if !started { return "Not started (native server)" }
-            if let code = exitCode { return "Native server exited with code \(code). Relaunch the app to restart it." }
+            if !status.0 { return "Not started (native server)" }
+            if let code = status.1 { return "Native server exited with code \(code). Relaunch the app to restart it." }
             if sharedOnLAN, let url = lanURL { return "Sharing on this network at \(url) (native server)" }
             return "Native server process running"
         }
         if Bundle.main.path(forResource: "node-darwin-arm64", ofType: nil) == nil {
             return "Not started (node binary missing from the bundle)"
         }
-        if !started { return "Not started (server.js missing from the bundle)" }
-        if let code = exitCode { return "Server exited with code \(code). Relaunch the app to restart it." }
+        if !status.0 { return "Not started (server.js missing from the bundle)" }
+        if let code = status.1 { return "Server exited with code \(code). Relaunch the app to restart it." }
         if sharedOnLAN, let url = lanURL { return "Sharing on this network at \(url)" }
         return "Server process running"
     }
@@ -352,6 +391,7 @@ enum NodeServer {
     static func restart() {
         queue.async {
             guard !shutdownRequested, !PlaybackSettings.torrentsDisabled else { return }
+            runtime.withLock { $0.quitFailure = nil }
             // Reap whichever engine is running (node or native), then respawn per the flag, so
             // both the LAN-bind toggle and the native-engine toggle swap in place.
             func reapCurrent() -> Bool {
@@ -395,38 +435,122 @@ enum NodeServer {
         }
     }
 
-    /// Force-terminate the running node child and stop the server for this process lifetime. Called
-    /// on app termination (see VortXiOSApp's macOS app-delegate hook) so the child never gets
-    /// reparented to launchd holding port 11470. Idempotent and thread-safe.
-    ///
-    /// Foundation's `Process` does NOT kill its child when the parent exits, so without this an app
-    /// quit leaks the node process. We send SIGTERM (`terminate()`), give it a short grace, then
-    /// escalate to SIGKILL for any wedged child, and `waitUntilExit()` to reap it (no zombie).
-    static func stop() {
-        queue.sync {
-            shutdownRequested = true        // mark intentional: the terminationHandler must not treat this as a crash
-            started = false
-            publishNativeProcess(nil)
-            defer { retireNativePortReceipt() }
-            guard let proc = process else { return }
-            process = nil
-
-            // Detach the crash handler first: this exit is expected, not a failure to surface.
+    /// Ask AppKit to defer quit while this request observes the exact child exiting. A deadline
+    /// replies false and restores normal operation; it never discards a live child or its receipt.
+    /// The callback fires once for this attempt, even if launch/TERM outlives the deadline.
+    static func stop(completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        let id = UUID()
+        let accepted = runtime.withLock { state in
+            guard state.quitAttempt == nil else { return false }
+            state.quitAttempt = QuitAttempt(id: id, completion: completion)
+            state.shutdownRequested = true
+            state.quitFailure = nil
+            return true
+        }
+        guard accepted else {
+            Task { @MainActor in completion(false) }
+            return
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + quitGrace
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + quitGrace + 0.25) {
+            _ = completeQuitAttempt(id, stopped: false, owner: nil)
+        }
+        queue.async {
+            guard runtime.withLock({ $0.quitAttempt?.id == id }) else { return }
+            guard let proc = process else {
+                _ = completeQuitAttempt(id, stopped: true, owner: nil)
+                return
+            }
+            let previousHandler = proc.terminationHandler
             proc.terminationHandler = nil
-            guard proc.isRunning else { return }
+            let stopped = MacNodeRestartPolicy.requestTermination(
+                grace: max(0, deadline - ProcessInfo.processInfo.systemUptime),
+                isRunning: { proc.isRunning },
+                terminate: {
+                    // Liveness/handler access above may have outlived this quit attempt.
+                    // Claim this exact action only now, then leave the lock before Foundation.
+                    guard admitQuitTermination(id, owner: proc) else { return }
+                    // Admission is irrevocable: cancellation can win after this check but
+                    // cannot retract the Foundation call already admitted for this child.
+                    proc.terminate()
+                }
+            )
+            let resolved = completeQuitAttempt(id, stopped: stopped, owner: proc)
+            // A cancelled attempt may already have issued TERM. Restore observation for the
+            // retained child; a late exit is recorded without acknowledging an old quit request.
+            if (!resolved || !stopped), process === proc {
+                proc.terminationHandler = previousHandler
+                if !proc.isRunning {
+                    exitCode = proc.terminationStatus
+                    retireNativePortReceipt()
+                    DiagnosticsLog.log("server", "child exited after quit was cancelled; retry Quit or Restart streaming server")
+                }
+            }
+        }
+    }
 
-            proc.terminate()                // SIGTERM: ask node to exit cleanly
-            // Escalate to SIGKILL if it ignores SIGTERM, so the port is always released and nothing
-            // is reparented to launchd. `waitUntilExit()` then reaps the child (no zombie).
-            let deadline = Date().addingTimeInterval(terminateGrace)
-            while proc.isRunning && Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.05)
+    /// Admit at most one TERM for the exact active quit and child. No Process method, status
+    /// getter, or callback runs under this lock. The caller must invoke the admitted action
+    /// outside the lock; a later cancellation cannot retract that already-admitted action.
+    private static func admitQuitTermination(_ id: UUID, owner: Process) -> Bool {
+        runtime.withLock { state in
+            guard state.shutdownRequested,
+                  var attempt = state.quitAttempt, attempt.id == id,
+                  state.process === owner, !attempt.termAdmitted else { return false }
+            attempt.termAdmitted = true
+            state.quitAttempt = attempt
+            return true
+        }
+    }
+
+    /// Winner selection and the quit fence share the same lock as the child owner. Old timers
+    /// and late queue completions cannot clear a newer attempt, change its fence, or reply twice.
+    @discardableResult
+    private static func completeQuitAttempt(_ id: UUID, stopped: Bool, owner: Process?) -> Bool {
+        let resolution = runtime.withLock { state -> (QuitAttempt, String?, Process?)? in
+            guard let attempt = state.quitAttempt, attempt.id == id else { return nil }
+            if stopped, state.process !== owner { return nil }
+            let retained = state.process
+            state.quitAttempt = nil
+            if stopped {
+                let receipt = state.nativePortReceipt
+                state.shutdownRequested = true
+                state.started = false
+                state.exitCode = nil
+                state.process = nil
+                state.nativePortReceipt = nil
+                state.nativePublication = nil
+                state.nativeBoundPort = nil
+                state.nativeReceiptReadAt = -1
+                state.quitFailure = nil
+                return (attempt, receipt, retained)
             }
-            if proc.isRunning {
-                kill(proc.processIdentifier, SIGKILL)
-            }
-            proc.waitUntilExit()
-            NSLog("StremioX: node streaming server stopped on app termination")
+            state.shutdownRequested = false
+            state.quitFailure = "Quit was canceled because streaming-server shutdown was not confirmed. You can retry Quit."
+            // Publication stayed retained behind the quit fence. Canceling exposes that same
+            // snapshot, never inventing a publication suppressed by an earlier failed restart.
+            return (attempt, nil, retained)
+        }
+        guard let resolution else { return false }
+        let completion = resolution.0.completion
+        Task { @MainActor in completion(stopped) }
+        // The reply depends on observed child exit, not filesystem cleanup. Never hold the
+        // state lock across FileManager or across the release of a retained Process/callback.
+        if stopped {
+            restartStatus.clear()
+            if let receipt = resolution.1 { try? FileManager.default.removeItem(atPath: receipt) }
+        }
+        withExtendedLifetime(resolution.2) {}
+        return true
+    }
+
+    /// Park ownership before Foundation launch can block or the child can exit. A queued quit
+    /// suppresses launch; a canceled quit restores the ability to start normally.
+    private static func beginLaunch(_ child: Process) -> Bool {
+        runtime.withLock { state in
+            guard !state.shutdownRequested, state.process == nil else { return false }
+            state.process = child
+            return true
         }
     }
 
@@ -618,9 +742,10 @@ enum NodeServer {
 
         do {
             NSLog("%@", "StremioX: starting node streaming server (bin=\(nodeBin), HOME=\(home))")
+            guard beginLaunch(proc) else { started = false; return }
             try proc.run()
-            process = proc
         } catch {
+            if process === proc { process = nil }
             started = false
             NSLog("%@", "StremioX: failed to launch node server: \(error)")
         }
@@ -695,17 +820,22 @@ enum NodeServer {
 
         do {
             NSLog("%@", "StremioX: starting native streaming server (bin=\(binPath), home=\(serverData))")
+            guard beginLaunch(proc) else {
+                started = false
+                retireNativePortReceipt()
+                return
+            }
             try proc.run()
-            process = proc
             publishNativeProcess(proc, receipt: nativePortReceipt)
         } catch {
+            if process === proc { process = nil }
             started = false
             retireNativePortReceipt()
             NSLog("%@", "StremioX: failed to launch native streaming server: \(error)")
         }
     }
 
-    /// Queue-only cleanup after the owning process has been reaped or failed to launch.
+    /// Queue-only cleanup after the owning process was observed exited or failed to launch.
     private static func retireNativePortReceipt() {
         publishNativeProcess(nil)
         guard let path = nativePortReceipt else { return }

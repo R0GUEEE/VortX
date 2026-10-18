@@ -507,12 +507,12 @@ private struct MacWindowChrome: NSViewRepresentable {
 #if os(macOS) && !VORTX_NO_EMBEDDED_SERVER
 import AppKit
 
-/// macOS app delegate whose sole job is to kill the embedded node streaming server when the app
-/// actually quits. `applicationWillTerminate(_:)` is the reliable "app is exiting" signal on macOS
-/// (Cmd-Q, menu Quit, logout/shutdown), unlike scenePhase `.background`/`.inactive`, which fire on
-/// routine window/focus changes and must NOT tear the server down. Without this the `node` child is
-/// reparented to launchd and keeps holding port 11470 (the orphaned-process leak this fixes).
+/// Ordinary quit is deferred until the owned streaming child exits. If shutdown cannot be
+/// confirmed, cancel quit and keep the app as owner. Force Quit/crash bypasses this contract.
+@MainActor
 final class MacAppDelegate: NSObject, NSApplicationDelegate {
+    private var quitRequestPending = false
+    private var quitFailureAlert: NSAlert?
     // Install the macOS 26 (Tahoe) NSToolbar-insert crash guard before any window
     // stands up its (hidden) toolbar. SwiftUI's ToolbarBridge otherwise throws an
     // NSException inserting into the shared window toolbar when an off-main model
@@ -523,14 +523,37 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
         VortXInstallToolbarCrashGuard()
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        NodeServer.stop()
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !quitRequestPending else { return .terminateLater }
+        quitRequestPending = true
+        NodeServer.stop { stopped in
+            self.quitRequestPending = false
+            sender.reply(toApplicationShouldTerminate: stopped)
+            guard !stopped, self.quitFailureAlert == nil else { return }
+            let alert = NSAlert()
+            alert.messageText = "VortX could not finish shutting down the streaming server"
+            alert.informativeText = "Quit was canceled so the app can keep ownership of its server. You can retry Quit or use Restart streaming server in Settings. A forced exit may leave the server running."
+            alert.addButton(withTitle: "Keep VortX Open")
+            self.quitFailureAlert = alert
+            if let window = sender.windows.first(where: { $0.isVisible && $0 !== alert.window }) {
+                alert.beginSheetModal(for: window) { _ in
+                    Task { @MainActor in self.quitFailureAlert = nil }
+                }
+            } else {
+                // Last-window-close can request quit with no remaining document window.
+                // This AppKit modal loop presents the failure; it never joins the server queue.
+                sender.activate()
+                _ = alert.runModal()
+                self.quitFailureAlert = nil
+            }
+        }
+        return .terminateLater
     }
 
     /// Closing the only window must QUIT the app (a single-window media app, not a document app).
     /// Without this, the red close button / Cmd-W left the app running headless with the node server
-    /// still holding port 11470 and no way to get the window back, and applicationWillTerminate above
-    /// never fired, so the server was only reaped on an explicit Quit.
+    /// still holding port 11470 and no way to get the window back. This requests the same deferred
+    /// quit path; an incomplete shutdown keeps the owner alive and displays the failure.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
 #endif
