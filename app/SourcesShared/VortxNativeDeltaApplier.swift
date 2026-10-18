@@ -51,6 +51,13 @@ struct VortxNativeDeltaApplier {
     private static let deltaKeys: Set<String> = ["profiles", "libraries", "activeProfileId", "nativeSync",
         "accountLibraryArchives", "projectedAccountSlots"]
 
+    /// Complete decoded-value equality for lossless preparation, not raw JSON admission.
+    /// Uses the same exact UTF-8/key/enum/Double-bit comparator as accepted base validation.
+    /// Call outside every session/publication critical section; this walks the whole value.
+    static func exactlyMatchesPreparedBaseline(_ lhs: VortxJSON, _ rhs: VortxJSON) -> Bool {
+        exactValue(lhs, rhs)
+    }
+
     /// Call only after an eligible, exclusively owned handle has acknowledged normalization
     /// and v2 negotiation. expectedSnapshot is its complete post-normalization state.
     /// An old engine's generic ok response is insufficient: a matching v2 base is mandatory.
