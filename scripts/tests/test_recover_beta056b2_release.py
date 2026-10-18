@@ -62,6 +62,52 @@ OPTIONAL = ("release_tag", "recovery_source_commit", "resume_handoff", "mpvkit_a
             "mpvkit_artifacts_sha256", "release_id", "altstore_note")
 
 
+class DraftUrlTests(unittest.TestCase):
+    name = "VortX-tvOS-v0.5.6-beta.2-ci.ipa"
+    slug = "untagged-60247beaa4d56a52ca14"
+
+    def draft(self):
+        return {"draft": True, "html_url": f"https://github.com/VortXTV/VortX/releases/tag/{self.slug}"}
+
+    def url(self, slug):
+        return f"https://github.com/VortXTV/VortX/releases/download/{slug}/{self.name}"
+
+    def test_tag_urls_remain_valid_in_both_modes(self):
+        for command, release in (("verify-draft", self.draft()), ("verify-published", {"draft": False})):
+            V.validate_asset_url(command, release, TAG, self.name, self.url(TAG))
+
+    def test_temporary_url_is_bound_to_authenticated_draft_html(self):
+        before = copy.deepcopy(self.draft())
+        V.validate_asset_url("verify-draft", before, TAG, self.name, self.url(self.slug))
+        self.assertEqual(before, self.draft())
+        for html in (None, 0, "", self.draft()["html_url"] + "\n",
+                     self.draft()["html_url"] + "?x=1", self.draft()["html_url"] + "#x",
+                     self.draft()["html_url"].replace("github.com", "example.invalid"),
+                     self.draft()["html_url"].replace(self.slug, "untagged-" + "a" * 20),
+                     self.draft()["html_url"].replace(self.slug, "untagged-" + "a" * 19),
+                     self.draft()["html_url"].replace(self.slug, "untagged-" + "a" * 21),
+                     self.draft()["html_url"].replace(self.slug, "untagged-" + "G" * 20)):
+            with self.subTest(html=html), self.assertRaises(ValueError):
+                V.validate_asset_url("verify-draft", {"draft": True, "html_url": html}, TAG, self.name, self.url(self.slug))
+
+    def test_temporary_urls_never_pass_published_or_unknown_modes(self):
+        for command in ("verify-published", "prepare", "", None, 1, True):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                V.validate_asset_url(command, self.draft(), TAG, self.name, self.url(self.slug))
+        for draft in (False, None, 1, "true"):
+            with self.subTest(draft=draft), self.assertRaises(ValueError):
+                V.validate_asset_url("verify-draft", dict(self.draft(), draft=draft), TAG, self.name, self.url(self.slug))
+
+    def test_draft_urls_reject_host_repo_name_and_suffix_changes(self):
+        good = self.url(self.slug)
+        for bad in (None, 1, "", good + "\n", good + "?x=1", good + "#x", good + "/",
+                    good.replace("github.com", "example.invalid"), good.replace("VortXTV/VortX", "other/VortX"),
+                    good.replace(self.name, self.name + ".extra"), good.replace(self.slug, TAG + "-wrong"),
+                    good.replace(self.slug, "untagged-" + "a" * 20)):
+            with self.subTest(url=bad), self.assertRaises(ValueError):
+                V.validate_asset_url("verify-draft", self.draft(), TAG, self.name, bad)
+
+
 class DispatchTests(unittest.TestCase):
     def receipt(self):
         return json.loads(RAW_DISPATCH)

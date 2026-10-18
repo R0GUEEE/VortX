@@ -659,6 +659,20 @@ def release_assets(release, expected):
     return {name: {field: asset[field] for field in fields} for name, asset in by_name.items()}
 
 
+def validate_asset_url(command, release, tag, name, url):
+    require(command in ("verify-draft", "verify-published"), "unsupported asset URL verification mode")
+    canonical_url = f"https://github.com/{REPO}/releases/download/{tag}/{name}"
+    allowed = url == canonical_url
+    if command == "verify-draft":
+        require(release.get("draft") is True, "temporary asset URL requires an authenticated draft")
+        html = release.get("html_url")
+        match = re.fullmatch(rf"https://github\.com/{re.escape(REPO)}/releases/tag/(untagged-[0-9a-f]{{20}})",
+                             html) if isinstance(html, str) else None
+        if match is not None:
+            allowed = allowed or url == f"https://github.com/{REPO}/releases/download/{match[1]}/{name}"
+    require(allowed, "release asset URL differs from its exact tag or authenticated draft URL")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("prepare", "verify-draft", "verify-published"))
@@ -759,9 +773,9 @@ def main():
         require(current_assets == assets, "release assets changed during verification")
         for name, (size, expected_sha) in expected_hashes.items():
             asset = current_assets[name]
-            require(asset["size"] == size and asset["digest"] == f"sha256:{expected_sha}" and
-                    asset.get("browser_download_url") == f"https://github.com/{REPO}/releases/download/{args.tag}/{name}",
+            require(asset["size"] == size and asset["digest"] == f"sha256:{expected_sha}",
                     "release asset metadata differs from original CI bytes")
+            validate_asset_url(args.command, current_release, args.tag, name, asset.get("browser_download_url"))
             destination = work / ("verified-" + name)
             if args.command == "verify-published":
                 public_download(args.tag, name, destination, size, expected_sha)
