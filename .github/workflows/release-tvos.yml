@@ -339,6 +339,19 @@ jobs:
             '{schemaVersion:1,sourceCommit:$source,workflowCommit:$workflow,verifierSha256:$verifier,tag:$tag,runId:$run,attempt:$attempt}' \
             > out/native-workflow-provenance.json
 
+      - name: Record artifact-only dispatch inputs for hosted beta verification
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag == '' && inputs.native_only == true
+        env:
+          DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          set -euo pipefail
+          jq -n --argjson inputs "$DISPATCH_INPUTS_JSON" \
+            --arg event "$GITHUB_EVENT_NAME" --arg ref "$GITHUB_REF" \
+            --arg source "$BUILD_SOURCE_SHA" --arg workflow "$GITHUB_SHA" \
+            --argjson run "$GITHUB_RUN_ID" --argjson attempt "$GITHUB_RUN_ATTEMPT" \
+            '{schemaVersion:1,event:$event,ref:$ref,sourceCommit:$source,workflowCommit:$workflow,runId:$run,attempt:$attempt,inputs:$inputs}' \
+            > out/native-ci-dispatch.json
+
       - name: Constrain legacy comparison to artifact-only builds
         if: env.VORTX_NATIVE_ONLY != 'true'
         env:
@@ -2372,12 +2385,61 @@ jobs:
             --release-json "$RELEASE_JSON" --provenance "$WORK_DIR/provenance.json" \
             --asset-dir "$WORK_DIR" --release-commit "$GITHUB_SHA" --repo-root "$GITHUB_WORKSPACE"
 
+  verify-hosted-direct-beta:
+    if: >-
+      github.event_name == 'release' &&
+      contains(github.event.release.body, 'vortx-distribution: hosted-direct-beta')
+    concurrency:
+      group: vortx-hosted-direct-beta-${{ github.event.release.id }}
+      cancel-in-progress: false
+    runs-on: macos-26
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up JDK 21 for read-only Android package verification
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Set up Android package inspection tools
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+      - name: Verify original CI handoffs and all public beta bytes without feed writes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: VortXTV/VortX
+          RELEASE_ID: ${{ github.event.release.id }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = VortXTV/VortX
+          WORK_DIR="$(mktemp -d "$RUNNER_TEMP/vortx-hosted-beta.XXXXXX")"
+          curl --fail --location --connect-timeout 10 --max-time 90 --retry 2 \
+            https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar \
+            --output "$WORK_DIR/bundletool.jar"
+          echo "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29  $WORK_DIR/bundletool.jar" | shasum -a 256 --check
+          export APKSIGNER_BIN="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          export AAPT2_BIN="$ANDROID_HOME/build-tools/36.0.0/aapt2"
+          python3 scripts/verify-ci-direct-beta.py verify-published \
+            --tag "$EVENT_TAG" --source-commit "$GITHUB_SHA" --release-id "$RELEASE_ID" \
+            --repo-root "$GITHUB_WORKSPACE" --work-dir "$WORK_DIR" \
+            --bundletool "$WORK_DIR/bundletool.jar" --event-file "$GITHUB_EVENT_PATH"
+
   verify-published:
     needs: [attach-release]
     if: >-
       always() && (
         (github.event_name == 'release' &&
         !contains(github.event.release.body, 'vortx-distribution: direct-test') &&
+        !contains(github.event.release.body, 'vortx-distribution: hosted-direct-beta') &&
         !startsWith(github.event.release.tag_name, 'vendor-')) ||
         (github.event_name == 'workflow_dispatch' &&
         inputs.publish_release == true &&

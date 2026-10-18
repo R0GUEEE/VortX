@@ -279,6 +279,18 @@ jobs:
             | sed 's#  dist/#  #' > dist/SHA256SUMS-android.txt
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Upload the immutable Android handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VortX-Android-release
+          path: |
+            dist/*.apk
+            dist/*.aab
+            dist/SHA256SUMS-android.txt
+            dist/SIGNING_PROVENANCE.txt
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Create or append to the draft release
         env:
           GH_TOKEN: ${{ github.token }}
