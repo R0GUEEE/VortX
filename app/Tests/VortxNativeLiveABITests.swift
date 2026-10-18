@@ -494,26 +494,59 @@ private final class NativeFieldNotifications: @unchecked Sendable {
         let activeSlotColdTarget = try VortxNativeProfiles.ownTarget(material: try JSONDecoder().decode(VortxJSON.self, from: activeSlotColdMaterial), profileID: child.id)
         check(activeSlotColdTarget.sourceDocumentSHA256 == freshOwnTarget.sourceDocumentSHA256
               && activeSlotColdTarget.profileOverlaySHA256 == freshWitness)
-        let preOwnBaseline = Data("{\"schemaVersion\":1}".utf8)
+        // A schema-only carrier cannot prove a retained account origin, even with an active slot.
+        let partialOriginBaseline = Data("{\"schemaVersion\":1}".utf8)
+        do {
+            _ = try VortxLegacyBootstrapMaterial.classifyDeferredOwnAccountOverlays(document: freshRootDocument,
+                roster: [owner, ownAccount], ownerProfileID: owner.id, retainedOwnAccountBaseline: partialOriginBaseline,
+                retainedOwnAccountSlotBaselines: activeSlotBaselines)
+            preconditionFailure("Partial origin baseline admitted by classifier")
+        } catch let error as VortxLegacyBootstrapMaterial.ReconciliationRequired {
+            check(error.reason == "Retained account origin requires a complete baseline")
+        }
+        do {
+            _ = try VortxLegacyBootstrapMaterial.encode(document: freshRootDocument, roster: [owner, ownAccount],
+                ownerProfileID: owner.id, rosterModifiedSeconds: nil,
+                retainedOwnAccountBaseline: partialOriginBaseline, retainedOwnAccountSlotBaselines: activeSlotBaselines)
+            preconditionFailure("Partial origin baseline admitted by encoder")
+        } catch let error as VortxLegacyBootstrapMaterial.ReconciliationRequired {
+            check(error.reason == "Retained account origin requires a complete baseline")
+        }
+        // Build a complete synthetic historical shared origin through the real encoder. The
+        // later native own slot is not permission to rewrite that global legacy policy.
+        let preOwnBaseline = try VortxLegacyBootstrapMaterial.encode(
+            document: Data("{\"vortx\":{}}".utf8), roster: [owner, child], ownerProfileID: owner.id,
+            rosterModifiedSeconds: nil)
         let lateSlotDisposition = try VortxLegacyBootstrapMaterial.classifyDeferredOwnAccountOverlays(document: freshRootDocument,
             roster: [owner, ownAccount], ownerProfileID: owner.id, retainedOwnAccountBaseline: preOwnBaseline,
             retainedOwnAccountSlotBaselines: activeSlotBaselines)
-        check(lateSlotDisposition.count == 1 && lateSlotDisposition[0].status == .matchedWitness)
+        check(lateSlotDisposition.isEmpty)
         let lateSlotMaterial = try VortxLegacyBootstrapMaterial.encode(document: freshRootDocument,
             roster: [owner, ownAccount], ownerProfileID: owner.id, rosterModifiedSeconds: nil,
             retainedOwnAccountBaseline: preOwnBaseline, retainedOwnAccountSlotBaselines: activeSlotBaselines,
             deferredOwnAccountOverlays: lateSlotDisposition)
-        let lateSlotTarget = try VortxNativeProfiles.ownTarget(material: try JSONDecoder().decode(VortxJSON.self, from: lateSlotMaterial), profileID: child.id)
-        check(lateSlotTarget.sourceDocumentSHA256 == freshOwnTarget.sourceDocumentSHA256
-              && lateSlotTarget.profileOverlaySHA256 == freshWitness)
+        let lateSlotJSON = try JSONDecoder().decode(VortxJSON.self, from: lateSlotMaterial)
+        check(lateSlotJSON["ownAccountSources"] == nil)
+        check(try VortxLegacyBootstrapMaterial.accountOrigins(lateSlotMaterial)[child.id] == .shared)
         let retainedClockCarrier = Data(("{\"source\":{\"verifiedStreamingUid\":\"verified-own-uid\",\"sourceDocumentSha256\":\""
             + String(repeating: "d", count: 64)
             + "\"},\"addons\":{\"items\":[],\"order\":[],\"intents\":[]},\"library\":{\"items\":[],\"intents\":[]},\"watches\":[{\"metaId\":\"tt-retained-clock\",\"type\":\"movie\",\"videoId\":\"tt-retained-clock\",\"positionMs\":1,\"lastPlayedAtMs\":0.039304369631583576}],\"identityLinks\":[]}").utf8)
         let retainedClockSlot = VortxLegacyBootstrapMaterial.RetainedOwnAccountSlotBaseline(profileID: child.id,
             sourceBaseline: retainedClockCarrier)
+        // Precision belongs to a complete historical own tuple, not a fabricated schema-only
+        // origin. Keep all tuple fields together, as in the material unit regression.
+        let clockCarrier = try VortxProfileOverlayWitness.decodeObject(json: retainedClockCarrier)
+        var clockBaseline = try VortxProfileOverlayWitness.decodeObject(json: freshMaterialData)
+        for (materialField, carrierField) in [("ownAccountSources", "source"), ("addons", "addons"),
+                                               ("libraries", "library"), ("watches", "watches"), ("identityLinks", "identityLinks")] {
+            var bucket = clockBaseline[materialField] as! [String: Any]
+            bucket[child.id.uuidString] = clockCarrier[carrierField]
+            clockBaseline[materialField] = bucket
+        }
         let retainedClockMaterial = try VortxLegacyBootstrapMaterial.encode(document: Data("{\"vortx\":{}}".utf8),
             roster: [owner, ownAccount], ownerProfileID: owner.id, rosterModifiedSeconds: nil,
-            retainedOwnAccountBaseline: preOwnBaseline, retainedOwnAccountSlotBaselines: [retainedClockSlot])
+            retainedOwnAccountBaseline: JSONSerialization.data(withJSONObject: clockBaseline),
+            retainedOwnAccountSlotBaselines: [retainedClockSlot])
         let retainedClockJSON = try VortxProfileOverlayWitness.decodeObject(json: retainedClockMaterial)
         let retainedClock = (((retainedClockJSON["watches"] as? [String: Any])?[child.id.uuidString] as? [[String: Any]])?.first?["lastPlayedAtMs"] as? NSNumber)
         check(retainedClock?.doubleValue.bitPattern == 0x3fa41fb3cc50aa01)
