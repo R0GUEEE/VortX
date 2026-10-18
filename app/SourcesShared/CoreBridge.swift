@@ -6183,6 +6183,8 @@ final class CoreBridge: ObservableObject {
     private func buildBoardRows(_ board: CoreBoardState) -> [CoreBoardRow] {
         let titles = catalogTitleMap()
         let disabledAddons = ProfileStore.activeDisabledAddons()   // per-profile add-on set, hoisted once
+        let hiddenCatalogs = CatalogPrefsStore.hidden()
+        let savedOrder = CatalogOrderSnapshot(CatalogPrefsStore.order())
         // Removed-but-engine-retained add-ons (see `tombstonedBases`): their rows must not render on
         // Home, matching the catalog manager filter, or a removed add-on's rows would ghost with no
         // manager entry left to hide them (#121).
@@ -6195,13 +6197,13 @@ final class CoreBridge: ObservableObject {
             let items = catalog.compactMap { $0.content?.ready }.flatMap { $0 }
             guard !items.isEmpty else { continue }
             let key = Self.catalogKey(base: request.base, type: request.path.type, id: request.path.id)
-            if CatalogPrefsStore.isHidden(key) { continue }   // user hid this catalog row (catalog manager)
+            if hiddenCatalogs.contains(key) { continue }   // user hid this catalog row (catalog manager)
             rows.append(CoreBoardRow(id: key, title: titles[key] ?? request.path.id,
                                      type: request.path.type, items: items, engineIndex: engineIndex))
         }
         // Apply the user's catalog order; unlisted catalogs keep the engine's relative order after the listed ones.
         return rows.enumerated().sorted { a, b in
-            let ra = CatalogPrefsStore.rank(a.element.id), rb = CatalogPrefsStore.rank(b.element.id)
+            let ra = savedOrder.rank(a.element.id), rb = savedOrder.rank(b.element.id)
             return ra != rb ? ra < rb : a.offset < b.offset
         }.map(\.element)
     }
