@@ -4,11 +4,12 @@ All notable changes to VortX, newest first. VortX is Apple TV first, with an iPh
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
-## 0.5.6 beta 1 - Recovery, safer profile changes and less repeated work
+## 0.5.6 beta 2 - Recovery, safer profile changes and less repeated work
 
-Build **275** across Apple and Android. This is an early prerelease of the integrated
+Build **276** across Apple and Android. This is an early prerelease of the integrated
 audit repairs, not completion of the full audit or the Apple Swift 6 migration.
 Package and publication checks are still required before this candidate is released.
+The earlier beta 1 candidate was not published; saved-data safety checks remain intact.
 
 ### Fixed and improved
 
@@ -25,7 +26,7 @@ Package and publication checks are still required before this candidate is relea
 The main iOS, Mac, Full TV and Lite TV apps are **not yet fully migrated to Swift 6**.
 This candidate retains the integrated Swift 6 Top Shelf and standalone Watch Stats work;
 remaining Apple caller integration, preference/UI-queue candidates, household/client and
-SDK adoption, broader cleanup and audit coverage continue toward beta 2. Isolated tests
+SDK adoption, broader cleanup and audit coverage continue after this prerelease. Isolated tests
 are not physical-device sync, playback or measured smoothness acceptance.
 
 This beta does not deploy backend/database changes or automatically promote stable
