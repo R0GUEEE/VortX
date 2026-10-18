@@ -3874,6 +3874,13 @@ struct iOSSearchView: View {
     }
 }
 
+/// Retains Discover's hero for the view identity without forwarding its output publications.
+/// The hero leaf observes the model; catalog/filter work only follows its own inputs.
+@MainActor
+private final class DiscoverHeroOwner: ObservableObject {
+    let model = FeaturedHeroModel()
+}
+
 /// Discover, driven by the stremio-core engine (CatalogWithFilters): type, catalog, and genre
 /// chips carrying the engine's own request, dispatched back on tap, over a poster grid, under the
 /// interactive featured hero (shown once a catalog has loaded).
@@ -3887,7 +3894,8 @@ struct iOSDiscoverView: View {
     @EnvironmentObject private var theme: ThemeManager   // observe textScale so Theme.Typography repaints live
     @AppStorage(TabBarPrefs.hideLive) private var hideLiveTab = false   // also hide Live types from the Discover type filter (#117 per-tab key)
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @StateObject private var hero = FeaturedHeroModel()
+    @StateObject private var heroOwner = DiscoverHeroOwner()
+    private var hero: FeaturedHeroModel { heroOwner.model }
     @ObservedObject private var collectionsHub = CollectionsHubModel.shared
     private var showCollectionsHub: Bool { catalogPrefs.showCollectionsDiscover }
     /// Merge Discover + Search into one surface (Settings toggle, default OFF, reversible). When ON the root
