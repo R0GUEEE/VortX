@@ -505,26 +505,7 @@ input:focus-visible {
   flex: 0 0 auto;
 }
 
-/* ---- Chips ---- */
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.45rem 0.85rem;
-  border-radius: var(--radius-chip);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 0.88rem;
-  transition: background var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease);
-}
-.chip:hover {
-  background: var(--surface-2);
-}
-.chip.selected {
-  background: var(--accent);
-  color: var(--on-accent);
-}
+/* Static chip variant. The shared control base and states live in DESIGN SYSTEM below. */
 .chip-static {
   background: var(--surface-2);
   color: var(--muted);
@@ -1438,6 +1419,8 @@ input:focus-visible {
 .btn-chip:hover, .chip:hover { background: var(--surface-3); }
 .btn-chip:active, .chip:active { transform: scale(0.97); }
 .btn-chip.selected, .chip.selected { background: var(--accent-soft); color: var(--accent-bright); box-shadow: inset 0 0 0 1px var(--accent); }
+/* Disabled chips must not retain the selected/hover/pressed affordance. */
+.btn-chip:disabled, .chip:disabled { background: var(--surface-2); color: var(--muted); box-shadow: none; cursor: default; transform: none; }
 
 /* Surface card: rows + panels that float on the canvas via elevation, never borders. */
 .surface-card {
