@@ -34,7 +34,7 @@ assert.equal(read(".node-version").trim(), nodeVersion);
 assert.equal(read(".npmrc").trim(), "engine-strict=true");
 assert.equal(
   packageJson.scripts.test,
-  "node scripts/cloudflare-pages-contract.test.mjs && node --test src/lib/*.test.mjs",
+  "node scripts/cloudflare-pages-contract.test.mjs && node --test src/lib/*.test.mjs src/views/login.auth-adoption.test.mjs",
 );
 assert.equal(
   packageJson.scripts.deploy,

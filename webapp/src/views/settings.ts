@@ -1,5 +1,6 @@
 import { actionOf, escapeHtml } from "../lib/dom";
 import { currentSession, signOut, accountSyncStatus } from "../lib/account";
+import { sessionOwner } from "../lib/vault";
 import { exportBackup, importBackup } from "../lib/store";
 import {
   profiles,
@@ -88,6 +89,7 @@ const SOURCE_LABELS: Record<SourceType, { name: string; sub: string }> = {
 };
 
 let host: HTMLElement | null = null;
+let logoutNotice = "";
 
 export function renderSettings(target: HTMLElement): void {
   host = target;
@@ -176,7 +178,7 @@ function accountSection(): string {
       `<p class="settings-footer" data-account-sync-status aria-live="polite">${accountSyncMessage()}</p>`;
     return group("Account", body, "Your account data is end to end encrypted.");
   }
-  const body = `<a class="btn-primary settings-signin" href="#/login">Sign in to VortX</a>`;
+  const body = `<a class="btn-primary settings-signin" href="#/login">Sign in to VortX</a><p data-logout-status role="status">${escapeHtml(logoutNotice)}</p>`;
   return group(
     "Account",
     body,
@@ -534,10 +536,18 @@ export function handleSettingsClick(target: EventTarget | null): boolean {
       return commit({ subtitleScale: clampSub(Number(d.size) || 1) });
     case "sub-size":
       return commit({ subtitleScale: clampSub(getSettings().subtitleScale + (Number(d.dir) || 0) * SUB_STEP) });
-    case "account-signout":
-      signOut();
+    case "account-signout": {
+      logoutNotice = "Signed out in this tab; checking saved session…";
+      const completion = signOut(), revision = sessionOwner().revision;
       rerender();
+      const target = host?.querySelector<HTMLElement>("[data-logout-status]");
+      void completion.then((result) => {
+        if (sessionOwner().revision !== revision) return;
+        logoutNotice = result.status === "not-persisted" ? "Saved session cleared." : "Saved sign-out could not be confirmed. The residual session has not been re-adopted.";
+        if (target?.isConnected && target === host?.querySelector("[data-logout-status]")) target.textContent = logoutNotice;
+      });
       return true;
+    }
     case "switch-profile":
       setActiveProfile(d.id ?? ""); // applies the profile's look via updateSettings
       rerender();

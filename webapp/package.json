@@ -28,7 +28,7 @@
     "typecheck": "tsc --noEmit",
     "deploy": "tsc && vite build && wrangler pages deploy dist --project-name=vortx-web",
     "test:pages-contract": "node scripts/cloudflare-pages-contract.test.mjs",
-    "test": "node scripts/cloudflare-pages-contract.test.mjs && node --test src/lib/*.test.mjs"
+    "test": "node scripts/cloudflare-pages-contract.test.mjs && node --test src/lib/*.test.mjs src/views/login.auth-adoption.test.mjs"
   },
   "dependencies": {
     "@types/qrcode": "^1.5.6",

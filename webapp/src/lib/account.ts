@@ -6,7 +6,7 @@
 //   - an account-scoped journal of explicit edits, ACKed only after serialized successful writes.
 // vault.ts owns session persistence and encrypted transport. Journals carry no session/key/socket URL.
 
-import { loadSession, clearSession, validateSession, saveSession, fetchSync, connectSyncSocket, mutateSyncDoc, SyncUpgradeRequiredError, type Session } from "./vault";
+import { clearSession, validateSession, migrateSession, sessionOwner, startSessionAuthority, onSessionAuthority, captureSessionOwnership, completeAuthAttempt, fetchSync, connectSyncSocket, mutateSyncDoc, SyncUpgradeRequiredError, type Session, type AuthAttempt, type AuthResult } from "./vault";
 import {
   mergeInstalledAddons,
   pruneInstalledAddons,
@@ -64,29 +64,31 @@ function nativeSettingsTarget(profile: NativeSyncProjection["profiles"][number])
 // The in-memory cache. `undefined` = not yet hydrated from storage; `null` = hydrated, signed out.
 // We lazily hydrate from loadSession() on first read so a hard reload restores the signed-in state.
 let cached: Session | null | undefined = undefined;
-const SESSION_DESCRIPTOR_KEY = "vortx.session.v1";
+let observedAuthorityRevision = -1;
 
 type Listener = (session: Session | null) => void;
 const listeners = new Set<Listener>();
 
-/** Set the cache and tell every subscriber. The single mutation point for the session. */
+/** Vault has already recorded the historical transition before these fallible consumers run. */
 function setSession(next: Session | null): void {
-  bindSettingsSyncState(next);
   cached = next;
-  bindReceiveSession(next);
+  try { bindSettingsSyncState(next); } catch { /* retained intents remain; authority is not rolled back */ }
+  // A revision change invalidates the old receiver even when A's token/key bytes compare equal.
+  if (receiveState) disposeReceiver(receiveState);
+  receiveState = null;
+  try { bindReceiveSession(next); } catch { /* no receive authority inferred from callback success */ }
   notify();
 }
-
-/** The current session (cached). Hydrates from localStorage on first call. This is a SYNCHRONOUS
- *  best-effort read: it does not validate the token with the server (use ensureValidSession on boot
- *  for that), so a revoked token still reads as signed-in until the next validation. */
+function reconcileAuthority(): void {
+  const state = sessionOwner();
+  if (state.revision === observedAuthorityRevision && cached !== undefined) return;
+  observedAuthorityRevision = state.revision;
+  setSession(state.session);
+}
+/** Known blocked/memory owners remain accounts; availability is checked by captured ownership guards. */
 export function currentSession(): Session | null {
-  if (cached === undefined) {
-    cached = loadSession();
-    bindSettingsSyncState(cached);
-    bindReceiveSession(cached);
-  }
-  return cached;
+  reconcileAuthority();
+  return cached ?? null;
 }
 
 /** Whether there is a stored session on this device (best-effort, not server-validated). */
@@ -106,37 +108,24 @@ export function accountDisplay(): string | null {
  *  is lenient). On success it refreshes account fields and re-persists. Returns the live session or
  *  null. Safe to call once at startup, before painting the nav. */
 export async function ensureValidSession(): Promise<Session | null> {
-  const session = loadSession();
-  const prior = snapshotSession(currentSession());
-  if (!session) {
-    setSession(null);
-    return null;
-  }
-  const ownsStoredSession = captureStoredSession(session);
-  const ok = await validateSession(session);
-  if (!sameSession(currentSession(), prior)) return currentSession();
-  if (!ownsStoredSession()) {
-    // Another tab may replace the shared descriptor before its storage event is delivered.
-    // Retire this tab without rewriting or deleting the newer account's descriptor.
-    const next = loadSession();
-    setSession(next);
-    return next;
-  }
-  if (!ok) {
-    clearSession();
-    setSession(null);
-    return null;
-  }
-  // validateSession refreshes account fields (e.g. twoFactorEnabled) in place; re-persist them.
-  saveSession(session);
-  setSession(session);
-  return session;
+  startSessionAuthority();
+  const initial = currentSession();
+  if (!initial || !captureSessionOwnership(initial)()) return initial;
+  // Explicit owned-legacy compatibility; loadSession/ownership reads never migrate.
+  await migrateSession();
+  const session = currentSession();
+  if (!session) return null;
+  const owns = captureSessionOwnership(session);
+  const result = await validateSession(session);
+  if (result === "invalid" && owns()) await signOut();
+  reconcileAuthority();
+  return currentSession();
 }
-
-/** Adopt a freshly created session (called by the Login screen after register/login/recover/reset).
- *  vault already persisted it via saveSession; this updates the cache + notifies the UI. */
-export function adoptSession(session: Session): void {
-  setSession(session);
+/** Only the opaque attempt's privately authenticated candidate may be adopted. */
+export async function adoptSession(attempt: AuthAttempt): Promise<AuthResult> {
+  const result = await completeAuthAttempt(attempt);
+  reconcileAuthority();
+  return result;
 }
 
 /** Pull a string transport URL out of a synced add-on entry (the app emits {transportUrl,name}; the web
@@ -641,10 +630,8 @@ function requestAccountPull(state: ReceiveState): Promise<void> {
 
 /** One automatic receiving lifecycle for this page. Account/token changes retire old callbacks. */
 export function startAccountSync(): () => void {
-  // Reconcile changes that occurred after boot validation but before the listener existed.
-  const initial = currentSession(), stored = loadSession();
-  if (stored && !sameSession(initial, stored)) setSession(stored);
-  else if (initial && !captureStoredSession(initial)()) setSession(null);
+  startSessionAuthority();
+  reconcileAuthority();
   receiveStarted = true;
   bindReceiveSession(currentSession());
   const catchUp = (): void => {
@@ -656,12 +643,6 @@ export function startAccountSync(): () => void {
     if (receiveState) disposeReceiver(receiveState);
     releaseJournals(settingsSyncState);
   };
-  const storageChanged = (event: StorageEvent): void => {
-    if (event.key !== null && event.key !== SESSION_DESCRIPTOR_KEY) return;
-    const next = loadSession();
-    if (!sameSession(currentSession(), next)) setSession(next);
-  };
-  window.addEventListener("storage", storageChanged);
   window.addEventListener("online", catchUp);
   window.addEventListener("offline", catchUp);
   window.addEventListener("pageshow", catchUp);
@@ -671,7 +652,6 @@ export function startAccountSync(): () => void {
     receiveStarted = false;
     if (receiveState) disposeReceiver(receiveState);
     receiveState = null;
-    window.removeEventListener("storage", storageChanged);
     window.removeEventListener("online", catchUp);
     window.removeEventListener("offline", catchUp);
     window.removeEventListener("pageshow", catchUp);
@@ -1073,24 +1053,14 @@ let settingsSyncState: SettingsSyncState;
 // Jobs still verify their captured state before starting, so a queued write from a departed account drops.
 let settingsWriteTail: Promise<void> = Promise.resolve();
 
-function snapshotSession(session: Session | null): Session | null {
-  return session ? { ...session, account: { ...session.account }, dataKey: session.dataKey.slice() } : null;
-}
-
 /** Bind async readers to the descriptor and key owned when they start. In-memory callers
  *  may omit storage entirely; a present but unowned descriptor never grants that exception. */
 function hasSessionDescriptor(): boolean {
-  try { return localStorage.getItem(SESSION_DESCRIPTOR_KEY) !== null; }
-  catch { return false; }
+  return sessionOwner().mode !== "memory"; // denied reads are never absence/memory permission
 }
 function captureStoredSession(session: Session, requireStored = false): () => boolean {
-  const captured = snapshotSession(session)!;
-  const required = requireStored || hasSessionDescriptor();
-  return () => {
-    if (!sameSession(session, captured)) return false;
-    const stored = loadSession();
-    return (!required && !hasSessionDescriptor() && !stored) || sameSession(stored, captured);
-  };
+  const owns = captureSessionOwnership(session);
+  return () => (!requireStored || sessionOwner().mode === "persisted") && owns();
 }
 
 function sameSession(a: Session | null, b: Session | null): boolean {
@@ -1892,9 +1862,11 @@ onSettingsChange((next) => {
 });
 
 /** Sign out: clear storage, reset the cache, and notify subscribers so the nav drops back to signed-out. */
-export function signOut(): void {
-  clearSession();
-  setSession(null);
+export function signOut(): Promise<AuthResult> {
+  // clearSession retires authority synchronously, before waiting for the cooperative lock.
+  const completion = clearSession();
+  reconcileAuthority();
+  return completion;
 }
 
 /** Subscribe to sign-in / sign-out. Fires once immediately with the current session, then on every
@@ -1909,5 +1881,8 @@ export function subscribe(listener: Listener): () => void {
 
 function notify(): void {
   const value = cached ?? null;
-  for (const listener of listeners) listener(value);
+  for (const listener of listeners) { try { listener(value); } catch { /* isolated UI effect */ } }
 }
+
+// Pure subscription registration; no credential read/write at module import.
+onSessionAuthority(reconcileAuthority);

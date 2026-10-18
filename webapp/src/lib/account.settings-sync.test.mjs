@@ -1,18 +1,6 @@
+import { admit, Locks } from "./auth-adoption.fixtures.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { registerHooks } from "node:module";
-
-registerHooks({
-  resolve(specifier, context, next) {
-    if (specifier.startsWith(".") && !/\.[a-z]+$/i.test(specifier) && context.parentURL) {
-      const candidate = new URL(specifier + ".ts", context.parentURL);
-      if (existsSync(fileURLToPath(candidate))) return { url: candidate.href, shortCircuit: true };
-    }
-    return next(specifier, context);
-  },
-});
 
 const local = new Map();
 const session = new Map();
@@ -37,6 +25,7 @@ globalThis.document = {
 };
 globalThis.window = new EventTarget();
 globalThis.matchMedia = () => ({ matches: false });
+Object.defineProperty(globalThis, "navigator", { configurable: true, value: { onLine: true, locks: new Locks() } });
 
 const nativeSetTimeout = globalThis.setTimeout;
 let settingsTimerSchedules = 0;
@@ -90,11 +79,14 @@ local.set(
 );
 local.set("vortx.web.activeProfile.v1", "seed-overlay");
 
-const { __syncCryptoTestHooks } = await import("./vault.ts");
+const vault = await import("./vault.ts");
+const { __syncCryptoTestHooks } = vault;
 const { sealDocument, openDocument } = __syncCryptoTestHooks;
 const { getSettings, updateSettings } = await import("./settings.ts");
 const { profiles, activeProfileId, setActiveProfile, addProfile, deleteProfile } = await import("./profiles.ts");
-const { adoptSession, applySyncDoc } = await import("./account.ts");
+const account = await import("./account.ts");
+const { applySyncDoc } = account;
+const adoptSession = (value) => admit(vault, value, account);
 
 const waitUntil = async (predicate, label, timeoutMs = 3_000) => {
   const deadline = Date.now() + timeoutMs;
@@ -209,7 +201,7 @@ test("settings sync writes only owner edits and never echoes hydration or overla
     account: { id: "acct-settings-test", email: "owner@example.test", username: "owner" },
     dataKey,
   };
-  adoptSession(accountSession);
+  await adoptSession(accountSession);
 
   const accountDoc = {
     vortx: {
@@ -432,7 +424,7 @@ test("settings sync writes only owner edits and never echoes hydration or overla
 test("rapid separate settings edits union their changed keys into one latest-doc patch", async () => {
   const accountSession = makeAccountSession("acct-rapid-settings");
   const remote = settingsDoc();
-  adoptSession(accountSession);
+  await adoptSession(accountSession);
   applySyncDoc(remote);
   const server = await installSyncServer(accountSession, remote);
 
@@ -454,7 +446,7 @@ test("slow settings writes are serialized so the newest same-key edit wins", asy
   });
   const accountSession = makeAccountSession("acct-serialized-settings");
   const remote = settingsDoc();
-  adoptSession(accountSession);
+  await adoptSession(accountSession);
   applySyncDoc(remote);
   const server = await installSyncServer(accountSession, remote, 100, async (putNumber) => {
     if (putNumber === 1) await firstPutGate;
@@ -485,10 +477,10 @@ test("switching accounts cancels a pending settings timer from the old session",
     });
   };
 
-  adoptSession(first);
+  await adoptSession(first);
   applySyncDoc(settingsDoc());
   updateSettings({ accentID: "forest" });
-  adoptSession(second);
+  await adoptSession(second);
   applySyncDoc({});
 
   await new Promise((resolve) => nativeSetTimeout(resolve, 1_000));
@@ -504,7 +496,7 @@ test("an owner edit preserves unrelated settings from the latest remote document
   });
   newerRemote.vortx.updatedAt = 200;
 
-  adoptSession(accountSession);
+  await adoptSession(accountSession);
   applySyncDoc(hydrated);
   const server = await installSyncServer(accountSession, newerRemote, 200);
   updateSettings({ accentID: "forest" });
@@ -524,7 +516,7 @@ test("an owner edit preserves unrelated settings from the latest remote document
 test("API-key-only account documents support deletion and hydrate missing keys as cleared", async () => {
   const accountSession = makeAccountSession("acct-api-keys-only");
   const remote = { apiKeys: { tmdb: "test-tmdb-value", mdblist: "test-mdblist-value" } };
-  adoptSession(accountSession);
+  await adoptSession(accountSession);
   applySyncDoc(remote);
   assert.equal(getSettings().tmdbKey, "test-tmdb-value");
   assert.equal(getSettings().mdblistKey, "test-mdblist-value");
@@ -578,7 +570,7 @@ test("settings writes preserve the effective web roster, tombstones, fields, and
     },
   };
 
-  adoptSession(accountSession);
+  await adoptSession(accountSession);
   applySyncDoc(remote);
   setActiveProfile(profiles()[0].id);
   const server = await installSyncServer(accountSession, remote, 200);
@@ -616,7 +608,7 @@ test("a failed serialized batch merges into queued edits and retries an isolated
   const failedPuts = new Set([1, 3]);
   const accountSession = makeAccountSession("acct-failed-settings-batch");
   const remote = settingsDoc();
-  adoptSession(accountSession);
+  await adoptSession(accountSession);
   applySyncDoc(remote);
   const server = await installSyncServer(accountSession, remote, 100, async (putNumber) => {
     activePuts += 1;
@@ -655,7 +647,7 @@ test("a failed serialized batch merges into queued edits and retries an isolated
   assert.equal(maxActivePuts, 1, "retry writes must remain serialized");
 });
 
-test("session identity changes clear account data immediately and preserve device-local settings", () => {
+test("session identity changes clear account data immediately and preserve device-local settings", async () => {
   const first = makeAccountSession("acct-clear-first");
   const refreshed = {
     ...first,
@@ -663,7 +655,7 @@ test("session identity changes clear account data immediately and preserve devic
   };
   const second = makeAccountSession("acct-clear-second");
 
-  adoptSession(first);
+  await adoptSession(first);
   applySyncDoc(
     settingsDoc(
       {
@@ -690,7 +682,7 @@ test("session identity changes clear account data immediately and preserve devic
     performance: "reduced",
   });
 
-  adoptSession(refreshed);
+  await adoptSession(refreshed);
   assert.equal(getSettings().tmdbKey, "account-a-tmdb", "a token refresh must retain the same account's settings");
   assert.equal(getSettings().mdblistKey, "account-a-mdblist");
   assert.equal(getSettings().accentID, "royal");
@@ -708,7 +700,7 @@ test("session identity changes clear account data immediately and preserve devic
   assert.equal(getSettings().background, "oled");
 
   applySyncDoc(settingsDoc({ accentID: "crimson", oled: true }, { tmdb: "refreshed-tmdb" }));
-  adoptSession(second);
+  await adoptSession(second);
   assert.equal(getSettings().tmdbKey, "", "account A credentials must clear before account B hydration");
   assert.equal(getSettings().accentID, "vortx", "account A appearance must clear before account B hydration");
   assert.equal(getSettings().background, "warm");
@@ -723,12 +715,12 @@ test("token refresh preserves pending settings writes and armed sync state", asy
   };
   const remote = settingsDoc();
 
-  adoptSession(accountSession);
+  await adoptSession(accountSession);
   applySyncDoc(remote);
   const server = await installSyncServer(accountSession, remote);
 
   updateSettings({ accentID: "forest" });
-  adoptSession(refreshed);
+  await adoptSession(refreshed);
 
   await waitUntil(() => server.puts.length === 1, "pending settings PUT after token refresh");
   const firstPut = server.requests.filter((request) => request.init.method === "PUT");

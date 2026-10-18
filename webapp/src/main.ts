@@ -23,10 +23,11 @@ import { renderLibrary } from "./views/library";
 import { loadLive, renderLive } from "./views/live";
 import { closeDetail, handleDetailClick, openDetail } from "./views/detail";
 import { handleSettingsClick, renderSettings } from "./views/settings";
-import { handleLoginClick, renderLogin } from "./views/login";
-import { renderApprove, handleApproveClick } from "./views/approve";
+import { handleLoginClick, renderLogin, disposeLogin } from "./views/login";
+import { renderApprove, handleApproveClick, disposeApprove } from "./views/approve";
 import { applySettings } from "./lib/settings";
 import { ensureValidSession, startAccountSync } from "./lib/account";
+import { startSessionAuthority } from "./lib/vault";
 import { initTvPlatform } from "./lib/tvnav";
 
 // VortX web client entry point. Flow: load installed add-ons (Cinemeta + user stream add-ons) ->
@@ -114,6 +115,7 @@ function pageTitle(route: Route): string {
 
 /** Render a route. Async surfaces paint a shell synchronously, then stream content in. */
 async function renderRoute(route: Route): Promise<void> {
+  disposeLogin(); disposeApprove();
   // A route change (e.g. browser back/forward) while the player overlay is open means the user navigated
   // away from playback, so tear the player down: otherwise it stays on top of the new route, the video
   // keeps playing audio, and its global key handler keeps capturing keystrokes.
@@ -370,6 +372,7 @@ function normalizeApproveEntry(): void {
 }
 
 async function start(): Promise<void> {
+  startSessionAuthority();
   const app = el("app");
   if (!app) return;
   normalizeApproveEntry(); // rescue the legacy /approve?c=..&k=.. path form into the hash route (#153)
@@ -390,7 +393,7 @@ async function start(): Promise<void> {
   // Validate the token in the background, then pull the account sync doc so a returning (already signed-in)
   // user's add-ons, library, and Continue Watching refresh on load - not only on a fresh sign-in. Never
   // blocks first paint; applySyncDoc fires vortx:addons-changed to re-render when something merges.
-  void ensureValidSession().then(() => startAccountSync());
+  void ensureValidSession().then(() => startAccountSync(), () => startAccountSync());
   const generation = ++addonReloadGeneration;
   const initialAddons = await loadInstalledAddons();
   if (generation === addonReloadGeneration) addons = initialAddons;

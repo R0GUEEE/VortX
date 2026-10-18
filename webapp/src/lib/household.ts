@@ -15,6 +15,7 @@
 //   5. Leave (self) / the household re-keys so the leaver reads nothing new.
 import {
   type Session,
+  captureSessionOwnership,
   householdStatus,
   householdBlobGet,
   householdKeyRequest,
@@ -39,12 +40,13 @@ const td = new TextDecoder();
 // intervening sign-out or account switch that later returns to the original session.
 function captureSession(session: Session): { isCurrent: () => boolean; dispose: () => void } {
   const accountId = session.account.id, token = session.token, dataKey = session.dataKey.slice();
+  const owns = captureSessionOwnership(session);
   let valid = true;
   const matches = (candidate: Session | null): boolean => !!candidate && candidate.account.id === accountId
     && candidate.token === token && candidate.dataKey.length === dataKey.length
     && dataKey.every((byte, index) => candidate.dataKey[index] === byte);
   const dispose = subscribe((candidate) => { if (!matches(candidate)) valid = false; });
-  return { isCurrent: () => valid && matches(currentSession()), dispose };
+  return { isCurrent: () => valid && matches(currentSession()) && owns(), dispose };
 }
 function requireCurrent(isCurrent: () => boolean): void {
   if (!isCurrent()) throw new Error("Account changed while accepting shared content. Please try again.");

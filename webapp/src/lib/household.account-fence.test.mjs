@@ -15,6 +15,9 @@ const values = new Map();
 const settings = {};
 const h = globalThis.__householdFence = {
   currentSession: () => session,
+  // This existing orchestration suite mocks the ownership dependency; real authority/blocked/ABA
+  // behavior is exercised separately by vault.auth-adoption.test.mjs against the actual graph.
+  captureSessionOwnership: (source) => () => source === session,
   subscribe(fn) { listeners.add(fn); fn(session); return () => listeners.delete(fn); },
   householdStatus: (...args) => readStatus(...args),
   householdBlobGet: async () => ({ document: "shared" }),
@@ -28,7 +31,7 @@ const h = globalThis.__householdFence = {
 const proxy = (names) => `const h = globalThis.__householdFence; ${names.map((name) => `export const ${name} = (...args) => h.${name}(...args);`).join(" ")}`;
 const mocks = {
   "./account": proxy(["currentSession", "subscribe"]),
-  "./vault": proxy(["householdStatus", "householdBlobGet", "householdKeyRequest", "householdKeyStatus", "unwrapHhKey", "newHouseholdEphemeral", "sealSharedBlob", "openSharedBlob", "getSyncDoc", "mutateSyncDoc"]),
+  "./vault": proxy(["captureSessionOwnership", "householdStatus", "householdBlobGet", "householdKeyRequest", "householdKeyStatus", "unwrapHhKey", "newHouseholdEphemeral", "sealSharedBlob", "openSharedBlob", "getSyncDoc", "mutateSyncDoc"]),
   "./addon": `export const CINEMETA_URL = "https://cinemeta.test/manifest.json"; ${proxy(["loadAddon"])}`,
   "./settings": proxy(["getSettings", "updateSettings"]),
   "./profiles": "export const activeScope = () => ''; export const activeProfileId = () => 'owner';",

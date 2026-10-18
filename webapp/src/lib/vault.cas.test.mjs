@@ -1,19 +1,9 @@
+import { fresh, admit, seedOwned, storageEvent } from "./auth-adoption.fixtures.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { registerHooks } from "node:module";
 import { webcrypto } from "node:crypto";
-
-registerHooks({ resolve(specifier, context, next) {
-  if (specifier.startsWith(".") && !/\.[a-z]+$/i.test(specifier) && context.parentURL) {
-    const candidate = new URL(specifier + ".ts", context.parentURL);
-    if (existsSync(fileURLToPath(candidate))) return { url: candidate.href, shortCircuit: true };
-  }
-  return next(specifier, context);
-} });
 Object.defineProperty(globalThis, "crypto", { configurable: true, value: webcrypto });
-const vault = await import("./vault.ts");
+let vault;
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 class Storage {
   data = new Map();
@@ -22,11 +12,11 @@ class Storage {
   removeItem(key) { this.data.delete(key); }
 }
 let sequence = 0;
-function session() {
-  Object.assign(globalThis, { localStorage: new Storage(), sessionStorage: new Storage(), window: new EventTarget() });
+async function session() {
+  ({ vault } = await fresh());
   const id = "synthetic-cas-" + ++sequence;
   const s = { token: "shared-synthetic-token", account: { id, username: id, email: id + "@example.invalid" }, dataKey: new Uint8Array(32).fill(sequence) };
-  vault.saveSession(s);
+  await admit(vault, s);
   return s;
 }
 async function encrypt(doc, s) {
@@ -81,7 +71,7 @@ function relay(s, initial = { foreign: { nested: { future: 7 } }, vortx: { futur
 }
 test("candidate-bound encrypted vault writes use real mutation methods", async (t) => {
   await t.test("same-token later GET cannot bless an earlier candidate; rejection remerges latest unknown carriers", async () => {
-    const s = session(), server = relay(s), held = server.holdPut();
+    const s = await session(), server = relay(s), held = server.holdPut();
     const intent = { id: "one-logical-action", value: "local" };
     localStorage.setItem("synthetic-retained-intent", JSON.stringify(intent));
     const writing = vault.mutateSyncDoc(s, (doc) => { doc.webIntent = intent; });
@@ -99,7 +89,7 @@ test("candidate-bound encrypted vault writes use real mutation methods", async (
     assert.equal(localStorage.getItem("synthetic-retained-intent"), JSON.stringify(intent));
   });
   await t.test("two writers from an authenticated absent row create at zero and remerge the losing intent", async () => {
-    const s = session(), server = relay(s, null), held = server.holdPut();
+    const s = await session(), server = relay(s, null), held = server.holdPut();
     const first = vault.mutateSyncDoc(s, (doc) => { doc.first = true; }); await held.ready;
     await vault.mutateSyncDoc(s, (doc) => { doc.second = true; }); held.release(); await first;
     assert.deepEqual(server.puts.map(({ baseRevision, version }) => [baseRevision, version]), [[null, 0], [null, 0], [0, 1]]);
@@ -107,36 +97,37 @@ test("candidate-bound encrypted vault writes use real mutation methods", async (
   });
   await t.test("unknown or unreadable bases, auth failures, and numeric overflow never become default null witnesses", async () => {
     for (const version of [undefined, "20", -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.MAX_SAFE_INTEGER]) {
-      const s = session(), server = relay(s);
+      const s = await session(), server = relay(s);
       server.malformed({ document: await encrypt({}, s), version });
       await assert.rejects(vault.mutateSyncDoc(s, (doc) => { doc.mine = true; }));
       assert.equal(server.puts.length, 0);
     }
     for (const code of [401, 503]) {
-      const s = session(), server = relay(s); server.error(code);
+      const s = await session(), server = relay(s); server.error(code);
       await assert.rejects(vault.mutateSyncDoc(s, (doc) => { doc.mine = true; })); assert.equal(server.puts.length, 0);
     }
-    const s = session(), server = relay(s); server.malformed({ document: "cannot decrypt", version: 20 });
+    const s = await session(), server = relay(s); server.malformed({ document: "cannot decrypt", version: 20 });
     await assert.rejects(vault.mutateSyncDoc(s, (doc) => { doc.mine = true; })); assert.equal(server.puts.length, 0);
   });
   await t.test("account replacement while candidate is sealing fences the PUT and retains the original intent", async () => {
-    const s = session(), server = relay(s);
+    const s = await session(), server = relay(s);
     await assert.rejects(vault.mutateSyncDoc(s, (doc) => {
       doc.mine = "original account";
-      vault.saveSession({ ...s, token: "other-token", account: { ...s.account, id: "other-account" } });
+      // A separately owned tab publication can occur synchronously during this reducer.
+      seedOwned({ ...s, token: "other-token", account: { ...s.account, id: "other-account" } }); storageEvent();
     }), /session changed/i);
     assert.equal(server.puts.length, 0);
   });
   await t.test("upgrade-required is terminal within the mutation and absent acceptance is never an ACK", async () => {
-    const s = session(), server = relay(s); server.requireUpgrade();
+    const s = await session(), server = relay(s); server.requireUpgrade();
     await assert.rejects(vault.mutateSyncDoc(s, (doc) => { doc.mine = true; }), { name: "SyncUpgradeRequiredError" });
     assert.equal(server.puts.length, 1);
-    const other = session(), unconfirmed = relay(other); unconfirmed.omitAcceptance();
+    const other = await session(), unconfirmed = relay(other); unconfirmed.omitAcceptance();
     await assert.rejects(vault.mutateSyncDoc(other, (doc) => { doc.mine = true; }), /confirm/);
     assert.equal(unconfirmed.puts.length, 1);
   });
   await t.test("a lost accepted response leaves the edit unacknowledged and fresh readback proves its retained identity", async () => {
-    const s = session(), server = relay(s), intent = { id: "durable-action", value: 3 };
+    const s = await session(), server = relay(s), intent = { id: "durable-action", value: 3 };
     localStorage.setItem("synthetic-retained-intent", JSON.stringify(intent)); server.loseResponse();
     await assert.rejects(vault.mutateSyncDoc(s, (doc) => { doc.webIntent = intent; }), /response lost/);
     assert.equal(server.puts.length, 1);
@@ -145,7 +136,7 @@ test("candidate-bound encrypted vault writes use real mutation methods", async (
     assert.equal(server.version, 21);
   });
   await t.test("explicit owned deletion preserves unknown nested siblings", async () => {
-    const s = session(), server = relay(s, { apiKeys: { tmdb: "synthetic-remove", future: { retain: true } }, vortx: { futureField: "retain" } });
+    const s = await session(), server = relay(s, { apiKeys: { tmdb: "synthetic-remove", future: { retain: true } }, vortx: { futureField: "retain" } });
     await vault.mutateSyncDoc(s, (doc) => { delete doc.apiKeys.tmdb; });
     assert.deepEqual(server.read(), { apiKeys: { future: { retain: true } }, vortx: { futureField: "retain" } });
   });
