@@ -541,7 +541,7 @@ struct TVPlayerView: View {
     @State private var altSourceCount = 0        // playable streams loaded for this title / episode
     @State private var qualityOptionCount = 0    // distinct resolutions across those streams
     @State private var chapterCount = 0          // embedded chapters, refreshed with the skip segments
-    @State private var skipPillDismissedStart: Double?   // segment start whose pill Back dismissed: hides the pill without skipping; re-armed when the playhead leaves that segment
+    @State private var skipPillDismissedSegment: SkipSegment?   // dismissed span; re-armed on actual exit or a different full countdown key
     @State private var autoSkipCountdown = AutoSkipCountdownState()
     // The UIKit remote catcher owns physical focus, while this flag mirrors which virtual skip-pill action
     // VoiceOver/Switch Control (or Left/Right + Select) has selected. The X action must remain reachable
@@ -827,7 +827,10 @@ struct TVPlayerView: View {
     @State private var autoSkipDelaySeconds = AutoSkipSettings.delaySeconds()
     private var seekStepSeconds: Double { Double(seekStep) ?? 10 }
     @State private var apiSkipCandidates: [SegmentCandidate] = []   // crowd-sourced spans for the current title
-    @State private var skipFetchKey = ""                   // imdb:S:E the crowd spans belong to
+    @State private var skipFetchOwner: SkipLookupRequestOwner<PlayerLoadToken>?
+    @State private var skipFetchAttempt: UUID?
+    @State private var skipFetchContentIdentity = ""
+    @State private var skipLookupRefreshing = false
     @State private var skipFetchTask: Task<Void, Never>?
     // Current episode (changes when switching via Next/Prev/Episodes or auto-advance). Seeded from
     // the passed url/title/meta in onAppear so the first load is unchanged.
@@ -1359,6 +1362,7 @@ struct TVPlayerView: View {
             consumePendingManualEpisodeNavigationIfReady()
         }
         .onChange(of: sourceSwitchGeneration) { _ in
+            fetchSkipTimestamps()
             cancelDirectResumeInventoryRefresh()
             clearPendingManualEpisodeNavigation(reason: "source replacement")
             episodeInventoryUnavailable = false
@@ -1723,6 +1727,7 @@ struct TVPlayerView: View {
         }
         refreshSubFingerprint(force: true)
         fetchPooledSubtitles()
+        fetchSkipTimestamps()
     }
 
     private func cancelAssetSanityObservationDeadline() {
@@ -2371,7 +2376,9 @@ struct TVPlayerView: View {
         case MPVProperty.duration:
             if let d = data as? Double {
                 if d != duration || !d.isFinite || d <= 0 { watchedDwell.reset() }
-                duration = d; maybeResume(); refreshSkipSegments(); fetchSkipTimestamps(); fetchAddonSubtitles()
+                duration = d
+                retireUnusableSkipLookupDuration(loadToken: loadToken, durationSeconds: d)
+                maybeResume(); refreshSkipSegments(); fetchSkipTimestamps(); fetchAddonSubtitles()
                 // Re-apply the persisted aspect-ratio pick on every (re)load, the same iOS does (aspect
                 // parity: a tvOS pick previously reset to Fit on the next source or episode).
                 if !appliedSize, d > 0 {
@@ -3755,7 +3762,7 @@ struct TVPlayerView: View {
                                                    episode: meta.episode, durationSeconds: duration)
                 skipEditSubmittedKeys.insert(key)
                 skipEditDone = true
-                skipFetchKey = ""        // force a re-fetch so the submitted span resolves onto the bar
+                invalidateSkipLookup()        // force a re-fetch so the submitted span resolves onto the bar
                 fetchSkipTimestamps()
             } catch {
                 skipEditError = error.localizedDescription
@@ -8714,7 +8721,7 @@ struct TVPlayerView: View {
     private func cancelAutomaticSkip(_ segment: SkipSegment) {
         guard skipPillSegment == segment else { return }
         AutoSkipCountdownPolicy.cancel(state: &autoSkipCountdown, segment: segment)
-        skipPillDismissedStart = segment.start
+        skipPillDismissedSegment = segment
         skipPillFocusedCancel = false
         DiagnosticsLog.log("playback", "automatic skip cancelled kind=\(segment.kind.rawValue) start=\(segment.start)")
     }
@@ -8763,13 +8770,19 @@ struct TVPlayerView: View {
             if currentSkip != nil { currentSkip = nil }
             return
         }
-        if skip?.start != currentSkip?.start {
+        if skip != currentSkip {
             currentSkip = skip
             skipPillFocusedCancel = false
         }
-        // Re-arm a Back-dismissed pill once the playhead leaves that segment (seek-out, natural exit,
-        // or a new file's spans): the dismissal is scoped to one continuous stay inside the segment.
-        if let dismissed = skipPillDismissedStart, skip?.start != dismissed { skipPillDismissedStart = nil }
+        if let dismissed = skipPillDismissedSegment {
+            let insideDismissedSpan = time.isFinite && time >= dismissed.start && time < dismissed.end
+            let dismissedKey = skipPillSegmentKey(dismissed)
+            let sameResolvedSpan = dismissedKey != nil && skipPillSegmentKey(skip) == dismissedKey
+            let temporaryRequestGap = skip == nil && skipLookupRefreshing
+            if !insideDismissedSpan || (!sameResolvedSpan && !temporaryRequestGap) {
+                skipPillDismissedSegment = nil
+            }
+        }
     }
 
     /// Re-resolve skip spans from every available layer (named chapters + crowd timestamps), once the
@@ -8785,35 +8798,67 @@ struct TVPlayerView: View {
 
     /// Pull crowd-sourced intro/credits spans for the current title (disk-cached, non-blocking): the
     /// pill simply appears once the result lands, normally well before the intro is reached.
+    private var currentSkipLookupOwner: SkipLookupRequestOwner<PlayerLoadToken>? {
+        guard let m = curMeta, pendingAdvance == nil,
+              SkipTimestampService.supports(metaId: m.libraryId),
+              let loadToken = coordinator.player?.activeLoadToken,
+              assetSanityAttempt.isAccepted(owner: loadToken) else { return nil }
+        return SkipLookupRequestOwner(metaId: m.libraryId, season: m.season, episode: m.episode,
+                                      durationSeconds: duration, sourceGeneration: sourceSwitchGeneration,
+                                      loadToken: loadToken)
+    }
+
+    private func invalidateSkipLookup() {
+        skipFetchTask?.cancel()
+        skipFetchTask = nil
+        skipFetchOwner = nil
+        skipFetchAttempt = nil
+        // This flag records a temporary request-data gap, not a candidate usable for display/seek.
+        skipLookupRefreshing = skipPillDismissedSegment != nil
+        apiSkipCandidates = []
+        refreshSkipSegments()
+    }
+
+    private func retireUnusableSkipLookupDuration(loadToken: PlayerLoadToken?, durationSeconds: Double) {
+        guard let loadToken, loadToken == coordinator.player?.activeLoadToken,
+              pendingAdvance == nil, assetSanityAttempt.isAccepted(owner: loadToken),
+              SkipLookupRequestOwner<PlayerLoadToken>.usableMilliseconds(durationSeconds) == nil else { return }
+        invalidateSkipLookup()
+    }
+
     private func fetchSkipTimestamps() {
-        guard let m = curMeta else { plog.info("skip: no curMeta, not fetching"); return }
-        let key = "\(m.libraryId):\(m.season ?? 0):\(m.episode ?? 0)"
-        guard SkipTimestampService.supports(metaId: m.libraryId) else {
-            skipFetchTask?.cancel()
-            apiSkipCandidates = []
-            // T18: an unsupported title still resolves chapter-derived skip segments, so a NEW episode must reset
-            // the per-episode auto-skip dedup + pill dismissal here too (the supported branch below already does).
-            // Guard on the key so a same-episode re-fetch (a source switch re-fires the duration event) does not
-            // clobber mid-episode; store the real key (not "") so the next unsupported episode is detectable.
-            if key != skipFetchKey { skipPillDismissedStart = nil }
-            skipFetchKey = key
-            AutoSkipCountdownPolicy.bindMedia(&autoSkipCountdown, mediaID: autoSkipMediaIdentity)
-            refreshSkipSegments()
+        let contentIdentity = autoSkipMediaIdentity
+        if contentIdentity != skipFetchContentIdentity {
+            skipFetchContentIdentity = contentIdentity
+            skipPillDismissedSegment = nil
+            skipLookupRefreshing = false
+        }
+        AutoSkipCountdownPolicy.bindMedia(&autoSkipCountdown, mediaID: contentIdentity)
+        guard let owner = currentSkipLookupOwner else {
+            invalidateSkipLookup()
             return
         }
-        if key != skipFetchKey { apiSkipCandidates = []; skipPillDismissedStart = nil }   // new episode: reset auto-skip + pill dismissal
-        skipFetchKey = key
-        AutoSkipCountdownPolicy.bindMedia(&autoSkipCountdown, mediaID: autoSkipMediaIdentity)
-        let dur = duration
-        plog.info("skip: fetching key=\(key, privacy: .public) dur=\(Int(dur), privacy: .public)")
-        skipFetchTask?.cancel()
+        guard owner.shouldStart(replacing: skipFetchOwner,
+                                previousTaskIsCancelled: skipFetchTask?.isCancelled ?? true) else { return }
+        invalidateSkipLookup()
+        let attempt = UUID()
+        skipFetchOwner = owner
+        skipFetchAttempt = attempt
         skipFetchTask = Task { @MainActor in
-            let found = await SkipTimestampService.candidates(imdbId: m.libraryId, season: m.season,
-                                                              episode: m.episode, durationSeconds: dur)
-            guard !Task.isCancelled, skipFetchKey == key else { return }
+            var completed = false
+            defer {
+                if !completed, skipFetchAttempt == attempt { invalidateSkipLookup() }
+            }
+            let found = await SkipTimestampService.candidates(
+                imdbId: owner.metaId, season: owner.season, episode: owner.episode,
+                durationSeconds: owner.durationSeconds
+            )
+            guard skipFetchAttempt == attempt, skipFetchOwner == owner,
+                  owner.canPublish(current: currentSkipLookupOwner, isCancelled: Task.isCancelled) else { return }
             apiSkipCandidates = found
+            skipLookupRefreshing = false
             refreshSkipSegments()
-            plog.info("skip: \(found.count, privacy: .public) crowd spans, \(skipSegments.count, privacy: .public) resolved segments")
+            completed = true
         }
     }
 
@@ -8864,10 +8909,20 @@ struct TVPlayerView: View {
     /// The skip pill actually on screen right now - one source of truth shared by the body render
     /// and the remote handler: chrome hidden, a segment active, the Up Next band not owning the
     /// corner, and not Back-dismissed for this segment.
+    /// Match dismissal to the countdown's existing full-span identity, not a start-only UI key.
+    /// Check representability before using the existing non-failable millisecond-key initializer.
+    private func skipPillSegmentKey(_ segment: SkipSegment?) -> AutoSkipSegmentKey? {
+        guard let segment, segment.start.isFinite, segment.end.isFinite,
+              Int(exactly: (segment.start * 1000).rounded()) != nil,
+              Int(exactly: (segment.end * 1000).rounded()) != nil else { return nil }
+        return AutoSkipSegmentKey(segment: segment)
+    }
+
     private var skipPillSegment: SkipSegment? {
         guard hasStartedPlaying, !loadFailed, controlsHidden, let seg = currentSkip,
               upNextRemaining == nil, !isCreditsUpNext,
-              seg.start != skipPillDismissedStart,
+              let key = skipPillSegmentKey(seg),
+              key != skipPillSegmentKey(skipPillDismissedSegment),
               !autoSkipCountdown.isSuppressed(for: seg) else { return nil }
         return seg
     }

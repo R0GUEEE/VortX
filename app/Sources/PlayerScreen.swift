@@ -2109,7 +2109,8 @@ struct PlayerScreen: View {
     @State private var currentSkip: SkipSegment?
     @State private var autoSkipCountdown = AutoSkipCountdownState()
     @State private var autoSkipDelaySeconds = AutoSkipSettings.delaySeconds()
-    @State private var skipFetchKey = ""
+    @State private var skipFetchOwner: SkipLookupRequestOwner<PlayerLoadToken>?
+    @State private var skipFetchAttempt: UUID?
     @State private var skipFetchTask: Task<Void, Never>?
 
     // Playback-info overlay rows, refreshed while the Info panel is open.
@@ -2151,6 +2152,7 @@ struct PlayerScreen: View {
             consumePendingManualEpisodeNavigationIfReady()
         }
         .onChange(of: sourceSwitchGeneration) { _ in
+            fetchSkipTimestamps()
             cancelDirectResumeInventoryRefresh()
             clearPendingManualEpisodeNavigation(reason: "source replacement")
             episodeInventoryUnavailable = false
@@ -2889,6 +2891,7 @@ struct PlayerScreen: View {
         }
         refreshSubFingerprint(force: true)
         fetchPooledSubtitles()
+        fetchSkipTimestamps()
     }
 
     private func cancelAssetSanityObservationDeadline() {
@@ -3433,6 +3436,7 @@ struct PlayerScreen: View {
             if let d = data as? Double {
                 if d != duration || !d.isFinite || d <= 0 { watchedDwell.reset() }
                 duration = d
+                retireUnusableSkipLookupDuration(loadToken: loadToken, durationSeconds: d)
                 if !appliedSize, d > 0 {                 // re-apply the size mode on every (re)load
                     appliedSize = true
                     coordinator.player?.setVideoSize(videoSize)
@@ -9264,7 +9268,7 @@ struct PlayerScreen: View {
             let key = "\(meta.libraryId):\(meta.season ?? 0):\(meta.episode ?? 0):\(skipDBEditType.rawValue)"
             skipDBSubmittedKeys.insert(key)
             skipDBSubmitResult = true
-            skipFetchKey = ""
+            invalidateSkipLookup()
             fetchSkipTimestamps()
         } catch {
             skipDBSubmitResult = false
@@ -9503,30 +9507,69 @@ struct PlayerScreen: View {
         chapterFractions = ChapterMarks.fractions(chapters: chapters, duration: duration)
         updateCurrentSkip(at: currentTime)
     }
-    private func fetchSkipTimestamps() {
-        guard let m = curMeta, SkipTimestampService.supports(metaId: m.libraryId) else {
-            skipFetchTask?.cancel(); apiSkipCandidates = []; skipFetchKey = ""
-            AutoSkipCountdownPolicy.bindMedia(&autoSkipCountdown, mediaID: autoSkipMediaIdentity)
-            refreshSkipSegments(); return
-        }
-        let key = "\(m.libraryId):\(m.season ?? 0):\(m.episode ?? 0)"
-        guard key != skipFetchKey else { return }
-        if key != skipFetchKey { apiSkipCandidates = [] }
-        skipFetchKey = key
-        AutoSkipCountdownPolicy.bindMedia(&autoSkipCountdown, mediaID: autoSkipMediaIdentity)
-        let dur = duration
+    private var currentSkipLookupOwner: SkipLookupRequestOwner<PlayerLoadToken>? {
+        guard let m = curMeta, pendingAdvance == nil,
+              SkipTimestampService.supports(metaId: m.libraryId),
+              let loadToken = coordinator.player?.activeLoadToken,
+              assetSanityAttempt.isAccepted(owner: loadToken) else { return nil }
+        return SkipLookupRequestOwner(metaId: m.libraryId, season: m.season, episode: m.episode,
+                                      durationSeconds: duration, sourceGeneration: sourceSwitchGeneration,
+                                      loadToken: loadToken)
+    }
+
+    private func invalidateSkipLookup() {
         skipFetchTask?.cancel()
+        skipFetchTask = nil
+        skipFetchOwner = nil
+        skipFetchAttempt = nil
+        apiSkipCandidates = []
+        #if !os(tvOS)
+        skipDBIntroEstimateMs = nil
+        #endif
+        refreshSkipSegments()
+    }
+
+    /// Called by the current duration event before its positive-duration side-effect guard.
+    private func retireUnusableSkipLookupDuration(loadToken: PlayerLoadToken?, durationSeconds: Double) {
+        guard let loadToken, loadToken == coordinator.player?.activeLoadToken,
+              pendingAdvance == nil, assetSanityAttempt.isAccepted(owner: loadToken),
+              SkipLookupRequestOwner<PlayerLoadToken>.usableMilliseconds(durationSeconds) == nil else { return }
+        invalidateSkipLookup()
+    }
+
+    private func fetchSkipTimestamps() {
+        AutoSkipCountdownPolicy.bindMedia(&autoSkipCountdown, mediaID: autoSkipMediaIdentity)
+        guard let owner = currentSkipLookupOwner else {
+            invalidateSkipLookup()
+            return
+        }
+        guard owner.shouldStart(replacing: skipFetchOwner,
+                                previousTaskIsCancelled: skipFetchTask?.isCancelled ?? true) else { return }
+        invalidateSkipLookup()
+        let attempt = UUID()
+        skipFetchOwner = owner
+        skipFetchAttempt = attempt
         skipFetchTask = Task { @MainActor in
-            let found = await SkipTimestampService.candidates(imdbId: m.libraryId, season: m.season,
-                                                              episode: m.episode, durationSeconds: dur)
-            guard !Task.isCancelled, skipFetchKey == key else { return }
+            var completed = false
+            defer {
+                // A rejected finished task is not a successful cached/coalesced request. Do not retire a successor.
+                if !completed, skipFetchAttempt == attempt { invalidateSkipLookup() }
+            }
+            let found = await SkipTimestampService.candidates(
+                imdbId: owner.metaId, season: owner.season, episode: owner.episode,
+                durationSeconds: owner.durationSeconds
+            )
+            guard skipFetchAttempt == attempt, skipFetchOwner == owner,
+                  owner.canPublish(current: currentSkipLookupOwner, isCancelled: Task.isCancelled) else { return }
             apiSkipCandidates = found
             refreshSkipSegments()
             #if !os(tvOS)
-            // Typical-intro-length hint (from the optional skipdb.tv read), surfaced as the editor's
-            // "magic" suggested end. Keyed like the skipDB cache entry.
-            skipDBIntroEstimateMs = await SkipTimestampStore.shared.introEstimate(for: "skipdb:\(key):\(Int(dur / 10) * 10)")
+            let estimate = await SkipTimestampStore.shared.introEstimate(for: owner.skipDBHintCacheKey)
+            guard skipFetchAttempt == attempt, skipFetchOwner == owner,
+                  owner.canPublish(current: currentSkipLookupOwner, isCancelled: Task.isCancelled) else { return }
+            skipDBIntroEstimateMs = estimate
             #endif
+            completed = true
         }
     }
 

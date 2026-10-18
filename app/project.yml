@@ -197,6 +197,9 @@ targets:
       # file mirror, so this target needs it for the same reason it needs VXProbe itself. Foundation +
       # CryptoKit only and self-contained, matching the three single-file includes above.
       - path: SourcesShared/VXProbeRedaction.swift
+      # The shared player/service requires these Foundation-only IntroDB lookup helpers.
+      - path: SourcesShared/TheIntroDBV4.swift
+      - path: SourcesShared/SkipLookupRequestOwner.swift
       - Resources/Assets.xcassets
       - path: Resources/server.js
         buildPhase: resources
