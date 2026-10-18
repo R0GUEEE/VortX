@@ -2,10 +2,45 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-// Source contracts for the shared chip definition; these do not measure browser
+// Source contracts for shared chip and semantic text definitions; these do not measure browser
 // rendering, profile tint contrast, glass composition, or device responsiveness.
 const css = readFileSync(new URL('../styles/app.css', import.meta.url), 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '');
+const desktopCss = readFileSync(new URL('../../../desktop/src/styles.css', import.meta.url), 'utf8')
+  .replace(/\/\*[\s\S]*?\*\//g, '');
+
+function rootColour(source, name) {
+  const root = /^:root\s*\{([^}]+)\}/m.exec(source);
+  assert.ok(root, 'Retain an explicit root palette');
+  const declarations = [...root[1].matchAll(new RegExp(`${name}:\\s*(#[0-9a-f]{6})\\s*;`, 'gi'))];
+  assert.equal(declarations.length, 1, `Keep one root value for ${name}`);
+  return declarations[0][1].toLowerCase();
+}
+
+function luminance(hex) {
+  const [red, green, blue] = hex.slice(1).match(/../g).map((pair) => {
+    const component = parseInt(pair, 16) / 255;
+    return component <= 0.04045 ? component / 12.92 : ((component + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+test('desktop and webapp semantic text tokens share the same palette', () => {
+  for (const name of ['--muted', '--muted-2']) {
+    assert.equal(rootColour(desktopCss, name), rootColour(css, name), `${name} diverged between shells`);
+  }
+});
+
+test('desktop semantic text clears 4.5:1 on each declared opaque dark surface', () => {
+  for (const textName of ['--muted', '--muted-2']) {
+    const text = luminance(rootColour(desktopCss, textName));
+    for (const backgroundName of ['--bg', '--surface', '--surface-2', '--surface-3']) {
+      const background = luminance(rootColour(desktopCss, backgroundName));
+      const contrast = (Math.max(text, background) + 0.05) / (Math.min(text, background) + 0.05);
+      assert.ok(contrast >= 4.5, `${textName} on ${backgroundName}: ${contrast.toFixed(3)}:1`);
+    }
+  }
+});
 
 function sharedChipRule() {
   const matches = [...css.matchAll(/\.btn-chip,\s*\.chip\s*\{([^}]+)\}/g)];

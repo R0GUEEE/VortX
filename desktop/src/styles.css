@@ -1,7 +1,8 @@
 /* VortX desktop. Editorial-cinema direction shared with the Mac/Apple TV app: a warm near-black canvas
    so poster art is the only color on screen, the single VortX gold accent that means focus / selection
    / primary / progress, a serif wordmark + hero, and surface cards that brighten on hover. Palette +
-   type mirror SourcesShared/Theme.swift (the "vortx" gold accent default) so every surface is one product. */
+   type follow SourcesShared/Theme.swift (the "vortx" gold accent default); semantic text tokens
+   follow the webapp's higher-contrast palette so both shells remain consistent. */
 :root {
   /* Warm near-black chrome, the exact DESIGN.md tokens (mirrors SourcesShared/Theme.swift). */
   --bg: #15120e;
@@ -15,8 +16,8 @@
   --accent-soft: rgba(245, 158, 11, 0.18);
   --on-accent: #0f0d0a;
   --text: #f6f1e9;
-  --muted: #bcb1a1;
-  --muted-2: #8c8273;
+  --muted: #d4cfc1;
+  --muted-2: #a89f94;
   --font: "SF Pro Display", "SF Pro Text", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --serif: "New York", "Iowan Old Style", Georgia, "Times New Roman", serif;
   --radius-card: 16px;
