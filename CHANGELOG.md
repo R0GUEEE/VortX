@@ -4,6 +4,34 @@ All notable changes to VortX, newest first. VortX is Apple TV first, with an iPh
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
+## 0.5.6 beta 1 - Recovery, safer profile changes and less repeated work
+
+Build **275** across Apple and Android. This is an early prerelease of the integrated
+audit repairs, not completion of the full audit or the Apple Swift 6 migration.
+Package and publication checks are still required before this candidate is released.
+
+### Fixed and improved
+
+- **Profile import and recovery ([#262](https://github.com/VortXTV/VortX/issues/262), [#265](https://github.com/VortXTV/VortX/issues/265)).** Older profile display values are validated without rewriting their original saved bytes. Recovery markers distinguish confirmed missing data from unreadable or unavailable storage, so a failed read does not authorize an empty replacement. These changes do not recover an already-lost encryption key.
+- **Repeated recovery after skipping credits.** Inner seek recovery and outer playback recovery share a retry allowance instead of repeatedly reopening the same failing region. An unfinished episode keeps its resume position; it is not marked watched or automatically advanced to hide the failure. The underlying premature end of a remote media stream remains a separate diagnosis.
+- **Player controls and Mac lifecycle.** Control auto-hide follows the current interaction lifecycle, preparation work is moved off the UI actor where covered, and server restarts are bounded. Mac quit waits for the server it owns to finish shutting down and reports a retained-child failure instead of silently starting more copies.
+- **Intro and credit lookup ([#266](https://github.com/VortXTV/VortX/issues/266)).** Apple and Android use IntroDB v4 with checked request identity and response handling. Apple TV span updates and Android cache validation follow the same requested episode rather than accepting a stale response.
+- **Profile ownership.** Continue Watching migration attempts and Watch Stats retain their original profile ownership. An old completion cannot clear a newer attempt's busy state or publish another profile's statistics.
+- **Less repeated work.** Catalog sorting reads the saved order once per operation and Home reads the hidden-row set once per build. Watched-history migration avoids redundant retry preflight and pools repeated evidence while preserving pending history. Discover observation and decorative TV seek motion are narrowed to their relevant state.
+- **Shared presentation and safety.** Glass eligibility and Effects Off are applied through shared control policy, disabled chip styles and desktop semantic text colours are more consistent, and browser account/view ownership and diagnostic log bounds are tightened.
+
+### What is still being worked on
+
+The main iOS, Mac, Full TV and Lite TV apps are **not yet fully migrated to Swift 6**.
+This candidate retains the integrated Swift 6 Top Shelf and standalone Watch Stats work;
+remaining Apple caller integration, preference/UI-queue candidates, household/client and
+SDK adoption, broader cleanup and audit coverage continue toward beta 2. Isolated tests
+are not physical-device sync, playback or measured smoothness acceptance.
+
+This beta does not deploy backend/database changes or automatically promote stable
+update feeds. Apple IPAs require sideload signing. The Mac app is ad-hoc signed, not
+notarized; installation instructions remain in [Release artifacts](docs/RELEASE-ARTIFACTS.md).
+
 ## 0.5.5 - Smooth for real, hero trailers and your next episode
 
 Build **274** across Apple and Android. 0.5.4 still converted your 0.4 data again on every sync, every
