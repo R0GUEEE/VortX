@@ -1986,9 +1986,9 @@ final class MPVMetalViewController: PlatformViewController {
     /// below the configured 900s so the offloaded forward payload never over-commits; an unknown or ordinary
     /// bitrate keeps the FULL configured ceiling (the byte budget is generous, so normal 4K is unaffected). Only
     /// ever lowers, and never below the floor.
-    private func bitrateBoundedRampCeiling(configured: Int) -> Int {
-        let videoBits = max(0, diagnosticDouble("video-bitrate") ?? 0)
-        let audioBits = max(0, diagnosticDouble("audio-bitrate") ?? 0)
+    private func bitrateBoundedRampCeiling(configured: Int, handle: OpaquePointer) -> Int {
+        let videoBits = max(0, diagnosticDouble("video-bitrate", handle: handle) ?? 0)
+        let audioBits = max(0, diagnosticDouble("audio-bitrate", handle: handle) ?? 0)
         let bytesPerSec = (videoBits + audioBits) / 8
         guard bytesPerSec > 0 else { return configured }
         let budgetSecs = Int(Double(Self.diskCacheReadaheadRampMaxReadaheadBytes) / bytesPerSec)
@@ -2000,7 +2000,9 @@ final class MPVMetalViewController: PlatformViewController {
 
     private func scheduleDiskCacheReadaheadRampStep(generation: UInt64, ceiling: Int) {
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.mpv != nil,
+            // Borrow only after this work starts; destruction uses this same serial queue
+            // and cannot overtake the running work. A raw pointer alone does not own mpv.
+            guard let self, let handle = self.mpv,
                   self.cacheReadaheadRampGeneration == generation else { return }
             // Read-and-clear the user-seek marker for THIS sample window (serialized with the seek entry points on
             // `queue`). A user seek's keyframe re-decode legitimately bursts frame drops, so its window must never
@@ -2009,9 +2011,9 @@ final class MPVMetalViewController: PlatformViewController {
             self.userSeekedSinceRampSample = false
             // Re-derive the ceiling from the live bitrate: a very-high-bitrate stream tops out lower so the disk
             // offload never over-fills; ordinary 4K keeps the full depth (see bitrateBoundedRampCeiling).
-            let effectiveCeiling = self.bitrateBoundedRampCeiling(configured: ceiling)
-            let dropCount = self.diagnosticInt(MPVProperty.frameDropCount) ?? self.cacheReadaheadRampLastFrameDrop
-            let stalled = self.diagnosticFlag(MPVProperty.pausedForCache) ?? false
+            let effectiveCeiling = self.bitrateBoundedRampCeiling(configured: ceiling, handle: handle)
+            let dropCount = self.diagnosticInt(MPVProperty.frameDropCount, handle: handle) ?? self.cacheReadaheadRampLastFrameDrop
+            let stalled = self.diagnosticFlag(MPVProperty.pausedForCache, handle: handle) ?? false
             let dropDelta = dropCount - self.cacheReadaheadRampLastFrameDrop
             self.cacheReadaheadRampLastFrameDrop = dropCount
             let floor = max(1, self.cacheReadaheadRampStartSecs)
@@ -2023,7 +2025,7 @@ final class MPVMetalViewController: PlatformViewController {
                 let next = max(floor, self.cacheReadaheadRampAppliedSecs - Self.diskCacheReadaheadRampStepSecs)
                 if next != self.cacheReadaheadRampAppliedSecs {
                     self.cacheReadaheadRampAppliedSecs = next
-                    self.setString("cache-secs", String(next))
+                    self.setString("cache-secs", String(next), handle: handle)
                     self.mpvLog.log("disk cache readahead ramp backed off to \(next, privacy: .public)s (drop burst \(dropDelta, privacy: .public))")
                 }
             } else if !stalled, dropDelta <= Self.diskCacheReadaheadRampDropTolerance {
@@ -2031,7 +2033,7 @@ final class MPVMetalViewController: PlatformViewController {
                 let next = min(self.cacheReadaheadRampAppliedSecs + Self.diskCacheReadaheadRampStepSecs, effectiveCeiling)
                 if next > self.cacheReadaheadRampAppliedSecs {
                     self.cacheReadaheadRampAppliedSecs = next
-                    self.setString("cache-secs", String(next))
+                    self.setString("cache-secs", String(next), handle: handle)
                 }
             }
             // else: minor jitter (tolerance < delta <= burst) or a cache stall -> HOLD this rung.
@@ -3562,38 +3564,50 @@ final class MPVMetalViewController: PlatformViewController {
     #endif
 
     private func getDouble(_ name: String) -> Double {
-        guard mpv != nil else { return 0.0 }
+        guard let handle = mpv else { return 0.0 }
         var data = Double()
-        mpv_get_property(mpv, name, MPV_FORMAT_DOUBLE, &data)
+        mpv_get_property(handle, name, MPV_FORMAT_DOUBLE, &data)
         return data
     }
     
     private func getString(_ name: String) -> String? {
-        guard mpv != nil else { return nil }
-        let cstr = mpv_get_property_string(mpv, name)
+        guard let handle = mpv else { return nil }
+        return getString(name, handle: handle)
+    }
+
+    private func getString(_ name: String, handle: OpaquePointer) -> String? {
+        let cstr = mpv_get_property_string(handle, name)
         let str: String? = cstr == nil ? nil : String(cString: cstr!)
         mpv_free(cstr)
         return str
     }
     
     private func getFlag(_ name: String) -> Bool {
-        guard mpv != nil else { return false }   // teardown nils mpv; a late togglePause() must not pass NULL to libmpv
+        guard let handle = mpv else { return false }   // teardown nils mpv; a late togglePause() must not pass NULL to libmpv
+        return getFlag(name, handle: handle)
+    }
+
+    private func getFlag(_ name: String, handle: OpaquePointer) -> Bool {
         var data = Int32()   // MPV_FORMAT_FLAG is a 4-byte C int, not Int/Int64; an 8-byte read only works by little-endian luck
-        mpv_get_property(mpv, name, MPV_FORMAT_FLAG, &data)
+        mpv_get_property(handle, name, MPV_FORMAT_FLAG, &data)
         return data > 0
     }
     
     @discardableResult
     private func setFlag(_ name: String, _ flag: Bool) -> Bool {
-        guard mpv != nil else { return false }
+        guard let handle = mpv else { return false }
         var data: Int32 = flag ? 1 : 0   // MPV_FORMAT_FLAG is a 4-byte C int; write exactly 4 bytes, not 8
-        return mpv_set_property(mpv, name, MPV_FORMAT_FLAG, &data) >= 0
+        return mpv_set_property(handle, name, MPV_FORMAT_FLAG, &data) >= 0
     }
 
     private func getInt(_ name: String) -> Int {
-        guard mpv != nil else { return 0 }
+        guard let handle = mpv else { return 0 }
+        return getInt(name, handle: handle)
+    }
+
+    private func getInt(_ name: String, handle: OpaquePointer) -> Int {
         var data = Int64()
-        mpv_get_property(mpv, name, MPV_FORMAT_INT64, &data)
+        mpv_get_property(handle, name, MPV_FORMAT_INT64, &data)
         return Int(data)
     }
 
@@ -3655,8 +3669,12 @@ final class MPVMetalViewController: PlatformViewController {
     }
 
     private func setString(_ name: String, _ value: String) {
-        guard mpv != nil else { return }
-        mpv_set_property_string(mpv, name, value)
+        guard let handle = mpv else { return }
+        setString(name, value, handle: handle)
+    }
+
+    private func setString(_ name: String, _ value: String, handle: OpaquePointer) {
+        mpv_set_property_string(handle, name, value)
     }
 
     /// Positive evidence that Dolby Vision Profile 7 FEL pairing actually engaged.
@@ -3671,15 +3689,14 @@ final class MPVMetalViewController: PlatformViewController {
     /// enhancement-layer" warning from mpv means the EL decoder came up and libplacebo is
     /// compositing it. Single-track interleaved Profile 7 uses mpv's splitter instead of track
     /// pairing, backed by `dovi_split` in the pinned FFmpeg release/9.0 build.
-    private func probeEnhancementLayer() {
-        guard mpv != nil else { return }
-        let count = getInt("track-list/count")
+    private func probeEnhancementLayer(handle: OpaquePointer) {
+        let count = getInt("track-list/count", handle: handle)
         guard count > 0 else { return }
         var videoTracks = 0
         var dependentIDs: [Int] = []
-        for i in 0..<count where (getString("track-list/\(i)/type") ?? "") == "video" {
+        for i in 0..<count where (getString("track-list/\(i)/type", handle: handle) ?? "") == "video" {
             videoTracks += 1
-            if getFlag("track-list/\(i)/dependent") { dependentIDs.append(getInt("track-list/\(i)/id")) }
+            if getFlag("track-list/\(i)/dependent", handle: handle) { dependentIDs.append(getInt("track-list/\(i)/id", handle: handle)) }
         }
         guard videoTracks > 1 || !dependentIDs.isEmpty else { return }   // ordinary single-layer source
         if dependentIDs.isEmpty {
@@ -5038,13 +5055,13 @@ final class MPVMetalViewController: PlatformViewController {
                     // The file opened and its tracks/params are known. Push a compact source label (the
                     // current path's host, redacted of any token-bearing query) into the probe state so the
                     // heartbeat names what is playing, and mark the engine as mpv + state playing.
-                    let loadedHost = self.getString("path").flatMap { URL(string: $0)?.host }
+                    let loadedHost = self.getString("path", handle: handle).flatMap { URL(string: $0)?.host }
                         ?? self.playUrl?.host ?? "?"
                     if self.ownsSharedProbeState {
                         VXProbeState.shared.setPlayer(state: "playing", source: loadedHost, engine: "mpv")
                     }
                     VXProbe.event(self.probeChannel, "loaded \(loadedHost)")
-                    self.probeEnhancementLayer()
+                    self.probeEnhancementLayer(handle: handle)
                     #if os(tvOS)
                     DispatchQueue.main.async { [weak self] in
                         self?.framePresentationFileLoaded(loadToken: loadedToken)
