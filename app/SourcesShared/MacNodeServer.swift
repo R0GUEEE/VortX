@@ -1,6 +1,73 @@
 #if os(macOS)
 import Foundation
 import Darwin   // getifaddrs / ifaddrs / getnameinfo for LAN IP discovery
+import os
+
+/// Restart-only TERM grace. No numeric PID, force signal, or wait on a possibly live child.
+enum MacNodeRestartPolicy {
+    static func requestTermination(
+        grace: TimeInterval,
+        isRunning: () -> Bool,
+        terminate: () -> Void,
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        pause: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) -> Bool {
+        guard isRunning() else { return true }
+        let deadline = now() + max(0, grace)
+        terminate()
+        while isRunning() {
+            let remaining = deadline - now()
+            guard remaining > 0 else { return false }
+            pause(min(0.05, remaining))
+        }
+        return true
+    }
+}
+
+/// The UI reads this independently of the lifecycle queue. Only this failure snapshot is new;
+/// existing started/exitCode synchronization is a separate boundary, not repaired here.
+final class MacNodeRestartStatus: Sendable {
+    private struct Failure: Sendable {
+        let owner: ObjectIdentifier
+        let isRunning: @Sendable () -> Bool
+    }
+    private let failure = OSAllocatedUnfairLock<Failure?>(initialState: nil)
+
+    func record(owner: AnyObject, isRunning: @escaping @Sendable () -> Bool) {
+        let next = Failure(owner: ObjectIdentifier(owner), isRunning: isRunning)
+        let previous = failure.withLock { state in
+            let previous = state
+            state = next
+            return previous
+        }
+        // Retire old captures outside the lock: their deinitializers may re-enter status.
+        withExtendedLifetime(previous) {}
+    }
+
+    func clear() {
+        let previous = failure.withLock { state in
+            let previous = state
+            state = nil
+            return previous
+        }
+        withExtendedLifetime(previous) {}
+    }
+
+    func matches(owner: AnyObject) -> Bool {
+        let identity = ObjectIdentifier(owner)
+        return failure.withLock { $0?.owner == identity }
+    }
+
+    var message: String? {
+        let snapshot = failure.withLock { $0 }
+        guard let snapshot else { return nil }
+        // Never hold our lock across a Foundation Process status read.
+        if snapshot.isRunning() {
+            return "Restart did not complete: the previous streaming server is still running. Try restarting again."
+        }
+        return "Restart did not complete: the previous streaming server has exited. Try restarting again."
+    }
+}
 
 /// macOS streaming server. Runs Stremio's server.js (the torrent engine + /proxy + HLS) in a
 /// CHILD PROCESS, listening on http://127.0.0.1:11470, so TORRENT streams play on the Mac.
@@ -48,6 +115,7 @@ enum NodeServer {
     /// them race-free without sprinkling locks. Matches the serial-queue pattern used elsewhere in
     /// the shared sources (DiagnosticsLog, Keychain).
     private static let queue = DispatchQueue(label: "com.stremiox.mac.nodeserver")
+    private static let restartStatus = MacNodeRestartStatus()
 
     /// Set by `stop()` so the terminationHandler treats the kill as an intentional app-exit
     /// shutdown, NOT a crash to surface in Settings. A `restart()` does NOT set this (it nils the
@@ -210,9 +278,14 @@ enum NodeServer {
     /// (server.js always carries the darwin `videotoolbox` profile and enables it by default.)
     static var canTranscode: Bool { ffmpegBinaries() != nil }
 
+    /// Checked restart-only snapshot for UI readers; never joins the lifecycle queue or reads
+    /// the unrelated started/exitCode state. A retained child's late exit changes this message.
+    static var restartFailureDescription: String? { restartStatus.message }
+
     /// One-line state for the Settings diagnostics (mirrors the iOS/tvOS NodeServer wording).
     static var statusDescription: String {
         if PlaybackSettings.torrentsDisabled { return "Disabled by Direct Links Only" }
+        if let message = restartFailureDescription { return message }
         if usingNativeServer {
             if nativeServerBinary == nil { return "Native streaming server is missing from this build." }
             if !started { return "Not started (native server)" }
@@ -281,19 +354,30 @@ enum NodeServer {
             guard !shutdownRequested, !PlaybackSettings.torrentsDisabled else { return }
             // Reap whichever engine is running (node or native), then respawn per the flag, so
             // both the LAN-bind toggle and the native-engine toggle swap in place.
-            func reapCurrent() {
+            func reapCurrent() -> Bool {
                 publishNativeProcess(nil)
-                if let proc = process, proc.isRunning {
+                if let proc = process {
                     proc.terminationHandler = nil   // expected stop; don't surface it as a crash
-                    proc.terminate()
-                    proc.waitUntilExit()            // reap, so the relaunch can rebind 11470 cleanly
+                    guard MacNodeRestartPolicy.requestTermination(
+                        grace: terminateGrace,
+                        isRunning: { proc.isRunning },
+                        terminate: { proc.terminate() }
+                    ) else {
+                        // Retain this exact child and receipt. A later retry/stop still owns it;
+                        // a replacement must not overwrite ownership or assume the port is free.
+                        restartStatus.record(owner: proc, isRunning: { proc.isRunning })
+                        DiagnosticsLog.log("server", "restart did not complete within TERM grace; existing child retained")
+                        return false
+                    }
                 }
                 process = nil
                 exitCode = nil
                 retireNativePortReceipt()
+                restartStatus.clear()
+                return true
             }
             if nativeServerEnabled {
-                reapCurrent()
+                guard reapCurrent() else { return }
                 started = false
                 guard let nativeBin = nativeServerBinary else {
                     DiagnosticsLog.log("server", "native streaming selected but server binary is missing")
@@ -305,7 +389,7 @@ enum NodeServer {
             }
             guard let nodeBin = Bundle.main.path(forResource: "node-darwin-arm64", ofType: nil),
                   let serverJs = Bundle.main.path(forResource: "server", ofType: "js") else { return }
-            reapCurrent()
+            guard reapCurrent() else { return }
             started = true
             spawn(nodeBin: nodeBin, scriptPath: serverJs)
         }
@@ -522,7 +606,8 @@ enum NodeServer {
         // the serial queue so the state write is race-free, and ignore it once shutdown began.
         proc.terminationHandler = { p in
             queue.async {
-                guard !shutdownRequested, process === p else { return }
+                guard !shutdownRequested, process === p,
+                      !restartStatus.matches(owner: p) else { return }
                 exitCode = p.terminationStatus
                 NSLog("%@", "StremioX: node server exited rc=\(p.terminationStatus)")
                 // Mirror the unexpected exit into the EXPORTABLE diagnostics log so a server death is visible
@@ -599,7 +684,8 @@ enum NodeServer {
         // (stop()/restart() detach it first), routed through the serial queue.
         proc.terminationHandler = { p in
             queue.async {
-                guard !shutdownRequested, process === p else { return }
+                guard !shutdownRequested, process === p,
+                      !restartStatus.matches(owner: p) else { return }
                 exitCode = p.terminationStatus
                 retireNativePortReceipt()
                 NSLog("%@", "StremioX: native streaming server exited rc=\(p.terminationStatus)")

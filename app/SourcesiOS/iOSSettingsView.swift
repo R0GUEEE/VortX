@@ -72,6 +72,8 @@ struct iOSSettingsView: View {
     @State private var diagExport: (url: String, qr: Image)?
     @State private var diagMacPath: String?
     #if os(macOS)
+    @State private var macRestartFailure: String?
+    @State private var macRestartRecheck: Task<Void, Never>?
     /// Drives the "Share streaming server on this network" toggle (macOS only). Backed by
     /// NodeServer.sharedOnLAN, which persists + restarts the node process when it flips.
     @State private var shareOnLAN = NodeServer.sharedOnLAN
@@ -434,18 +436,31 @@ struct iOSSettingsView: View {
             .onChange(of: theme.textScale) { _ in ProfileStore.shared.captureTheme() }
             // Device-scoped settings (audioOutput, forceSDRTonemap, perfMode, directLinksOnly) are
             // deliberately NOT folded back: they describe THIS device, not the viewer.
-            .task {
+            #if os(macOS)
+            .onDisappear {
+                macRestartRecheck?.cancel()
+                macRestartRecheck = nil
+            }
+            #endif
+            .task { @MainActor in
                 // Live server monitor that never gives up: the embedded server cold-starts well
                 // after launch, so a fixed window could expire and show "Offline" until a relaunch.
                 // Retries fast while offline, keeps the badge fresh once up; restarts on each visit.
                 while !Task.isCancelled {
+                    #if os(macOS)
+                    refreshMacRestartFailure()
+                    #endif
                     if effectiveDirectLinksOnly {
                         serverOnline = nil
                         try? await Task.sleep(for: .seconds(12))
                         continue
                     }
                     let online = await StremioServer.isOnline()
-                    serverOnline = online
+                    guard !Task.isCancelled else { return }
+                    #if os(macOS)
+                    refreshMacRestartFailure()
+                    #endif
+                    serverOnline = effectiveDirectLinksOnly ? nil : online
                     try? await Task.sleep(for: .seconds(online ? 12 : 3))
                 }
             }
@@ -1410,6 +1425,16 @@ struct iOSSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            #if os(macOS)
+            if let message = visibleMacRestartFailure {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.Palette.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            #endif
+
             if !effectiveDirectLinksOnly {
                 Text(StremioServer.base)
                     .font(.system(.footnote, design: .monospaced))
@@ -1452,15 +1477,11 @@ struct iOSSettingsView: View {
 
                 #if os(macOS)
                 if !StremioServer.isCustom {
-                    // macOS: the server is a CHILD process, so restart it IN PLACE without quitting the app
-                    // (unlike iOS' one-shot in-process nodejs-mobile). Reaps the child, frees its accumulated
-                    // memory, and rebinds 11470. Same restart() the LAN-sharing toggle already uses.
+                    // macOS requests an in-place restart. If the old child does not exit during
+                    // TERM grace, the failure stays visible and this same button is the explicit retry.
                     Button {
                         NodeServer.restart()
-                        Task {   // re-check status once the child has respawned
-                            try? await Task.sleep(nanoseconds: 1_500_000_000)
-                            serverOnline = await StremioServer.isOnline()
-                        }
+                        scheduleMacRestartRecheck()
                     } label: {
                         Label("Restart streaming server", systemImage: "arrow.clockwise")
                     }
@@ -1512,10 +1533,7 @@ struct iOSSettingsView: View {
                 shareOnLAN = newValue
                 NodeServer.sharedOnLAN = newValue            // persists + restarts node
                 didCopyLAN = false
-                Task {                                        // re-check status after the restart
-                    try? await Task.sleep(nanoseconds: 1_200_000_000)
-                    serverOnline = await StremioServer.isOnline()
-                }
+                scheduleMacRestartRecheck()
             }
         )) {
             Label("Share streaming server on this network", systemImage: "wifi")
@@ -1838,8 +1856,46 @@ struct iOSSettingsView: View {
     }
     #endif
 
+    #if os(macOS)
+    /// The cached embedded failure never labels a custom endpoint or an inactive server.
+    private var visibleMacRestartFailure: String? {
+        guard !effectiveDirectLinksOnly, !StremioServer.isCustom else { return nil }
+        return macRestartFailure
+    }
+
+    @MainActor private func refreshMacRestartFailure() {
+        let message = !effectiveDirectLinksOnly && !StremioServer.isCustom
+            ? NodeServer.restartFailureDescription : nil
+        if macRestartFailure != message { macRestartFailure = message }
+    }
+
+    /// Reuses the existing action-triggered health recheck, after the two-second TERM grace.
+    /// The ordinary monitor still refreshes state if queued lifecycle work finishes later.
+    @MainActor private func scheduleMacRestartRecheck() {
+        macRestartRecheck?.cancel()
+        macRestartRecheck = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(2.25))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            refreshMacRestartFailure()
+            guard !effectiveDirectLinksOnly, !StremioServer.isCustom else { return }
+            let online = await StremioServer.isOnline()
+            guard !Task.isCancelled else { return }
+            refreshMacRestartFailure()
+            guard !effectiveDirectLinksOnly, !StremioServer.isCustom else { return }
+            serverOnline = online
+        }
+    }
+    #endif
+
     private var serverColor: Color {
         if effectiveDirectLinksOnly { return Theme.Palette.textTertiary }
+        #if os(macOS)
+        if visibleMacRestartFailure != nil { return Theme.Palette.danger }
+        #endif
         switch serverOnline {
         case .some(true): return Color(.sRGB, red: 0.45, green: 0.72, blue: 0.42, opacity: 1)
         case .some(false): return Theme.Palette.danger
@@ -1848,6 +1904,9 @@ struct iOSSettingsView: View {
     }
     private var serverText: String {
         if effectiveDirectLinksOnly { return String(localized: "Disabled by Direct Links Only") }
+        #if os(macOS)
+        if visibleMacRestartFailure != nil { return String(localized: "Restart incomplete") }
+        #endif
         switch serverOnline {
         case .some(true): return String(localized: "Online")
         case .some(false): return String(localized: "Offline")
