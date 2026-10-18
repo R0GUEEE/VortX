@@ -463,6 +463,7 @@ private struct PlayerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
     @Environment(\.colorSchemeContrast) private var systemContrast
     @Environment(\.playerControlContrastOverride) private var contrastOverride
     @Environment(\.isEnabled) private var isEnabled
+    @AppStorage(VisualEffects.glassKey) private var glassChoice = VisualEffects.auto
 
     private var reduceTransparency: Bool {
         reduceTransparencyOverride ?? systemReduceTransparency
@@ -486,7 +487,9 @@ private struct PlayerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
     /// Accessibility keeps a dark, fully opaque readable face.
     @ViewBuilder private var surface: some View {
         ZStack {
-            if reduceTransparency || contrast == .increased || !isEnabled {
+            if reduceTransparency
+                || !VisualEffects.glass(stored: glassChoice, reduced: VisualEffects.reducedForAuto)
+                || contrast == .increased || !isEnabled {
                 shape.fill(neutral)
                 if isEnabled { shape.fill(Theme.Palette.accent.opacity(active ? 0.22 : 0.12)) }
             } else {
