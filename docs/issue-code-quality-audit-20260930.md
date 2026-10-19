@@ -85,10 +85,10 @@ Current follow-up verification (distinct from the historical patch results below
   source-frozen tvOS, iOS, and native macOS arm64 Release builds all passed with signing disabled after
   the last account ownership correction; earlier builds are not substituted for those gates.
 - The final account-local mapper executes real JSON-decoded fixtures, and the guest-provenance gate
-  executes 17 decisions/storage fixtures. CoreBridge publication-fence wiring checks also pass. Astra
-  independently accepted the final canonical account/history boundary, including both Home adapters;
+  executes 17 decisions/storage fixtures. CoreBridge publication-fence wiring checks also pass. An
+  independent reviewer accepted the final canonical account/history boundary, including both Home adapters;
   independent playback and lifecycle reviews are source reviews, not physical playback receipts.
-  Astra also independently accepted the final canonical playback recovery state repair after two
+  An independent reviewer also accepted the final canonical playback recovery state repair after two
   consequential repair rounds; that acceptance does not substitute for the device/provider gates.
 - The first current-source GitHub run exposed an older-compiler type-check timeout in the Trakt alias
   union. That expression now accumulates an explicitly typed array in the identical order. The actual
@@ -98,7 +98,7 @@ Current follow-up verification (distinct from the historical patch results below
   in the native subtitle delegate. Explicit nonisolated witnesses now transfer only immutable output
   identity/text/native-buffer-presence values into a synchronous main-actor assertion, supported by
   the configured AVFoundation main delegate queue. No asynchronous cue hop or warning suppression was
-  added. Astra independently accepted the final adapter; its renderer/flush/teardown fixtures pass.
+  added. An independent reviewer accepted the final adapter; its renderer/flush/teardown fixtures pass.
 - No new-source physical DV/receiver, live NNTP throughput, or Android remote/process-death acceptance
   receipt is claimed. The successful read-only TV copy is not an installation or playback test of this patch.
 

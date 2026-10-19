@@ -1,8 +1,72 @@
 # Changelog
 
-All notable changes to VortX, newest first. VortX is Apple TV first, with an iPhone and iPad build alongside it. Dates are when each version was published.
+Notable VortX changes, newest first. VortX is Apple TV first, with iPhone/iPad, Mac and Android packages. Dated entries identify publication dates; historical draft entries retain their original candidate status.
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
+
+## 0.5.6 beta 2 - 2026-10-18
+
+Build **276**. Published as [v0.5.6-beta.2](https://github.com/VortXTV/VortX/releases/tag/v0.5.6-beta.2), with four Apple packages, three Android packages, checksums and hosted provenance. The earlier beta 1 candidate was not published.
+
+### Fixed
+
+- **Older profile import/recovery failures (#262, #265):** recognize valid legacy display values without rewriting their original bytes. Distinguish a confirmed missing backup from unreadable/unavailable storage, so a read failure does not authorize replacing it with an empty account. Lost encryption keys cannot be recovered by this change.
+- **Repeated recovery after seeking/skipping credits:** inner seek and outer playback recovery share a retry allowance. An unfinished episode retains its resume position and is not marked watched or advanced to conceal an early EOF. The upstream source ending early remains a separate problem.
+- **Controls and Mac lifecycle:** auto-hide follows the current interaction, covered preparation work leaves the UI actor, server restarts are bounded and quit waits for the server owned by that app.
+- **Intro/credit timing (#266):** Apple and Android use IntroDB v4 with matching-episode response handling. Stale responses cannot overwrite the current episode's timings; Android validates cached results.
+- **Profile ownership:** Continue Watching imports and Watch Stats keep the profile/attempt they started with, instead of publishing into a replacement profile or clearing newer work.
+
+### Changed
+
+- Home/catalog operations reuse saved visibility/order snapshots. Watched-history imports avoid redundant retry work and pool repeated evidence without dropping pending history.
+- Apple TV skips not-yet-due Up Next work before building episode inventories. Discover observation and decorative seek updates are more narrowly scoped.
+- Updated controls share glass/Effects Off rules, disabled styles and Mac semantic text colors more consistently.
+
+The full first-party Swift 6 migration, wider audit and player-performance work are **not complete**. These changes do not establish physical-device smoothness or universal sync/provider acceptance. #267 is queued, not fixed. See [ROADMAP.md](ROADMAP.md) and [diagnostic guidance](docs/SUPPORT.md).
+
+## 0.5.5 - 2026-10-17
+
+Build **274**. [Release notes](https://github.com/VortXTV/VortX/releases/tag/v0.5.5).
+
+- Stabilized the legacy-data fingerprint so unchanged 0.4 data does not keep triggering conversion and whole-account uploads during sync.
+- Restored hero-trailer startup on the affected Apple surfaces.
+- Mac/iPad series pages scroll to the in-progress or next episode, and watched episode cards use an even dimmed presentation.
+- Reduced fallback polling while the live connection is healthy; missed-change checks remain when it is not.
+
+This addressed identified repeated-conversion work, not every later profile or performance report.
+
+## 0.5.4 - 2026-10-16
+
+Build **273**. [Release notes](https://github.com/VortXTV/VortX/releases/tag/v0.5.4).
+
+- Recognized legacy profile/Stremio fingerprint fields that could incorrectly block account migration.
+- Narrowed migration change detection and avoided re-applying unchanged synced profiles/settings.
+- Opened previously saved accounts locally while remaining conversion work settles, and retained clearer failure diagnostics.
+- Restored dimmed watched episodes, corrected artwork framing and improved Usenet NZB handling.
+
+Later releases refined migration detection and recovery further; this entry is not a claim that all accounts were fixed by 0.5.4.
+
+## 0.5.3 - 2026-10-16
+
+Build **272**. [Release notes](https://github.com/VortXTV/VortX/releases/tag/v0.5.3).
+
+- Narrowed player/detail observations and reduced repeated save/serialization work during playback.
+- Restored missing add-on groups in All sources and the ability to re-enable switched-off built-ins.
+- Added broader rating displays, episode ratings/cards and Trailers & Extras on Apple.
+- Added tinted glass player controls on supported systems and Android rating/presentation updates.
+
+## 0.5.2 - 2026-10-14
+
+Build **271**. [Release notes](https://github.com/VortXTV/VortX/releases/tag/v0.5.2).
+
+- Added per-profile interests, For You rows and smart collections, actor pages, network shares and a live-channel TV guide where schedule data exists.
+- Updated series/season presentation, hero navigation, source/add-on controls and TV effects/performance settings.
+- Added diagnostic export entry points before normal sign-in/profile browsing is available.
+- Repaired identified account migration, Continue Watching/Library and Usenet paths. Subsequent reports and follow-up fixes remain documented separately.
+
+## 0.5.1 - 2026-10-11
+
+Build **268**. [Release notes](https://github.com/VortXTV/VortX/releases/tag/v0.5.1) cover Apple TV profiles, history import and sync follow-ups in the native 0.5 line. The complete historical release bodies remain available on GitHub; an older release title is not a current acceptance claim.
 
 ## 0.5.0-beta.3 - Account loading, watch state, and Cinema polish
 

@@ -1,84 +1,60 @@
-# VortX release artifacts and naming
+# VortX release artifacts
 
-This page is the canonical dimension reference for every artifact the release workflows stage.
-It exists because of audit finding REL-02: release staging used to label the Android builds by
-device class ("phone" and "tv") when those labels did not describe any real property of the
-artifacts.
+Use a named [official release](https://github.com/VortXTV/VortX/releases) as the package boundary. Do not mix files from different tags or assume an update feed/download redirect follows every beta.
 
-## The real dimensions
+## Apple packages
 
-An Android artifact name answers exactly three questions:
+| Package pattern | Device and contents |
+| --- | --- |
+| `VortX-iOS-<tag>-ci.ipa` | iPhone and iPad, iOS/iPadOS 16+ |
+| `VortX-tvOS-<tag>-ci.ipa` | Apple TV, tvOS 18+, embedded native streaming transport and Top Shelf |
+| `VortX-tvOS-lite-<tag>-ci.ipa` | Apple TV, tvOS 18+, Direct Links Only, no embedded transport or Top Shelf |
+| `VortX-macOS-<tag>-ci.dmg` | Apple-silicon Mac, macOS 14+ |
 
-| Dimension | Values | Meaning |
-|---|---|---|
-| Flavor (engine and distribution) | `full-mpv`, `play-media3` | Which playback engine is packaged and where the build is meant to ship. `full` carries the GPLv3 libmpv native engine and is sideloaded from GitHub releases. `play` carries only the Media3/ExoPlayer engine with no GPL native code and is bound for Google Play. |
-| ABI | `universal` | One APK packages every shipped ABI (`arm64-v8a`, `armeabi-v7a`, and `x86_64`). The 32-bit ARM slice supports older Fire TV hardware. There are no per-ABI splits today; if splits land, each gains an explicit ABI segment in its name. |
-| Package type | `.apk`, `.aab` | Sideloadable APK or Play App Bundle. |
+The IPAs need compatible sideload signing. The Mac app is ad-hoc signed, not notarized. Full and Lite use different application identities; they are not interchangeable in-place updates. Archive sizes are not fixed support guarantees.
 
-### What a flavor is NOT
+## Android dimensions
 
-The flavor is never a device split. Both `full-mpv` and `play-media3` contain the phone AND the Android TV activities (including the LEANBACK launcher entry), so one install of either variant serves both device classes. Nothing about a device can be inferred from the flavor, and no artifact is labeled phone or TV on purpose.
+An Android variant describes its **player/distribution**, not a device split. Both APKs contain phone/tablet and Android TV interfaces, including the TV launcher entry.
 
-## Canonical names
+| Artifact pattern | Contents |
+| --- | --- |
+| `VortX-<version>-full-mpv-universal.apk` | Sideload build with native GPL libmpv and Media3 routes |
+| `VortX-<version>-play-media3-universal.apk` | Media3/ExoPlayer-only variant, without the GPL MPV payload |
+| `VortX-<version>-play-media3.aab` | Distribution App Bundle, not directly installable |
 
-Staged by `.github/workflows/android-release.yml` after signer verification:
+Current APKs support Android 8.0/API 26+ and include `arm64-v8a`, `armeabi-v7a` and `x86_64`. A Play-oriented filename does not mean a Google Play listing is available. Use the same variant and signer when updating; do not uninstall to work around a rejected update.
 
-| Artifact | Old (misleading) name | Contents |
-|---|---|---|
-| `VortX-x.y.z-full-mpv-universal.apk` | `VortX-x.y.z-phone.apk` | Sideload build, GPL mpv engine primary player, Media3 fallback, phone + TV UI, all three ABIs |
-| `VortX-x.y.z-play-media3-universal.apk` | `VortX-x.y.z-tv.apk` | Play-bound build, Media3 only, GPL native free, phone + TV UI, all three ABIs |
-| `VortX-x.y.z-play-media3.aab` | `VortX-x.y.z-play.aab` | Play App Bundle form of the `play-media3` build |
+There are no current phone-only or TV-only release APKs. Old filenames using those labels were misleading. Any consumer that pins an asset name, digest or channel must be reviewed when naming changes; renaming is not automatically safe for a redirect or feed.
 
-Consumers that fetch "the newest APK" (for example the `dl.vortx.tv` redirect worker) match on
-the `.apk` extension or read staged metadata, not on these labels, so renames are safe for them;
-anything pinning the old names must move to the canonical ones above.
+## Checksums, signing and provenance
 
-## Signing and provenance
+Release layouts have changed over time. For **0.5.6 beta 2/build 276**, the final package set is:
 
-Android release signing stays fail-closed on four secrets (`VORTX_KEYSTORE_PATH`,
-`VORTX_KEYSTORE_PASSWORD`, `VORTX_KEY_ALIAS`, `VORTX_KEY_PASSWORD`, referenced by name only).
-Before anything uploads, `scripts/verify-android-release-signing.sh` requires APK Signature
-Scheme v2, exactly one signer, rejects any Android Debug certificate, and pins the production
-certificate SHA-256. Each release ships `SHA256SUMS` (per-artifact SHA-256) and
-`SIGNING_PROVENANCE.txt` (signer verification output plus release tag commit, source commit, and
-workflow run URL) so every published byte is traceable to a tag and a run.
+- Four Apple packages and three Android packages.
+- `SHA256SUMS.txt`, listing the seven package hashes.
+- `VortX-Hosted-Direct-Beta-Provenance.json`, tying packages to the source, hosted runs and verification evidence.
 
-Android version identity is separate from the Apple build. After signing verification,
-`verify-android-release-version.sh` inspects both APK manifests with SDK `aapt2` and the Play AAB
-manifest with pinned, SHA-256-verified Google bundletool. All three must match the unique numeric
-`versionCode` and `versionName` in Gradle and package `com.vortx.android`. Only then are the
-`Android versionCode:` and `Android versionName:` records added to `SIGNING_PROVENANCE.txt`.
-Feed augmentation requires those immutable records; it must never substitute an Apple build.
+That release's provenance explicitly records its separately reviewed recovery-verification tooling. Do not rewrite an original receipt or describe an unsuccessful historical verifier run as successful. A future release must pass its own current gates.
 
-## Mac installation note required in every release
+Android's original immutable build handoff also retains `SHA256SUMS` and `SIGNING_PROVENANCE.txt`. Those temporary evidence files need not appear as separate final release assets when the reviewed combined provenance carries their evidence.
 
-Every release that includes a Mac app must include this command in its release notes, after
-the instruction to drag VortX into Applications:
+Before upload, the Android signing checks require APK Signature Scheme v2, one signer, no Android Debug certificate and the project's expected production signer. APK/AAB manifests must match the Gradle version identity and application ID. Packaged native payloads, supported ABIs and the Play GPL exclusion are checked separately. Apple checks include actual native input/link identity, minimum OS, package content and applicable signature validation.
+
+Checksums establish byte identity against a manifest, not safety on their own. A workflow success or artifact filename is not enough: source, run/attempt, immutable handoff, extracted content, versions, signer and final public bytes must agree. See [Native release packaging](native-release-packaging.md).
+
+## Installation note required for Mac releases
+
+After instructing users to drag VortX into Applications, include:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/VortX.app
 ```
 
-Explain plainly that users should run it only if macOS blocks the app obtained from the
-official VortX GitHub release. It removes the download quarantine flag; it does not notarize
-the app. Publishing notes does not authorize running the command on a user's installed app.
+Explain that this is only for the official VortX app if macOS blocks it. Removing quarantine does not notarize the app or establish its safety. Publishing this instruction does not authorize executing it on anyone's installed app. See [Installation](INSTALLING.md).
 
-## Secretless pull-request validation
+## Release channels and validation
 
-`.github/workflows/release-packaging-validation.yml` runs on every pull request with zero secret
-access and exercises as much of the packaging path as a runner allows:
+Normal coordinated feed publication and a direct-download beta are different workflows. A direct-download beta does not by itself authorize changing stable feeds, download routing, website deployment or backend state.
 
-- Android: the exact release task set (`assembleFullRelease`, `assemblePlayRelease`,
-  `bundlePlayRelease`) against an ephemeral run-local keystore, then strict signature checks (v2
-  scheme, single signer, ephemeral-certificate binding, explicit Android Debug rejection),
-  `jarsigner -verify -strict` on the AAB, the GPL boundary scan, and native-lib merge proof.
-- Apple: fixture-driven contract tests for `release-feed.mjs`, `gen-altstore-source.py`, and
-  `repackage-ipa.sh`, plus a numeric project-build parse of the real Xcode manifest.
-
-What this lane deliberately cannot validate, and which lane does instead:
-
-| Not validable secretlessly | Why | Validated by |
-|---|---|---|
-| Engine-linked APKs (`libstremiox_core.so`, `libvortx_ffi.so`) | Engines live in private repos behind `ENGINE_REPO_TOKEN` | Privileged push and release lanes with `VORTX_REQUIRE_ENGINE=1` |
-| Production signer pin | The pinned certificate must never appear in a secretless job | Release workflow via `verify-android-release-signing.sh` |
-| Apple signed archives and notarization | Requires paid Apple identities | Protected release stage in `release-tvos.yml` |
+Secretless pull-request packaging checks use fixture data and, for Android signing exercises, an ephemeral keystore. They cannot prove private-engine package identity, the production signer or physical-device playback. Privileged release lanes and final public readback must supply the missing evidence. Apple sideload/ad-hoc checks must not be mislabeled as Developer ID notarization or App Store acceptance.

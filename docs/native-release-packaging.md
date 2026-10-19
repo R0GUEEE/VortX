@@ -9,11 +9,12 @@ independent review, full-build and artifact gates remain required before publica
 ## Pinned shipping inputs
 
 The checkout and post-checkout equality assertion in `release-tvos.yml`, `android.yml` and
-`android-release.yml` must select one identical, reviewed native source revision. Their current
-source contract is `a722eef43f80bd82226215cf460bba2e02869777`. Updating this pin does not establish
-private CI, fresh cross-platform SDK, app, signing or release acceptance; those gates must pass
-against the final combined public source before shipping. The retained Stremio comparison pin is
-`31c66611822043e089f5819ad232a5df93975873`; native packages must not contain its engine or Node runtime.
+`android-release.yml` must select the identical reviewed native source revision for that release.
+Read the pin from the exact source tag and immutable handoff, not a moving documentation page.
+Updating a pin does not establish private CI, fresh cross-platform SDK, app, signing or release
+acceptance; those gates must pass against the final combined public source before shipping.
+Retained legacy comparison inputs are not shipping dependencies; native packages must not contain
+the legacy engine or Node runtime.
 
 Apple shipping and secretless validation use the same fresh player archive:
 
@@ -32,8 +33,10 @@ The tagless `android.yml` candidate supplies Full and Play debug APKs plus, when
 provisioned, a production-signed Full APK and Full AAB. It does not replace `android-release.yml`,
 which binds to an existing release tag and verifies production-signed Full/Play universal APKs,
 the Play AAB, normalized native payloads, signer, version, GPL boundary and retained provenance
-before draft attachment. Android cannot publish; the Apple coordinator retains the cross-platform
-draft/feed/publication gates.
+before draft attachment. The Android lane does not publish on its own. Normal coordinated releases
+retain cross-platform draft/feed/publication gates. Separately reviewed direct-download beta
+workflows bind their own immutable handoffs and final asset set without automatically changing
+stable feeds. See [Release artifacts](RELEASE-ARTIFACTS.md) for the current published layout.
 
 ## Apple
 
@@ -70,8 +73,15 @@ selection on push events, where dispatch inputs are absent. Explicit false is an
 comparison: it cannot target or publish a release, including through coordinator resume. Native
 builds use the pinned reviewed MPV archive and SHA-256; an optional override must supply both and
 still passes the content gate. ABI, aggregate deployment/OSO, simulator launch/dSYM, signing,
-immutable handoff, feed and draft publication gates continue to run. Input, app and final package
-receipts travel in the immutable app handoff. The coordinator retains publication authority.
+immutable handoff and the applicable distribution gates continue to run. Input, app and final package
+receipts travel in the immutable app handoff. Original receipt values, including an empty dispatch
+release-tag value, remain unchanged; a separate final manifest must not relabel that receipt.
+
+For direct-download betas, an accepted build and a successful prepare step are still not publication.
+Review the actual final provenance before attachment, verify the complete draft by content, then
+verify unauthenticated tag-bound public downloads after publication. A historical failed verifier
+or release-event check stays a failure in the record. Do not reuse packages from another source/tag
+or weaken guards to turn it green.
 
 ## Android
 

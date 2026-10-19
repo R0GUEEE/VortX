@@ -27,23 +27,32 @@ and explains the empty state when the only sources found are torrents.
 
 | Concern | Native apps / desktop | This web client |
 | --- | --- | --- |
-| Add-on protocol | embedded `stremio-core` engine (Rust) | `src/lib/addon.ts` - direct `fetch()` |
+| Add-on protocol | native engine integration, platform-specific hosts | `src/lib/addon.ts` - direct `fetch()` |
 | Catalogs / meta | engine `board` / `meta_details` models | Cinemeta + installed add-ons over HTTPS |
 | Stream ranking | `StreamRanking.swift` / `desktop/src/streamRanking.ts` | `src/lib/streamRanking.ts` (ported) |
 | Series / episodes | `desktop/src/engine.ts` helpers | `src/lib/series.ts` (ported) |
 | Player | libmpv (Apple) / libmpv via Tauri (desktop) | HTML5 `<video>` + `hls.js` (`src/lib/player.ts`) |
 | Torrents | in-process streaming server | not supported (no server) |
 
-The ranking, series handling, and detail UX are ports of the desktop frontend
-(`desktop/src/detail.ts`, `streamRanking.ts`, `engine.ts`) so behaviour and look match the apps. The
-transport and player are the parts that differ, because the browser has neither the Rust engine nor a
-streaming server.
+The ranking, series handling and detail UX share concepts with the other frontends, but browser
+behavior is not a full native-app parity claim. The browser does not embed the native engine or a
+media streaming server. Account sync still uses the VortX API.
 
 ## Add-ons
 
-Cinemeta (catalogs + metadata) is installed by default, so Home and Detail work out of the box. To get
-playable streams, open **Add-ons** and install a stream add-on by its `manifest.json` URL. The list is
-stored in the browser (`localStorage`); there is no account on the web client.
+Cinemeta supplies default catalogs/metadata. To get playable streams, open **Add-ons** and install
+a compatible stream add-on by its `manifest.json` URL. Browser storage also retains local state.
+
+## Account and sync
+
+Use the client locally, or sign into a VortX account with its encrypted account vault. Sign-in and
+page load pull supported account add-ons, library, Continue Watching, profiles, settings and metadata
+keys. Supported settings, add-on and active-profile watch-progress changes made here sync back.
+This does not promise continuous realtime updates without a reload, identical native-player
+behavior or synchronization of every device-local field.
+
+Never share browser storage, an account backup or an unredacted network export in a public issue.
+See [Help and diagnostics](../docs/SUPPORT.md).
 
 ## Develop
 
