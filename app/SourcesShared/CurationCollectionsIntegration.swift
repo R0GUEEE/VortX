@@ -108,19 +108,21 @@ enum CurationImportProjection {
                                 .font(Theme.Typography.label).foregroundStyle(Theme.Palette.warn)
                         }
                         CurationFolderSourceRows(folder: folder, controller: controller) { items, suppliedArtwork in
-                            if suppliedArtwork {
-                                CurationGuardedTitleRail(items: items, lifetime: ticket.artworkLifetime, onOpen: onOpen)
-                            } else {
-                            #if os(tvOS)
-                            ExternalWatchlistRow(eyebrow: String(localized: "Collection source"), title: folder.name,
-                                                 items: items, focusModel: focusOwner.model)
-                            #else
-                            PosterRail(title: folder.name, items: items.map { item in
-                                RailItem(id: item.id, type: item.type, name: item.name, poster: item.poster, progress: 0)
-                            }, onTap: { tapped in
-                                if let item = items.first(where: { $0.id == tapped.id && $0.type == tapped.type }) { onOpen(item) }
-                            }, showWatchedBadges: true)
-                            #endif
+                            Group {
+                                if suppliedArtwork {
+                                    CurationGuardedTitleRail(items: items, lifetime: ticket.artworkLifetime, onOpen: onOpen)
+                                } else {
+                                #if os(tvOS)
+                                    ExternalWatchlistRow(eyebrow: String(localized: "Collection source"), title: folder.name,
+                                                         items: items, focusModel: focusOwner.model)
+                                #else
+                                    PosterRail(title: folder.name, items: items.map { item in
+                                        RailItem(id: item.id, type: item.type, name: item.name, poster: item.poster, progress: 0)
+                                    }, onTap: { tapped in
+                                        if let item = items.first(where: { $0.id == tapped.id && $0.type == tapped.type }) { onOpen(item) }
+                                    }, showWatchedBadges: true)
+                                #endif
+                                }
                             }
                         }
                     }

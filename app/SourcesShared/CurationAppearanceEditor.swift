@@ -108,7 +108,7 @@ import SwiftUI
                 ForEach(defaults.currentCollections()) { collection in
                     ForEach(collection.folders) { folder in
                         ForEach(Array(folder.sources.enumerated()), id: \.element.id) { index, source in
-                            Button(folder.sources.count == 1 ? "VortX · \(folder.name)" : "VortX · \(folder.name) · \(String(localized: "Source \(index + 1)"))") {
+                            Button(curatedSourceLabel(folder, index: index)) {
                                 addSource(source.kind, to: id)
                             }
                             .buttonStyle(ChipButtonStyle())
@@ -240,6 +240,13 @@ import SwiftUI
             }
         }
     }
+    private func curatedSourceLabel(_ folder: CurationFolder, index: Int) -> String {
+        let title = "VortX · \(folder.name)"
+        guard folder.sources.count != 1 else { return title }
+        let source = String(localized: "Source \(index + 1)")
+        return title + " · " + source
+    }
+
     private func sourceLabel(_ source: CurationSource) -> String {
         switch source.kind {
         case .legacyRules: return String(localized: "Collection rules")
