@@ -459,6 +459,14 @@ enum VortxLegacyWatchedMigration {
         _ = try decodePending(archive, accountID: accountID, ownerProfileID: ownerProfileID)
     }
 
+    /// Denial-only title attribution from the same strict pending decoder. It does not
+    /// authorize replay, current UID binding, alias installation, or import completion.
+    static func pendingAttribution(_ archive: Data, accountID: String, ownerProfileID: UUID)
+        throws -> (profileID: UUID, metaID: String) {
+        let retained = try decodePending(archive, accountID: accountID, ownerProfileID: ownerProfileID)
+        return (retained.scope.profileID, retained.metaID)
+    }
+
     private static func decodePending(_ archive: Data, accountID: String, ownerProfileID: UUID) throws -> Candidate {
         try Task.checkCancellation()
         let value = try VortxProfileOverlayWitness.decodeObject(json: archive)

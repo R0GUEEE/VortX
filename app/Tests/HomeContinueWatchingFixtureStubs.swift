@@ -78,6 +78,14 @@ struct UserProfile: Equatable {   // Equatable like the real profile (applyNativ
 struct ProfileAddonPreferences: Equatable {}
 
 struct CoreLibrary { let catalog: [CoreCWItem] }
+// The legacy selector fixture has no new native eligibility capability. The separate
+// TraktNextEpisodeConsumerTests links the real consumer with continuation-controlled evidence.
+struct TraktNextEpisodeOffer {}
+final class TraktHomeNextEpisodeProducer {
+    static let shared = TraktHomeNextEpisodeProducer()
+    func requestRefresh(intent: HomeContinueWatchingSelection.Intent, core: CoreBridge) {}
+    func offers(intent: HomeContinueWatchingSelection.Intent, paused: [CoreCWItem], now: Date) -> [TraktNextEpisodeOffer] { [] }
+}
 struct CoreCWItem {
     let id: String
     let type: String

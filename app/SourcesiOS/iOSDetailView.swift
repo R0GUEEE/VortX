@@ -327,6 +327,7 @@ struct iOSDetailView: View {
     var initialVideoID: String? = nil
     var initialTraktSessionID: TraktSessionID? = nil
     var initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil
+    var initialTraktNextEpisodeOffer: TraktNextEpisodeOffer? = nil
     @State private var resumeHintOpenedAt = Date()
     @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var account: StremioAccount
@@ -363,6 +364,7 @@ struct iOSDetailView: View {
     /// A remote Continue Watching offer remains readable only while its exact Trakt credential session is
     /// current. Detail views can stay mounted across sign-out, so this check belongs at every use site.
     private var validInitialResumeSeconds: Double? {
+        guard initialTraktNextEpisodeOffer?.isCurrent() != false else { return nil }
         guard initialContinueWatchingIntent?.isCurrent() != false else { return nil }
         guard newerPlaybackVideoID == nil else { return nil }
         guard initialTraktSessionID == nil || TraktAuth.storedSessionID == initialTraktSessionID else { return nil }
@@ -370,6 +372,7 @@ struct iOSDetailView: View {
     }
 
     private var validInitialVideoID: String? {
+        guard initialTraktNextEpisodeOffer?.isCurrent() != false else { return nil }
         guard initialContinueWatchingIntent?.isCurrent() != false else { return nil }
         guard newerPlaybackVideoID == nil else { return nil }
         guard initialTraktSessionID == nil || TraktAuth.storedSessionID == initialTraktSessionID else { return nil }
@@ -935,6 +938,7 @@ struct iOSDetailView: View {
                                 : nil,
                             initialTraktSessionID: initialTraktSessionID,
                             initialContinueWatchingIntent: initialContinueWatchingIntent,
+                            initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
                             autoPlayOnAppear: true
                         ),
                         isActive: Binding(
@@ -2303,7 +2307,8 @@ struct iOSDetailView: View {
                                   seasonEpisodes: sortedEpisodes(m.videos ?? []),
                                   initialStartAtSeconds: primaryResumeSeconds,
                                   initialTraktSessionID: initialTraktSessionID,
-                                  initialContinueWatchingIntent: initialContinueWatchingIntent)
+                                  initialContinueWatchingIntent: initialContinueWatchingIntent,
+                                  initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer)
                         } label: {
                             Label(primaryEpisodeLabel(primary.video, isResume: primary.isResume,
                                                       resumeSeconds: primaryResumeSeconds),
@@ -2351,6 +2356,10 @@ struct iOSDetailView: View {
     /// you were last in even after that episode is marked watched. nil when there is no resume position. Mirrors
     /// the tvOS DetailView helper; seriesPrimaryEpisode still drives the Resume/Play button unchanged.
     private func resumeSeasonHint(_ videos: [CoreVideo]) -> Int? {
+        if let offer = initialTraktNextEpisodeOffer {
+            guard let m = meta else { return nil }
+            return offer.matchingVideo(metaID: m.id, type: m.type, videos: videos)?.season
+        }
         if let preferredID = newerPlaybackVideoID ?? validInitialVideoID,
            let season = sortedEpisodes(videos).first(where: { $0.id == preferredID })?.season {
             return season
@@ -2366,6 +2375,11 @@ struct iOSDetailView: View {
     private func seriesPrimaryEpisode(_ videos: [CoreVideo]) -> (video: CoreVideo, isResume: Bool)? {
         guard let m = meta else { return nil }
         let sorted = sortedEpisodes(videos)
+        if let offer = initialTraktNextEpisodeOffer {
+            guard let video = offer.matchingVideo(metaID: m.id, type: m.type, videos: videos),
+                  !localWatchedSet.contains(video.id) else { return nil }
+            return (video, false)
+        }
         if let preferred = DetailEpisodeTargetPolicy.preferred(
             orderedIDs: sorted.map(\.id), initialVideoID: validInitialVideoID,
             initialResumeSeconds: validInitialResumeSeconds, newerPlaybackID: newerPlaybackVideoID,
@@ -2451,6 +2465,7 @@ struct iOSDetailView: View {
     /// onwards (so finishing a season moves on to the next), else the first unwatched anywhere, specials last.
     /// Nil once everything is watched.
     private func episodeListTarget(_ videos: [CoreVideo]) -> CoreVideo? {
+        if initialTraktNextEpisodeOffer != nil { return seriesPrimaryEpisode(videos)?.video }
         let sorted = sortedEpisodes(videos)
         let watched = watchedSet
         if let primary = seriesPrimaryEpisode(videos), primary.isResume { return primary.video }
@@ -2480,6 +2495,11 @@ struct iOSDetailView: View {
     /// appears still opens on the season you were last watching. Mirrors the tvOS CoreSeasonedEpisodes resolver.
     private func applyEpisodeSeason(_ seasons: [Int]) {
         guard let videos = meta?.videos else { return }
+        if initialTraktNextEpisodeOffer != nil {
+            guard let exact = episodeListTarget(videos)?.season, seasons.contains(exact) else { return }
+            season = exact; didApplySeason = true
+            return
+        }
         // Wait for the watch history: choosing before it lands would lock the page onto a finished season.
         if !didApplySeason, episodeRailHistoryReady {
             let preferred = episodeListTarget(videos)?.season ?? resumeSeasonHint(videos) ?? firstUnwatchedSeason
@@ -3275,6 +3295,7 @@ struct iOSDetailView: View {
     }
 
     private func requestAutoPlayIfReady() {
+        guard initialTraktNextEpisodeOffer == nil else { return }
         guard autoPlayOnAppear, !autoPlayConsumed, !LiveTypes.contains(type) else { return }
         if isEpisodic {
             guard !metaUnavailable, let m = meta, autoPlayMetaMatchesRoute(m) else { return }
@@ -3423,6 +3444,7 @@ struct iOSDetailView: View {
         resumeSuggestion: AccountBoundResumeSuggestion<TraktSessionID>? = nil,
         quickWatchScope: CinemaQuickWatchScope? = nil
     ) async {
+        guard initialTraktNextEpisodeOffer == nil else { return }
         // A4b: no longer gated on `meta != nil`, a hub-opened title with nil/mismatched Cinemeta meta still
         // has a resolved best stream (off the same groups the list renders) and plays off its seed identity.
         guard !preparing, let stream = movieBest else { return }
@@ -3583,6 +3605,7 @@ struct iOSDetailView: View {
     /// `resolveTrailerLaunch`; here it is presented through `.trailerPlayer` (isTrailer:true, meta:nil) so a
     /// dead trailer shows "Trailer unavailable" and never hops to content.
     private func playTrailerStream(_ stream: CoreStream) async {
+        guard initialTraktNextEpisodeOffer == nil else { return }
         let name = "\(moviePlaybackMeta.name) Trailer"
         guard let launch = await iOSDetailView.resolveTrailerLaunch(for: stream, title: name) else { return }
         presentation = .trailerPlayer(url: launch.url, title: launch.title, audioSidecar: launch.audioSidecar)
@@ -3596,6 +3619,7 @@ struct iOSDetailView: View {
         url: URL,
         enginePreference: PlayerEngineRouter.Override? = nil
     ) async {
+        guard initialTraktNextEpisodeOffer == nil else { return }
         // #95: a tapped TRAILER row (a Streailer/YouTube `ytId` source) is NOT a content stream. Route it to
         // the trailer player (isTrailer:true, no meta) so a dead trailer shows "Trailer unavailable" and STOPS
         // instead of failing over to content and playing the actual movie. Content streams fall through below.
@@ -4366,11 +4390,15 @@ struct iOSDetailView: View {
                                       ? validInitialResumeSeconds
                                       : nil,
                                   initialTraktSessionID: initialTraktSessionID,
-                                  initialContinueWatchingIntent: initialContinueWatchingIntent)
+                                  initialContinueWatchingIntent: initialContinueWatchingIntent,
+                                  initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer)
             } label: {
                 episodeRowLabel(v, isWatched: isWatched, progress: progress, cardWidth: cardWidth)
             }
             .vortxCardButton(radius: Theme.Radius.card)
+            .disabled(initialTraktNextEpisodeOffer.map {
+                $0.target.videoID != v.id || v.season != $0.target.season || v.episode != $0.target.episode
+            } ?? false)
             .accessibilityValue(isWatched ? "Watched" : "")
             .contextMenu {
                 episodeActions(v, isWatched: isWatched)
@@ -5163,6 +5191,7 @@ struct iOSEpisodeStreams: View {
     var initialStartAtSeconds: Double? = nil
     var initialTraktSessionID: TraktSessionID? = nil
     var initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil
+    var initialTraktNextEpisodeOffer: TraktNextEpisodeOffer? = nil
     /// Set only by the Cinema quick-view route. It reuses this page's settled ranked Watch command; the
     /// ordinary episode-detail route remains source-list-first unless Smart Source Selection is enabled.
     var autoPlayOnAppear: Bool = false
@@ -5324,6 +5353,8 @@ struct iOSEpisodeStreams: View {
         // The engine loads per-episode streams on demand; trigger that load for THIS episode, but only
         // when the resident streams aren't already this episode's, so a back/forward revisit doesn't churn.
         .onAppear {
+            if initialTraktNextEpisodeOffer != nil,
+               !episodeTargetIsCurrent(shownVideo, generation: episodeTargetGeneration) { return }
             quickWatchRouteGeneration &+= 1
             // Wire the source-list model to this episode's sources (idempotent; see SourceListModel).
             sourceList.bind(core: core, torbox: torboxSearch, singularity: sourceIndex,
@@ -5341,7 +5372,8 @@ struct iOSEpisodeStreams: View {
             // Quick-view is accepted only after this page has authoritative target metadata; the command then
             // waits for the exact settled ranked source set before resolving and presenting the player. A viewer
             // who backs out of the player lands on the full source list.
-            if (autoPlayOnAppear || SourcePreferences.shared.autoPickBest), !didAutoPick {
+            if initialTraktNextEpisodeOffer == nil,
+               (autoPlayOnAppear || SourcePreferences.shared.autoPickBest), !didAutoPick {
                 didAutoPick = true
                 let scope = captureQuickWatchScope(for: shownVideo)
                 let routeGeneration = quickWatchRouteGeneration
@@ -5353,6 +5385,7 @@ struct iOSEpisodeStreams: View {
             }
         }
         .onDisappear {
+            if initialTraktNextEpisodeOffer != nil { episodeTargetGeneration &+= 1 }
             cancelPendingAutoPick()
             torrentPrime?.cancel(); sourceRefreshDebounce?.cancel()
         }
@@ -5491,6 +5524,7 @@ struct iOSEpisodeStreams: View {
     /// Return to the admitted player identity before consulting asynchronous history. This is navigation
     /// only: a failed attempt is never persisted as watched/progress, and another profile cannot reuse it.
     private func reanchorToEngineEpisode() {
+        guard initialTraktNextEpisodeOffer == nil else { return }
         guard presentation == nil else { return }
         let engineID = profiles.activeUsesEngineHistory
             ? core.metaDetails?.libraryItem?.state.videoId
@@ -5556,6 +5590,14 @@ struct iOSEpisodeStreams: View {
         quickWatchScope: CinemaQuickWatchScope? = nil
     ) -> Bool {
         guard generation == episodeTargetGeneration && shownVideo.id == target.id else { return false }
+        if let offer = initialTraktNextEpisodeOffer {
+            guard !Task.isCancelled, offer.isCurrent(), initialTraktSessionID == offer.sessionID,
+                  initialContinueWatchingIntent == offer.intent,
+                  meta.id == offer.target.metaID, meta.type == offer.target.type,
+                  let matched = offer.matchingVideo(details: core.metaDetails),
+                  matched.id == target.id, matched.season == target.season,
+                  matched.episode == target.episode else { return false }
+        }
         guard let quickWatchScope else { return true }
         return quickWatchScopeIsCurrent(quickWatchScope)
     }
@@ -5663,6 +5705,8 @@ struct iOSEpisodeStreams: View {
     /// stream add-ons (Unload -> Load, not an eq_update no-op), and repaint the source list to its loading
     /// state. Uses the SAME per-episode stream args this page's `loadMeta` dispatches.
     private func refindEpisodeSources() {
+        if initialTraktNextEpisodeOffer != nil,
+           !episodeTargetIsCurrent(shownVideo, generation: episodeTargetGeneration) { return }
         guard refindEnabled else { return }
         torboxSearch.invalidateCachedResult(for: episodeTarget)
         mediaServers.invalidateCache()
@@ -5699,6 +5743,7 @@ struct iOSEpisodeStreams: View {
             playWithEngine: { stream, url, preference in
                 Task { await play(stream, url: url, enginePreference: preference) }
             },
+            allowsExternalHandoff: initialTraktNextEpisodeOffer == nil,
             launchEnginePreference: launchEnginePreference,
             onLaunchEnginePreferenceChange: { launchEnginePreference = $0 },
             playAuto: { stream, url in Task { await play(stream, url: url, explicit: false) } },
@@ -5832,6 +5877,8 @@ struct iOSEpisodeStreams: View {
         let target = shownVideo
         let targetGeneration = episodeTargetGeneration
         let name = "\(meta.name) Trailer"
+        if initialTraktNextEpisodeOffer != nil,
+           !episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) { return }
         guard let launch = await iOSDetailView.resolveTrailerLaunch(for: stream, title: name) else { return }
         guard presentation == nil,
               episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
@@ -5911,6 +5958,7 @@ struct iOSEpisodeStreams: View {
         let pm = PlaybackMeta(libraryId: meta.id, videoId: target.id, type: "series",
                               name: meta.name, poster: target.thumbnail ?? meta.poster,
                               season: target.season, episode: target.episode)
+        guard offeredPlaybackIsCurrent(pm) else { return }
         let resumeProposal = await proposedResume(pm)
         guard presentation == nil,
               episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
@@ -5924,7 +5972,7 @@ struct iOSEpisodeStreams: View {
         )
         guard presentation == nil,
               episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
-        guard initialContinueWatchingIntent?.isCurrent() != false,
+        guard initialContinueWatchingIntent?.isCurrent() != false, offeredPlaybackIsCurrent(pm),
               let admittedResume = initialStartGate.admit(
             resumeProposal,
             currentSessionID: TraktAuth.storedSessionID
@@ -5973,6 +6021,7 @@ struct iOSEpisodeStreams: View {
             let pm = PlaybackMeta(libraryId: meta.id, videoId: target.id, type: "series",
                                   name: meta.name, poster: target.thumbnail ?? meta.poster,
                                   season: target.season, episode: target.episode)
+            guard offeredPlaybackIsCurrent(pm) else { return }
             let resumeProposal = await proposedResume(pm)
             guard presentation == nil,
                   episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
@@ -5986,7 +6035,7 @@ struct iOSEpisodeStreams: View {
             )
             guard presentation == nil,
                   episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
-            guard initialContinueWatchingIntent?.isCurrent() != false,
+            guard initialContinueWatchingIntent?.isCurrent() != false, offeredPlaybackIsCurrent(pm),
                   let admittedResume = initialStartGate.admit(
                 resumeProposal,
                 currentSessionID: TraktAuth.storedSessionID
@@ -6073,6 +6122,8 @@ struct iOSEpisodeStreams: View {
         let target = shownVideo
         let targetGeneration = episodeTargetGeneration
         let ep = debridHint(for: target)
+        if initialTraktNextEpisodeOffer != nil,
+           !episodeTargetIsCurrent(target, generation: targetGeneration) { return }
         // A download is not a tap: keep the unconditional (non-cache-gated) resolve so it still resolves a
         // debrid direct link for an uncached-but-servable pick, exactly as before this play-path change.
         let (ref, isTorrent) = await playbackRef(for: stream, episode: ep, cacheGated: false)
@@ -6136,6 +6187,9 @@ struct iOSEpisodeStreams: View {
         _ pm: PlaybackMeta,
         localFallback: Double? = nil
     ) async -> AccountBoundResumeProposal<TraktSessionID> {
+        if initialTraktNextEpisodeOffer != nil {
+            return AccountBoundResumeProposal(seconds: nil, expectedSessionID: nil, consumesInitial: false)
+        }
         if !initialStartGate.isConsumed,
            pm.videoId == video.id,
            initialTraktSessionID == nil || TraktAuth.storedSessionID == initialTraktSessionID,
@@ -6160,6 +6214,15 @@ struct iOSEpisodeStreams: View {
             expectedSessionID: nil,
             consumesInitial: false
         )
+    }
+
+    private func offeredPlaybackIsCurrent(_ pm: PlaybackMeta) -> Bool {
+        guard let offer = initialTraktNextEpisodeOffer else { return true }
+        guard !Task.isCancelled, offer.isCurrent(), initialTraktSessionID == offer.sessionID,
+              initialContinueWatchingIntent == offer.intent,
+              pm.libraryId == offer.target.metaID, pm.type == offer.target.type,
+              let matched = offer.matchingVideo(details: core.metaDetails) else { return false }
+        return matched.id == pm.videoId && matched.season == pm.season && matched.episode == pm.episode
     }
 
     private func localResume(_ pm: PlaybackMeta) async -> Double {
@@ -6921,6 +6984,9 @@ struct iOSSourceList: View {
     /// Explicit one-launch engine route from a source-row context menu. Optional for compatibility with
     /// narrow callers; normal taps continue through `play` and inherit the visible session picker.
     var playWithEngine: ((CoreStream, URL, PlayerEngineRouter.Override) -> Void)? = nil
+    /// An external player cannot retain a native-only episode-offer receipt. Ordinary
+    /// source routes keep their existing handoff; offered episodes use guarded in-app play.
+    var allowsExternalHandoff = true
     var launchEnginePreference: PlayerEngineRouter.Override? = nil
     var onLaunchEnginePreferenceChange: ((PlayerEngineRouter.Override?) -> Void)? = nil
     /// AUTO single-resolve for the primary "Watch in <quality>" button's FALLBACK (used only when
@@ -7683,7 +7749,7 @@ struct iOSSourceList: View {
                 playSourceRow(stream, url, addon: addon, preference: .avfoundation)
             }
         }
-        if SourcePlayerChoicePolicy.canHandOffExternally(
+        if allowsExternalHandoff, SourcePlayerChoicePolicy.canHandOffExternally(
             url: url,
             isTorrent: stream.isTorrent,
             isUsenet: stream.isUsenet,
@@ -7691,6 +7757,7 @@ struct iOSSourceList: View {
         ), ExternalPlayer.canRouteExternally(url, isTorrent: stream.isTorrent) {
             ForEach(externalPlayerTargets) { target in
                 Button("Play in \(target.name)") {
+                    guard allowsExternalHandoff else { return }
                     ExternalPlayer.open(target, stream: url, metadata: playbackMeta) { launched in
                         guard !launched else { return }
                         externalPlayerErrorMessage = "Could not open \(target.name)."
@@ -7760,6 +7827,7 @@ extension iOSSourceList: Equatable {
             && lhs.sourcesSettled == rhs.sourcesSettled
             && lhs.showsPrimaryControls == rhs.showsPrimaryControls
             && lhs.showsPrimaryPlayButton == rhs.showsPrimaryPlayButton
+            && lhs.allowsExternalHandoff == rhs.allowsExternalHandoff
             && lhs.progress == rhs.progress
             && lhs.continuity == rhs.continuity
             && lhs.pinContext == rhs.pinContext

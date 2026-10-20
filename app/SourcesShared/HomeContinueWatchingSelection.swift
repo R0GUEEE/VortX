@@ -38,6 +38,7 @@ enum HomeContinueWatchingSelection {
     struct Snapshot {
         let selection: TraktPlaybackShadow.ContinueWatchingSelection
         let context: Context
+        var nextEpisodes: [TraktNextEpisodeOffer] = []
         var intent: Intent { Intent(context: context, source: selection.source,
                                     traktSessionID: selection.sessionID, simklSessionID: selection.simklSessionID) }
     }
@@ -83,6 +84,13 @@ enum HomeContinueWatchingSelection {
         let snapshot = current(core: core, profiles: profiles)
         if snapshot.context.preferences.source == .simkl { SIMKLContinueWatchingShadow.shared.refresh(context: snapshot.context) }
         else if snapshot.context.preferences.source == .trakt { TraktPlaybackShadow.shared.refreshIfStale() }
+    }
+
+    /// Only the visible Home task invokes this lane; ordinary source/settings refreshes do not.
+    static func refreshVisibleTraktNextEpisodes(core: CoreBridge = .shared, profiles: ProfileStore = .shared) {
+        let snapshot = current(core: core, profiles: profiles)
+        guard snapshot.intent.source == .trakt, snapshot.intent.isCurrent(core: core, profiles: profiles) else { return }
+        TraktHomeNextEpisodeProducer.shared.requestRefresh(intent: snapshot.intent, core: core)
     }
 
     /// A newly mounted presentation has no accepted producer yet. Keep its body empty
@@ -172,7 +180,13 @@ enum HomeContinueWatchingSelection {
                 return Snapshot(selection: unavailable, context: context)
             }
         }
-        return Snapshot(selection: selection, context: context)
+        var result = Snapshot(selection: selection, context: context)
+        result.nextEpisodes = TraktHomeNextEpisodeProducer.shared.offers(
+            intent: result.intent, paused: selection.items, now: Date())
+        guard result.intent.isCurrent(core: core, profiles: profiles) else {
+            return Snapshot(selection: unavailable, context: context)
+        }
+        return result
     }
 
     /// Used at both private-art storage and final publication. A still-connected Trakt

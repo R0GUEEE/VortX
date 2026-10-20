@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 #if canImport(VortxEngine) && VORTX_ENGINE_STATE_BRIDGE
 import VortxEngine
 #endif
@@ -13,7 +14,14 @@ protocol VortxRuntimeABI: Sendable {
     func resolve(_ handle: UInt, request: String) -> String?
     func state(_ handle: UInt) -> String?
     func delta(_ handle: UInt) -> String?
+    /// Stateless evidence admission. It never borrows or changes an engine handle.
+    func canonicalizeOwnerHistoryEvidence(_ evidence: String) -> String?
     func free(_ handle: UInt)
+}
+
+extension VortxRuntimeABI {
+    // Older SDKs and standalone fixtures cannot advertise this newer capability.
+    func canonicalizeOwnerHistoryEvidence(_ evidence: String) -> String? { nil }
 }
 
 enum VortxNativeError: Error, Equatable {
@@ -215,6 +223,15 @@ struct VortxCABI: VortxRuntimeABI {
     }
     func state(_ handle: UInt) -> String? { copy(vortx_get_state_json(OpaquePointer(bitPattern: handle))) }
     func delta(_ handle: UInt) -> String? { copy(vortx_get_state_delta_json(OpaquePointer(bitPattern: handle))) }
+    #if VORTX_ENGINE_OWNER_HISTORY_BRIDGE
+    func canonicalizeOwnerHistoryEvidence(_ evidence: String) -> String? {
+        guard let pointer = vortx_owner_history_canonicalize_evidence_json(evidence) else { return nil }
+        defer { vortx_string_free(pointer) }
+        let length = strnlen(pointer, 16 * 1024 * 1024 + 1)
+        guard length <= 16 * 1024 * 1024 else { return nil }
+        return String(data: Data(bytes: pointer, count: length), encoding: .utf8)
+    }
+    #endif
     func free(_ handle: UInt) { vortx_engine_free(OpaquePointer(bitPattern: handle)) }
 }
 #endif

@@ -1453,6 +1453,7 @@ struct iOSHomeView: View {
     @ViewBuilder
     private var homeNavigation: some View {
         let renderedContinueWatching = continueWatchingRenderSnapshot
+        let renderedNextEpisodes = continueWatchingSnapshot.nextEpisodes.filter(TraktNextEpisodeHomeRow.permitsOpening)
         NavigationStack(path: $path) {
             // The hero is the first scrolling element (an ambient billboard header), not a
             // behind-the-scroll backdrop: that keeps its Play / Trailer buttons + the tappable poster
@@ -1535,6 +1536,10 @@ struct iOSHomeView: View {
                     if let status = renderedContinueWatching.status {
                         Text(status).font(.caption).foregroundStyle(.secondary).padding(.horizontal, Theme.Space.md)
                     }
+                    TraktNextEpisodeHomeRow(offers: renderedNextEpisodes) { offer in
+                        guard TraktNextEpisodeHomeRow.permitsOpening(offer) else { return }
+                        path.append(TraktNextEpisodeHomeRoute(offer: offer))
+                    }
                     // Every other Home section renders in the user's arranged order, minus the hidden ones
                     // (HomeRailPreferences). Default order + nothing hidden == today's Home exactly, so this is
                     // a no-op until the user customizes via the "Customize Home" editor.
@@ -1545,7 +1550,7 @@ struct iOSHomeView: View {
                     }
                     // Use the profile-aware CW source so an overlay profile WITH history never reads as
                     // empty, and one with none still shows the empty state honestly.
-                    if core.boardRows.isEmpty && renderedContinueWatching.items.isEmpty {
+                    if core.boardRows.isEmpty && renderedContinueWatching.items.isEmpty && renderedNextEpisodes.isEmpty {
                         emptyState
                     }
                 }
@@ -1554,6 +1559,17 @@ struct iOSHomeView: View {
             // A scroll gesture quiets the ambient hero rotation (resumes after inactivity), the
             // billboard never yanks the page while the user is browsing (#53).
             .scrollDismissesHeroRotation(model: hero)
+            .task(id: isActive && scenePhase == .active && continueWatchingSource == "trakt") {
+                guard isActive, scenePhase == .active, continueWatchingSource == "trakt" else { return }
+                HomeContinueWatchingSelection.refreshVisibleTraktNextEpisodes(core: core, profiles: profiles)
+                while !Task.isCancelled {
+                    do { try await Task.sleep(nanoseconds: 300_000_000_000) }
+                    catch { return }
+                    guard !Task.isCancelled, isActive, scenePhase == .active,
+                          continueWatchingSource == "trakt" else { return }
+                    HomeContinueWatchingSelection.refreshVisibleTraktNextEpisodes(core: core, profiles: profiles)
+                }
+            }
             // Re-tapping the active Home tab scrolls back to the top anchor above the hero.
             .scrollToTopOnBump(TabScrollKeys.home)
             // A floating back-to-top button appears once you scroll past the fold (#8); it bumps the same
@@ -1655,6 +1671,9 @@ struct iOSHomeView: View {
                         initialContinueWatchingIntent: target.intent
                     )
                 }
+            }
+            .navigationDestination(for: TraktNextEpisodeHomeRoute.self) { target in
+                TraktNextEpisodeHomeDestination(offer: target.offer)
             }
             .navigationDestination(for: CinemaDetailTarget.self) { target in
                 iOSDetailView(id: target.item.id, type: target.item.type, title: target.item.name,
@@ -1797,6 +1816,9 @@ struct iOSHomeView: View {
             refreshContinueWatchingPresentation()
         }
         .onReceive(NotificationCenter.default.publisher(for: SIMKLContinueWatchingShadow.changedNote)) { _ in
+            refreshContinueWatchingPresentation()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: TraktHomeNextEpisodeProducer.changedNote)) { _ in
             refreshContinueWatchingPresentation()
         }
         .onReceive(NotificationCenter.default.publisher(for: TraktPlaybackShadow.changedNote)) { _ in

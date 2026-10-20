@@ -63,6 +63,167 @@ enum OwnerHistoryExactJSON {
         }
     }
 
+    /// Complete native ENGINE output only, never a standalone delta or a peer merge.
+    /// Unmentioned unknown native siblings survive; explicit raw unknown upserts keep the
+    /// donor contract. No recursive merge/preservation inside a replaced typed field is claimed.
+    struct Snapshot: Sendable {
+        let bytes: Data
+        private let root: Object
+        private let roster: Object
+        private let profiles: Object
+        private let libraries: Object
+        private let native: Object
+        private let source: Data?
+        let witnessID: String
+        let fence: Data
+        /// Reuse the already encoded native field; no full snapshot/source parse on reads.
+        var nativeSyncBytes: Data { get throws { try root.required("nativeSync") } }
+
+        // ee37c942 NativeSyncDocument serde-owned fields, EXCLUDING ownerHistory. Known
+        // fields are replaced/cleared by complete native output. Unknown omissions are NOT
+        // clears. ownerHistory is separately supplied only by witness reuse or a cold state.
+        private static let nativeSerdeOwned: Set<String> = [
+            "websiteAddonReceipts", "accountSlots", "legacyProfileEditReceipts", "legacyImport",
+            "schemaVersion", "scope", "ownerProfileId", "profiles", "addons", "libraries", "watches"
+        ]
+
+        init(bytes: Data, witnessID: String, fence: Data) throws {
+            let root = try Object(bytes)
+            let roster = try Object(root.required("roster"))
+            self.profiles = try Object(roster.required("profiles"))
+            self.libraries = try Object(root.required("libraries"))
+            let native = try Object(root.required("nativeSync"))
+            self.bytes = bytes; self.root = root; self.roster = roster; self.native = native
+            self.source = native["ownerHistory"]; self.witnessID = witnessID; self.fence = fence
+        }
+        private init(bytes: Data, root: Object, roster: Object, profiles: Object, libraries: Object,
+                     native: Object, source: Data?, witnessID: String, fence: Data) {
+            self.bytes = bytes; self.root = root; self.roster = roster; self.profiles = profiles
+            self.libraries = libraries; self.native = native; self.source = source
+            self.witnessID = witnessID; self.fence = fence
+        }
+
+        /// Disposable app presentation only. Never expose full ownerHistory/source archives,
+        /// unknown raw account/native siblings or persistence bytes through VortxJSON.
+        var presentationBytes: Data {
+            get throws {
+                var visible = try Object(Data("{}".utf8)), visibleNative = try Object(Data("{}".utf8))
+                for key in ["roster", "libraries", "activeProfileId", "accountLibraryArchives", "projectedAccountSlots"] {
+                    if let value = root[key] { visible.set(key, value) }
+                }
+                for key in Self.nativeSerdeOwned {
+                    if let value = native[key] { visibleNative.set(key, value) }
+                }
+                visible.set("nativeSync", try visibleNative.encoded())
+                return try visible.encoded()
+            }
+        }
+
+        /// Only a native capture under a freshly checked accepted target supplies this fence.
+        /// Target/binding may change; the runtime generation, witness and account may not.
+        /// This copies metadata only: no source parsing, normalization, or checkpoint write.
+        func retargeting(fence nextFence: Data) throws -> Self {
+            var old = try Object(fence), next = try Object(nextFence)
+            for key in ["profileId", "verifiedStreamingUid", "binding"] {
+                _ = try old.required(key); _ = try next.required(key)
+                old.remove(key); next.remove(key)
+            }
+            guard try canonical(old.encoded()) == canonical(next.encoded()),
+                  try sameText(Object(nextFence).text("sourceSetWitnessId"), witnessID) else {
+                throw Failure.contradictory
+            }
+            return Self(bytes: bytes, root: root, roster: roster, profiles: profiles,
+                libraries: libraries, native: native, source: source, witnessID: witnessID, fence: nextFence)
+        }
+
+        /// Replaces only pinned serde-owned leaves plus explicit raw unknown upserts. The
+        /// retained Object shares immutable Data slices; omitted large/unknown/source values
+        /// are not decoded or canonicalized again. No native schema validity is minted here.
+        private func replacingNativeFields(_ incoming: Object, source nextSource: Data?) -> Object {
+            var result = native
+            for key in Self.nativeSerdeOwned { result.remove(key) }
+            for (key, value) in incoming.fields where key != "ownerHistory" { result.set(key, value) }
+            if let nextSource { result.set("ownerHistory", nextSource) }
+            else { result.remove("ownerHistory") }
+            return result
+        }
+
+        /// Cold replacement retains unknown host AND native siblings. Complete engine-owned
+        /// root/native fields still obey their replacement/omission semantics. Source may
+        /// change/disappear only on this cold path under its caller's full native validation.
+        func replacingNativeState(_ state: Data, witnessID: String, fence: Data) throws -> Self {
+            let stateRoot = try Object(state)
+            let managed: Set<String> = ["roster", "libraries", "accountLibraryArchives",
+                "projectedAccountSlots", "nativeSync", "activeProfileId"]
+            guard Set(stateRoot.fields.keys).isSubset(of: managed),
+                  stateRoot["roster"] != nil, stateRoot["libraries"] != nil,
+                  stateRoot["nativeSync"] != nil else { throw Failure.contradictory }
+            let nextRoster = try Object(stateRoot.required("roster"))
+            let nextProfiles = try Object(nextRoster.required("profiles"))
+            let nextLibraries = try Object(stateRoot.required("libraries"))
+            let incoming = try Object(stateRoot.required("nativeSync"))
+            let nextSource = incoming["ownerHistory"]
+            let nextNative = replacingNativeFields(incoming, source: nextSource)
+            var complete = root
+            for key in managed where key != "nativeSync" {
+                if let value = stateRoot[key] { complete.set(key, value) }
+                else { complete.remove(key) }
+            }
+            complete.set("nativeSync", try nextNative.encoded())
+            // Reuse the parsed objects above, rather than reparsing a new full Snapshot.
+            return try Self(bytes: complete.encoded(), root: complete, roster: nextRoster,
+                profiles: nextProfiles, libraries: nextLibraries, native: nextNative, source: nextSource,
+                witnessID: witnessID, fence: fence)
+        }
+
+        func applying(checkpoint: Data) throws -> Self {
+            let reply = try Object(checkpoint)
+            guard try reply.text("kind") == "checkpoint_delta",
+                  try reply.required("durableAck") == Data("false".utf8),
+                  try reply.required("requiresCompleteArchiveEnvelope") == Data("true".utf8),
+                  try sameText(reply.text("reuseExactOwnerHistoryFromWitness"), witnessID),
+                  try canonical(reply.required("preparedAgainst")) == canonical(fence) else {
+                throw Failure.contradictory
+            }
+            let delta = try Object(reply.required("delta"))
+            let allowed: Set<String> = ["accountLibraryArchives", "projectedAccountSlots", "nativeSync",
+                                       "activeProfileId", "profiles", "libraries"]
+            guard Set(delta.fields.keys).isSubset(of: allowed) else { throw Failure.contradictory }
+            var next = root, nextRoster = roster, nextProfiles = profiles, nextLibraries = libraries
+            var nextNative = native
+            if let rows = delta["profiles"] {
+                for row in try array(rows) {
+                    let profile = try Object(row); let id = try profile.text("id")
+                    guard !id.isEmpty else { throw Failure.malformed }
+                    nextProfiles.set(id, row)
+                }
+                nextRoster.set("profiles", try nextProfiles.encoded())
+                next.set("roster", try nextRoster.encoded())
+            }
+            if let buckets = delta["libraries"] {
+                for (key, value) in try Object(buckets).fields { nextLibraries.set(key, value) }
+                next.set("libraries", try nextLibraries.encoded())
+            }
+            for key in ["accountLibraryArchives", "projectedAccountSlots", "activeProfileId"] {
+                if let value = delta[key] { next.set(key, value) }
+            }
+            if let nativeBytes = delta["nativeSync"] {
+                let incoming = try Object(nativeBytes)
+                guard incoming["ownerHistory"] == nil else { throw Failure.contradictory }
+                nextNative = replacingNativeFields(incoming, source: source)
+                next.set("nativeSync", try nextNative.encoded())
+            }
+            let currentFence = try reply.required("fence")
+            let current = try Object(currentFence)
+            guard try sameText(current.text("sourceSetWitnessId"), witnessID) else { throw Failure.contradictory }
+            // Never parse a new full Snapshot on a delta. Retain original source/unknown
+            // slices plus the parsed native Object; only actual incoming delta fields parse.
+            return try Self(bytes: next.encoded(), root: next, roster: nextRoster,
+                profiles: nextProfiles, libraries: nextLibraries, native: nextNative, source: source,
+                witnessID: witnessID, fence: currentFence)
+        }
+    }
+
     private struct Parser {
         let bytes: [UInt8]
         var at = 0

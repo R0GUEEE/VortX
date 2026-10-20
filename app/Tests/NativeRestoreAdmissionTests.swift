@@ -104,6 +104,7 @@ private struct SymmetricKey { init(data: Data) {} }
     var reply: (Int, [String: Any]?) = (404, nil)
     var responseETag: String?
     var whileReading: (() -> Void)?
+    static var decodedHostDocuments = 0
     func isCurrent(_ capture: CredentialScopeRegistry.Capture) -> Bool { capture == credentialAuthority.capture() }
     static func resolveRoster(from document: [String: Any], fullOnly: Bool) -> ProfileRosterSnapshot? {
         precondition(fullOnly, "admission must never accept a lossy summary")
@@ -124,6 +125,7 @@ private struct SymmetricKey { init(data: Data) {} }
     // Crypto is an explicit inert aperture; pull classification and admission are unchanged source.
     func openSyncDocument(_ document: String, version: Int) -> Data? { Data(base64Encoded: document) }
     static func decodeDecryptedSyncDocument(_ bytes: Data) throws -> [String: Any] {
+        decodedHostDocuments += 1
         guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw VortxNativeError.invalidSnapshot }
         return object
     }
@@ -144,7 +146,7 @@ private struct SymmetricKey { init(data: Data) {} }
         return RestoreAdmissionFixture()
     }
     var slot: String { "vortx.native.backupSeen." + credentialAuthority.capture().namespace }
-    private func expectAdmission(_ expected: NativeRestoreAdmissionFailure, pulled: VersionedPull = .doc(doc: [:], version: 1)) async {
+    private func expectAdmission(_ expected: NativeRestoreAdmissionFailure, pulled: VersionedPull = .doc(doc: [:], version: 1, plaintext: Data("{}".utf8), observation: nil)) async {
         do {
             _ = try await nativeRestoreDocument(pulled, capture: credentialAuthority.capture(),
                 selectedProfile: ProfileStore.shared.activeID, generation: nativeCheckpointGeneration)
@@ -239,9 +241,11 @@ private struct SymmetricKey { init(data: Data) {} }
     }
     static func admissionCases() async throws {
         let valid = fresh()
-        let accepted = try await valid.nativeRestoreDocument(.doc(doc: ["preserved": "exact"], version: 1),
+        let original = Data(#"{ "preserved":"exact", "unknown":9007199254740993, "negativeZero":-0.0 }"#.utf8)
+        let accepted = try await valid.nativeRestoreDocument(.doc(doc: ["preserved": "exact"], version: 1, plaintext: original, observation: nil),
             capture: valid.credentialAuthority.capture(), selectedProfile: ProfileStore.shared.activeID, generation: valid.nativeCheckpointGeneration)
         check(accepted.document["preserved"] as? String == "exact" && accepted.owners.count == 1, "valid document admitted without rewriting")
+        check(accepted.plaintext == original, "admission retains original authenticated plaintext independently of the host projection")
         let old = fresh(); old.lastSyncedVersion = 2; await old.expectAdmission(.staleDocument)
         let missing = fresh(); resolvedRoster = nil; await missing.expectAdmission(.rosterUnavailable)
         let noKey = fresh(); noKey.dataKey = nil; await noKey.expectAdmission(.keyUnavailable)
@@ -331,8 +335,30 @@ private struct SymmetricKey { init(data: Data) {} }
         if case .unchanged(version: 7) = await conditional.pullDocVersionedResult(ifNoneMatch: 7) {} else { preconditionFailure("valid304 preserved") }
         check(Keychain.backend.writes.isEmpty, "unchanged response does not manufacture history")
         let good = fresh(); good.reply = (200, ["document": encoded, "version": 1])
-        if case .doc(_, 1) = await good.pullDocVersionedResult() {} else { preconditionFailure("valid pull") }
+        if case .doc(_, 1, let plaintext, _) = await good.pullDocVersionedResult() {
+            check(plaintext == Data("{}".utf8), "versioned pull carries the decrypted original bytes")
+        } else { preconditionFailure("valid pull") }
         check(Keychain.confirmedString(good.slot) == .value("1"), "accepted pull requires certified receipt")
+        let exact = fresh()
+        let raw = Data(#"{ "unknown":9007199254740991, "negativeZero":-0.0, "nested":{"later":1e-99} }"#.utf8)
+        exact.reply = (200, ["document": raw.base64EncodedString(), "version": 1])
+        if case .doc(_, 1, let plaintext, _) = await exact.pullDocVersionedResult() {
+            check(plaintext == raw, "raw numeric lexemes and whitespace survive the actual pull boundary")
+        } else { preconditionFailure("valid exact pull") }
+        let typed = fresh()
+        let nativeRaw = Data(#"{ "nativeSync":{"schemaVersion":6,"ownerHistory":{"future":9007199254740993}}, "nativeOwnerHistorySources":{"future":-0.0} }"#.utf8)
+        typed.reply = (200, ["document": nativeRaw.base64EncodedString(), "version": 1])
+        let decodedBefore = decodedHostDocuments
+        if case .ownerHistory(let plaintext, 1, let observation) = await typed.pullDocVersionedResult() {
+            check(plaintext == nativeRaw && decodedHostDocuments == decodedBefore,
+                "typed source classification bypasses the host decoder and retains exact original numbers")
+            try! Self.xperienceExportObservation.withCurrent(observation) {}
+            Self.xperienceExportObservation.observe()
+            do { try Self.xperienceExportObservation.withCurrent(observation) {}; preconditionFailure("old pull observation revived") } catch {}
+            await typed.expectAdmission(.accountDocumentUnavailable,
+                pulled: .ownerHistory(plaintext: plaintext, version: 1, observation: observation))
+            check(typed.seedCalls == 0, "typed response cannot enter a generic mount or empty seed fallback")
+        } else { preconditionFailure("typed route was not retained") }
     }
     static func run() async throws {
         markerCases(); try await admissionCases(); await pullCases()

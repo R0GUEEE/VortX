@@ -55,6 +55,20 @@ import CryptoKit
             maximumSealedBytes: XperienceExportBudget.officialMaximumSealedBytes, writeV2: true)
         try reject(.exportTooLarge) { try crowded.validate(native: .object([:]), host: .object([:]), profileEditResults: .object([:])) }
 
+        // A typed source-bearing account never becomes a generic JSON DTO for sizing.
+        // Preserved native/legacy siblings count even though the additional validator
+        // receives only the small disposable projection of changed owned fields.
+        let rawAccount = Data(#"{"nativeSync":{"schemaVersion":6,"ownerHistory":{"opaque":18446744073709551615,"negativeZero":-0.0},"future":9007199254740993},"legacy":{"keep":-0},"nativeOwnerHistorySources":{"keep":"original"}}"#.utf8)
+        let rawBudget = try XperienceExportBudget(completeAccountPlaintext: rawAccount,
+            maximumSealedBytes: XperienceExportBudget.officialMaximumSealedBytes, writeV2: true)
+        try rawBudget.validate(native: .object(["schemaVersion": .integer(6)]), host: .object([:]), profileEditResults: .object([:]))
+        try reject(.exportBaseUnavailable) { _ = try rawBudget.projected(native: .object([:]), host: .object([:]), profileEditResults: .object([:])) }
+        try reject(.exportBaseUnavailable) { try rawBudget.validate(native: .object(["ownerHistory": .object([:])]), host: .object([:]), profileEditResults: .object([:])) }
+        let rawCrowded = try XperienceExportBudget(completeAccountPlaintext:
+            Data((#"{"nativeSync":{"schemaVersion":6,"ownerHistory":{"keep":""# + String(repeating: "x", count: 2048) + #""}},"legacy":18446744073709551615}"#).utf8),
+            maximumSealedBytes: 1024, writeV2: true)
+        try reject(.exportTooLarge) { try rawCrowded.validate(native: .object(["schemaVersion": .integer(6)]), host: .object([:]), profileEditResults: .object([:])) }
+
         let raw = try document()
         let source = raw.collections[0].folders[0].sources[0]
         let mapping = XperienceAddonBinding.Mapping(manifestID: "synthetic.addon", transportDigest: String(repeating: "a", count: 64))

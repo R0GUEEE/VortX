@@ -631,6 +631,74 @@ enum VortxNativeWatchedArchive {
                 return result
             }
         }
+        /// Cold capture + strict replay of both installed and separate draft sources.
+        /// A read/decrypt/validation failure throws; it can never become an empty source.
+        func externalCWDenials(_ archive: Data?, store: any VortxCheckpointStore, profileID: String,
+            candidates: [VortxNativeExternalCW.Candidate]) async throws
+            -> (denials: VortxNativeExternalCWPending.Denials, draft: VortxMigrationDraftRead) {
+            guard UUID(uuidString: profileID)?.uuidString == profileID else { throw Failure.malformed }
+            var result = try VortxNativeExternalCWPending.Denials(candidates: candidates)
+            try await cooperation.boundary()
+            let draft = try store.captureMigrationDraft(scope: scope)
+            let installedJournal = try await validatedJournal(archive)
+            let draftJournal = try await validatedJournal(draft.archive)
+            let journals = [installedJournal, draftJournal]
+            // Match completion across both immutable snapshots, deduplicating exact receipts.
+            // Two different witnesses for the same tuple stay ambiguous and cannot clear it.
+            var indexed: [Data: Set<Data>] = [:]
+            for journal in journals {
+                for entry in try journal.records(evidenceKey) {
+                    try await cooperation.boundary()
+                    indexed[try identity(journal.fields(entry)), default: []].insert(Data(SHA256.hash(data: try journal.expanded(entry))))
+                }
+            }
+            let completed = Set(indexed.filter { $0.value.count == 1 }.keys)
+            guard let owner = UUID(uuidString: scope.ownerProfileID) else { throw Failure.malformed }
+            for journal in journals {
+            for entry in try journal.records(pendingKey) {
+                try await cooperation.boundary()
+                guard !completed.contains(try identity(journal.fields(entry))) else { continue }
+                let attribution = try VortxLegacyWatchedMigration.pendingAttribution(journal.expanded(entry),
+                    accountID: scope.account, ownerProfileID: owner)
+                if attribution.profileID.uuidString == profileID {
+                    result.denyTitle(attribution.metaID, reason: "host_pending_watched")
+                }
+            }
+            if let pending = journal.host["ownAccountOverlayPending"] {
+                guard case .object(let profiles) = pending else { throw Failure.malformed }
+                if let entry = profiles[profileID] {
+                    guard case .object(let fields) = entry,
+                          Set(fields.keys) == ["profileOverlayBase64", "reason"]
+                            || Set(fields.keys) == ["verifiedStreamingUid", "sourceDocumentSha256", "profileOverlayBase64", "reason"],
+                          case .string(let reason) = fields["reason"], ["missing_witness", "changed_witness"].contains(reason),
+                          case .string(let raw) = fields["profileOverlayBase64"], let bytes = Data(base64Encoded: raw),
+                          bytes.base64EncodedString() == raw else { throw Failure.malformed }
+                    if let uid = fields["verifiedStreamingUid"] {
+                        guard case .string(let value) = uid, !value.isEmpty,
+                              case .string(let digest) = fields["sourceDocumentSha256"],
+                              digest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { throw Failure.malformed }
+                    } else if reason != "missing_witness" { throw Failure.malformed }
+                    try await cooperation.boundary()
+                    try result.overlay(bytes, profileID: profileID, reason: "host_pending_overlay", check: cooperation.check)
+                }
+            }
+            try await cooperation.boundary()
+            if let validated = try VortxNativeUnattributedOverlayArchive.merge(nil,
+                journal.host[VortxNativeUnattributedOverlayArchive.key], scope: scope), case .object(let records) = validated {
+                for record in records.values {
+                    try await cooperation.boundary()
+                    guard record["profileId"] == .string(profileID) else { continue }
+                    guard case .string(let raw) = record["profileOverlayBase64"], let bytes = Data(base64Encoded: raw) else {
+                        throw Failure.malformed
+                    }
+                    try result.overlay(bytes, profileID: profileID, reason: "host_unattributed_overlay", check: cooperation.check)
+                }
+            }
+            }
+            try await cooperation.boundary()
+            try draft.withActive {}
+            return (result, draft)
+        }
         func pendingProfileIDs(_ archive: Data?) async throws -> [UUID] {
             let journal = try await validatedJournal(archive)
             let indexed = try await index(journal)

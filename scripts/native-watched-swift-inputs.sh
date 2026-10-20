@@ -7,6 +7,8 @@ native_watched_swift_inputs=(
   app/SourcesShared/VortxLegacyWatchedMigration.swift
   app/SourcesShared/VortxLegacyBootstrapMaterial.swift
   app/SourcesShared/VortxNativeWatchedArchive.swift
+  app/SourcesShared/VortxNativeExternalCW.swift
+  app/SourcesShared/VortxNativeExternalCWPending.swift
   app/SourcesShared/VortxNativeWatchlist.swift
   app/SourcesShared/VortxNativeHostFieldMutation.swift
   app/SourcesShared/VortxNativeFIFOAdmission.swift

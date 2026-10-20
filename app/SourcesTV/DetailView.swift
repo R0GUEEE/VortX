@@ -31,6 +31,7 @@ struct DetailView: View {
     var initialVideoID: String? = nil
     var initialTraktSessionID: TraktSessionID? = nil
     var initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil
+    var initialTraktNextEpisodeOffer: TraktNextEpisodeOffer? = nil
     @State private var resumeHintOpenedAt = Date()
     var client: AddonClient = AddonClient()   // kept for call-site compatibility (Search)
     @EnvironmentObject private var core: CoreBridge
@@ -121,6 +122,7 @@ struct DetailView: View {
     /// Navigation-carried Trakt state is private to the credential session that created it. Revalidate at
     /// every use because the detail page can remain mounted across sign-out or an account replacement.
     private var validInitialResumeSeconds: Double? {
+        guard initialTraktNextEpisodeOffer?.isCurrent() != false else { return nil }
         guard initialContinueWatchingIntent?.isCurrent() != false else { return nil }
         guard newerPlaybackVideoID == nil else { return nil }
         guard initialTraktSessionID == nil || TraktAuth.storedSessionID == initialTraktSessionID else { return nil }
@@ -128,6 +130,7 @@ struct DetailView: View {
     }
 
     private var validInitialVideoID: String? {
+        guard initialTraktNextEpisodeOffer?.isCurrent() != false else { return nil }
         guard initialContinueWatchingIntent?.isCurrent() != false else { return nil }
         guard newerPlaybackVideoID == nil else { return nil }
         guard initialTraktSessionID == nil || TraktAuth.storedSessionID == initialTraktSessionID else { return nil }
@@ -1100,6 +1103,9 @@ struct DetailView: View {
                                              orderedEpisodes: ordered,
                                              watched: watched,
                                              initialSeason: resumeSeasonHint(ordered: ordered, metaID: meta.id) ?? primary?.video.season,
+                                             initialTraktSessionID: initialTraktNextEpisodeOffer == nil ? nil : initialTraktSessionID,
+                                             initialContinueWatchingIntent: initialTraktNextEpisodeOffer == nil ? nil : initialContinueWatchingIntent,
+                                             initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
                                              onSeasonPickerFocus: {
                                                  proxy.scrollTo(CoreSeasonedEpisodes.seasonPickerAnchor, anchor: .center)
                                              })
@@ -1208,6 +1214,7 @@ struct DetailView: View {
                                                initialStartAtSeconds: validInitialResumeSeconds,
                                                initialTraktSessionID: initialTraktSessionID,
                                                initialContinueWatchingIntent: initialContinueWatchingIntent,
+                                               initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
                                                secondaryAction: hasFullTrailer(m) ? AnyView(trailerChip(m)) : nil,
                                                onDetailMove: { direction, region in
                                                    handleDetailMove(direction, from: region, using: proxy)
@@ -1462,7 +1469,8 @@ struct DetailView: View {
                                                            episodes: orderedEpisodes,
                                                            initialStartAtSeconds: primaryResumeSeconds,
                                                            initialTraktSessionID: initialTraktSessionID,
-                                                           initialContinueWatchingIntent: initialContinueWatchingIntent)   // ALL seasons ordered → auto-advance crosses the season boundary
+                                                           initialContinueWatchingIntent: initialContinueWatchingIntent,
+                                                           initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer)
                                     } label: {
                                         Label(primaryEpisodeLabel(primaryEpisode, isResume: primaryIsResume,
                                                                   resumeSeconds: primaryResumeSeconds),
@@ -1797,6 +1805,9 @@ struct DetailView: View {
     /// `ordered` is the caller's already-sorted (season, episode, id) list, so the page sorts once instead of
     /// twice more inside this one helper.
     private func resumeSeasonHint(ordered: [CoreVideo], metaID: String) -> Int? {
+        if let offer = initialTraktNextEpisodeOffer {
+            return offer.matchingVideo(metaID: metaID, type: effectiveType, videos: ordered)?.season
+        }
         if let preferredID = newerPlaybackVideoID ?? validInitialVideoID,
            let season = ordered.first(where: { $0.id == preferredID })?.season {
             return season
@@ -1814,6 +1825,11 @@ struct DetailView: View {
     /// the account that owns the data (see the resume comment below). Twin of iOSDetailView's version.
     private func seriesPrimaryEpisode(ordered: [CoreVideo], watched: Set<String>,
                                       localWatched: Set<String>, metaID: String) -> (video: CoreVideo, isResume: Bool)? {
+        if let offer = initialTraktNextEpisodeOffer {
+            guard let video = offer.matchingVideo(metaID: metaID, type: effectiveType, videos: ordered),
+                  !localWatched.contains(video.id) else { return nil }
+            return (video, false)
+        }
         if let preferred = DetailEpisodeTargetPolicy.preferred(
             orderedIDs: ordered.map(\.id), initialVideoID: validInitialVideoID,
             initialResumeSeconds: validInitialResumeSeconds, newerPlaybackID: newerPlaybackVideoID,
@@ -1912,6 +1928,9 @@ struct CoreSeasonedEpisodes: View {
     var orderedEpisodes: [CoreVideo] = []
     var watched: Set<String> = []
     var initialSeason: Int?
+    var initialTraktSessionID: TraktSessionID? = nil
+    var initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil
+    var initialTraktNextEpisodeOffer: TraktNextEpisodeOffer? = nil
     /// Scroll the season picker into the parent viewport before this view seats focus on its selected chip.
     /// Only the first episode row requests this; deeper rows keep native previous-row navigation.
     var onSeasonPickerFocus: (() -> Void)?
@@ -2394,7 +2413,10 @@ struct CoreSeasonedEpisodes: View {
         return NavigationLink {
             // `orderedEpisodes` (sorted once by the page), NOT the computed `meta.orderedEpisodes`: this
             // destination is built eagerly for every row on every body evaluation. ALL seasons → cross-season auto-advance.
-            CoreEpisodeStreams(meta: meta, video: v, season: v.season ?? season, episodes: orderedEpisodes)
+            CoreEpisodeStreams(meta: meta, video: v, season: v.season ?? season, episodes: orderedEpisodes,
+                               initialTraktSessionID: initialTraktSessionID,
+                               initialContinueWatchingIntent: initialContinueWatchingIntent,
+                               initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer)
         } label: {
             // The glass episode card (2026-10-15): the still, glass chips, the frosted panel below.
             let hidden = spoilerVeiled(v, isWatched: isWatched)
@@ -2417,6 +2439,9 @@ struct CoreSeasonedEpisodes: View {
             }
         }
         .buttonStyle(CardFocusStyle(scale: 1.04))
+        .disabled(initialTraktNextEpisodeOffer.map {
+            $0.target.videoID != v.id || v.season != $0.target.season || v.episode != $0.target.episode
+        } ?? false)
         .contextMenu {
             Button(isWatched ? "Mark as Unwatched" : "Mark as Watched") {
                 markEpisodeWatched(v, isWatched: isWatched)
@@ -2636,6 +2661,7 @@ struct CoreEpisodeStreams: View {
     var initialStartAtSeconds: Double? = nil
     var initialTraktSessionID: TraktSessionID? = nil
     var initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil
+    var initialTraktNextEpisodeOffer: TraktNextEpisodeOffer? = nil
     @EnvironmentObject private var core: CoreBridge
     @EnvironmentObject private var theme: ThemeManager
     @EnvironmentObject private var profiles: ProfileStore   // per-profile engine-history gate (activeUsesEngineHistory)
@@ -2660,7 +2686,8 @@ struct CoreEpisodeStreams: View {
         episodes: [CoreVideo] = [],
         initialStartAtSeconds: Double? = nil,
         initialTraktSessionID: TraktSessionID? = nil,
-        initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil
+        initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil,
+        initialTraktNextEpisodeOffer: TraktNextEpisodeOffer? = nil
     ) {
         self.meta = meta
         self.video = video
@@ -2669,6 +2696,7 @@ struct CoreEpisodeStreams: View {
         self.initialStartAtSeconds = initialStartAtSeconds
         self.initialTraktSessionID = initialTraktSessionID
         self.initialContinueWatchingIntent = initialContinueWatchingIntent
+        self.initialTraktNextEpisodeOffer = initialTraktNextEpisodeOffer
         _currentVideo = State(initialValue: video)
     }
 
@@ -2695,6 +2723,16 @@ struct CoreEpisodeStreams: View {
 
     /// The season the page shows: follows `currentVideo` so a cross-season binge advance re-labels correctly.
     private var shownSeason: Int { currentVideo.season ?? season }
+
+    private var offeredVideoIsCurrent: Bool {
+        guard let offer = initialTraktNextEpisodeOffer else { return true }
+        guard offer.isCurrent(), initialTraktSessionID == offer.sessionID,
+              initialContinueWatchingIntent == offer.intent,
+              meta.id == offer.target.metaID, meta.type == offer.target.type,
+              let matched = offer.matchingVideo(details: core.metaDetails) else { return false }
+        return matched.id == currentVideo.id && matched.season == currentVideo.season
+            && matched.episode == currentVideo.episode
+    }
 
     private func moveToEpisodeTop(using proxy: ScrollViewProxy) {
         // Keep programmatic episode-top recovery deterministic without animating for users who
@@ -2771,6 +2809,7 @@ struct CoreEpisodeStreams: View {
                                    initialStartAtSeconds: initialStartAtSeconds,
                                    initialTraktSessionID: initialTraktSessionID,
                                    initialContinueWatchingIntent: initialContinueWatchingIntent,
+                                   initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
                                    onDetailMove: { direction, region in
                                        guard direction == .up,
                                              TVDetailActionFocusPolicy.destination(
@@ -2782,6 +2821,7 @@ struct CoreEpisodeStreams: View {
                                    },
                                    // Re-find sources: same per-episode stream args this page's loadMeta uses.
                                    performRefindLoad: {
+                                       guard offeredVideoIsCurrent else { return }
                                        core.refindSources(type: "series", id: meta.id,
                                                           streamType: "series", streamId: currentVideo.id)
                                    })
@@ -2792,7 +2832,13 @@ struct CoreEpisodeStreams: View {
         }
         }
         .background(Theme.Palette.canvas.ignoresSafeArea())
-        .onAppear { core.loadMeta(type: "series", id: meta.id, streamType: "series", streamId: currentVideo.id) }
+        .onAppear {
+            guard offeredVideoIsCurrent else { return }
+            core.loadMeta(type: "series", id: meta.id, streamType: "series", streamId: currentVideo.id)
+        }
+        .onDisappear {
+            if initialTraktNextEpisodeOffer != nil { episodeTargetGeneration &+= 1 }
+        }
         // Binge-advance refresh: when the player closes, continuous play may have advanced past the episode this
         // page launched from. Follow the engine's resume episode so the page (title, backdrop, meta, and the
         // Watch-Now PlaybackMeta) shows the CURRENT episode, and re-point meta_details at it so a second Watch-Now
@@ -2818,6 +2864,7 @@ struct CoreEpisodeStreams: View {
     /// the live player's engine slot alone) and on a real move to a known episode, so a no-op close
     /// (paused, same episode) leaves the page untouched.
     private func reanchorPageToEngineEpisode(preferPlaybackCloseReceipt: Bool) {
+        guard initialTraktNextEpisodeOffer == nil else { return }
         let committed = preferPlaybackCloseReceipt ? presenter.playbackCloseReceipt : nil
         let attempted = preferPlaybackCloseReceipt ? presenter.playbackCloseAttempt : nil
         guard presenter.request == nil,
@@ -2951,6 +2998,7 @@ struct CoreStreamList: View {
     /// Exact Trakt session that owns `initialStartAtSeconds`. nil means the offset is local, not remote.
     var initialTraktSessionID: TraktSessionID? = nil
     var initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil
+    var initialTraktNextEpisodeOffer: TraktNextEpisodeOffer? = nil
     /// Optional detail action supplied by the mounting page (the movie trailer). It joins the secondary
     /// row so every action remains in one of the two semantic focus sections instead of forming a stray
     /// third row above the source controls. `AnyView` keeps this view's generic surface unchanged for the
@@ -3094,6 +3142,8 @@ struct CoreStreamList: View {
     /// state, then Unload -> Load the engine meta (via `performRefindLoad`) so expired sources are replaced. A
     /// plain re-Load would be an engine eq_update no-op; the Unload -> Load is what re-queries the add-ons.
     private func refindSources() {
+        if initialTraktNextEpisodeOffer != nil,
+           !targetIsCurrent(videoID: episodeStreamId, generation: episodeTargetGeneration) { return }
         guard refindEnabled else { return }
         torboxSearch.invalidateCachedResult(for: auxiliaryTarget)
         mediaServers.invalidateCache()
@@ -3107,6 +3157,7 @@ struct CoreStreamList: View {
     /// (via `engineResumeSeconds`), the overlay's own entry otherwise (via `ProfileStore.resumeOffset`).
     /// Suppressed for live channels (they no-op resume). Read-only; writes nothing.
     private var resumeSeconds: Double? {
+        guard initialTraktNextEpisodeOffer == nil else { return nil }
         guard let meta, !isLive else { return nil }
         let secs = core.engineResumeSeconds(for: meta) ?? ProfileStore.shared.resumeOffset(for: meta)
         return secs >= 1 ? secs : nil
@@ -3127,6 +3178,7 @@ struct CoreStreamList: View {
     /// authority. All policy lives in `TraktPlaybackShadow`, shared with iOS so the two cannot drift.
     /// Suppressed for live channels, which have no resume point to offer.
     private var traktSuggestion: AccountBoundResumeSuggestion<TraktSessionID>? {
+        guard initialTraktNextEpisodeOffer == nil else { return nil }
         guard let meta, !isLive else { return nil }
         return TraktPlaybackShadow.shared.suggestion(for: meta,
                                                      localSeconds: resumeSeconds,
@@ -3199,6 +3251,10 @@ struct CoreStreamList: View {
         // the list + focus target restore unchanged when the player closes (presenter.request flips back to nil).
         if presenter.request != nil {
             return AnyView(Color.clear.frame(minHeight: 1))
+        }
+        if initialTraktNextEpisodeOffer != nil,
+           !targetIsCurrent(videoID: episodeStreamId, generation: episodeTargetGeneration) {
+            return AnyView(Text("This episode offer is no longer current. Return to Home to refresh."))
         }
         // Per-series quality memory: bias Watch Now toward the quality signature of
         // whatever this title played last (per profile), so a series you watch in a
@@ -3562,7 +3618,8 @@ struct CoreStreamList: View {
         // then routes through the EXISTING `playBest` auto-pick. Fires once; a manual pick (presenter.request
         // set) or backing out cancels/short-circuits it, leaving the full list.
         .task {
-            guard SourcePreferences.shared.autoPickBest,
+            guard initialTraktNextEpisodeOffer == nil,
+                  SourcePreferences.shared.autoPickBest,
                   meta?.usesSeriesLifecycle == true,
                   !didAutoPick else { return }
             var step = 0
@@ -3744,6 +3801,15 @@ struct CoreStreamList: View {
 
     private func targetIsCurrent(videoID: String?, generation: Int) -> Bool {
         guard initialContinueWatchingIntent?.isCurrent() != false else { return false }
+        if let offer = initialTraktNextEpisodeOffer {
+            guard !Task.isCancelled, offer.isCurrent(), initialTraktSessionID == offer.sessionID,
+                  initialContinueWatchingIntent == offer.intent, let meta,
+                  meta.libraryId == offer.target.metaID, meta.type == offer.target.type,
+                  meta.videoId == offer.target.videoID, videoID == offer.target.videoID,
+                  meta.season == offer.target.season, meta.episode == offer.target.episode,
+                  let matched = offer.matchingVideo(details: core.metaDetails),
+                  matched.id == meta.videoId else { return false }
+        }
         if let episodeTargetIsCurrent {
             return episodeTargetIsCurrent(videoID, generation)
         }
@@ -4136,6 +4202,9 @@ struct CoreStreamList: View {
         fromStart: Bool,
         resumeSuggestion: AccountBoundResumeSuggestion<TraktSessionID>? = nil
     ) -> AccountBoundResumeProposal<TraktSessionID> {
+        if initialTraktNextEpisodeOffer != nil {
+            return AccountBoundResumeProposal(seconds: nil, expectedSessionID: nil, consumesInitial: false)
+        }
         if fromStart {
             return AccountBoundResumeProposal(
                 seconds: nil,
@@ -4178,7 +4247,7 @@ struct CoreStreamList: View {
         // source, resume THAT source directly - reresolve a fresh link for the same file - instead of
         // re-running source selection across every add-on (the "Tried N sources / this source didn't load"
         // failure). Only when the stored source is genuinely gone do we drop to the auto-pick race below.
-        if let m = meta,
+        if initialTraktNextEpisodeOffer == nil, let m = meta,
            let entry = LastStreamStore.entry(for: m.libraryId, profileID: ProfileStore.shared.activeID),
            entry.debridService != nil, let hash = entry.infoHash, !hash.isEmpty,
            // Movie: always this title. Series: only when the stored episode is the one being played.
@@ -4434,6 +4503,8 @@ struct CoreStreamList: View {
            ) {
             ForEach(ExternalPlayers.detected()) { player in
                 Button("Play in \(player.name)") {
+                    if initialTraktNextEpisodeOffer != nil,
+                       !targetIsCurrent(videoID: episodeStreamId, generation: episodeTargetGeneration) { return }
                     ExternalPlayers.open(url, in: player, metadata: meta, durationSeconds: traktDurationSeconds)
                 }
             }

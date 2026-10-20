@@ -27,7 +27,9 @@ enum XperiencePersistenceFailure: Error, Equatable, LocalizedError {
 final class XperienceExportObservationFence: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private var generation = UUID()
-    func observe() { lock.withLock { generation = UUID() } }
+    @discardableResult func observe() -> UUID {
+        lock.withLock { generation = UUID(); return generation }
+    }
     func capture() -> UUID { lock.withLock { generation } }
     func withCurrent(_ expected: UUID, _ operation: () throws -> Void) throws {
         try lock.withLock {

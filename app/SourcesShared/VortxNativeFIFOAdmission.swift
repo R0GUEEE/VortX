@@ -30,7 +30,23 @@ final class VortxNativeFIFOAdmission: @unchecked Sendable {
         }
         /// Coordinator's queue seam, without recursively taking its original source locks.
         var queueAuthority: any VortxMutationAuthority { QueueAuthority(read: self) }
+        /// Same retained source/member, but a read or merely queued capability cannot commit.
+        var runningAuthority: any VortxMutationAuthority { RunningAuthority(read: self) }
         func cancel() { owner.lock.withLock { cancelled = true } }
+    }
+    private struct RunningAuthority: VortxMutationAuthority {
+        let read: ReadCapability
+        func withActive(_ operation: () throws -> Void) throws {
+            try read.source.withActive {
+                try read.owner.withCapability(read) {
+                    guard case .admitted(let id) = read.phase,
+                          read.owner.running == id, read.owner.pending.first == id else {
+                        throw VortxNativeError.superseded
+                    }
+                    try operation()
+                }
+            }
+        }
     }
     private struct QueueAuthority: VortxMutationAuthority {
         let read: ReadCapability
@@ -48,8 +64,25 @@ final class VortxNativeFIFOAdmission: @unchecked Sendable {
             self.owner = owner; self.read = read
         }
         func begin() throws { try owner.begin(self) }
+        /// Queue-only original running member; the caller separately encloses its REAL
+        /// source authority. Never recursively reacquire a captured nonrecursive source.
+        var runningAuthority: any VortxMutationAuthority { MemberAuthority(member: self) }
         /// Called by the task's defer, after its predecessor and all ACK publication/completion.
         func finish() { owner.finish(self) }
+    }
+
+    private struct MemberAuthority: VortxMutationAuthority {
+        let member: Member
+        func withActive(_ operation: () throws -> Void) throws {
+            try member.owner.lock.withLock {
+                try member.owner.requireAvailable()
+                guard member.began, !member.finished,
+                      member.owner.running == member.id, member.owner.pending.first == member.id else {
+                    throw VortxNativeError.superseded
+                }
+                try operation()
+            }
+        }
     }
 
     /// Source lock precedes Facade lock. validate is the original acknowledged context check,

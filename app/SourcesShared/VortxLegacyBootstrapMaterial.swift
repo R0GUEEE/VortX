@@ -2045,7 +2045,8 @@ enum VortxLegacyBootstrapMaterial {
     private static func terms(_ raw: String?) -> [String] {
         (raw ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
     }
-    private static func removalMatches(_ key: String, meta: String, type: String) -> Bool {
+    // Shared with the denial-only cold overlay reader; never grants title equivalence.
+    static func removalMatches(_ key: String, meta: String, type: String) -> Bool {
         let prefix = type + "\u{1f}"
         guard key.hasPrefix(prefix) else { return false }
         let provider = String(key.dropFirst(prefix.count))

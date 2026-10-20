@@ -730,9 +730,41 @@ final class CoreBridge: ObservableObject {
                         && (try? Self.readNativeCredential(selectorKey)) == selection
                         && (try? Self.readNativeCredential(selectedSlot)) == token
                 })
-                try await facade.importOwnerAddons(imported, expectedProfileID: selectedProfileID, expectedAccountGeneration: epoch, sourceAuthority: importAuthority)
+                let ownAddonACK = try await facade.importOwnerAddons(imported, expectedProfileID: selectedProfileID,
+                    expectedAccountGeneration: epoch, sourceAuthority: importAuthority)
                 guard nativePlaybackBinding(.native(target.binding))?.0 === facade else { throw VortxNativeError.superseded }
-            } catch { throw VortxNativeOwnerAddonImport.Incomplete() }
+                if VortxNativeSession.ownerHistoryRoutingEnabled {
+                    do {
+                        // A deliberate post-OWN-ACK stage. The old read/fetch lease was
+                        // retired by secure selection and the accepted add-on mutation.
+                        // Receipt + exact retained login selection/token authorize only
+                        // this new capture; foreign/rejected transitions cannot get one.
+                        // Retain the credential generation from BEFORE our add-on ACK.
+                        // A foreign credential A->B->A cannot be blessed by this stage.
+                        let postOwnACK = VortxNativeOwnAccountProducer.Authority(generations: [importGeneration], validate: {
+                            CredentialScopeRegistry.shared.isCurrent(capture) && facade.isAvailable
+                                && facade.accountGeneration == epoch
+                                && facade.profileSnapshot()?.state["activeProfileId"] == .string(selectedProfileID)
+                                && (try? Self.readNativeCredential(selectorKey)) == selection
+                                && (try? Self.readNativeCredential(selectedSlot)) == token
+                        })
+                        let acknowledged = try await facade.captureOwnerHistoryLoginRead(receipt: ownAddonACK,
+                            verifiedUID: uid, sourceAuthority: postOwnACK)
+                        let account = try await VortXSyncManager.shared.prepareOwnerHistoryAccountExport(
+                            capture: capture, acknowledged: acknowledged)
+                        let prepared = try await OwnerHistoryLoginPreparation.prepare(acknowledged: acknowledged,
+                            account: account, authKey: token)
+                        guard try await facade.importOwnerHistory(prepared) else {
+                            throw OwnerHistoryLoginPreparation.Incomplete(reason: .pendingMetadata)
+                        }
+                        guard nativePlaybackBinding(.native(target.binding))?.0 === facade else {
+                            throw VortxNativeError.superseded
+                        }
+                    } catch let incomplete as OwnerHistoryLoginPreparation.Incomplete { throw incomplete }
+                    catch { throw OwnerHistoryLoginPreparation.Incomplete(reason: .importUnavailable) }
+                }
+            } catch let incomplete as OwnerHistoryLoginPreparation.Incomplete { throw incomplete }
+            catch { throw VortxNativeOwnerAddonImport.Incomplete() }
         }
         try refreshNativeProfiles(reloadCredentials: false)
     }
@@ -796,31 +828,68 @@ final class CoreBridge: ObservableObject {
     /// deliberately no empty-account fallback and no user-facing engine selector.
     @MainActor
     func installNativeSession(_ session: VortxNativeSession, registry: [VortxResourceAddon],
-                              capture: CredentialScopeRegistry.Capture, hostProfiles: [UserProfile] = []) async throws {
+                              capture: CredentialScopeRegistry.Capture, hostProfiles: [UserProfile] = [],
+                              initialProfileID: UUID? = nil,
+                              initialProfileSource: (any VortxMutationAuthority)? = nil) async throws {
         let installGeneration = UUID()
         nativeFacadeLock.withLock { nativeInstallGeneration = installGeneration }
         NotificationCenter.default.post(name: Self.xperienceContextChangedNote, object: nil)
         guard CredentialScopeRegistry.shared.isCurrent(capture), session.scope.account == capture.namespace else {
             session.revoke(); throw VortxNativeError.invalidSnapshot
         }
-        let facade = try await VortxNativeCoreFacade.create(session: session, registry: registry, mutationAccepted: {
+        let facade = try await VortxNativeCoreFacade.create(session: session, registry: registry, mutationAccepted: { [weak self] in
             Task { @MainActor in
-                guard CredentialScopeRegistry.shared.isCurrent(capture) else { return }
+                guard let self, CredentialScopeRegistry.shared.isCurrent(capture),
+                      self.nativeFacadeLock.withLock({
+                          self.nativeInstallGeneration == installGeneration && self.nativeCredentialCapture == capture
+                            && self.nativeFacadeStorage?.ownsSession(session) == true
+                      }) else { return }
                 VortXSyncManager.shared.nativeMutationDidCommit(credentialCapture: capture)
             }
-        }, progressAccepted: {
+        }, progressAccepted: { [weak self] in
             Task { @MainActor in
-                guard CredentialScopeRegistry.shared.isCurrent(capture) else { return }
+                guard let self, CredentialScopeRegistry.shared.isCurrent(capture),
+                      self.nativeFacadeLock.withLock({
+                          self.nativeInstallGeneration == installGeneration && self.nativeCredentialCapture == capture
+                            && self.nativeFacadeStorage?.ownsSession(session) == true
+                      }) else { return }
                 VortXSyncManager.shared.nativeMutationDidCommit(credentialCapture: capture, progressOnly: true)
             }
         }) { [weak self] fields in
-            guard CredentialScopeRegistry.shared.isCurrent(capture),
+            guard let self, CredentialScopeRegistry.shared.isCurrent(capture),
+                  self.nativeFacadeLock.withLock({
+                      self.nativeInstallGeneration == installGeneration && self.nativeCredentialCapture == capture
+                        && self.nativeFacadeStorage?.ownsSession(session) == true
+                  }),
                   let data = try? JSONSerialization.data(withJSONObject: ["name": "NewState", "args": fields]) else { return }
-            self?.handleEvent(data)
+            self.handleEvent(data)
             if !Set(fields).isDisjoint(with: ["ctx", "native_state", "native_host_preferences"]) {
                 NotificationCenter.default.post(name: Self.xperienceContextChangedNote, object: nil)
             }
         }
+        do {
+            if let requested = initialProfileID {
+                guard let saved = facade.watchlistBinding else { throw VortxNativeError.unavailable }
+                if saved.profileID != requested.uuidString {
+                    guard let initialProfileSource else { throw VortxNativeError.unavailable }
+                    try initialProfileSource.withActive {}
+                    guard CredentialScopeRegistry.shared.isCurrent(capture),
+                          nativeFacadeLock.withLock({ nativeInstallGeneration == installGeneration }) else {
+                        throw VortxNativeError.superseded
+                    }
+                    let action: VortxJSON = .object(["type": .string("switch_profile"), "id": .string(requested.uuidString)])
+                    // Only the real FIFO checkpoint/ACK changes selection. Its prepublication
+                    // callbacks cannot update the visible Bridge (guards above).
+                    try await facade.mutateProfiles([action], hostEdits: [], expectedProfileID: saved.profileID,
+                        expectedAccountGeneration: saved.accountGeneration, sourceAuthority: initialProfileSource)
+                    try initialProfileSource.withActive {}
+                    guard facade.watchlistBinding?.profileID == requested.uuidString,
+                          facade.registryBinding?.profileID == requested.uuidString else {
+                        throw VortxNativeError.superseded
+                    }
+                }
+            }
+        } catch { facade.close(); throw error }
         let result = nativeFacadeLock.withLock { () -> (Bool, VortxNativeCoreFacade?) in
             guard CredentialScopeRegistry.shared.isCurrent(capture), nativeInstallGeneration == installGeneration else { return (false, nil) }
             let old = nativeFacadeStorage; nativeFacadeStorage = facade; nativeCredentialCapture = capture; return (true, old)
@@ -6558,3 +6627,140 @@ extension CoreBridge {
     }
 }
 #endif
+
+// Same-file CoreBridge extension. Reuses the existing account/install/credential
+// commit authority and actual Facade FIFO; it does not introduce a second queue.
+#if VORTX_NATIVE_DATA_ENGINE
+extension CoreBridge {
+    struct NativeOwnerHistoryRead {
+        fileprivate let owner: NativeWatchlistTarget
+        fileprivate let registry: VortxNativeCoreFacade.RegistryBinding
+        fileprivate let lifetime: XperienceImportLifetime
+        let acknowledged: VortxNativeSession.OwnerHistoryCheckpointRead
+    }
+
+    @MainActor var hasOwnerHistorySession: Bool {
+        guard let target = captureNativeWatchlistTarget() else { return false }
+        return target.facade.hasOwnerHistorySession
+    }
+
+    @MainActor func captureNativeOwnerHistoryRead(capture: CredentialScopeRegistry.Capture,
+        allowLegacyUpgrade: Bool = false) async throws
+        -> NativeOwnerHistoryRead {
+        guard let target = captureNativeWatchlistTarget(), target.owner.credential == capture,
+              (target.facade.hasOwnerHistorySession || allowLegacyUpgrade), let registry = target.facade.registryBinding else {
+            throw VortxNativeError.closed
+        }
+        let lifetime = XperienceImportLifetime()
+        let source = NativeXperienceCommitAuthority(core: self, target: target, lifetime: lifetime)
+        let read = try await target.facade.captureOwnerHistoryCheckpointRead(expected: target.binding,
+            registry: registry, sourceAuthority: source)
+        do {
+            try read.originalRead.withActive {}
+            guard nativeWatchlistTargetIsCurrent(target), target.facade.registryBinding == registry else {
+                throw VortxNativeError.superseded
+            }
+            return .init(owner: target, registry: registry, lifetime: lifetime, acknowledged: read)
+        } catch { read.originalRead.cancel(); lifetime.revoke(); throw error }
+    }
+
+    @MainActor func cancelNativeOwnerHistoryRead(_ read: NativeOwnerHistoryRead) {
+        read.acknowledged.originalRead.cancel(); read.lifetime.revoke()
+    }
+
+    @MainActor func mergeNativeOwnerHistoryPeer(_ prepared: OwnerHistoryPeerPreparation,
+        original: NativeOwnerHistoryRead, capture: CredentialScopeRegistry.Capture,
+        hostEdits: [VortxNativeHostPreferences.Edit] = []) async throws -> PlaybackMutationTarget {
+        guard original.owner.owner.credential == capture,
+              prepared.acknowledged.originalRead === original.acknowledged.originalRead,
+              nativeWatchlistTargetIsCurrent(original.owner),
+              original.owner.facade.registryBinding == original.registry else { throw VortxNativeError.superseded }
+        let accepted = try await original.owner.facade.mergeOwnerHistoryPeer(prepared, hostEdits: hostEdits)
+        // Continuation publication precedes the member's defer/finish. Wait for that
+        // actual task to settle before taking an export read; never race its running slot.
+        await original.owner.facade.settleNativeMutations()
+        // The accepted transaction may itself delete the initiating profile. Do not
+        // require the old profile binding after its own real native publication; also
+        // never substitute another facade/installation to make a failed merge succeed.
+        guard CredentialScopeRegistry.shared.isCurrent(capture), !enginePublicationBlocked,
+              nativeFacadeLock.withLock({ nativeFacadeStorage === original.owner.facade
+                && nativeCredentialCapture == capture
+                && nativeInstallGeneration == original.owner.owner.sessionGeneration }),
+              original.owner.facade.isCurrentOwnerHistoryPeerCommit(accepted) else {
+            throw VortxNativeError.superseded
+        }
+        try refreshNativeProfiles()
+        guard original.owner.facade.isCurrentOwnerHistoryPeerCommit(accepted) else { throw VortxNativeError.superseded }
+        return captureNativePlaybackTarget()
+    }
+
+    @MainActor func nativeOwnerHistoryCompleteAccount(_ original: NativeOwnerHistoryRead,
+        writeV2: Bool) async throws -> Data {
+        guard nativeWatchlistTargetIsCurrent(original.owner),
+              original.owner.facade.registryBinding == original.registry else { throw VortxNativeError.superseded }
+        let bytes = try await original.owner.facade.ownerHistoryCompleteAccount(
+            read: original.acknowledged.originalRead, writeV2: writeV2)
+        try original.acknowledged.originalRead.withActive {}
+        guard nativeWatchlistTargetIsCurrent(original.owner),
+              original.owner.facade.registryBinding == original.registry else { throw VortxNativeError.superseded }
+        return bytes
+    }
+}
+#endif
+
+// Append in CoreBridge.swift; its existing private installation/credential fields stay private.
+extension CoreBridge {
+    @MainActor
+    func captureNativeExternalCWRead(target: PlaybackMutationTarget) -> TraktNextEpisodeNativeLease? {
+#if VORTX_NATIVE_DATA_ENGINE
+        guard case .native(let requested?) = target, let owner = captureNativeWatchlistTarget(),
+              requested == owner.owner, let registry = owner.facade.registryBinding else { return nil }
+        let authority = ExternalCWSourceAuthority(core: self, owner: owner)
+        guard let read = try? owner.facade.captureExternalCWRead(expected: owner.binding, registry: registry,
+            sourceAuthority: authority) else { return nil }
+        return .init(metadata: [], isCurrent: { read.isCurrent() }, query: { targets in
+                let verdicts = try await read.query(targets.map {
+                    .init(key: $0.key, type: $0.type, metaId: $0.metaID, videoId: $0.videoID,
+                          titleSpellings: $0.titleSpellings, season: $0.season, episode: $0.episode)
+                })
+                return verdicts.map { verdict in
+                    let disposition: TraktNextEpisodeVerdict.Disposition
+                    switch verdict.disposition {
+                    case .eligible: disposition = .eligible
+                    case .suppressed: disposition = .suppressed
+                    case .unresolved: disposition = .unresolved
+                    }
+                    return .init(key: verdict.key, disposition: disposition)
+                }
+            }, prepareMetadata: { id in
+                let metadata = try await read.prepareMetadata(id: id)
+                return .init(id: metadata.id, type: metadata.type,
+                    videos: metadata.videos.map { .init(id: $0.id, season: $0.season, episode: $0.episode) })
+            })
+#else
+        return nil
+#endif
+    }
+#if VORTX_NATIVE_DATA_ENGINE
+    private final class ExternalCWSourceAuthority: VortxMutationAuthority, @unchecked Sendable {
+        private weak var core: CoreBridge?
+        private let owner: NativeWatchlistTarget
+        init(core: CoreBridge, owner: NativeWatchlistTarget) { self.core = core; self.owner = owner }
+        func withActive(_ operation: () throws -> Void) throws {
+            guard let token = CredentialPublicationOutbox.beginMutation() else { throw VortxNativeError.superseded }
+            defer { CredentialPublicationOutbox.endMutation(token) }
+            guard let core, CredentialScopeRegistry.shared.isCurrent(owner.owner.credential) else {
+                throw VortxNativeError.superseded
+            }
+            try core.nativeFacadeLock.withLock {
+                guard core.nativeFacadeStorage === owner.facade,
+                      core.nativeCredentialCapture == owner.owner.credential,
+                      core.nativeInstallGeneration == owner.owner.sessionGeneration,
+                      core.nativePublishedAccountGeneration == owner.binding.accountGeneration,
+                      owner.facade.watchlistBinding == owner.binding else { throw VortxNativeError.superseded }
+                try operation()
+            }
+        }
+    }
+#endif
+}

@@ -43,6 +43,10 @@ private final class SessionABI: VortxRuntimeABI, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard var query = try? JSONSerialization.jsonObject(with: Data(request.utf8)) as? [String: Any] else { return nil }
         if query["kind"] as? String == "installed_addons" { query["addons"] = [] }
+        if query["kind"] as? String == "external_cw_eligibility" {
+            let candidates = query.removeValue(forKey: "candidates") as! [[String: Any]]
+            query["verdicts"] = candidates.map { ["key": $0["key"]!, "disposition": "eligible", "reason": "clear"] }
+        }
         if query["kind"] as? String == "profile_playback" {
             if playbackUnavailable { return "{\"kind\":\"error\"}" }
             query["continueWatching"] = [["metaId": "unsaved-series", "videoId": "opaque-video", "name": "In progress", "type": "series", "offsetMs": 120001, "durationMs": 1200001, "updatedAt": 1700000000, "watched": false, "timesWatched": 0]]
@@ -1340,6 +1344,9 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
     }
 
     static func main() async throws {
+        if CommandLine.arguments.contains("--external-cw-host") {
+            try await checkExternalCWQueryReceipts(); return
+        }
         try await migrationDraftProtocolTests()
         try await migrationProgressLeaseTests()
         try hydrationPreservationTests()
@@ -1774,5 +1781,46 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         catch VortxNativeError.invalidResponse {}
         await unavailableSession.close()
         print("Native session: acknowledged transactions, sealed cold state/context, legacy preservation and independent screen/logout fences passed")
+    }
+}
+
+extension VortxNativeSessionTests {
+    /// Focused actual Session method test; SessionABI supplies response bytes only.
+    static func checkExternalCWQueryReceipts() async throws {
+        let owner = "92000000-0000-0000-0000-000000000029"
+        let scope = VortxAccountScope(account: "external-cw.session.fixture", ownerProfileID: owner)
+        let directory = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("external-cw-session")
+        let a = try VortxNativeBootstrapArchive.encode(document: Data("{\"future\":\"A\"}".utf8))
+        let b = try VortxNativeBootstrapArchive.encode(document: Data("{\"future\":\"B\"}".utf8))
+        let key = SymmetricKey(data: Data(repeating: 9, count: 32))
+        let store = try VortxEncryptedCheckpointStore(directory: directory, key: key, bootstrap: a, bootstrapScope: scope)
+        let probe = try VortxEncryptedCheckpointStore(directory: directory, key: key)
+        let session = try VortxNativeSession(scope: scope, ownerName: "Fixture", abi: SessionABI(),
+            store: store, transport: SessionTransport(), allowNewAccount: true)
+        let fifo = VortxNativeFIFOAdmission(lock: NSRecursiveLock()), source = FIFOTestSource()
+        let candidate = VortxNativeExternalCW.Candidate(key: "candidate", type: "series", metaId: "show",
+            videoId: "opaque", titleSpellings: ["show"], season: 1, episode: 2)
+        let original = try fifo.capture(source: source) {}
+        let first = try await session.externalCWEligibility([candidate], profileID: owner, original: original)
+        precondition(first.verdicts.first?.disposition == .eligible)
+        try first.authority.withActive {}
+        try original.withActive {} // Query did not admit or finish the reading capability.
+        try probe.retainMigrationDraft(b, scope: scope, expected: nil, authority: source)
+        do { try first.authority.withActive {}; preconditionFailure("Session offer survived draft write") } catch {}
+        let secondRead = try fifo.capture(source: source) {}
+        let second = try await session.externalCWEligibility([candidate], profileID: owner, original: secondRead)
+        // Direct Session mutation (no fixture FIFO admission) must still retire this result.
+        _ = try await session.dispatch(["{\"type\":\"fixture_mutation\"}"], now: 1)
+        do { try second.authority.withActive {}; preconditionFailure("Session generation failed to retire offer") } catch {}
+        let thirdRead = try fifo.capture(source: source) {}
+        let third = try await session.externalCWEligibility([candidate], profileID: owner, original: thirdRead)
+        let later = try fifo.admit()
+        do { try third.authority.withActive {}; preconditionFailure("new FIFO intent failed to retire read") } catch {}
+        try later.begin(); later.finish()
+        let fourthRead = try fifo.capture(source: source) {}
+        let fourth = try await session.externalCWEligibility([candidate], profileID: owner, original: fourthRead)
+        await session.close()
+        do { try fourth.authority.withActive {}; preconditionFailure("closed Session revived offer") } catch {}
+        print("External CW actual Session: reading phase, draft, direct mutation, FIFO and close retirement passed")
     }
 }

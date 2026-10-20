@@ -526,6 +526,19 @@ private final class NativeFieldNotifications: @unchecked Sendable {
         let activeSlotSource = try JSONSerialization.jsonObject(with: activeSlotBaselines[0].sourceBaseline) as! [String: Any]
         check(activeSlotBaselines[0].profileID == child.id
               && ((activeSlotSource["source"] as? [String: Any])?["profileOverlaySha256"] as? String) == freshWitness)
+        // Closed slot interpretation only; this synthetic projection is NOT a valid full
+        // schema6 document, an owner-history receipt, or permission to mount a new protocol.
+        let schema6Slots: VortxJSON = .object(["schemaVersion": .integer(6),
+            "accountSlots": rebindState["nativeSync"]!["accountSlots"]!])
+        let sameSlots = try VortxNativeProfiles.activeOwnAccountSlotBaselines(nativeSync: schema6Slots)
+        check(sameSlots.count == activeSlotBaselines.count
+            && sameSlots[0].sourceBaseline == activeSlotBaselines[0].sourceBaseline)
+        check(try VortxNativeProfiles.activeOwnAccountSlotBaselines(nativeSync:
+            .object(["schemaVersion": .integer(6)])).isEmpty)
+        do {
+            _ = try VortxNativeProfiles.activeOwnAccountSlotBaselines(nativeSync: .object(["schemaVersion": .integer(7)]))
+            fatalError("Unsupported slot schema was interpreted")
+        } catch { check(true) }
         let activeSlotDisposition = try VortxLegacyBootstrapMaterial.classifyDeferredOwnAccountOverlays(document: freshRootDocument,
             roster: [owner, ownAccount], ownerProfileID: owner.id, retainedOwnAccountSlotBaselines: activeSlotBaselines)
         check(activeSlotDisposition.count == 1 && activeSlotDisposition[0].status == .matchedWitness)

@@ -109,6 +109,23 @@ private enum DiagnosticsLog { static func log(_ category: String, _ message: Str
         try left.merge(left.document)
         let identical = try exactLocal(left)
         expect(identical == leftBefore, "byte-identical same-stamp credential is idempotent")
+        let aliasHarness = try ProviderHarness(left)
+        let storedBefore = aliasHarness.stored
+        for nested in [false, true] {
+            var keys: [String: Any] = ["tmdb": nested ? precomposed : decomposed]
+            if nested { keys["metadata"] = ["tmdb": decomposed] }
+            var refused = false
+            do { _ = try aliasHarness.apply(["nativeProviderCredentials": try wire(left), "apiKeys": keys]) }
+            catch { refused = true }
+            expect(refused && aliasHarness.stored == storedBefore && !aliasHarness.nativeDurablePushPending && aliasHarness.requests == 0,
+                   nested ? "nested credential alias requires exact bytes without mutation or repair"
+                          : "top-level credential alias requires exact bytes without mutation or repair")
+        }
+        let exactAliases = try aliasHarness.apply(["nativeProviderCredentials": try wire(left),
+            "apiKeys": ["tmdb": precomposed, "metadata": ["tmdb": precomposed], "future": ["keep": true]]])
+        let exactAlias = exactAliases["tmdb"] as! String
+        expect(exactAlias.utf8.elementsEqual(precomposed.utf8) && exactAliases["future"] != nil && aliasHarness.requests == 0,
+               "matching opaque credential aliases retain unknown siblings and do not echo")
         var rejected = false
         do { try left.merge(right.document) } catch { rejected = true }
         let leftAfter = try exactLocal(left)

@@ -43,7 +43,8 @@ struct XperienceExportBudget: VortxProspectiveCheckpointValidator, Sendable {
     // Official backup-storage.js MAX_DOCUMENT_BYTES; the official deployment's chunk-write
     // capability is a release authority prerequisite. This is NOT a generic custom-server claim.
     static let officialMaximumSealedBytes = 7 * 1024 * 1024
-    private let base: VortxJSON
+    private let base: VortxJSON?
+    private let rawBase: Data?
     private let maximumSealedBytes: Int
     private let writeV2: Bool
 
@@ -52,12 +53,23 @@ struct XperienceExportBudget: VortxProspectiveCheckpointValidator, Sendable {
             throw XperiencePersistenceFailure.exportBaseUnavailable
         }
         base = completeAccountDocument
+        rawBase = nil
         self.maximumSealedBytes = maximumSealedBytes
         self.writeV2 = writeV2
     }
 
+    /// The typed owner-history route retains the authenticated account as exact JSON
+    /// slices. This sizing witness is additional to Session's full raw candidate budget;
+    /// it cannot turn disposable presentation values back into a source checkpoint.
+    init(completeAccountPlaintext: Data, maximumSealedBytes: Int, writeV2: Bool) throws {
+        guard maximumSealedBytes > 0 else { throw XperiencePersistenceFailure.exportBaseUnavailable }
+        _ = try OwnerHistoryExactJSON.Object(completeAccountPlaintext)
+        base = nil; rawBase = completeAccountPlaintext
+        self.maximumSealedBytes = maximumSealedBytes; self.writeV2 = writeV2
+    }
+
     func projected(native: VortxJSON, host: VortxJSON, profileEditResults: VortxJSON) throws -> VortxJSON {
-        guard case .object(var complete) = base else { throw XperiencePersistenceFailure.exportBaseUnavailable }
+        guard case .object(var complete)? = base else { throw XperiencePersistenceFailure.exportBaseUnavailable }
         // Preserve ALL other top-level siblings, including provider credentials and legacy carriers.
         complete["nativeSync"] = native
         complete["nativeHostPreferences"] = host
@@ -65,9 +77,28 @@ struct XperienceExportBudget: VortxProspectiveCheckpointValidator, Sendable {
         return .object(complete)
     }
     func validate(native: VortxJSON, host: VortxJSON, profileEditResults: VortxJSON) throws {
-        let full = try projected(native: native, host: host, profileEditResults: profileEditResults)
-        let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(full))
-        let plaintext = try JSONSerialization.data(withJSONObject: object)
+        let plaintext: Data
+        if let rawBase {
+            // Only the owned disposable projection supplied by typed Session is overlaid.
+            // Its excluded history and every unknown native/account slice stay untouched.
+            var complete = try OwnerHistoryExactJSON.Object(rawBase)
+            var nativeBase = try OwnerHistoryExactJSON.Object(complete.required("nativeSync"))
+            let projection = try OwnerHistoryExactJSON.Object(JSONEncoder().encode(native))
+            let owned: Set<String> = ["schemaVersion", "scope", "ownerProfileId", "profiles", "addons",
+                "libraries", "watches", "legacyImport", "accountSlots", "websiteAddonReceipts", "legacyProfileEditReceipts"]
+            guard Set(projection.fields.keys).isSubset(of: owned) else {
+                throw XperiencePersistenceFailure.exportBaseUnavailable
+            }
+            for (key, value) in projection.fields { nativeBase.set(key, value) }
+            complete.set("nativeSync", try nativeBase.encoded())
+            complete.set("nativeHostPreferences", try JSONEncoder().encode(host))
+            complete.set("profileEditResults", try JSONEncoder().encode(profileEditResults))
+            plaintext = try complete.encoded()
+        } else {
+            let full = try projected(native: native, host: host, profileEditResults: profileEditResults)
+            let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(full))
+            plaintext = try JSONSerialization.data(withJSONObject: object)
+        }
         guard try Self.sealedByteCount(plaintextCount: plaintext.count, writeV2: writeV2) <= maximumSealedBytes else {
             throw XperiencePersistenceFailure.exportTooLarge
         }

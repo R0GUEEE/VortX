@@ -37,6 +37,7 @@ struct HomeView: View {
     @AppStorage(ContinueWatchingPreferences.sourceKey) private var continueWatchingSource = "local"
     @AppStorage(ContinueWatchingPreferences.windowKey) private var continueWatchingWindow = "20"
     @State private var traktContinueWatchingRevision = 0
+    @State private var traktNextEpisodeTarget: TraktNextEpisodeHomeRoute?
     @AppStorage("stremiox.autoplayTrailers") private var autoplayTrailers = true
     @ObservedObject private var catalogPrefs = CatalogPreferences.shared   // #105: rails vs poster-wall Home layout
     @ReducedMotion private var reduceMotion
@@ -111,6 +112,7 @@ struct HomeView: View {
     /// as its own expression.
     private var homeShell: some View {
         let renderedContinueWatching = continueWatchingSnapshot
+        let renderedNextEpisodes = renderedContinueWatching.nextEpisodes.filter(TraktNextEpisodeHomeRow.permitsOpening)
         return NavigationStack {
             ZStack {
                 // The living backdrop: whichever poster is focused fills the screen with its
@@ -176,6 +178,10 @@ struct HomeView: View {
                             Text(status).font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
                                 .padding(.horizontal, Theme.Space.screenEdge)
                         }
+                        TraktNextEpisodeHomeRow(offers: renderedNextEpisodes) { offer in
+                            guard TraktNextEpisodeHomeRow.permitsOpening(offer) else { return }
+                            traktNextEpisodeTarget = TraktNextEpisodeHomeRoute(offer: offer)
+                        }
                         // Every other Home section renders in the user's arranged order, minus the hidden ones
                         // (HomeRailPreferences). Default order + nothing hidden == today's Home exactly, so this
                         // is a no-op until the user customizes via the "Customize Home" manage screen.
@@ -184,7 +190,7 @@ struct HomeView: View {
                                 homeSection(section)
                             }
                         }
-                        if continueWatching.isEmpty && core.boardRows.isEmpty {
+                        if renderedContinueWatching.selection.items.isEmpty && renderedNextEpisodes.isEmpty && core.boardRows.isEmpty {
                             if account.isSignedIn || vortxSync.isSignedIn { LoadingRail() } else { CoreEmptyState.signedOut }
                         }
                     }
@@ -194,6 +200,17 @@ struct HomeView: View {
                 .heroBottomStrip()
                 // Re-selecting the active Home tab scrolls the rail strip back to the top.
                 .scrollToTopOnBump(TabScrollKeys.home)
+                .task(id: isActive && scenePhase == .active && continueWatchingSource == "trakt") {
+                    guard isActive, scenePhase == .active, continueWatchingSource == "trakt" else { return }
+                    HomeContinueWatchingSelection.refreshVisibleTraktNextEpisodes(core: core, profiles: profiles)
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(nanoseconds: 300_000_000_000) }
+                        catch { return }
+                        guard !Task.isCancelled, isActive, scenePhase == .active,
+                              continueWatchingSource == "trakt" else { return }
+                        HomeContinueWatchingSelection.refreshVisibleTraktNextEpisodes(core: core, profiles: profiles)
+                    }
+                }
             }
             .overlay(alignment: .topLeading) {
                 header
@@ -204,6 +221,9 @@ struct HomeView: View {
             .background(Theme.Palette.canvas.ignoresSafeArea())
             .navigationDestination(for: XperienceHomeRoute.self) { _ in
                 XperienceCollectionsBrowserView()
+            }
+            .navigationDestination(item: $traktNextEpisodeTarget) { target in
+                TraktNextEpisodeHomeDestination(offer: target.offer)
             }
         }
     }
@@ -261,6 +281,9 @@ struct HomeView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: SIMKLContinueWatchingShadow.changedNote)) { _ in
             traktContinueWatchingRevision &+= 1; seed()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: TraktHomeNextEpisodeProducer.changedNote)) { _ in
+            traktContinueWatchingRevision &+= 1
         }
         .onReceive(NotificationCenter.default.publisher(for: TraktPlaybackShadow.changedNote)) { _ in
             traktContinueWatchingRevision &+= 1

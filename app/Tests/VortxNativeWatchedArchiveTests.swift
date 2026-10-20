@@ -1,8 +1,9 @@
 import Foundation
 import CryptoKit
 
-/// Real producer/archive implementations with synthetic, source-bound metadata. No account,
-/// checkpoint directory, keychain, app launch or network access participates in these checks.
+/// Real producer/archive implementations with synthetic, source-bound metadata. The focused
+/// external-CW mode also uses a retained disposable checkpoint directory; never real accounts,
+/// system keychain, app launch or network access.
 @main enum VortxNativeWatchedArchiveTests {
     typealias Object = [String: Any]
     actor FetchCounter {
@@ -62,6 +63,9 @@ import CryptoKit
         return result
     }
     static func main() async throws {
+        if CommandLine.arguments.contains("--external-cw-host") {
+            try await VortxNativeExternalCWHostTests.run(directory: URL(fileURLWithPath: CommandLine.arguments[1])); return
+        }
         let source = try source()
         let complete = try await prepare(source)
         check(complete.rows.count == 24 && complete.archives.count == 24 && complete.unresolved.isEmpty,

@@ -8,6 +8,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { fork } = require('node:child_process');
 const xperienceInputs = require('../test/xperience-harness-inputs.cjs');
+const { extractDeclaration } = xperienceInputs;
 const root = path.resolve(__dirname, '..');
 let interrupted = 0;
 let active;
@@ -124,28 +125,44 @@ function extractDiscovery() {
     return `import Foundation\n${matches[0][0]}\n`;
 }
 
-function extractDeclaration(source, signature) {
-    const begin = source.indexOf(signature);
-    if (begin < 0 || source.indexOf(signature, begin + signature.length) >= 0) throw new Error('Missing or ambiguous declaration: ' + signature);
-    let depth = 0, opened = false, state = 'code', escaped = false;
-    for (let i = begin; i < source.length; i++) {
-        const c = source[i], next = source[i + 1];
-        if (state === 'line') { if (c === '\n') state = 'code'; continue; }
-        if (state === 'block') { if (c === '*' && next === '/') { state = 'code'; i++; } continue; }
-        if (state === 'string') {
-            if (escaped) escaped = false;
-            else if (c === '\\') escaped = true;
-            else if (c === '"') state = 'code';
-            continue;
-        }
-        if (c === '/' && next === '/') { state = 'line'; i++; continue; }
-        if (c === '/' && next === '*') { state = 'block'; i++; continue; }
-        if (c === '"') { state = 'string'; continue; }
-        if (c === '{') { depth++; opened = true; }
-        if (c === '}' && opened && --depth === 0) return source.slice(begin, i + 1);
+function extractTraktNextInputs() {
+    // Same exact session-prefix and formatter-donor policy as the existing watched runner.
+    // No OAuth/Keychain runtime, whole CoreModels graph, formatter rewrite or source stub.
+    const policy = captured.get('app/SourcesShared/TraktScrobbleProgressPolicy.swift').toString('utf8');
+    const marker = '/// FIFO for Trakt';
+    const end = policy.indexOf(marker);
+    if (end < 0 || policy.indexOf(marker, end + marker.length) >= 0) throw new Error('Trakt session boundary changed');
+    const boundary = policy.slice(0, end);
+    if ([...boundary.matchAll(/^struct TraktSessionID:/gm)].length !== 1
+        || [...boundary.matchAll(/^enum TraktAuthBoundary/gm)].length !== 1) throw new Error('Trakt session declarations changed');
+    const actual = extractDeclaration(captured.get('app/SourcesShared/CoreModels.swift').toString('utf8'),
+        'extension ISO8601DateFormatter {') + '\n';
+    const donor = extractDeclaration(captured.get('app/Tests/TraktOAuthBrokerContractTests.swift').toString('utf8'),
+        'extension ISO8601DateFormatter {') + '\n';
+    const formatter = 'import Foundation\n\n' + donor;
+    const recipe = captured.get('scripts/test-trakt-watched-snapshot.sh').toString('utf8');
+    const expected = [
+        ['CoreModelsEPGFormatter.actual.swift', actual, '5002dda6ea34769312bc0d85566f13a28595e9f011c818aa380987277d540a93'],
+        ['TraktEPGFormatter.donor.swift', donor, '6de164e822df8c8feebf9ac67d2d2ceeb6f6fceac414401ed8fb735afbe5d38a'],
+        ['TraktEPGFormatter.swift', formatter, 'ee82aaf6c2f5758e3efa73ad1141ba85eeb57feb3179b95c54a6a7dd706506bb']
+    ];
+    for (const [name, bytes, sha256] of expected) {
+        if (digest(Buffer.from(bytes)) !== sha256 || !recipe.includes(sha256)) throw new Error('Original Trakt formatter policy changed: ' + name);
+        write('generated/' + name, bytes);
     }
-    throw new Error('Unterminated declaration: ' + signature);
+    write('trakt-next-extraction.json', JSON.stringify({
+        sessionOwner: 'app/SourcesShared/TraktScrobbleProgressPolicy.swift',
+        sessionOwnerSHA256: digest(captured.get('app/SourcesShared/TraktScrobbleProgressPolicy.swift')),
+        sessionBoundarySHA256: digest(Buffer.from(boundary)),
+        formatterPolicyOwner: 'scripts/test-trakt-watched-snapshot.sh',
+        formatterPolicySHA256: digest(captured.get('scripts/test-trakt-watched-snapshot.sh')),
+        formatterArtifacts: expected.map(([name, , sha256]) => ({ name, sha256 })),
+        declarationTransformations: [], excludes: ['OAuth/transport/persistence', 'CoreModels shared-formatter cache concurrency', 'Home/SwiftUI/native adapter']
+    }, null, 2) + '\n');
+    return [write('generated/TraktSessionBoundary.swift', boundary),
+        path.join(directory, 'generated/TraktEPGFormatter.swift')];
 }
+
 function extractRestoreAdmission() {
     const manager = captured.get('app/SourcesShared/VortXSyncManager.swift').toString('utf8');
     const observation = xperienceInputs.observationProperty(manager);
@@ -243,17 +260,32 @@ async function run(label, command, timeout, helper, cwd = root) {
 
 async function main() {
     const stage = process.argv[2];
-    if (process.platform !== 'darwin' || process.argv.length !== 3 || !['watched', 'session', 'bootstrap', 'restore', 'publication', 'parse', 'owner-source', 'owner-prepare', 'fifo'].includes(stage)) {
-        throw new Error('Usage on macOS: bash scripts/test-native-migration-phase-a.sh watched|session|bootstrap|restore|publication|parse|owner-source|owner-prepare|fifo');
+    if (process.platform !== 'darwin' || process.argv.length !== 3 || !['watched', 'session', 'bootstrap', 'restore', 'publication', 'parse', 'owner-source', 'owner-prepare', 'owner-json', 'fifo', 'owner-raw', 'owner-cold', 'trakt-next-progress', 'trakt-next-consumer'].includes(stage)) {
+        throw new Error('Usage on macOS: bash scripts/test-native-migration-phase-a.sh watched|session|bootstrap|restore|publication|parse|owner-source|owner-prepare|owner-json|fifo|owner-raw|owner-cold|trakt-next-progress|trakt-next-consumer');
     }
     const ownerSource = stage === 'owner-source' || stage === 'owner-prepare';
     const fifo = stage === 'fifo';
+    const ownerJSON = stage === 'owner-json';
+    const ownerRaw = stage === 'owner-raw', ownerCold = stage === 'owner-cold';
+    const traktNext = stage === 'trakt-next-progress' || stage === 'trakt-next-consumer';
     if (process.env.VORTX_NATIVE_PERSISTENCE_SDK) throw new Error('Unset VORTX_NATIVE_PERSISTENCE_SDK; this fixture never consumes a packaged SDK');
     const scripts = ['scripts/test-native-migration-phase-a.sh', 'scripts/test-native-migration-phase-a.cjs',
         'scripts/native-migration-supervisor.cjs', 'scripts/test-native-watched-archive.sh'];
     scripts.forEach(capture);
     let sources, consumers = [], links = [];
-    if (fifo) {
+    if (traktNext) {
+        capture('test/xperience-harness-inputs.cjs');
+        sources = ['app/SourcesShared/TraktNextEpisodeProgress.swift', 'app/SourcesShared/TraktModels.swift',
+            'app/SourcesShared/VortxNativeBootstrapArchive.swift', 'app/SourcesShared/WatchedFold.swift'];
+        if (stage === 'trakt-next-progress') sources.push('app/Tests/TraktNextEpisodeProgressTests.swift');
+        else sources.push('app/SourcesShared/TraktNextEpisodeConsumer.swift',
+            'app/SourcesShared/TraktWatchedSnapshotReader.swift', 'app/Tests/TraktNextEpisodeConsumerTests.swift');
+        ['app/SourcesShared/TraktScrobbleProgressPolicy.swift', 'app/SourcesShared/CoreModels.swift',
+            'app/Tests/TraktOAuthBrokerContractTests.swift', 'scripts/test-trakt-watched-snapshot.sh'].forEach(capture);
+    } else if (ownerJSON) {
+        sources = ['app/SourcesShared/OwnerHistoryExactJSON.swift',
+            'app/Tests/OwnerHistorySnapshotConservationTests.swift', 'app/Tests/OwnerHistorySnapshotConservationMain.swift'];
+    } else if (fifo) {
         sources = ['app/SourcesShared/VortxNativeRuntime.swift', 'app/SourcesShared/VortxResourceBridge.swift',
             'app/SourcesShared/VortxNativeHostFieldMutation.swift', 'app/SourcesShared/VortxNativeFIFOAdmission.swift',
             'app/Tests/VortxNativeFIFOAdmissionTests.swift', 'app/Tests/VortxNativeFIFOAdmissionMain.swift'];
@@ -269,6 +301,7 @@ async function main() {
     } else if (stage === 'restore') {
         capture('test/xperience-harness-inputs.cjs');
         sources = xperienceInputs.observationInputs(capture(xperienceInputs.observationInputList).toString('utf8'));
+        sources.push('app/SourcesShared/OwnerHistoryExactJSON.swift', 'app/SourcesShared/VortxNativeOwnerHistoryIngress.swift');
         ['app/SourcesShared/VortXSyncManager.swift', 'app/SourcesShared/Keychain.swift',
             'app/SourcesShared/CredentialScope.swift', 'app/Tests/NativeRestoreAdmissionTests.swift'].forEach(capture);
     } else if (stage === 'bootstrap') {
@@ -276,12 +309,15 @@ async function main() {
         capture('app/SourcesShared/SettingsBackup.swift');
     } else {
         const shared = sharedInputs();
+        capture('test/xperience-harness-inputs.cjs');
+        const ownerInputs = xperienceInputs.ownerHistoryInputs(capture(xperienceInputs.ownerHistoryInputList).toString('utf8'));
+        capture('app/SourcesShared/VortXSyncManager.swift');
         links = shared.links;
         sources = ['app/SourcesShared/VortxNativeRuntime.swift', 'app/SourcesShared/VortxResourceBridge.swift',
             'app/SourcesShared/VortxResourceProjection.swift', 'app/SourcesShared/VortxNativeBootstrapArchive.swift',
             'app/SourcesShared/VortxNativeHostPreferences.swift', 'app/SourcesShared/VortxNativeSession.swift',
             'app/SourcesShared/ProfileAddonPreferences.swift', 'app/SourcesShared/VortxProfileOverlayWitness.swift',
-            'app/SourcesShared/VortxNativeProfileEditHost.swift', ...shared.sources];
+            'app/SourcesShared/VortxNativeProfileEditHost.swift', ...shared.sources, ...ownerInputs];
         capture('app/SourcesShared/Profiles.swift');
         capture('app/SourcesShared/ProfileDiscoveryPreferences.swift');
         if (ownerSource) {
@@ -299,9 +335,16 @@ async function main() {
             capture('app/SourcesShared/VortXSyncManager.swift');
         } else {
             sources.push('app/SourcesShared/VortxNativeCoreFacade.swift', 'app/SourcesShared/VortxNativePreviouslyWatched.swift',
-                'app/SourcesShared/VortxNativeProviderCredentials.swift', 'app/Tests/VortxNativeSessionTests.swift');
+                'app/SourcesShared/VortxNativeProviderCredentials.swift');
+            if (ownerRaw) sources.push('app/Tests/OwnerHistoryRawAccountPreparationTests.swift');
+            else if (ownerCold) sources.push('app/Tests/OwnerHistoryColdCoordinatorTests.swift',
+                'app/Tests/OwnerHistoryColdCoordinatorMain.swift');
+            else sources.push('app/Tests/VortxNativeSessionTests.swift');
         }
     }
+    // The explicit owner closure overlaps existing per-stage real inputs. Compile each
+    // exact source once; no old test entry or production input is removed.
+    sources = [...new Set(sources)];
     sources.forEach(capture);
     fs.mkdirSync(path.join(root, 'app/build'), { recursive: true });
     directory = fs.mkdtempSync(path.join(root, `app/build/native-migration-${stage}.`));
@@ -318,8 +361,18 @@ async function main() {
         inputs.push(write('generated/NativeRestoreAdmission.swift', extractRestoreAdmission()));
     } else if (stage === 'bootstrap') {
         inputs.push(write('generated/SettingsBackup.swift', extractSettingsBackupEncoder()));
-    } else if (stage === 'watched' || stage === 'session' || ownerSource) {
+    } else if (traktNext) {
+        inputs.push(...extractTraktNextInputs());
+    } else if (stage === 'watched' || stage === 'session' || ownerSource || ownerRaw || ownerCold) {
         inputs.push(write('generated/UserProfile.swift', extractProfile()), write('generated/Discovery.swift', extractDiscovery()));
+        const carriers = xperienceInputs.ownerHistoryCarriers(captured.get('app/SourcesShared/VortXSyncManager.swift').toString('utf8'));
+        inputs.push(write('generated/OwnerHistoryFixtureCarriers.swift', carriers.source));
+        write('owner-history-carriers.json', JSON.stringify({
+            owner: 'app/SourcesShared/VortXSyncManager.swift',
+            ownerSHA256: digest(captured.get('app/SourcesShared/VortXSyncManager.swift')),
+            declarations: carriers.declarations.map(({ signature, bytes }) => ({ signature, sha256: digest(Buffer.from(bytes)) })),
+            declarationTransformations: [], factoryExtraction: false
+        }, null, 2) + '\n');
     }
     write('compiler-inputs.sha256', inputs.map(file => `${digest(fs.readFileSync(file))}  ${path.relative(directory, file)}\n`).join(''));
     verifySources('source-precompile');
@@ -358,7 +411,7 @@ async function main() {
     }
     const flags = ['-O', '-whole-module-optimization', '-j', '1', '-num-threads', '1', '-swift-version', '6',
         '-parse-as-library', '-strict-concurrency=complete', '-warnings-as-errors', '-module-cache-path', path.join(directory, 'module-cache')];
-    if (ownerSource || fifo || stage === 'session') {
+    if (ownerSource || ownerJSON || fifo || stage === 'session' || ownerRaw || ownerCold || traktNext) {
         // Host-beta OS versions must not invent an unavailable standard-library target.
         // Use the same explicit macOS 14 fixture floor as the existing native test lanes.
         await run('sdk-path', ['/usr/bin/nice', '-n', '15', '/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-path'], 30_000, helper);
@@ -367,7 +420,7 @@ async function main() {
         if (!['arm64', 'x64'].includes(process.arch)) throw new Error('Unsupported fixture host');
         flags.push('-sdk', sdk, '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx14.0`);
     }
-    if (fifo) {
+    if (fifo || ownerJSON || ownerCold) {
         await run('sdk-platform', ['/usr/bin/nice', '-n', '15', '/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-platform-path'], 30_000, helper);
         const platform = fs.readFileSync(path.join(directory, 'sdk-platform.log'), 'utf8').trim();
         const frameworks = path.join(platform, 'Developer/Library/Frameworks');
