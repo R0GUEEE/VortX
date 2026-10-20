@@ -5059,10 +5059,11 @@ final class MPVMetalViewController: PlatformViewController {
                         }
                     }
                 case MPV_EVENT_SEEK:
-                    // Full muted loops have no viewer resume/cache-maintenance transaction.
-                    // Native settlement and containment were already processed above; avoid
-                    // one unused main-queue closure per internal EOF-loop seek.
-                    if isLoopingPreview { break }
+                    // A full muted loop normally has no recovery transaction, but system memory
+                    // pressure can create a real cache-reanchor flight even for a preview.
+                    // Preserve that flight's raw-dequeue witness and callbacks; only omit the
+                    // unused callback when no cache transaction was present at dequeue.
+                    if isLoopingPreview && rawCacheWitness == nil { break }
                     if let owner = self.callbackLoadToken(requiresLoadedFile: true) {
                         self.loadTokenLock.lock()
                         self.freshOrigin.observedSeek(owner: owner)
@@ -5097,7 +5098,7 @@ final class MPVMetalViewController: PlatformViewController {
                                   PlayerTimePositionEvent(seconds: position, loadToken: owner,
                                                           mpvSeekSettlement: evidence),
                                   loadToken: owner)
-                        if isLoopingPreview { break }
+                        if isLoopingPreview && rawCacheWitness == nil { break }
                         DispatchQueue.main.async { [weak self] in
                             guard let self, self.activeLoadToken == owner else { return }
                             self.completeSeekEOFRecovery(loadToken: owner, position: position,
@@ -5105,7 +5106,7 @@ final class MPVMetalViewController: PlatformViewController {
                         }
                     }
                     #if canImport(UIKit)
-                    if isLoopingPreview { break }
+                    if isLoopingPreview && rawCacheWitness == nil { break }
                     guard let loadToken = self.callbackLoadToken(requiresLoadedFile: true) else { break }
                     let cacheWitness = rawCacheWitness
                     let cacheSeeks = rawCacheNativeSample?.lowLevelSeeks
