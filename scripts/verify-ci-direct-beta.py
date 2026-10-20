@@ -9,17 +9,20 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta
+import functools
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import selectors
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 
@@ -127,8 +130,64 @@ def api(endpoint):
     return json.loads(subprocess.check_output(["gh", "api", "--method", "GET", "--", f"repos/{REPO}/{endpoint}"]))
 
 
+def gh_metadata(arguments):
+    # Local CLI metadata only: no endpoint, authentication request or shell.
+    require(arguments in (("api", "--help"), ("--version",)), "unsupported CLI metadata command")
+    process = subprocess.Popen(["gh", *arguments], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    deadline = time.monotonic() + 10
+    output = bytearray()
+    try:
+        with selectors.DefaultSelector() as monitor:
+            monitor.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                require(remaining > 0 and monitor.select(remaining), "CLI metadata timed out")
+                chunk = os.read(process.stdout.fileno(), min(4096, 65537 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                require(len(output) <= 65536, "CLI metadata exceeds bound")
+        require(process.wait(timeout=max(0.001, deadline - time.monotonic())) == 0,
+                "CLI metadata command failed")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        process.stdout.close()
+    require(output, "CLI metadata is empty")
+    return bytes(output)
+
+
+@functools.lru_cache(maxsize=1)
+def gh_raw_options():
+    # Probe once before any raw response. Never retry a failed raw download with
+    # different flags, and do not change api()'s JSON metadata command.
+    help_raw = gh_metadata(("api", "--help"))
+    version_raw = gh_metadata(("--version",))
+    help_text, version_text = (value.decode("utf-8") for value in (help_raw, version_raw))
+    require(not re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", help_text + version_text),
+            "CLI metadata contains control bytes")
+    require(all(re.search(pattern, help_text, re.M) for pattern in
+                (r"^USAGE\r?$", r"^  gh api <endpoint> \[flags\]\r?$", r"^FLAGS\r?$", r"^LEARN MORE\r?$")),
+            "unrecognized API help metadata")
+    advertised = re.findall(r"^[ \t]+--allow-escape-sequences[ \t]{2,}[^\r\n]+\r?$", help_text, re.M)
+    require(help_text.count("--allow-escape-sequences") == len(advertised) <= 1,
+            "malformed raw escape capability metadata")
+    version_lines = version_text.splitlines()
+    require(version_lines and re.fullmatch(r"gh version [0-9]+\.[0-9]+\.[0-9]+(?: [^\r\n]+)?", version_lines[0]),
+            "unrecognized CLI version metadata")
+    options = ("--allow-escape-sequences",) if advertised else ()
+    receipt = {"schemaVersion": 1, "version": version_lines[0],
+               "versionSha256": hashlib.sha256(version_raw).hexdigest(),
+               "apiHelpSha256": hashlib.sha256(help_raw).hexdigest(), "apiHelpBytes": len(help_raw),
+               "rawOptions": list(options)}
+    print("GitHub raw transport capability: " + json.dumps(receipt, sort_keys=True), file=sys.stderr)
+    return options
+
+
 def api_download(endpoint, destination, limit, accept=None):
-    command = ["gh", "api", "--method", "GET"]
+    # Both old and new CLIs keep exact raw bytes on this captured binary pipe.
+    command = ["gh", "api", "--method", "GET", *gh_raw_options()]
     if accept:
         command += ["-H", f"Accept: {accept}"]
     command += ["--", f"repos/{REPO}/{endpoint}"]
@@ -140,7 +199,7 @@ def api_download(endpoint, destination, limit, accept=None):
                 count += len(chunk)
                 require(count <= limit, "download exceeds declared bound")
                 target.write(chunk)
-            require(process.wait() == 0, "GitHub read failed")
+            require(process.wait() == 0, f"GitHub raw read failed: {endpoint}")
         finally:
             if process.poll() is None:
                 process.kill()
@@ -177,10 +236,13 @@ def check_tag(tag, source):
     raise ValueError("tag nesting exceeds bound")
 
 
-def release_identity(release, release_id, tag, draft):
+def release_identity(release, release_id, tag, draft, source):
     require(release.get("id") == release_id and release.get("tag_name") == tag and
+            release.get("target_commitish") == source and
             release.get("draft") is draft and release.get("prerelease") is True and
-            (draft or isinstance(release.get("published_at"), str)), "wrong release identity/state")
+            (release.get("published_at") is None if draft else
+             isinstance(release.get("published_at"), str) and bool(release["published_at"])),
+            "wrong release identity/state/source")
     body = release.get("body") or ""
     require(body.splitlines().count(MARKER) == 1 and body.count("vortx-distribution:") == 1 and
             "vortx-channel: latest-beta" not in body and "vortx-platforms: apple" not in body,
@@ -523,6 +585,20 @@ def release_assets(release, expected):
     return {name: {field: asset[field] for field in fields} for name, asset in by_name.items()}
 
 
+def validate_asset_url(command, release, tag, name, url):
+    require(command in ("verify-draft", "verify-published"), "unsupported asset URL verification mode")
+    canonical_url = f"https://github.com/{REPO}/releases/download/{tag}/{name}"
+    allowed = url == canonical_url
+    if command == "verify-draft":
+        require(release.get("draft") is True, "temporary asset URL requires an authenticated draft")
+        html = release.get("html_url")
+        match = re.fullmatch(rf"https://github\.com/{re.escape(REPO)}/releases/tag/(untagged-[0-9a-f]{{20}})",
+                             html) if isinstance(html, str) else None
+        if match is not None:
+            allowed = allowed or url == f"https://github.com/{REPO}/releases/download/{match[1]}/{name}"
+    require(allowed, "release asset URL differs from its exact tag or authenticated draft URL")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("prepare", "verify-draft", "verify-published"))
@@ -548,7 +624,7 @@ def main():
     helper = importlib.util.module_from_spec(specification)
     specification.loader.exec_module(helper)
     release = api(f"releases/{args.release_id}")
-    release_identity(release, args.release_id, args.tag, args.command != "verify-published")
+    release_identity(release, args.release_id, args.tag, args.command != "verify-published", args.source_commit)
     expected_provenance = args.provenance_sha256
     if args.event_file is not None:
         require(args.command == "verify-published" and expected_provenance is None,
@@ -556,7 +632,7 @@ def main():
         event = read_json(args.event_file)
         require(event.get("action") == "published" and event.get("repository", {}).get("full_name") == REPO,
                 "wrong release event identity")
-        release_identity(event["release"], args.release_id, args.tag, False)
+        release_identity(event["release"], args.release_id, args.tag, False, args.source_commit)
         expected_provenance = provenance_binding(event["release"]["body"])
     if args.command != "prepare":
         sha(expected_provenance)
@@ -594,7 +670,7 @@ def main():
         require(stable_snapshot(args.tag, helper) == stable, "stable Latest/main/feeds/route snapshot changed")
         check_tag(args.tag, args.source_commit)
         current_release = api(f"releases/{args.release_id}")
-        release_identity(current_release, args.release_id, args.tag, args.command != "verify-published")
+        release_identity(current_release, args.release_id, args.tag, args.command != "verify-published", args.source_commit)
         if args.command == "prepare":
             args.output.mkdir()
             for path, item in records:
@@ -612,9 +688,9 @@ def main():
         require(current_assets == assets, "release assets changed during verification")
         for name, (size, expected_sha) in expected_hashes.items():
             asset = current_assets[name]
-            require(asset["size"] == size and asset["digest"] == f"sha256:{expected_sha}" and
-                    asset.get("browser_download_url") == f"https://github.com/{REPO}/releases/download/{args.tag}/{name}",
+            require(asset["size"] == size and asset["digest"] == f"sha256:{expected_sha}",
                     "release asset metadata differs from original CI bytes")
+            validate_asset_url(args.command, current_release, args.tag, name, asset.get("browser_download_url"))
             destination = work / ("verified-" + name)
             if args.command == "verify-published":
                 public_download(args.tag, name, destination, size, expected_sha)
@@ -624,7 +700,7 @@ def main():
         require(stable_snapshot(args.tag, helper) == stable, "stable routes changed during downloads")
         check_tag(args.tag, args.source_commit)
         final_release = api(f"releases/{args.release_id}")
-        release_identity(final_release, args.release_id, args.tag, args.command != "verify-published")
+        release_identity(final_release, args.release_id, args.tag, args.command != "verify-published", args.source_commit)
         require(provenance_binding(final_release["body"]) == expected_provenance, "release provenance binding changed")
         require(release_assets(final_release, set(expected_hashes)) == current_assets, "release changed during byte checks")
         print(f"Verified {args.command}: original CI evidence, all nine asset bytes, unchanged stable routes")

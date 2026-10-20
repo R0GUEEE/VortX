@@ -349,7 +349,22 @@ jobs:
             --arg event "$GITHUB_EVENT_NAME" --arg ref "$GITHUB_REF" \
             --arg source "$BUILD_SOURCE_SHA" --arg workflow "$GITHUB_SHA" \
             --argjson run "$GITHUB_RUN_ID" --argjson attempt "$GITHUB_RUN_ATTEMPT" \
-            '{schemaVersion:1,event:$event,ref:$ref,sourceCommit:$source,workflowCommit:$workflow,runId:$run,attempt:$attempt,inputs:$inputs}' \
+            '
+            # GitHub can omit submitted empty strings from toJSON(inputs). Add
+            # only absent strings; preserve every supplied typed actual value.
+            {release_tag:"",recovery_source_commit:"",resume_handoff:"",
+             mpvkit_artifacts_url:"",mpvkit_artifacts_sha256:"",release_id:"",altstore_note:""} as $empty_strings |
+            ["native_only","publish_release","publish_existing_055","tvos_test_only","apple_only"] as $booleans |
+            if ($inputs | type) != "object" or
+               ((($inputs | keys) - ($booleans + ($empty_strings | keys))) | length) != 0 or
+               any($booleans[]; . as $key | ($inputs | has($key) | not) or
+                   ($inputs[$key] | type) != "boolean") or
+               any($empty_strings | keys[]; . as $key | ($inputs | has($key)) and
+                   ($inputs[$key] | type) != "string")
+            then error("artifact-only dispatch has unknown, missing, or mistyped inputs")
+            else {schemaVersion:1,event:$event,ref:$ref,sourceCommit:$source,workflowCommit:$workflow,
+                  runId:$run,attempt:$attempt,inputs:($empty_strings + $inputs)}
+            end' \
             > out/native-ci-dispatch.json
 
       - name: Constrain legacy comparison to artifact-only builds

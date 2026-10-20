@@ -37,13 +37,13 @@ class HostedDirectBetaContract(unittest.TestCase):
 
     def test_marker_rejects_latest_and_other_distribution(self):
         release = {"id": 7, "tag_name": "v0.5.6-beta.1", "draft": True, "prerelease": True,
-                   "body": MODULE.MARKER}
-        MODULE.release_identity(release, 7, "v0.5.6-beta.1", True)
+                   "body": MODULE.MARKER, "target_commitish": "a" * 40, "published_at": None}
+        MODULE.release_identity(release, 7, "v0.5.6-beta.1", True, "a" * 40)
         for addition in (MODULE.MARKER, "vortx-channel: latest-beta", "vortx-distribution: direct-test",
                          "vortx-platforms: apple"):
             with self.subTest(addition=addition), self.assertRaises(ValueError):
                 MODULE.release_identity({**release, "body": MODULE.MARKER + "\n" + addition}, 7,
-                                        "v0.5.6-beta.1", True)
+                                        "v0.5.6-beta.1", True, "a" * 40)
 
     def test_prepared_digest_binding(self):
         line = "<!-- vortx-ci-provenance-sha256: " + "a" * 64 + " -->"
