@@ -742,6 +742,7 @@ final class MPVMetalViewController: PlatformViewController {
     #endif
 
     private func configureAudioSession() {
+        guard !startMuted else { return }
         // AVAudioSession is iOS/tvOS only; on macOS mpv's coreaudio AO owns audio routing, so this
         // is a no-op there.
         #if canImport(UIKit)
@@ -777,6 +778,7 @@ final class MPVMetalViewController: PlatformViewController {
     /// Refresh the active route's AVAudioSession policy. Maximum channels bound what we request;
     /// `outputNumberOfChannels` after that request is the only count used to select mpv's layout.
     private func refreshAudioSessionPolicy() {
+        guard !startMuted else { return }
         let session = AVAudioSession.sharedInstance()
         let mode = AudioOutputMode.current
         let sessionMode: AVAudioSession.Mode = mode == .stereo ? .default : .moviePlayback
@@ -857,9 +859,8 @@ final class MPVMetalViewController: PlatformViewController {
             return
         }
 
-        // Hero-preview options (#44), set before mpv_initialize so they take at init time. `mute=yes`
-        // gives a soundless ambient clip (no audio output is ever opened); `loop-file=inf` makes mpv
-        // re-play the trailer forever with no app-side EOF handling. The main player sets neither.
+        // Muting alone keeps mpv's audio renderer/session alive. Preview audio track selection is
+        // disabled after custom options below, before initialization. Native looping is preview-only.
         if startMuted { checkError(mpv_set_option_string(mpv, "mute", "yes")) }
         if loopPlayback { checkError(mpv_set_option_string(mpv, "loop-file", "inf")) }
 
@@ -1166,6 +1167,19 @@ final class MPVMetalViewController: PlatformViewController {
             }
         }
 
+        // A decorative preview must never open an AO or claim the shared audio session. Apply this
+        // after custom options so a saved aid/ audio override cannot reactivate preview audio.
+        if startMuted {
+            let disabledAudio = mpv_set_option_string(mpv, "aid", "no")
+            guard disabledAudio >= 0 else {
+                checkError(disabledAudio)
+                initializationFailure.fail("The silent preview could not disable audio.")
+                let failedContext = mpv
+                mpv = nil
+                mpv_terminate_destroy(failedContext)
+                return
+            }
+        }
         let initializationStatus = mpv_initialize(mpv)
         guard initializationStatus >= 0 else {
             checkError(initializationStatus)
@@ -1254,7 +1268,9 @@ final class MPVMetalViewController: PlatformViewController {
         // an eARC handshake finishes, the user swaps to a different output. mpv's AO stays
         // negotiated against the old route, which can strand audio on a layout the new endpoint
         // can't play. Re-evaluate the channel count and reapply the policy on any route change.
-        NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChanged), name: AVAudioSession.routeChangeNotification, object: nil)
+        if !startMuted {
+            NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChanged), name: AVAudioSession.routeChangeNotification, object: nil)
+        }
         #endif
     }
 
@@ -1324,7 +1340,7 @@ final class MPVMetalViewController: PlatformViewController {
     /// silent no-op after), which is why the reapply path uses setString. Handles a receiver
     /// powering on or an HDMI-ARC/eARC handshake settling after the AO was first opened.
     private func applyChannelPolicy(force: Bool = false) {
-        guard mpv != nil else { return }
+        guard !startMuted, mpv != nil else { return }
         refreshAudioSessionPolicy()
         let next = (channelPolicy, sampleRatePolicy ?? 0)
         if !force, let applied = appliedAudioPolicy, applied == next { return }   // no real change: don't churn the AO
@@ -1335,6 +1351,7 @@ final class MPVMetalViewController: PlatformViewController {
     }
 
     @objc private func audioRouteChanged(_ note: Notification) {
+        guard !startMuted else { return }
         // Hop to the main actor: the notification can arrive on an arbitrary thread and we touch
         // the mpv handle. (mpv option-set is thread-safe, but keep the AVAudioSession read + log
         // ordering deterministic.)
@@ -1678,7 +1695,7 @@ final class MPVMetalViewController: PlatformViewController {
         // `change-list append` hands the URL to mpv as ONE argument: setting the property as a string
         // would re-parse it against the path-list separator (":"), which every https URL contains.
         command("change-list", args: ["audio-files", "clr", ""])
-        if let sidecar {
+        if !startMuted, let sidecar {
             command("change-list", args: ["audio-files", "append", sidecar.absoluteString])
         }
 
@@ -3744,6 +3761,7 @@ final class MPVMetalViewController: PlatformViewController {
     }
 
     func setAudioTrack(_ id: Int) {
+        guard !startMuted else { return }
         guard TrackSelector.shouldApplyAudioSelection(id, to: tracks(ofType: "audio")) else { return }
         #if os(tvOS)
         armSeekCacheHold()   // an aid change triggers a demuxer refresh-seek that discards + re-reads the forward cache
