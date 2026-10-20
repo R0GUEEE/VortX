@@ -92,7 +92,7 @@ struct VortxNativeProviderCredentials {
         for (key, value) in incoming.fields {
             if let old = next.document.fields[key] {
                 if old.clock == value.clock && old.actor == value.actor {
-                    guard old.value == value.value else { throw VortxNativeError.invalidSnapshot }
+                    guard Self.sameCredentialValue(old.value, value.value) else { throw VortxNativeError.invalidSnapshot }
                 } else if value.clock > old.clock || (value.clock == old.clock && value.actor > old.actor) {
                     next.document.fields[key] = value
                     // A newer authenticated register supersedes an older pending event, not a
@@ -121,6 +121,15 @@ struct VortxNativeProviderCredentials {
             else { result.removeValue(forKey: key) }
         }
         return result
+    }
+    /// Credentials are opaque bytes. Unicode canonical equivalence must not hide two
+    /// different values claiming the same causal event.
+    private static func sameCredentialValue(_ lhs: VortxJSON, _ rhs: VortxJSON) -> Bool {
+        switch (lhs, rhs) {
+        case (.null, .null): return true
+        case (.string(let left), .string(let right)): return left.utf8.elementsEqual(right.utf8)
+        default: return false
+        }
     }
     private static func validate(_ document: Document, scope: String) throws {
         guard document.schemaVersion == 1, document.scope == scope else { throw VortxNativeError.invalidSnapshot }

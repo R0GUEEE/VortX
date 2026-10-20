@@ -38,7 +38,7 @@ writeFileSync(output, [json, error, `struct VortxNativeHostPreferences {\n${host
   .replace('        /* PRODUCTION_PROVIDER_EXPORT */', projection)
   .replace('    /* PRODUCTION_PROVIDER_METHODS */', methods)].join('\n'));
 // Foundation-only public carrier/method extraction: no SDK, ABI library, Keychain or account.
-execFileSync('xcrun', ['swiftc', '-parse-as-library', '-swift-version', '6', '-strict-concurrency=complete', '-warnings-as-errors',
+execFileSync('xcrun', ['swiftc', '-parse-as-library', '-swift-version', '6', '-strict-concurrency=complete', '-warnings-as-errors', '-j', '1', '-num-threads', '1',
   '-D', 'VORTX_NATIVE_DATA_ENGINE', 'app/SourcesShared/SyncDocumentRevisionPolicy.swift', 'app/SourcesShared/SyncBackupUploadFailure.swift',
   'app/SourcesShared/VortxNativeProviderCredentials.swift', 'app/SourcesShared/NativeForegroundSyncPolicy.swift', output,
   '-o', join(directory, 'checks')], {stdio: 'inherit'});

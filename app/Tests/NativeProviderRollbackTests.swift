@@ -92,10 +92,49 @@ private enum DiagnosticsLog { static func log(_ category: String, _ message: Str
     static func wire(_ state: VortxNativeProviderCredentials) throws -> Any {
         try JSONSerialization.jsonObject(with: JSONEncoder().encode(state.document))
     }
+    static func exactLocal(_ state: VortxNativeProviderCredentials) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(state.local)
+    }
+    static func checkOpaqueCredentialConflicts(scope: String, actor: String) throws {
+        let precomposed = "\u{00E9}", decomposed = "e\u{0301}"
+        expect(precomposed == decomposed && !precomposed.utf8.elementsEqual(decomposed.utf8),
+               "fixture distinguishes canonical String equality from opaque credential bytes")
+        var left = try VortxNativeProviderCredentials(scope: scope, actor: actor)
+        var right = try VortxNativeProviderCredentials(scope: scope, actor: actor)
+        try left.edit(["tmdb": .string(precomposed)])
+        try right.edit(["tmdb": .string(decomposed)])
+        let leftBefore = try exactLocal(left), rightBefore = try exactLocal(right)
+        try left.merge(left.document)
+        let identical = try exactLocal(left)
+        expect(identical == leftBefore, "byte-identical same-stamp credential is idempotent")
+        var rejected = false
+        do { try left.merge(right.document) } catch { rejected = true }
+        let leftAfter = try exactLocal(left)
+        expect(rejected && leftAfter == leftBefore,
+               "same-stamp NFC to NFD contradiction rejects without changing document, counter or pending")
+        rejected = false
+        do { try right.merge(left.document) } catch { rejected = true }
+        let rightAfter = try exactLocal(right)
+        expect(rejected && rightAfter == rightBefore, "same-stamp NFD to NFC contradiction also preserves all local bytes")
+        var cleared = try VortxNativeProviderCredentials(scope: scope, actor: actor)
+        try cleared.edit(["tmdb": .null])
+        rejected = false
+        do { try left.merge(cleared.document) } catch { rejected = true }
+        let afterClearConflict = try exactLocal(left)
+        expect(rejected && afterClearConflict == leftBefore, "same-stamp null and value remain a rejected contradiction")
+        try right.edit(["tmdb": .string(decomposed)])
+        try left.merge(right.document)
+        let newer = left.mirror(into: [:])["tmdb"]!
+        expect(newer.utf8.elementsEqual(decomposed.utf8) && left.local.pending.isEmpty,
+               "genuinely newer register preserves exact credential bytes and supersedes only older pending event")
+    }
     static func main() async throws {
         let scope = "synthetic.account"
         let actorA = "00000000-0000-0000-0000-000000000001"
         let actorC = "00000000-0000-0000-0000-000000000003"
+        try checkOpaqueCredentialConflicts(scope: scope, actor: actorA)
         var warm = try VortxNativeProviderCredentials(scope: scope, actor: actorA)
         try warm.edit(["tmdb": .string("synthetic-old")])
         let old = warm
