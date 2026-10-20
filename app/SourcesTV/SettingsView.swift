@@ -19,8 +19,7 @@ struct SettingsView: View {
     @ObservedObject private var catalogPrefs = CatalogPreferences.shared
     @EnvironmentObject private var profiles: ProfileStore
     @State private var serverOnline: Bool?
-    /// Settings search query. Empty shows the full settings tree; a non-empty query filters the sections
-    /// below to those whose title or any of their row keywords contain it (case-insensitive substring).
+    /// Empty shows the category landing page. A query searches every section, across all categories.
     @State private var settingsQuery = ""
     @AppStorage("stremiox.hdrToneMapMode") private var hdrToneMapMode = "auto"   // auto / on / off
     // Match Frame Rate: HDRDisplayMode owns both the key and the display-mode behavior it drives, so the key
@@ -152,42 +151,10 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                    Text("Settings").screenTitleStyle()
-                    // Phase-0 seeding banner for the com.vortx move (see MoveSeeding): pinned above the
-                    // search field, ungated by the settings filter so the move state is ALWAYS inspectable
-                    // here. Not launch-gated (unlike the nag sheet): un-seeded it prompts, seeded it confirms.
-                    seedingBanner
-                    // Focusable search field: typing filters the sections below (additive, the whole tree
-                    // stays intact and returns the moment the field is cleared). Each section is gated by
-                    // `sectionMatches`, so an empty query shows everything and a query keeps only the hits.
-                    searchSection
-                    if isSearching && !hasAnySettingsMatch {
-                        noSettingsMatchSection
-                    }
-                    if sectionMatches(.profiles) { profilesSection }
-                    if sectionMatches(.account) { accountSection }
-                    if sectionMatches(.stremioMirror) { stremioMirrorSection }
-                    if sectionMatches(.playback) { playbackSection }
-                    if sectionMatches(.downloads) { downloadsSection }
-                    if sectionMatches(.notifications) { notificationsSection }
-                    if sectionMatches(.streams) { streamsSection }
-                    if sectionMatches(.community) { communitySection }
-                    if sectionMatches(.server) { serverSection }
-                    if sectionMatches(.tabBar) { tabBarSection }
-                    if sectionMatches(.appearance) { appearanceSection }
-                    if sectionMatches(.audioSubtitle) { audioSubtitleSection }
-                    if sectionMatches(.subtitle) { subtitleSection }
-                    if sectionMatches(.advanced) { advancedSection }
-                    if sectionMatches(.backup) { backupSection }
-                    if sectionMatches(.about) { aboutSection }
+            settingsLanding
+                .navigationDestination(for: TVSettingsCategory.self) { category in
+                    settingsCategoryPage(category)
                 }
-                .padding(.horizontal, Theme.Space.screenEdge)
-                .padding(.vertical, Theme.Space.xl)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .background(Theme.Palette.canvas.ignoresSafeArea())
         }
         .fullScreenCover(isPresented: $showDiagExport, onDismiss: {
             VXDiagExport.shared.stop()
@@ -244,32 +211,126 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: Category navigation
+
+    private var settingsLanding: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                Text("Settings").screenTitleStyle()
+                // Keep the move state visible above both categories and global search results.
+                seedingBanner
+                searchSection
+                if isSearching {
+                    if !hasAnySettingsMatch { noSettingsMatchSection }
+                    ForEach(matchingSettingsSections, id: \.self) { id in
+                        settingsSection(id)
+                    }
+                } else {
+                    settingsCategories
+                }
+            }
+            .padding(.horizontal, Theme.Space.screenEdge)
+            .padding(.vertical, Theme.Space.xl)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Theme.Palette.canvas.ignoresSafeArea())
+    }
+
+    /// Native links keep remote Back and focus restoration on the existing navigation stack.
+    private var settingsCategories: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            ForEach(TVSettingsCategory.allCases) { category in
+                NavigationLink(value: category) {
+                    HStack(spacing: Theme.Space.md) {
+                        Image(systemName: category.systemImage)
+                            .font(Theme.Typography.cardTitle)
+                            .foregroundStyle(Theme.Palette.accent)
+                            .frame(width: 46)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                            Text(category.title)
+                                .font(Theme.Typography.cardTitle)
+                                .foregroundStyle(Theme.Palette.textPrimary)
+                            Text(category.summary)
+                                .font(Theme.Typography.label)
+                                .foregroundStyle(Theme.Palette.textSecondary)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right")
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                            .accessibilityHidden(true)
+                    }
+                    .padding(Theme.Space.lg)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(RowFocusStyle())
+                .accessibilityLabel(category.title)
+                .accessibilityHint(category.summary)
+            }
+        }
+        .focusSection()
+    }
+
+    private func settingsCategoryPage(_ category: TVSettingsCategory) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                Text(category.title).screenTitleStyle()
+                ForEach(category.sections, id: \.self) { id in
+                    settingsSection(id)
+                }
+            }
+            .padding(.horizontal, Theme.Space.screenEdge)
+            .padding(.vertical, Theme.Space.xl)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Theme.Palette.canvas.ignoresSafeArea())
+    }
+
+    // Keep routing type-erased like section(); avoid a sixteen-case opaque SwiftUI return type.
+    // Both navigation and global search reuse the same controls, bindings and presentation owners.
+    private func settingsSection(_ id: SettingsSearchSection) -> AnyView {
+        switch id {
+        case .profiles: return AnyView(profilesSection)
+        case .account: return AnyView(accountSection)
+        case .stremioMirror: return AnyView(stremioMirrorSection)
+        case .playback: return AnyView(playbackSection)
+        case .downloads: return AnyView(downloadsSection)
+        case .notifications: return AnyView(notificationsSection)
+        case .streams: return AnyView(streamsSection)
+        case .community: return AnyView(communitySection)
+        case .server: return AnyView(serverSection)
+        case .tabBar: return AnyView(tabBarSection)
+        case .appearance: return AnyView(appearanceSection)
+        case .audioSubtitle: return AnyView(audioSubtitleSection)
+        case .subtitle: return AnyView(subtitleSection)
+        case .advanced: return AnyView(advancedSection)
+        case .backup: return AnyView(backupSection)
+        case .about: return AnyView(aboutSection)
+        }
+    }
+
     // MARK: Settings search
 
-    /// The trimmed, lowercased query, computed once per body pass so `sectionMatches` is a plain `contains`.
+    /// The normalized query determines whether the landing page shows categories or global results.
     private var trimmedSettingsQuery: String {
-        settingsQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        SettingsSearchSection.normalizedQuery(settingsQuery)
     }
 
     /// Whether the user is actively filtering. An empty (or whitespace-only) field is treated as no filter.
     private var isSearching: Bool { !trimmedSettingsQuery.isEmpty }
 
-    /// A section shows when there is no query, or when the query is a case-insensitive substring of the
-    /// section's title or any of its row keywords.
-    private func sectionMatches(_ id: SettingsSearchSection) -> Bool {
-        let q = trimmedSettingsQuery
-        guard !q.isEmpty else { return true }
-        if id.title.lowercased().contains(q) { return true }
-        return id.keywords.contains { $0.contains(q) }
+    /// Search starts from the complete section inventory, independently of the category routes.
+    private var matchingSettingsSections: [SettingsSearchSection] {
+        SettingsSearchSection.matchingSections(for: settingsQuery)
     }
 
     /// True when at least one section matches the current query (drives the empty-state card).
     private var hasAnySettingsMatch: Bool {
-        SettingsSearchSection.allCases.contains { sectionMatches($0) }
+        !matchingSettingsSections.isEmpty
     }
 
     /// The focusable search field at the top of Settings. Focusing it opens the tvOS keyboard; typing
-    /// filters the sections below and the Clear chip (or emptying the field) restores the full tree. Sits
+    /// filters all sections and the Clear chip (or emptying the field) restores the categories. Sits
     /// on the same settings-card glass as every section so it reads as part of the same surface.
     private var searchSection: some View {
         HStack(spacing: Theme.Space.md) {
@@ -281,11 +342,13 @@ struct SettingsView: View {
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.Palette.textPrimary)
                 .autocorrectionDisabled(true)
+                .accessibilityLabel("Search all settings")
             if !settingsQuery.isEmpty {
                 Button { settingsQuery = "" } label: {
                     Label("Clear", systemImage: "xmark.circle.fill")
                 }
                 .buttonStyle(ChipButtonStyle(selected: false))
+                .accessibilityLabel("Clear settings search")
             }
         }
         .padding(Theme.Space.lg)
@@ -1640,78 +1703,6 @@ struct SettingsView: View {
             Text(value).foregroundStyle(Theme.Palette.textSecondary)
         }
         .font(Theme.Typography.body)
-    }
-}
-
-/// The searchable Settings sections on Apple TV. Each case carries the section's on-screen title plus the
-/// row keywords it should match, so the search field can filter the tree by a case-insensitive substring of
-/// any title or row label. Keywords are stored lowercased so matching is a plain `contains`. Kept in sync
-/// with the sections `SettingsView` actually renders (the iOS `iOSSettingsView` keeps its own equivalent).
-private enum SettingsSearchSection: CaseIterable {
-    case profiles, account, stremioMirror, playback, downloads, notifications, streams, community,
-         server, tabBar, appearance, audioSubtitle, subtitle, advanced, backup, about
-
-    var title: String {
-        switch self {
-        case .profiles: return "Profiles"
-        case .account: return "Account"
-        case .stremioMirror: return "Stremio mirror"
-        case .playback: return "Playback"
-        case .downloads: return "Downloads"
-        case .notifications: return "Notifications"
-        case .streams: return "Streams"
-        case .community: return "Community"
-        case .server: return "Streaming Server"
-        case .tabBar: return "Tab Bar"
-        case .appearance: return "Appearance"
-        case .audioSubtitle: return "Audio & Subtitles"
-        case .subtitle: return "Subtitle Style"
-        case .advanced: return "Advanced (mpv options)"
-        case .backup: return "Backup & Restore"
-        case .about: return "About"
-        }
-    }
-
-    var keywords: [String] {
-        switch self {
-        case .profiles: return ["profile", "avatar", "pin", "switch profile", "add profile"]
-        case .account: return ["vortx account", "sync", "sign in", "integrations", "stremio", "trakt", "simkl",
-                               "import", "metadata", "tmdb", "mdblist", "fanart", "debrid", "real-debrid",
-                               "poster artwork", "erdb", "ratings", "iptv", "live tv", "playlist",
-                               "media server", "plex", "jellyfin", "emby", "api key"]
-        case .stremioMirror: return ["mirror", "two-way sync", "add-ons", "library", "continue watching"]
-        case .playback: return ["direct links only", "audio output", "video upscaling", "streaming cache",
-                                "player engine", "dolby vision", "mkv", "skip step", "auto-skip", "intro",
-                                "credits", "skip timestamps", "skip database", "seek bar", "community scrub previews",
-                                "trickplay", "autoplay trailers", "trailer language", "default volume",
-                                "auto-add watched", "play in", "external player", "still watching", "idle"]
-        case .downloads: return ["downloads", "auto-delete", "delete watched", "offline", "storage", "reclaim space"]
-        case .notifications: return ["new episode alerts", "episode", "notification"]
-        case .streams: return ["quality preset", "smart source selection", "add-on ranking", "source type",
-                               "safety filter", "regex", "max quality", "minimum quality", "max file size",
-                               "compact source rows", "pinned sources", "resolution"]
-        case .community: return ["contribute", "anonymized data", "singularity", "privacy"]
-        case .server: return ["server", "configure server", "restart", "embedded", "node",
-                              "external engine", "use a mac", "mac as engine", "engine host",
-                              "seek anywhere", "pair a mac"]
-        case .tabBar: return ["tab", "discover tab", "live tv tab", "library tab", "search tab"]
-        case .appearance: return ["accent", "background", "oled", "app language", "language",
-                                  "cinematic catalog cards", "hide poster labels", "poster style",
-                                  "collections on home", "collections on discover", "refresh collections",
-                                  "streaming services", "discover & region", "budget & box office", "spoiler",
-                                  "blur", "dolby vision", "hdr", "match frame rate", "frame rate", "judder",
-                                  "24p", "refresh rate", "text size", "performance",
-                                  "top shelf", "tv home screen", "home screen", "continue watching",
-                                  // INS-260722-02: the re-homed Home rows editor ("Customize Home"),
-                                  // so search reaches it under Appearance.
-                                  "customize home", "home rows", "top picks", "collections", "order", "hide"]
-        case .audioSubtitle: return ["audio language", "fallback audio", "subtitle language", "fallback subtitle",
-                                     "subtitles", "forced", "match audio to subtitle"]
-        case .subtitle: return ["font", "size", "fine size", "color", "background", "subtitle style"]
-        case .advanced: return ["mpv", "custom options", "diagnostic logging", "diagnostic log", "export log"]
-        case .backup: return ["backup", "restore", "export library", "import library"]
-        case .about: return ["version", "player", "what's new", "update", "libmpv", "mpvkit"]
-        }
     }
 }
 
