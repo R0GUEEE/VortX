@@ -1341,19 +1341,6 @@ final class VortXSyncManager: ObservableObject {
         }
     }
 
-    /// Explicit Retry/Sync now may try immediately; automatic catch-up obeys failed-import
-    /// backoff. Neither path clears a poisoned session or treats unreadable data as empty.
-    func retryAccountRestore() async -> Bool {
-#if VORTX_NATIVE_DATA_ENGINE
-        let capture = credentialAuthority.capture()
-        guard isSignedIn, isCurrent(capture) else { return false }
-        if !CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: ProfileStore.shared.activeID) {
-            guard await restoreNativeCheckpoint(credentialCapture: capture, userInitiated: true), isCurrent(capture) else { return false }
-        }
-#endif
-        return await restoreAccountDocIfNeeded()
-    }
-
     /// A picker retry prepares only a missing session; selection remains a separate acknowledged action.
     @MainActor
     func prepareNativeProfileSelection(credentialCapture capture: CredentialScopeRegistry.Capture) async -> Bool {
@@ -4129,6 +4116,19 @@ final class VortXSyncManager: ObservableObject {
         let applied = appliedAddonOrder
         guard !applied.isEmpty else { return live }
         return AddonOrderSyncPolicy.unique((applied + live).filter { !removed.contains($0) })
+    }
+
+    /// Explicit Retry/Sync now may try immediately; automatic catch-up obeys failed-import
+    /// backoff. Neither path clears a poisoned session or treats unreadable data as empty.
+    func retryAccountRestore() async -> Bool {
+#if VORTX_NATIVE_DATA_ENGINE
+        let capture = credentialAuthority.capture()
+        guard isSignedIn, isCurrent(capture) else { return false }
+        if !CoreBridge.shared.hasCertifiedNativeSession(capture: capture, profileID: ProfileStore.shared.activeID) {
+            guard await restoreNativeCheckpoint(credentialCapture: capture, userInitiated: true), isCurrent(capture) else { return false }
+        }
+#endif
+        return await restoreAccountDocIfNeeded()
     }
 
     /// GUARANTEED RESTORE (#145 M1). Make this device apply the account's document before it is ever allowed to

@@ -118,6 +118,27 @@ jobs:
           VORTX_KEY_PASSWORD: vortx-adhoc-ci-store
         run: ./gradlew :app:assembleFullRelease :app:assemblePlayRelease :app:bundlePlayRelease --no-daemon --stacktrace
 
+      # Same bounded current-source recovery filters as CodeQL, also available to manual
+      # secretless validation. JNI-gated cases still skip without the real native runtime.
+      - name: Test Android sync and account recovery
+        working-directory: android
+        run: >-
+          ./gradlew :app:testPlayDebugUnitTest
+          -Pvortx.nativeEngine=true -Pvortx.nativeResourceHost=true
+          --tests com.vortx.android.sync.AndroidRealtimeSyncTest
+          --tests com.vortx.android.sync.DurableSessionStateTest
+          --tests com.vortx.android.sync.NativeAccountSyncTest
+          --tests com.vortx.android.sync.VortXSessionOwnerTransitionContractTest
+          --no-daemon --stacktrace
+
+      - name: Retain current-source recovery test execution and skips
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Android-recovery-unit-results
+          path: android/app/build/test-results/testPlayDebugUnitTest/*.xml
+          if-no-files-found: error
+
       - name: Require the exact release package set (two universal APKs, one AAB)
         run: |
           set -euo pipefail
@@ -236,6 +257,9 @@ jobs:
       - name: Run IPA repackaging tests
         run: bash scripts/tests/repackage-ipa.test.sh
 
+      - name: Prove all-shell failure aggregation keeps every gate fail-closed
+        run: node scripts/test-shell-validation-aggregation.mjs
+
       # Pinned XcodeGen, identical version + checksum gate as release-tvos.yml so project
       # generation here observes the same generator the release lane uses.
       - name: Install pinned XcodeGen
@@ -302,7 +326,7 @@ jobs:
       - name: Build and verify tvOS, iOS, and macOS shells
         run: |
           set -euo pipefail
-          build_shell() {
+          build_one_shell() {
             local scheme="$1" destination="$2" expected_bundle="$3" dd="$4" require_engines="$5" arch="${6:-}"
             echo "::group::xcodebuild $scheme"
             # Keep code in the executable checked below, not Xcode's Debug preview trampoline/dylib pair.
@@ -342,6 +366,20 @@ jobs:
             fi
             echo "ok: $scheme -> $(basename "$products_dir") bundle=$bundle_id executable=$exe engines resolved"
           }
+          # Keep every original gate fail-fast within its isolated shell, but collect all
+          # platform failures before the job fails. A Lite error must not hide an iOS/Mac error.
+          # A fresh Bash process is intentional: invoking a function directly in `if` disables
+          # errexit inside that function, even if it calls `set -e` again.
+          export -f build_one_shell
+          shell_failures=0
+          build_shell() {
+            if bash -euo pipefail -c 'build_one_shell "$@"' -- "$@"; then
+              echo "::notice::shell passed: $1 ${6:-default}"
+            else
+              echo "::error::shell failed: $1 ${6:-default}"
+              shell_failures=$((shell_failures + 1))
+            fi
+          }
           build_shell VortXTVLite   'generic/platform=tvOS Simulator' com.stremiox.tv.lite     "$RUNNER_TEMP/dd-tvlite" core-only
           # The pinned NodeMobile tvOS simulator framework supports arm64 only, matching
           # the protected release smoke lane. Lite has no NodeMobile and retains the
@@ -350,3 +388,4 @@ jobs:
           build_shell VortXTVLite   'generic/platform=tvOS Simulator' com.stremiox.tv.lite    "$RUNNER_TEMP/dd-tvlite-x86" core-only x86_64
           build_shell VortXiOSNative 'generic/platform=iOS Simulator'  com.stremiox.app.native "$RUNNER_TEMP/dd-ios"    both
           build_shell VortXMac      'platform=macOS,arch=arm64'       com.stremiox.mac        "$RUNNER_TEMP/dd-mac"    core-only
+          [ "$shell_failures" -eq 0 ] || { echo "::error::$shell_failures shell checks failed"; exit 1; }

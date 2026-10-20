@@ -340,7 +340,7 @@ jobs:
             > out/native-workflow-provenance.json
 
       - name: Record artifact-only dispatch inputs for hosted beta verification
-        if: github.event_name == 'workflow_dispatch' && inputs.release_tag == '' && inputs.native_only == true
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag == '' && env.VORTX_NATIVE_ONLY == 'true'
         env:
           DISPATCH_INPUTS_JSON: ${{ toJSON(inputs) }}
         run: |
