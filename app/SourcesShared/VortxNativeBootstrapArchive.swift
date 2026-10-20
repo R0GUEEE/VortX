@@ -54,14 +54,14 @@ enum VortxNativeBootstrapArchive {
     /// supplies the strict-decoded object so binary64 provenance is not reparsed by Foundation.
     static func credentialFreeDocument(_ source: [String: Any], diagnostics: ((String) -> Void)? = nil) throws -> Data {
         var exclusions: [String] = []
-        let value = try sanitize(source, path: "", exclusions: &exclusions, diagnostics: diagnostics)
+        let value = try sanitize(source, path: "", exclusions: &exclusions, diagnostics: diagnostics, textContext: .legacyHost)
         return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes])
     }
     static func encode(document: Data, material: Data? = nil, authenticatedSourceArchive: Data? = nil) throws -> Data {
         guard let source = try decodeJSON(with: document) as? [String: Any] else { throw Failure.malformed }
         try requireUnambiguousJSON(document)
         var exclusions: [String] = []
-        let sanitized = try sanitize(source, path: "", exclusions: &exclusions)
+        let sanitized = try sanitize(source, path: "", exclusions: &exclusions, textContext: .legacyHost)
         var archive: [String: Any] = ["schemaVersion": 1, "hostDocument": sanitized,
                                       "excludedCredentialPaths": exclusions.sorted()]
         if let material {
@@ -120,13 +120,13 @@ enum VortxNativeBootstrapArchive {
         else { throw Failure.malformed }
         var forbidden: [String] = []
         try requireUnambiguousJSON(archive)
-        _ = try sanitize(host, path: "", exclusions: &forbidden)
+        _ = try sanitize(host, path: "", exclusions: &forbidden, textContext: .legacyHost)
         if let material = object["legacyImportMaterial"] {
             guard material is [String: Any] else { throw Failure.malformed }
             _ = try sanitize(material, path: "/legacyImportMaterial", exclusions: &forbidden)
         }
         if let source = object["authenticatedSourceArchive"] {
-            _ = try sanitize(source, path: "/authenticatedSourceArchive", exclusions: &forbidden)
+            _ = try sanitize(source, path: "/authenticatedSourceArchive", exclusions: &forbidden, textContext: .legacyHost)
         }
         guard forbidden.isEmpty else { throw Failure.ambiguousCredentialCarrier }
     }
@@ -184,12 +184,47 @@ enum VortxNativeBootstrapArchive {
     private enum TextContext {
         case ordinary, addonManifest, addonDisplayText
         case settingsDomain, profileRosterData, profileRoster, profileRosterItem, profileName, profileAvatar
+        case legacyHost, legacyVortx, legacyLibraryRows, legacyLibraryRow, libraryName
     }
     private static func isProfileRosterItem(_ object: [String: Any]) -> Bool {
         // ProfileStore.persist writes JSON Data containing UUID/name/avatar roster records.
         // Unknown fields are still inspected; a field name alone never grants display semantics.
         guard let id = object["id"] as? String, UUID(uuidString: id) != nil,
               object["name"] is String, object["avatar"] is String else { return false }
+        return true
+    }
+    private static func isLegacyLibraryRow(_ object: [String: Any]) -> Bool {
+        // Match the legacy owner row's identity and display fields, without requiring a
+        // supported type: the downstream projector must still be able to hold an odd row.
+        // Unknown siblings retain full inspection and do not receive display semantics.
+        guard let id = object["id"] as? String,
+              !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              id.rangeOfCharacter(from: .controlCharacters) == nil,
+              object["type"] is String, object["name"] is String else { return false }
+        return true
+    }
+    private static func hasLiteralLibraryLabel(_ text: String) -> Bool {
+        guard hasLiteralDisplayLabel(text) else { return false }
+        // Unlike a carrier, a title may have a literal tag. Do not let that tag conceal
+        // a JSON/plist/quoted carrier in the remainder, including a base64-encoded one.
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let closing: Character = trimmed.first == "[" ? "]" : "}"
+        guard let end = trimmed.firstIndex(of: closing) else { return false }
+        let carrierPadding = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}"))
+        func normalizedCarrierText(_ bytes: Data) -> String {
+            let view = (try? jsonUTF8View(bytes)) ?? bytes
+            return String(decoding: view, as: UTF8.self).trimmingCharacters(in: carrierPadding)
+        }
+        // Normalize the complete padding run before BOTH inspection and base64 decoding.
+        // A BOM before encoded text must not make the decoder fail open after a safe sniff.
+        let suffix = normalizedCarrierText(Data(trimmed[trimmed.index(after: end)...].utf8))
+        func carrierPrefix(_ bytes: Data) -> Bool {
+            let significant = normalizedCarrierText(bytes).unicodeScalars
+            let prefix = String(String.UnicodeScalarView(significant.prefix(32)))
+            return structuredPrefix(Data(prefix.utf8)) || prefix.hasPrefix("\"")
+        }
+        guard !carrierPrefix(Data(suffix.utf8)) else { return false }
+        if let decoded = Data(base64Encoded: suffix), carrierPrefix(decoded) { return false }
         return true
     }
     private static func isAddonDescriptor(_ object: [String: Any]) -> Bool {
@@ -287,6 +322,13 @@ enum VortxNativeBootstrapArchive {
                         context = .profileRosterData
                     } else if textContext == .profileRosterItem, object[key] is String, key == "name" {
                         context = .profileName
+                    } else if textContext == .legacyLibraryRow, object[key] is String, key == "name" {
+                        context = .libraryName
+                    } else if textContext == .legacyHost, key == "vortx", object[key] is [String: Any] {
+                        context = .legacyVortx
+                    } else if (textContext == .legacyHost || textContext == .legacyVortx),
+                              key == "library", object[key] is [Any] {
+                        context = .legacyLibraryRows
                     } else if textContext == .profileRosterItem, object[key] is String, key == "avatar" {
                         context = .profileAvatar
                     } else {
@@ -301,8 +343,14 @@ enum VortxNativeBootstrapArchive {
         }
         if let array = value as? [Any] {
             return try array.enumerated().map {
-                let context: TextContext = textContext == .profileRoster && ($0.element as? [String: Any]).map(isProfileRosterItem) == true
-                    ? .profileRosterItem : .ordinary
+                let context: TextContext
+                if textContext == .profileRoster && ($0.element as? [String: Any]).map(isProfileRosterItem) == true {
+                    context = .profileRosterItem
+                } else if textContext == .legacyLibraryRows && ($0.element as? [String: Any]).map(isLegacyLibraryRow) == true {
+                    context = .legacyLibraryRow
+                } else {
+                    context = .ordinary
+                }
                 return try sanitize($0.element, path: path + "/" + String($0.offset), exclusions: &exclusions, depth: depth + 1,
                                     diagnostics: diagnostics, textContext: context)
             }
@@ -357,7 +405,8 @@ enum VortxNativeBootstrapArchive {
         if let text = value as? String, structuredPrefix(Data(text.utf8)),
            !(textContext == .addonDisplayText && hasLiteralDisplayLabel(text)),
            !((textContext == .profileName || textContext == .profileAvatar) && (text == "[" || text == "{")),
-           !(textContext == .profileName && hasLiteralDisplayLabel(text)) {
+           !(textContext == .profileName && hasLiteralDisplayLabel(text)),
+           !(textContext == .libraryName && hasLiteralLibraryLabel(text)) {
             throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .plainTextPrefix)
         }
         guard value is String || value is NSNumber || value is NSNull || value is Date else { throw rejected(.malformed, path: path, diagnostics: diagnostics) }

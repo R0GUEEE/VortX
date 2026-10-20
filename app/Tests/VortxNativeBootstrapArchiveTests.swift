@@ -82,6 +82,8 @@ import CryptoKit
         catch { print("FAIL: producer-shaped literal profile text blocked account preparation: \(error)"); exit(1) }
         do { try literalAddonManifestLabels() }
         catch { print("FAIL: literal add-on manifest text blocked account preparation: \(error)"); exit(1) }
+        do { try literalLegacyLibraryNames() }
+        catch { print("FAIL: literal library title blocked account preparation: \(error)"); exit(1) }
         let unchangedArchive = try JSONSerialization.jsonObject(with: VortxNativeBootstrapArchive.encode(document: data(["future": unchanged]))) as! [String: Any]
         check((unchangedArchive["hostDocument"] as! [String: String])["future"] == unchanged)
         let malformedBackup = try data(["format": "vortx-backup", "schema": 1, "payloadBase64": "opaque"]).base64EncodedString()
@@ -726,6 +728,220 @@ import CryptoKit
         } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
         check(messages == ["archive_inspection result=failed reason=opaque_preference field=/vortx/addons/*/manifest/name carrier=plain_text_prefix"])
         print("Issue #263: \(journeys) exact display-text carrier journeys, nested credential inspection and malformed/opaque rejection controls passed")
+    }
+
+    static func literalLegacyLibraryNames() throws {
+        // #262 reports /vortx/library/*/name with plain_text_prefix. The customer value
+        // is unknown: these labels reproduce only the bounded literal-label class.
+        typealias Object = [String: Any]
+        func row(_ name: Any, type: Any = "movie", extra: Object = [:]) -> Object {
+            var result: Object = ["id": "tt-fixture-library", "type": type, "name": name,
+                                  "poster": "https://poster.example/fixture.jpg",
+                                  "futureRow": ["keep": "unchanged", "clock": 125.375]]
+            result.merge(extra) { _, value in value }
+            return result
+        }
+        func document(_ entry: Object, legacyRoot: Bool = false) -> Object {
+            let host: Object = legacyRoot ? ["library": [entry]] : ["vortx": ["library": [entry]]]
+            return host.merging(["futureHost": ["keep": true]]) { current, _ in current }
+        }
+        func entry(_ host: Object, legacyRoot: Bool = false) -> Object {
+            let bucket = legacyRoot ? host : host["vortx"] as! Object
+            return (bucket["library"] as! [Object])[0]
+        }
+        func journey(_ source: Object) throws {
+            let original = try data(source)
+            let originalHash = SHA256.hash(data: original)
+            let legacyRoot = source["library"] != nil
+            let titleBytes = Data((entry(source, legacyRoot: legacyRoot)["name"] as! String).utf8)
+            func checkHost(_ host: Object) {
+                check(NSDictionary(dictionary: host).isEqual(to: source))
+                check(Data((entry(host, legacyRoot: legacyRoot)["name"] as! String).utf8) == titleBytes)
+                check((entry(host, legacyRoot: legacyRoot)["futureRow"] as! Object)["keep"] as? String == "unchanged")
+                check((host["futureHost"] as! [String: Bool])["keep"] == true)
+            }
+            var messages: [String] = []
+            let clean = try VortxNativeBootstrapArchive.credentialFreeDocument(source, diagnostics: { messages.append($0) })
+            check(messages.isEmpty)
+            checkHost(try JSONSerialization.jsonObject(with: clean) as! Object)
+            // Exercise raw original-document admission as well as the decoded preparation path.
+            for bytes in [original, clean] {
+                let archive = try VortxNativeBootstrapArchive.encode(document: bytes)
+                try VortxNativeBootstrapArchive.validate(archive)
+                let root = try JSONSerialization.jsonObject(with: archive) as! Object
+                check((root["excludedCredentialPaths"] as! [String]).isEmpty)
+                checkHost(root["hostDocument"] as! Object)
+                let retained = try VortxNativeBootstrapArchive.encode(document: data(["fresh": true]), authenticatedSourceArchive: archive)
+                try VortxNativeBootstrapArchive.validate(retained)
+                let retainedRoot = try JSONSerialization.jsonObject(with: retained) as! Object
+                checkHost(retainedRoot["authenticatedSourceArchive"] as! Object)
+            }
+            check(try data(source) == original && SHA256.hash(data: original) == originalHash)
+        }
+        let labels = ["[REC]", "[4K] Fixture title", "{Family} Film", " \n[日本語] アニメ", "[true]", "[123]"]
+        for label in labels {
+            for legacyRoot in [false, true] {
+                try journey(document(row(label), legacyRoot: legacyRoot))
+            }
+        }
+        // Preserve the downstream per-unit hold policy for unsupported legacy content types.
+        try journey(document(row("[Live] Fixture channel", type: "channel")))
+        func refused(_ source: Object) throws {
+            let original = try data(source)
+            do {
+                _ = try VortxNativeBootstrapArchive.credentialFreeDocument(source)
+                preconditionFailure("Unrecognized library display context was admitted")
+            } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+            check(try data(source) == original)
+        }
+        let label = "[REC] Fixture title"
+        try refused(["name": label])
+        try refused(["future": row(label)])
+        try refused(["future": ["library": [row(label)]]])
+        try refused(["vortx": ["future": ["library": [row(label)]]]])
+        // Only actual source/archive ingress grants host roles. Decoding a parent or
+        // forging a host field with an archive's name must never reacquire those roles.
+        try refused(["authenticatedSourceArchive": document(row(label))])
+        let encodedParents = [
+            String(decoding: try data(["library": [row(label)]]), as: UTF8.self),
+            try data(["library": [row(label)]]).base64EncodedString(),
+            try PropertyListSerialization.data(fromPropertyList: ["library": [row(label)]], format: .xml, options: 0).base64EncodedString()
+        ]
+        for parent in encodedParents {
+            try refused(["vortx": parent])
+            try refused(["authenticatedSourceArchive": parent])
+        }
+        try refused(document(row("Fixture", extra: ["future": label])))
+        try refused(document(row("Fixture", extra: ["extension": ["name": label]])))
+        var missingID = row(label); missingID.removeValue(forKey: "id")
+        try refused(document(missingID))
+        var missingType = row(label); missingType.removeValue(forKey: "type")
+        try refused(document(missingType))
+        var malformedID = row(label); malformedID["id"] = "\n"
+        try refused(document(malformedID))
+        try refused(document(row(label, type: 1)))
+        try refused(document(row([label])))
+        try refused(document(row(["name": label])))
+        let malformed = ["[", "{", #"{"token":"unfinished"#, #"[{"password":"unfinished"#,
+                         #"{'token':'fixture'}"#, "{token=fixture;}", "[[REC]]", "[REC]no separator",
+                         "[" + String(repeating: "x", count: 65) + "] Film",
+                         #"[true] {"token":"fixture-hidden"}"#, #"[123] {"password":"fixture-hidden"}"#,
+                         #"[REC] {"token":"fixture-hidden"}"#, #"[REC] ["fixture-hidden"]"#,
+                         "[REC] bplist00broken", "[REC] <?xml broken", "[REC] \"quoted\"",
+                         "[null] trailing", "bplist00broken", "<?xml broken"]
+        for name in malformed { try refused(document(row(name))) }
+        // Display roles never flow through a quoted string, base64 or another decoded carrier.
+        let quotedLabel = String(decoding: try JSONSerialization.data(withJSONObject: label, options: [.fragmentsAllowed]), as: UTF8.self)
+        try refused(document(row(quotedLabel)))
+        for bytes in [Data(label.utf8), Data(#"{"token":"unfinished"#.utf8), Data([0x7b, 0xff, 0]), Data("bplist00broken".utf8)] {
+            try refused(document(row(bytes.base64EncodedString())))
+        }
+        let secretJSON = #"{"token":"fixture-hidden","keep":true}"#
+        let quotedSecret = String(decoding: try JSONSerialization.data(withJSONObject: secretJSON, options: [.fragmentsAllowed]), as: UTF8.self)
+        let secretPlist = try PropertyListSerialization.data(fromPropertyList: ["password": "fixture-hidden", "keep": true], format: .binary, options: 0)
+        let secretXML = String(decoding: try PropertyListSerialization.data(fromPropertyList: ["password": "fixture-hidden"], format: .xml, options: 0), as: UTF8.self)
+        let beforeBase64 = ["\u{FEFF}", " \t\u{FEFF}\u{2003}\n\u{FEFF}",
+                            String(repeating: " ", count: 64) + "\u{FEFF}" + String(repeating: "\u{00A0}", count: 32)]
+        for carrier in [Data(secretJSON.utf8).base64EncodedString(), Data(quotedSecret.utf8).base64EncodedString(),
+                        secretPlist.base64EncodedString(), Data(secretXML.utf8).base64EncodedString()] {
+            for leading in beforeBase64 {
+                try refused(document(row("[REC] " + leading + carrier)))
+                try refused(document(row("[REC] " + leading + carrier + "\u{FEFF} \t")))
+            }
+        }
+        let padding = [String(repeating: " ", count: 32), String(repeating: " ", count: 64),
+                       String(repeating: "\u{2003}", count: 64),
+                       "\u{FEFF}" + String(repeating: "\u{00A0}\u{2003}\n", count: 32) + "\u{FEFF}"]
+        for leading in padding {
+            for carrier in [secretJSON, quotedSecret, secretXML, "bplist00broken"] {
+                let suffix = leading + carrier
+                try refused(document(row("[REC] " + suffix)))
+                try refused(document(row("[REC] " + Data(suffix.utf8).base64EncodedString())))
+                // Normalize BOM-bearing UTF-16 before scanning all leading whitespace.
+                let utf16 = Data([0xff, 0xfe]) + suffix.data(using: .utf16LittleEndian)!
+                try refused(document(row("[REC] " + utf16.base64EncodedString())))
+            }
+            let paddedBinaryPlist = Data(leading.utf8) + secretPlist
+            try refused(document(row("[REC] " + paddedBinaryPlist.base64EncodedString())))
+        }
+        let encoded: [(String, (String) throws -> Object)] = [
+            (secretJSON, { try JSONSerialization.jsonObject(with: Data($0.utf8)) as! Object }),
+            (quotedSecret, { raw in
+                let inner = try JSONSerialization.jsonObject(with: Data(raw.utf8), options: [.fragmentsAllowed]) as! String
+                return try JSONSerialization.jsonObject(with: Data(inner.utf8)) as! Object
+            }),
+            (Data(secretJSON.utf8).base64EncodedString(), { try JSONSerialization.jsonObject(with: Data(base64Encoded: $0)!) as! Object }),
+            (secretPlist.base64EncodedString(), { try PropertyListSerialization.propertyList(from: Data(base64Encoded: $0)!, options: [], format: nil) as! Object })
+        ]
+        for (name, unwrap) in encoded {
+            // A tag cannot convert a structured or encoded credential suffix into display text.
+            try refused(document(row("[REC] " + name)))
+            let source = document(row(name)), original = try data(document(row(name)))
+            let clean = try VortxNativeBootstrapArchive.credentialFreeDocument(source)
+            let safeHost = try JSONSerialization.jsonObject(with: clean) as! Object
+            let safe = try unwrap(entry(safeHost)["name"] as! String)
+            check(safe["token"] == nil && safe["password"] == nil && safe["keep"] as? Bool == true)
+            let archive = try VortxNativeBootstrapArchive.encode(document: original)
+            try VortxNativeBootstrapArchive.validate(archive)
+            let root = try JSONSerialization.jsonObject(with: archive) as! Object
+            let expectedExclusions = ["/vortx/library/0/name/" + (name == secretPlist.base64EncodedString() ? "password" : "token")]
+            check((root["excludedCredentialPaths"] as! [String]) == expectedExclusions)
+            let stored = try unwrap(entry(root["hostDocument"] as! Object)["name"] as! String)
+            check(stored["token"] == nil && stored["password"] == nil && stored["keep"] as? Bool == true)
+            let retained = try VortxNativeBootstrapArchive.encode(document: data([:]), authenticatedSourceArchive: archive)
+            try VortxNativeBootstrapArchive.validate(retained)
+            let retainedRoot = try JSONSerialization.jsonObject(with: retained) as! Object
+            check((retainedRoot["excludedCredentialPaths"] as! [String]) == expectedExclusions)
+            let retainedName = try unwrap(entry(retainedRoot["authenticatedSourceArchive"] as! Object)["name"] as! String)
+            check(retainedName["token"] == nil && retainedName["password"] == nil && retainedName["keep"] as? Bool == true)
+            check(try data(source) == original)
+        }
+        let siblingSource = document(row(label, extra: ["token": "fixture-hidden"]))
+        let siblingClean = try JSONSerialization.jsonObject(with: VortxNativeBootstrapArchive.credentialFreeDocument(siblingSource)) as! Object
+        check(entry(siblingClean)["token"] == nil && entry(siblingClean)["name"] as? String == label)
+        let siblingArchive = try VortxNativeBootstrapArchive.encode(document: data(siblingSource))
+        try VortxNativeBootstrapArchive.validate(siblingArchive)
+        let siblingRoot = try JSONSerialization.jsonObject(with: siblingArchive) as! Object
+        check((siblingRoot["excludedCredentialPaths"] as! [String]) == ["/vortx/library/0/token"])
+        let siblingRetained = try VortxNativeBootstrapArchive.encode(document: data([:]), authenticatedSourceArchive: siblingArchive)
+        try VortxNativeBootstrapArchive.validate(siblingRetained)
+        let siblingRetainedRoot = try JSONSerialization.jsonObject(with: siblingRetained) as! Object
+        check((siblingRetainedRoot["excludedCredentialPaths"] as! [String]) == ["/vortx/library/0/token"])
+        let retainedSibling = entry(siblingRetainedRoot["authenticatedSourceArchive"] as! Object)
+        check(retainedSibling["token"] == nil && (retainedSibling["futureRow"] as! Object)["keep"] as? String == "unchanged")
+        do {
+            _ = try VortxNativeBootstrapArchive.credentialFreeDocument(document(row(label, extra: ["futureCredentialBox": "fixture-hidden"])))
+            preconditionFailure("Unknown credential carrier inherited library display semantics")
+        } catch VortxNativeBootstrapArchive.Failure.ambiguousCredentialCarrier {}
+        // Raw duplicate witnesses must reach the production scanner before Foundation collapses them.
+        let duplicates = [
+            #""future":{"token":"fixture-hidden"},"future":{"keep":true}"#,
+            #""future":{"keep":true},"future":{"token":"fixture-hidden"}"#,
+            #""na\u006de":"[REC] Title","name":"Fixture""#
+        ]
+        for members in duplicates {
+            let raw = Data((#"{"vortx":{"library":[{"id":"tt-fixture","type":"movie","name":"[REC] Title","# + members + "}]}}").utf8)
+            let originalHash = SHA256.hash(data: raw)
+            do {
+                _ = try VortxNativeBootstrapArchive.encode(document: raw)
+                preconditionFailure("Duplicate library source members were admitted")
+            } catch VortxNativeBootstrapArchive.Failure.malformed {}
+            check(SHA256.hash(data: raw) == originalHash)
+        }
+        let duplicateName = #"{"token":"fixture-hidden","to\u006ben":"fixture-other","keep":true}"#
+        for name in [duplicateName, Data(duplicateName.utf8).base64EncodedString()] {
+            do {
+                _ = try VortxNativeBootstrapArchive.credentialFreeDocument(document(row(name)))
+                preconditionFailure("Duplicate nested title members were admitted")
+            } catch VortxNativeBootstrapArchive.Failure.malformed {}
+        }
+        var messages: [String] = []
+        do {
+            _ = try VortxNativeBootstrapArchive.credentialFreeDocument(document(row("[private:token]")), diagnostics: { messages.append($0) })
+            preconditionFailure("Malformed library display label was admitted")
+        } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+        check(messages == ["archive_inspection result=failed reason=opaque_preference field=/vortx/library/*/name carrier=plain_text_prefix"])
+        print("Issue #262: typed legacy library labels, exact archive retention and unchanged-source credential/malformed controls passed")
     }
 
     static func archiveInspectionDiagnostics() throws {
