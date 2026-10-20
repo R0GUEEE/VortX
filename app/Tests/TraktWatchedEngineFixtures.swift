@@ -62,8 +62,8 @@ actor TraktAuth {
 }
 
 enum AuthenticatedHTTPTransportError: Error { case invalidResponse }
-struct AuthenticatedHTTPResponse { let data: Data; let statusCode: Int }
-struct AuthenticatedHTTPTransport {
+struct AuthenticatedHTTPResponse: Sendable { let data: Data; let statusCode: Int }
+struct AuthenticatedHTTPTransport: Sendable {
     static let shared = AuthenticatedHTTPTransport()
     static let snapshotResponseLimit = 8 * 1024 * 1024
     func send(_ request: URLRequest, allowedHosts: Set<String>, maxResponseBytes: Int) async throws
@@ -81,7 +81,7 @@ struct AuthenticatedHTTPTransport {
     }
 }
 
-struct PrivateExternalSyncStorage {
+struct PrivateExternalSyncStorage: Sendable {
     static func live(provider: String, file: String, legacyFiles: [String]) throws -> Self { Self() }
     func load() throws -> Data? { WatchedEngineEnvironment.shared.data() }
     func save(_ data: Data) throws { try WatchedEngineEnvironment.shared.save(data) }
@@ -93,17 +93,17 @@ enum ExternalSyncToggle {
         key == traktImportWatched && WatchedEngineEnvironment.shared.imports()
     }
 }
-struct WatchedIndex {
+struct WatchedIndex: Sendable {
     static let shared = WatchedIndex()
     func externalShadowChanged() {}
 }
 enum DiagnosticsLog { static func log(_ category: String, _ message: String) {} }
-enum TraktCollectionType { case movies, shows }
-enum TraktScrobbleItem {
+enum TraktCollectionType: Sendable { case movies, shows }
+enum TraktScrobbleItem: Sendable {
     case movie(TraktMovie)
     case episodeInShow(show: TraktShow, episode: TraktEpisode)
 }
-struct TraktService {
+struct TraktService: Sendable {
     static let shared = TraktService()
     func ratings(type: TraktCollectionType, expectedSession: TraktSessionID) async throws -> [TraktRatingEntry] {
         WatchedEngineEnvironment.shared.record("ratings-read"); return []
@@ -129,7 +129,7 @@ struct TraktService {
         WatchedEngineEnvironment.shared.record("rating-remove"); return 0
     }
 }
-struct TraktRatingsStore {
+struct TraktRatingsStore: Sendable {
     static let shared = TraktRatingsStore()
     static let changedNote = Notification.Name("fixture-ratings")
     var currentContext: (generation: Int, sessionID: TraktSessionID?) { (0, TraktAuth.storedSessionID) }

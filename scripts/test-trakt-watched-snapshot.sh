@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Source-only fixtures: no installed/live account, network, device or application launch.
-# Two distinct serial proof lanes: strict6 reader, then Swift5 full actual engine.
+# Default proof lanes: strict6 reader, then warnings-as-errors Swift5 full actual engine.
+# Optional strict6 engine mode is diagnostic preparation, not a promised migration pass.
 watched_project_root=${1:-"$PWD"}
 watched_candidate_root=${2:-"$watched_project_root"}
+watched_engine_lane="${VORTX_WATCHED_ENGINE_LANE:-swift5}"
+case "$watched_engine_lane" in
+  swift5) engine_mode_flags=(-swift-version 5 -warnings-as-errors) ;;
+  strict6) engine_mode_flags=(-swift-version 6 -strict-concurrency=complete -warnings-as-errors) ;;
+  *) echo "Unsupported engine proof lane: $watched_engine_lane" >&2; exit 2 ;;
+esac
 watched_script_path="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
 cd "$watched_project_root"
 repo_root="$PWD"
@@ -212,6 +219,7 @@ printf 'swift=%s\nnode=%s\nsdk=%s\nsdk_version=%s\ntarget=%s\n' \
   "$swift_bin" "$node_bin" "$host_sdk" "$host_sdk_version" "$host_target" > "$run_dir/toolchain.txt"
 printf 'module_cache=%s\ntmpdir=%s\ncompiler_deadline_seconds=600\nruntime_deadline_seconds=120\n' \
   "$run_dir/module-cache" "$run_dir/tmp" >> "$run_dir/toolchain.txt"
+printf 'engine_lane=%s\n' "$watched_engine_lane" >> "$run_dir/toolchain.txt"
 shasum -a 256 "$swift_bin" "$node_bin" >> "$run_dir/toolchain.txt"
 
 run_component swift-version 30 "$swift_bin" --version
@@ -228,10 +236,11 @@ expected_pass='PASS: Trakt watched complete-pagination, bounds, cursor and cance
 rg -Fxq -- "$expected_pass" "$run_dir/reader.runtime.log"
 printf '%s\n' 'PASS: strict Swift6 reader/actual model/raw utility component lane only'
 
-# Full actual engine retains its existing Swift5 async NSLock usage. No full strict6 claim.
+# Scoped locking removes async lock/unlock calls. Class-wide sendability remains separate;
+# strict6 mode exposes that compiler gate without suppression or a fake expected-failure pass.
 run_component engine.compile 600 "$swift_bin" -parse-as-library \
   -sdk "$host_sdk" -target "$host_target" -module-cache-path "$run_dir/module-cache" \
-  -swift-version 5 -D TRAKT_WATCHED_ENGINE_TESTS -D TRAKT_WATCHED_RAW_TESTS \
+  "${engine_mode_flags[@]}" -D TRAKT_WATCHED_ENGINE_TESTS -D TRAKT_WATCHED_RAW_TESTS \
   -whole-module-optimization -j 1 -num-threads 1 \
   "$watched_reader" "$watched_archive" "$watched_envelope" \
   app/SourcesShared/WatchedFold.swift app/SourcesShared/TraktModels.swift \
@@ -249,4 +258,5 @@ shasum -a 256 "$run_dir/inputs.sha256" "$run_dir/toolchain.txt" \
   "$run_dir/engine.compile.supervisor.json" "$run_dir/engine.runtime.supervisor.json" \
   > "$run_dir/final-receipt.sha256"
 stop_if_interrupted
-printf '%s\n' 'PASS: Swift5 full actual engine transaction fixtures; not full strict6/app/device/provider proof'
+printf 'PASS: %s full actual engine transaction fixtures with warnings-as-errors; not app/device/provider proof\n' \
+  "$watched_engine_lane"
