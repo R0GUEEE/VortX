@@ -52,6 +52,62 @@ enum VortxNativeOwnerHistorySource {
             accountBindingBytes = try VortxNativeHostFieldEvidence.canonicalData(binding.document)
         }
 
+        /// Raw acknowledged-state entry point for source-bearing snapshots. Decode only the
+        /// small admission projection; ownerHistory and unrelated native data never pass through
+        /// VortxJSON/Double. The caller still owns the original Session/FIFO/credential authority.
+        init(scope: VortxAccountScope, profileID: UUID, verifiedUID: String, snapshotData: Data) throws {
+            typealias Exact = OwnerHistoryExactJSON
+            let root = try Exact.Object(snapshotData)
+            let nativeBytes = try root.required("nativeSync")
+            let native = try Exact.Object(nativeBytes)
+            let profiles = try Exact.Object(Exact.Object(root.required("roster")).required("profiles"))
+            func decoded(_ bytes: Data) throws -> VortxJSON { try JSONDecoder().decode(VortxJSON.self, from: bytes) }
+            var projectedProfiles: [String: VortxJSON] = [:]
+            for id in Set([scope.ownerProfileID, profileID.uuidString]) {
+                let profile = try Exact.Object(profiles.required(id))
+                var projection: [String: VortxJSON] = [:]
+                for key in ["owner", "deleted", "account"] {
+                    if let bytes = profile[key] { projection[key] = try decoded(bytes) }
+                }
+                projectedProfiles[id] = .object(projection)
+            }
+            var projectedNative: [String: VortxJSON] = [
+                "scope": try decoded(native.required("scope")),
+                "ownerProfileId": try decoded(native.required("ownerProfileId"))
+            ]
+            if let slotsBytes = native["accountSlots"] {
+                let slots = try Exact.Object(slotsBytes)
+                if let slotBytes = slots[profileID.uuidString] {
+                    let slot = try Exact.Object(slotBytes)
+                    if let binding = slot["activeBinding"] {
+                        projectedNative["accountSlots"] = .object([profileID.uuidString:
+                            .object(["activeBinding": try decoded(binding)])])
+                    }
+                }
+            }
+            let projection: VortxJSON = .object([
+                "activeProfileId": try decoded(root.required("activeProfileId")),
+                "nativeSync": .object(projectedNative),
+                "roster": .object(["profiles": .object(projectedProfiles)])
+            ])
+            // Reuse the actual existing owner/shared role and causal binding checks, rather
+            // than introduce a second interpretation of admission from the raw envelope.
+            let checked = try Self(scope: scope, profileID: profileID, verifiedUID: verifiedUID, state: projection)
+            self.scope = checked.scope; ownerProfileID = checked.ownerProfileID
+            self.profileID = checked.profileID; self.verifiedUID = checked.verifiedUID
+            nativeDocumentBytes = try Exact.canonical(nativeBytes)
+            accountBindingBytes = checked.accountBindingBytes
+        }
+
+        /// Rechecks the same identity and complete raw native document; it never recaptures an
+        /// authority or grants a new read. Numeric spellings and unknown source fields remain exact.
+        func matches(snapshotData: Data) -> Bool {
+            guard let next = try? Self(scope: .init(account: scope, ownerProfileID: ownerProfileID.uuidString),
+                                       profileID: profileID, verifiedUID: verifiedUID, snapshotData: snapshotData)
+            else { return false }
+            return nativeDocumentBytes == next.nativeDocumentBytes && accountBindingBytes == next.accountBindingBytes
+        }
+
         /// A complete native document change, including unrelated pending native work, invalidates
         /// preparation. This is a preflight helper, NOT a substitute for the final kernel CAS.
         func matches(state: VortxJSON) -> Bool {

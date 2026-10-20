@@ -58,9 +58,66 @@ private final class OwnerSourceCalls: @unchecked Sendable {
                 return .init(data: bytes, statusCode: 200)
             })
     }
+    private static func rawCaptureChecks() throws {
+        typealias Exact = OwnerHistoryExactJSON
+        var root = try Exact.Object(JSONEncoder().encode(state()))
+        var native = try Exact.Object(root.required("nativeSync"))
+        let history = Data(#"{"futureNumbers":[-0.0,9007199254740993,1e999],"unknown":{"order":[3,1,2]}}"#.utf8)
+        native.set("ownerHistory", history)
+        root.set("nativeSync", try native.encoded())
+        // Deliberately not decodable through the generic Double-backed DTO. This is valid
+        // raw JSON, not a reason to drop its evidence or rebuild it from the presentation.
+        let bytes = try root.encoded()
+        let captured = try Source.Capture(scope: scope, profileID: owner, verifiedUID: uid, snapshotData: bytes)
+        check(captured.matches(snapshotData: bytes))
+        check(try Exact.Object(captured.nativeDocumentBytes).required("ownerHistory") == Exact.canonical(history))
+        check(captured.nativeDocumentBytes.range(of: Data("-0.0".utf8)) != nil)
+        check(captured.nativeDocumentBytes.range(of: Data("9007199254740993".utf8)) != nil)
+        check(captured.nativeDocumentBytes.range(of: Data("1e999".utf8)) != nil)
+        check(captured.accountBindingBytes == (try capture()).accountBindingBytes)
+
+        var changed = native
+        changed.set("ownerHistory", Data(#"{"futureNumbers":[0.0,9007199254740993,1e999],"unknown":{"order":[3,1,2]}}"#.utf8))
+        var changedRoot = root; changedRoot.set("nativeSync", try changed.encoded())
+        check(!captured.matches(snapshotData: try changedRoot.encoded()))
+        changed = native; changed.set("pendingUnknown", Data("true".utf8))
+        changedRoot = root; changedRoot.set("nativeSync", try changed.encoded())
+        check(!captured.matches(snapshotData: try changedRoot.encoded()))
+        changedRoot = root; changedRoot.set("activeProfileId", try Exact.string(child.uuidString))
+        check(!captured.matches(snapshotData: try changedRoot.encoded()))
+
+        let sharedBytes = try JSONEncoder().encode(state(profile: child))
+        let shared = try Source.Capture(scope: scope, profileID: child, verifiedUID: uid, snapshotData: sharedBytes)
+        check(shared.profileID == child && shared.ownerProfileID == owner)
+        check(shared.matches(snapshotData: sharedBytes))
+        for invalid in [try JSONEncoder().encode(state(profile: child, own: true)),
+                        Data(#"{"nativeSync":{},"nativeSync":{}}"#.utf8),
+                        Data(#"{"nativeSync":{"hidden":1,"\u0068idden":2}}"#.utf8)] {
+            do {
+                _ = try Source.Capture(scope: scope, profileID: child, verifiedUID: uid, snapshotData: invalid)
+                fatalError("invalid raw owner capture admitted")
+            } catch {}
+        }
+
+        // Native active-binding receipts, not roster appearance, determine the account role.
+        var bindingNative = native
+        bindingNative.set("accountSlots", Data(#"{"\#(owner.uuidString)":{"activeBinding":{"account":{"kind":"own","value":"foreign"},"revision":1,"transactionId":"synthetic-rebind"}}}"#.utf8))
+        var reboundRoot = root; reboundRoot.set("nativeSync", try bindingNative.encoded())
+        check(!captured.matches(snapshotData: try reboundRoot.encoded()))
+
+        let canonical = try Exact.canonical(Data(#"{"z":-0.0,"a":[9007199254740993,1e999]}"#.utf8))
+        check(canonical == Data(#"{"a":[9007199254740993,1e999],"z":-0.0}"#.utf8))
+        for bad in [#"{"x":1,"x":2}"#, #"{"x":01}"#, #"{"x":1.}"#,
+                    #"{"x":1e}"#, #"{"x":[1,]}"#, #"{"x":1} trailing"#] {
+            do { _ = try Exact.Object(Data(bad.utf8)); fatalError("malformed exact JSON admitted") } catch {}
+        }
+        print("PASS raw capture keeps original numeric/unknown evidence, binding roles and malformed rejection")
+    }
+
     static func main() async throws {
         let original = try capture()
         check(original.matches(state: state()))
+        try rawCaptureChecks()
         check(!original.matches(state: state(marker: "e\u{301}"))) // Swift String equality would miss this change.
         let unicodeScope = VortxAccountScope(account: "synthetic.é", ownerProfileID: owner.uuidString)
         let equivalentButDistinct: VortxJSON = .object([
