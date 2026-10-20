@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { fork } = require('node:child_process');
+const xperienceInputs = require('../test/xperience-harness-inputs.cjs');
 const root = path.resolve(__dirname, '..');
 let interrupted = 0;
 let active;
@@ -147,6 +148,7 @@ function extractDeclaration(source, signature) {
 }
 function extractRestoreAdmission() {
     const manager = captured.get('app/SourcesShared/VortXSyncManager.swift').toString('utf8');
+    const observation = xperienceInputs.observationProperty(manager);
     const keychain = captured.get('app/SourcesShared/Keychain.swift').toString('utf8');
     const credential = captured.get('app/SourcesShared/CredentialScope.swift').toString('utf8');
     const methods = [
@@ -169,6 +171,7 @@ function extractRestoreAdmission() {
     write('restore-extraction.json', JSON.stringify({
         methods: methods.map(({signature, bytes}) => ({ signature, sha256: digest(Buffer.from(bytes)) })),
         propertiesSHA256: digest(Buffer.from(properties)), secureBoundarySHA256: digest(Buffer.from(secure)),
+        observationPropertySHA256: observation ? digest(Buffer.from(observation)) : null,
         methodTransformations: [],
         apertures: ['inert encrypted-store/key/storage', 'fake secure backend', 'HTTP/crypto', 'roster decoder', 'detached seed'],
         exclusions: ['full native mount', 'OS Keychain/entitlements', 'device login', 'HTTP absence contract']
@@ -185,7 +188,7 @@ function extractRestoreAdmission() {
         throw new Error('Silent empty-seed error folding returned');
     }
     return template.replace('/* PRODUCTION_SECURE_BOUNDARY */', secure)
-        .replace('/* PRODUCTION_DECLARATIONS */', properties + '\n' + methods.map(item => item.bytes).join('\n\n'));
+        .replace('/* PRODUCTION_DECLARATIONS */', observation + '\n' + properties + '\n' + methods.map(item => item.bytes).join('\n\n'));
 }
 
 async function run(label, command, timeout, helper, cwd = root) {
@@ -258,7 +261,8 @@ async function main() {
             'app/SourcesShared/VortxNativeHostPreferences.swift', 'app/SourcesShared/VortxNativeSession.swift',
             'app/SourcesShared/VortxNativeWatchedArchive.swift', 'app/SourcesShared/VortxNativeBootstrapArchive.swift'];
     } else if (stage === 'restore') {
-        sources = [];
+        capture('test/xperience-harness-inputs.cjs');
+        sources = xperienceInputs.observationInputs(capture(xperienceInputs.observationInputList).toString('utf8'));
         ['app/SourcesShared/VortXSyncManager.swift', 'app/SourcesShared/Keychain.swift',
             'app/SourcesShared/CredentialScope.swift', 'app/Tests/NativeRestoreAdmissionTests.swift'].forEach(capture);
     } else if (stage === 'bootstrap') {

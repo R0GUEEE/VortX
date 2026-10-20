@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/native-watched-swift-inputs.sh
+source scripts/xperience-observation-swift-inputs.sh
 sdk="${VORTX_SYNC_TEST_SDK:?exact reviewed macOS static SDK required}"
 library="$sdk/libvortx_ffi.a"
 headers="$sdk/Headers/vortx"
@@ -18,14 +19,16 @@ fi
 node test/apple-sync-manager.mjs --extract "$source_file" "$fixture_dir/Combined.swift"
 sed -n '1,/^\/\/\/ The profile roster and the active selection\./{ /^\/\/\/ The profile roster and the active selection\./!p; }' app/SourcesShared/Profiles.swift > "$fixture_dir/UserProfile.swift"
 { printf '%s\n' 'import Foundation'; sed -n '/^struct ProfileDiscoveryPreferences: /,/^}$/p' app/SourcesShared/ProfileDiscoveryPreferences.swift; } > "$fixture_dir/Discovery.swift"
-xcrun swiftc -swift-version 6 -parse-as-library -strict-concurrency=complete -warnings-as-errors \
+nice -n 15 xcrun swiftc -j 1 -num-threads 1 -whole-module-optimization -swift-version 6 -parse-as-library -strict-concurrency=complete -warnings-as-errors \
     -D VORTX_NATIVE_DATA_ENGINE -D VORTX_ENGINE_STATE_BRIDGE -D VORTX_ENGINE_RESOURCE_HOST -I "$headers" \
     app/SourcesShared/VortxNativeRuntime.swift app/SourcesShared/VortxResourceBridge.swift \
     app/SourcesShared/VortxResourceProjection.swift app/SourcesShared/VortxNativeBootstrapArchive.swift \
     app/SourcesShared/VortxNativeHostPreferences.swift "${native_watched_swift_inputs[@]}" \
+    "${xperience_observation_swift_inputs[@]}" \
     app/SourcesShared/VortxNativeSession.swift app/SourcesShared/VortxNativeProfiles.swift app/SourcesShared/ProfileAddonPreferences.swift \
     app/SourcesShared/VortxNativeProfileEditHost.swift app/SourcesShared/VortxProfileOverlayWitness.swift app/SourcesShared/NativePreferenceIntentStore.swift \
     app/SourcesShared/VortXSyncCrypto.swift app/SourcesShared/NativeForegroundSyncPolicy.swift \
+    app/SourcesShared/VortxNativeOwnAccountProducer.swift app/SourcesShared/AuthenticatedHTTPTransport.swift app/SourcesShared/LinkAuthService.swift \
     app/SourcesShared/SyncDocumentRevisionPolicy.swift app/SourcesShared/ProfileRosterSyncPolicy.swift app/SourcesShared/LegacySyncRetention.swift \
     app/SourcesShared/SettingsDirtyKeys.swift app/SourcesShared/SyncBackupUploadFailure.swift \
     "$fixture_dir/UserProfile.swift" "$fixture_dir/Discovery.swift" "$fixture_dir/Combined.swift" \

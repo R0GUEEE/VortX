@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import xperienceInputs from './xperience-harness-inputs.cjs';
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 if (process.argv[2] === '--extract') {
@@ -63,7 +64,11 @@ if (process.argv[2] === '--extract') {
     '    private func pushSyncDocAt(', '    private func commitNativePulledDocument(', '    private func applyNativeGlobals(',
     '    static func ownedAddons(', '    func syncDown(', '    private func handle(', '    private func startPoll()'];
   let combined = await readFile('app/Tests/AppleSyncReceivePublicationPeer.swift', 'utf8');
+  const observation = xperienceInputs.observationProperty(manager.text);
+  if (observation) receipts.push({ path: manager.path, marker: 'exact Xperience observation property',
+    sourceSHA256: sha256(manager.text), sliceSHA256: sha256(observation) });
   combined += '\nextension VortXSyncManager {\n'
+    + observation + '\n'
     + ['    private struct NativeReceiveReceipt {', '    private enum VersionedPull ', '    private enum PushOutcome ', '    private struct PendingDebridApply:',
       '    private enum ProviderApplyService:', '    private enum ProviderApplyValue:', '    private struct PendingProviderApply:']
       .map(marker => member(manager, marker)).join('\n')

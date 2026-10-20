@@ -179,6 +179,7 @@ struct HomeView: View {
                         // Every other Home section renders in the user's arranged order, minus the hidden ones
                         // (HomeRailPreferences). Default order + nothing hidden == today's Home exactly, so this
                         // is a no-op until the user customizes via the "Customize Home" manage screen.
+                        XperienceHomeEntry()
                         ForEach(railPrefs.arrange(HomeRail.tvDefaultOrder)) { section in
                             if !railPrefs.isHidden(section) {
                                 homeSection(section)
@@ -202,6 +203,9 @@ struct HomeView: View {
                     .ignoresSafeArea()   // absolute top-left, clear of the hero title below
             }
             .background(Theme.Palette.canvas.ignoresSafeArea())
+            .navigationDestination(for: XperienceHomeRoute.self) { _ in
+                XperienceCollectionsBrowserView()
+            }
         }
     }
 

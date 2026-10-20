@@ -1538,6 +1538,7 @@ struct iOSHomeView: View {
                     // Every other Home section renders in the user's arranged order, minus the hidden ones
                     // (HomeRailPreferences). Default order + nothing hidden == today's Home exactly, so this is
                     // a no-op until the user customizes via the "Customize Home" editor.
+                    XperienceHomeEntry()
                     ForEach(railPrefs.arrange(HomeRail.iOSDefaultOrder)) { section in
                         if !railPrefs.isHidden(section) {
                             homeSection(section)
@@ -1666,6 +1667,12 @@ struct iOSHomeView: View {
             }
             .navigationDestination(for: CinemaBoardCatalogTarget.self) { target in
                 CinemaBoardCatalogBrowse(target: target, path: $path)
+            }
+            .navigationDestination(for: XperienceHomeRoute.self) { _ in
+                XperienceCollectionsBrowserView()
+                    #if os(macOS)
+                    .macBackAffordance()
+                    #endif
             }
             .iOSPlayerCover($player, account: account, core: core)
         }

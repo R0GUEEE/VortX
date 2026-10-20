@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/native-watched-swift-inputs.sh
+source scripts/xperience-observation-swift-inputs.sh
 mode="${1:?choose components or checkpoint}"
 case "$mode" in
   components) entry=app/Tests/XperienceNativePersistenceTests.swift ;;
@@ -37,11 +38,12 @@ inputs=(
   app/SourcesShared/CredentialScope.swift app/SourcesShared/Keychain.swift app/SourcesShared/VortXSyncCrypto.swift
   app/SourcesShared/XperienceCollections.swift app/SourcesShared/XperienceAddonBinding.swift
   app/SourcesShared/XperienceImportPrivacy.swift app/SourcesShared/XperienceNativePersistence.swift
+  "${xperience_observation_swift_inputs[@]}"
   "$entry"
 )
 # Hash actual production inputs, including the source of each narrowly extracted value type.
 shasum -a 256 app/SourcesShared/Profiles.swift app/SourcesShared/ProfileDiscoveryPreferences.swift \
-  scripts/native-watched-swift-inputs.sh "$0" "$header" "$library" > "$storage_test_dir/input-sha256.txt"
+  scripts/native-watched-swift-inputs.sh scripts/xperience-observation-swift-inputs.sh "$0" "$header" "$library" > "$storage_test_dir/input-sha256.txt"
 for input in "${inputs[@]}"; do
   [[ "$input" == -lz ]] || shasum -a 256 "$input" >> "$storage_test_dir/input-sha256.txt"
 done

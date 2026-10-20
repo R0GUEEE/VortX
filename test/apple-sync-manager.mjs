@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import xperienceInputs from './xperience-harness-inputs.cjs';
 
 const members = ['nativeGlobalEdits', 'nativeGlobalValue', 'nativeDirtySettingsForExport', 'nativeDirtySettingIsExported', 'clearPushedDirtySettings', 'ensureNativeCheckpoint',
   'syncUp', 'finishSyncUp', 'mergeLocalIntoDoc', 'pullDocVersionedResult', 'pushSyncDocAt', 'pushDerivedDoc', 'requestSyncSoon'];
@@ -23,13 +24,41 @@ if (process.argv[2] === '--extract') {
   });
   selected.push(source.match(/^    private enum VersionedPull .*$/m)[0],
     source.match(/^    private enum PushOutcome .*$/m)[0]);
+  const observation = xperienceInputs.observationProperty(source);
+  if (observation) selected.push(observation);
   const profiles = await readFile('app/SourcesShared/Profiles.swift', 'utf8');
   const preferenceFixture = await readFile('app/Tests/NativePreferenceAcknowledgementTests.swift', 'utf8');
   const block = (text, marker) => {
     const start = text.indexOf(marker); assert(start >= 0, marker);
+    assert.equal(text.indexOf(marker, start + marker.length), -1, `ambiguous ${marker}`);
     const end = text.indexOf('\n    }', start); assert(end > start, marker);
     return text.slice(start, end + 6);
   };
+  const exactDeclaration = (text, expression, label) => {
+    const matches = [...text.matchAll(expression)];
+    assert.equal(matches.length, 1, `missing or ambiguous ${label}`);
+    return matches[0][0];
+  };
+  // Extract real conversion bookkeeping only when the selected manager calls it.
+  // A legitimate older baseline without that call does not acquire newer policy.
+  const usesConversion = selected.some(value => value.includes('nativeLegacyConversionDecision('));
+  let commitGeneration = '';
+  selected.push(block(source, '    private struct NativeLegacyPreparation {'));
+  if (usesConversion) {
+    commitGeneration = exactDeclaration(source, /^    private var nativeDocumentCommitGeneration: UInt64 = 0$/gm, 'conversion generation');
+    selected.push(exactDeclaration(source, /^    private static let nativeExportKeys = \[[^\]]+\]/gm, 'native export keys'),
+      ...['    private func nativeLegacyConversionDigest(', '    private func nativeLegacyConversionKey(',
+        '    private func nativeLegacyConversionDecision(', '    private func recordNativeLegacyConversion(',
+        '    static func resolveRoster('].map(marker => block(source, marker)));
+  }
+  const backup = await readFile('app/SourcesShared/SettingsBackup.swift', 'utf8');
+  const backupDecoder = [exactDeclaration(backup, /^    static let formatTag = .*$/gm, 'backup format'),
+    ...['    struct Envelope:', '    enum RestoreError:', '    static func decodeDomain('].map(marker => block(backup, marker))].join('\n');
+  let peerSource = await readFile('app/Tests/AppleSyncManagerPeer.swift', 'utf8');
+  const managerAnchor = '@MainActor private final class ManagerHarness {';
+  assert.equal(peerSource.split(managerAnchor).length, 2, 'unique manager environment');
+  // Stored instance declarations cannot be placed in the appended extension.
+  peerSource = peerSource.replace(managerAnchor, managerAnchor + '\n' + commitGeneration);
   selected.push(block(source, '    private struct DerivedSyncDoc {'),
     block(source, '    private static func documentVersion('),
     source.slice(source.indexOf('    private func dirtySettingsKey('), source.indexOf('    private var dirtySettings:')),
@@ -84,7 +113,8 @@ if (process.argv[2] === '--extract') {
     .replaceAll('PlaybackMutationTarget', 'ManagerPlaybackMutationTarget')
     .replaceAll('VortXSyncManager.shared', 'ManagerHarness.shared');
   const discovery = await readFile('app/SourcesShared/ProfileDiscoveryPreferences.swift', 'utf8');
-  await writeFile(process.argv[4], (await readFile('app/Tests/AppleSyncManagerPeer.swift', 'utf8')) + managerEnvironment
+  await writeFile(process.argv[4], peerSource + managerEnvironment
+    + '\nextension SettingsBackup {\n' + backupDecoder + '\n}\n'
     + '\nextension ProfileStore {\n' + productionPreferences.join('\n') + '\n}\nextension ProfileDiscoveryPreferencesStore {\n'
     + block(discovery, 'enum Key {') + '\n}\nextension ProfileStore {\n' + productionProfileSave + '\n}\nextension ManagerHarness {\n'
     + productionIntentMethods + '\n' + selected.join('\n') + '\n}\n');
@@ -498,6 +528,10 @@ try {
       revisionPolicySHA256: await digest('app/SourcesShared/SyncDocumentRevisionPolicy.swift'),
       rosterPolicySHA256: await digest('app/SourcesShared/ProfileRosterSyncPolicy.swift'),
       retentionSHA256: await digest('app/SourcesShared/LegacySyncRetention.swift'),
+      conversionPolicySHA256: await digest('app/SourcesShared/NativeForegroundSyncPolicy.swift'),
+      conversionAuthoritySHA256: await digest('app/SourcesShared/VortxNativeOwnAccountProducer.swift'),
+      backupDecoderSourceSHA256: await digest('app/SourcesShared/SettingsBackup.swift'),
+      conversionBoundary: 'Real manager conversion generation, type, digest, decision, record and roster resolver are extracted. The existing legacy preparation collaborator returns empty synthetic material; peer merge rejects any nonempty material or authority/archive before dispatch. The real SettingsBackup decoder retains this harness existing synthetic isSyncable policy. Producer/transport source compiles for the real Authority type; no producer fetch or direct provider HTTP is invoked.',
       binarySHA256: await digest(peerBinary), librarySHA256: process.env.VORTX_SYNC_TEST_LIBRARY_SHA256,
       headerSHA256: process.env.VORTX_SYNC_TEST_HEADER_SHA256,
       boundary: 'Actual extracted manager upload/merge/crypto/ACK/retry/queue and documentVersion plus native preference context/value/snapshot/admission/prepare/finish/replay, startup intent wake, local settings dirty detection, projection quarantine/mount gate and cloud receipt ACK methods; actual Profiles.saveNative and preference projection acknowledgement helpers. Real NativePreferenceIntentStore encrypted journal, native C ABI sessions, profile mutation/project converters and checkpoint stores. Journal directory and synthetic key are injected only by the peer fixture; no user Application Support or Keychain is read. Loopback exact-base CAS relay model with bodyless authenticated404, null/0 create, base+1 update, conflict reread, strict verdicts and accepted lost-response recovery. Session mount, credential and legacy UserDefaults collaborators are synthetic. Full LegacySyncRetention is a compiled input but this native path does not execute legacy summary serialization. Does not exercise installed app/UI, complete syncDown, providers, WebSocket or deployed worker.' }, null, 2));

@@ -8,174 +8,6 @@ import UIKit       // UIApplication.beginBackgroundTask for the on-background sy
 #endif
 #endif
 
-enum CredentialOwnerRetryOutcome<Value: Sendable>: Sendable {
-    case acquired(Value)
-    case exhausted
-    case superseded
-}
-
-struct CredentialProviderRetryOutcome: Equatable, Sendable {
-    let firstCompleted: Bool
-    let secondCompleted: Bool
-    let superseded: Bool
-
-    var completed: Bool { firstCompleted && secondCompleted }
-}
-
-/// Exact sign-out transaction ordering shared by the immediate and retry paths. Durable deletion happens
-/// while the pre-sign-out capture is still current. Only a second exact fence check can authorize binding
-/// every credential store to the signed-out owner and publishing the live signed-out projection.
-@MainActor
-enum CredentialSignOutCoordinator {
-    static func complete(
-        isPreSignOutCurrent: () -> Bool,
-        deletePersistedSession: () -> CredentialMutationResult,
-        bindSignedOutOwner: () -> Bool,
-        publishSignedOutState: () -> Void
-    ) -> Bool {
-        guard isPreSignOutCurrent() else { return false }
-        guard deletePersistedSession() == .success else { return false }
-        guard isPreSignOutCurrent() else { return false }
-        guard bindSignedOutOwner() else { return false }
-        publishSignedOutState()
-        return true
-    }
-}
-
-/// Small injected coordinator shared by the production owner and provider retry paths. Keeping the loop here
-/// makes its bounded suspension, generation checks, and per-provider completion state executable without the
-/// app graph; all actual credential mutation remains in the main-actor closures supplied by the manager.
-@MainActor
-enum CredentialRetryCoordinator {
-    static func launch<Success: Sendable>(
-        _ operation: @escaping @MainActor @Sendable () async -> Success
-    ) -> Task<Success, Never> {
-        Task { @MainActor in await operation() }
-    }
-
-    static func acquireOwner<Value: Sendable>(
-        attempts: ClosedRange<Int>,
-        delayBeforeFirstAttempt: Bool = false,
-        isCurrent: @MainActor () -> Bool,
-        tryAcquire: @MainActor (Int) -> Value?,
-        denied: @MainActor (Int) -> Void,
-        exhausted: @MainActor () -> Void,
-        dropped: @MainActor () -> Void = {},
-        sleepBeforeRetry: @MainActor () async -> Bool
-    ) async -> CredentialOwnerRetryOutcome<Value> {
-        var shouldDelay = delayBeforeFirstAttempt
-        for attempt in attempts {
-            guard !Task.isCancelled, isCurrent() else {
-                dropped()
-                return .superseded
-            }
-            if shouldDelay {
-                guard await sleepBeforeRetry() else {
-                    dropped()
-                    return .superseded
-                }
-            }
-            guard !Task.isCancelled, isCurrent() else {
-                dropped()
-                return .superseded
-            }
-            if let value = tryAcquire(attempt) { return .acquired(value) }
-            denied(attempt)
-            guard attempt != attempts.upperBound else {
-                exhausted()
-                return .exhausted
-            }
-            shouldDelay = true
-        }
-        exhausted()
-        return .exhausted
-    }
-
-    /// Each provider owns independent completion state under the same capture fence. A successful provider
-    /// is never claimed or finalized again while the other provider consumes its remaining bounded retries.
-    static func finalizeProviders<Claim>(
-        maximumAttempts: Int,
-        isCurrent: @MainActor () -> Bool,
-        firstClaim: @MainActor () -> Claim,
-        firstClaimSucceeded: @MainActor (Claim) -> Bool,
-        firstNeedsFinalization: @MainActor (Claim) -> Bool,
-        firstFinalize: @MainActor () async -> Bool,
-        secondClaim: @MainActor () -> Claim,
-        secondClaimSucceeded: @MainActor (Claim) -> Bool,
-        secondNeedsFinalization: @MainActor (Claim) -> Bool,
-        secondFinalize: @MainActor () async -> Bool,
-        sleepBeforeRetry: @MainActor () async -> Bool
-    ) async -> CredentialProviderRetryOutcome {
-        var firstCompleted = false
-        var secondCompleted = false
-
-        guard maximumAttempts > 0 else {
-            return CredentialProviderRetryOutcome(
-                firstCompleted: false,
-                secondCompleted: false,
-                superseded: false)
-        }
-
-        for attempt in 1...maximumAttempts {
-            guard !Task.isCancelled, isCurrent() else {
-                return CredentialProviderRetryOutcome(
-                    firstCompleted: firstCompleted,
-                    secondCompleted: secondCompleted,
-                    superseded: true)
-            }
-
-            if !firstCompleted {
-                let claim = firstClaim()
-                if firstClaimSucceeded(claim) {
-                    if firstNeedsFinalization(claim) {
-                        let finalized = await firstFinalize()
-                        guard !Task.isCancelled, isCurrent() else {
-                            return CredentialProviderRetryOutcome(
-                                firstCompleted: firstCompleted,
-                                secondCompleted: secondCompleted,
-                                superseded: true)
-                        }
-                        firstCompleted = finalized
-                    } else {
-                        firstCompleted = true
-                    }
-                }
-            }
-
-            if !secondCompleted {
-                let claim = secondClaim()
-                if secondClaimSucceeded(claim) {
-                    if secondNeedsFinalization(claim) {
-                        let finalized = await secondFinalize()
-                        guard !Task.isCancelled, isCurrent() else {
-                            return CredentialProviderRetryOutcome(
-                                firstCompleted: firstCompleted,
-                                secondCompleted: secondCompleted,
-                                superseded: true)
-                        }
-                        secondCompleted = finalized
-                    } else {
-                        secondCompleted = true
-                    }
-                }
-            }
-
-            if firstCompleted && secondCompleted {
-                return CredentialProviderRetryOutcome(
-                    firstCompleted: true,
-                    secondCompleted: true,
-                    superseded: false)
-            }
-            guard attempt < maximumAttempts, await sleepBeforeRetry() else { break }
-        }
-
-        return CredentialProviderRetryOutcome(
-            firstCompleted: firstCompleted,
-            secondCompleted: secondCompleted,
-            superseded: Task.isCancelled || !isCurrent())
-    }
-}
-
 #if !CREDENTIAL_RETRY_COORDINATOR_STANDALONE
 
 /// Bridges the thread-agnostic `VortXSyncManager.addonOrderChangedNote` to a `@Published` the add-on list
@@ -3285,6 +3117,9 @@ final class VortXSyncManager: ObservableObject {
         guard isCurrent(capture), dataKey != nil else { return nil }
         let (code, json) = await request("GET", "/v1/backup", auth: true, credentialCapture: capture)
         guard isCurrent(capture) else { return nil }
+        #if VORTX_NATIVE_DATA_ENGINE
+        if code == 200 || code == 404 { Self.xperienceExportObservation.observe() }
+        #endif
         guard code == 200, let doc = json?["document"] as? String,
               let pt = openSyncDocument(doc, version: (json?["version"] as? Int) ?? 0) else { return nil }
         return try? Self.decodeDecryptedSyncDocument(pt)
@@ -3304,6 +3139,9 @@ final class VortXSyncManager: ObservableObject {
         guard isCurrent(capture), dataKey != nil else { return .failed }
         let (code, json) = await request("GET", "/v1/backup", auth: true, credentialCapture: capture)
         guard isCurrent(capture) else { return .failed }
+        #if VORTX_NATIVE_DATA_ENGINE
+        if code == 200 || code == 404 { Self.xperienceExportObservation.observe() }
+        #endif
         if code == 404 { return .empty }                 // no backup yet
         guard code == 200 else { return .failed }        // network/server error: do not clobber
         guard let json else { return .failed }
@@ -3361,6 +3199,10 @@ final class VortXSyncManager: ObservableObject {
             guard let ifNoneMatch, etag == "\"\(ifNoneMatch)\"" else { return failed(.conditionalResponseInvalid) }
             return .unchanged(version: ifNoneMatch)
         }
+        #if VORTX_NATIVE_DATA_ENGINE
+        // A newly observed source retires an older full-export witness before any mutation.
+        if code == 200 || code == 404 { Self.xperienceExportObservation.observe() }
+        #endif
         if code == 404 { return .empty }                                  // no backup yet
         // request() returns code 0 for a thrown URLSession error (offline / DNS / TLS / timeout) and 5xx is a
         // server fault: both are transient, and both are exactly the "silently returns false" case of #145.
@@ -4045,7 +3887,8 @@ final class VortXSyncManager: ObservableObject {
     /// intent is captured once per push; a newer edit stays pending until its own push is acknowledged.
     /// Returns nil on a FAILED pull (network error / undecryptable doc): a failed pull must NEVER overwrite
     /// the account's existing document, or it wipes keys other surfaces wrote.
-    private func mergeLocalIntoDoc(orderIntent: AddonOrderIntent?, credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil) async -> DerivedSyncDoc? {
+    private func mergeLocalIntoDoc(orderIntent: AddonOrderIntent?, credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil,
+                                   exportReadWitness: (@MainActor () -> Void)? = nil) async -> DerivedSyncDoc? {
         let capture = suppliedCapture ?? credentialAuthority.capture()
         guard isCurrent(capture), isSignedIn else { return nil }
         let capturedKey = dataKey
@@ -4060,6 +3903,7 @@ final class VortXSyncManager: ObservableObject {
         let baseRevision: Int?
         let candidateRead = await pullDocVersionedResult(credentialCapture: capture)
         guard isCurrent(capture), sourceIsCurrent() else { return nil }
+        exportReadWitness?()
         switch candidateRead {
         case .failed, .unchanged: return nil
         case .empty:
@@ -6209,6 +6053,48 @@ final class VortXSyncManager: ObservableObject {
                 await self.syncDown(credentialCapture: capture, routineReceive: true)
             }
         }
+    }
+}
+#endif
+
+// MARK: - Complete account sizing witness for confirmed manual collection save
+#if VORTX_NATIVE_DATA_ENGINE
+extension VortXSyncManager {
+    nonisolated private static let xperienceExportObservation = XperienceExportObservationFence()
+    /// Called ONLY after explicit Save confirmation, never for file selection or preview.
+    /// Reuses the real account export preparation, including authenticated pull, peer/event
+    /// reconciliation and provider projection. Ordinary synchronization MAY checkpoint before
+    /// the collection edit. This method does not upload and never follows a collection URL.
+    @MainActor func prepareXperienceExportBudget(capture: CredentialScopeRegistry.Capture,
+        sourceIsCurrent: @MainActor () -> Bool) async throws -> XperiencePreparedExport {
+        guard isSignedIn, isCurrent(capture), sourceIsCurrent(), case .account = capture.scope,
+              let key = dataKey, key.count == 32 else { throw XperiencePersistenceFailure.exportBaseUnavailable }
+        var observedGeneration: UUID?
+        guard let prepared = await mergeLocalIntoDoc(orderIntent: nil, credentialCapture: capture,
+            exportReadWitness: { observedGeneration = Self.xperienceExportObservation.capture() }) else {
+            throw XperiencePersistenceFailure.exportBaseUnavailable
+        }
+        try Task.checkCancellation()
+        guard isCurrent(capture), dataKey == key, sourceIsCurrent(), prepared.credentialCapture == capture,
+              prepared.sourceIsCurrent(), let observedGeneration else { throw XperiencePersistenceFailure.staleContext }
+        let full = try JSONDecoder().decode(VortxJSON.self,
+            from: JSONSerialization.data(withJSONObject: prepared.document))
+        // Capture secure provider evidence under the existing store lock. The preparation and
+        // capture contain no await here; a worker-visible change is still detected by exact bytes.
+        let witness = try VortxNativeProviderCredentials.withStoreLock { () throws -> XperienceExportWitnessAuthority in
+            let state = try nativeProviderState(capture: capture)
+            guard XperienceExactEvidence.json(try state.document, full["nativeProviderCredentials"]),
+                  case .value(let bytes) = Keychain.confirmedString("vortx.native.providerState." + capture.namespace) else {
+                throw XperiencePersistenceFailure.exportBaseUnavailable
+            }
+            return .init(observation: Self.xperienceExportObservation, generation: observedGeneration,
+                providerSlot: "vortx.native.providerState." + capture.namespace, providerBytes: bytes)
+        }
+        // Verified official BACKUP_CHUNK_WRITES capability is a release prerequisite. Custom
+        // servers need a separately verified cap rather than inheriting this official contract.
+        let budget = try XperienceExportBudget(completeAccountDocument: full,
+            maximumSealedBytes: XperienceExportBudget.officialMaximumSealedBytes, writeV2: Self.writeSyncDocV2)
+        return .init(budget: budget, authority: witness)
     }
 }
 #endif

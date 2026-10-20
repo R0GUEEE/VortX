@@ -35,6 +35,9 @@ struct IntegrationsSettingsView: View {
                 // 4. Nuvio: opens the paste-URL importer (WS6).
                 NuvioConnectCard()
 
+                // JSON layout imports are separate from the existing manifest-link importer.
+                XperienceCollectionsConnectCard()
+
                 // 5. List import: paste a public Letterboxd / MDBList / Trakt list URL and browse it as a
                 //    native Home row (ListImport). Optional, on-device only, never touches account/library.
                 ListImportConnectCard()

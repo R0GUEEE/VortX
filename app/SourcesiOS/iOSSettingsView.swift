@@ -2393,7 +2393,8 @@ private enum SettingsSearchSection: CaseIterable {
         case .account: return ["vortx account", "sync", "sign in", "integrations", "stremio", "trakt", "simkl",
                                "import", "metadata", "tmdb", "mdblist", "fanart", "debrid", "real-debrid",
                                "poster artwork", "erdb", "ratings", "iptv", "live tv", "playlist",
-                               "media server", "plex", "jellyfin", "emby", "api key"]
+                               "media server", "plex", "jellyfin", "emby", "api key",
+                               "xperience", "nuvio", "collections.json", "import collections"]
         case .stremioMirror: return ["mirror", "two-way sync", "add-ons", "library", "continue watching"]
         case .playback: return ["direct links only", "audio output", "video upscaling", "streaming cache",
                                 "player engine", "dolby vision", "mkv", "skip step", "auto-skip", "intro",

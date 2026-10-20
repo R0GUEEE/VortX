@@ -799,6 +799,7 @@ final class CoreBridge: ObservableObject {
                               capture: CredentialScopeRegistry.Capture, hostProfiles: [UserProfile] = []) async throws {
         let installGeneration = UUID()
         nativeFacadeLock.withLock { nativeInstallGeneration = installGeneration }
+        NotificationCenter.default.post(name: Self.xperienceContextChangedNote, object: nil)
         guard CredentialScopeRegistry.shared.isCurrent(capture), session.scope.account == capture.namespace else {
             session.revoke(); throw VortxNativeError.invalidSnapshot
         }
@@ -816,6 +817,9 @@ final class CoreBridge: ObservableObject {
             guard CredentialScopeRegistry.shared.isCurrent(capture),
                   let data = try? JSONSerialization.data(withJSONObject: ["name": "NewState", "args": fields]) else { return }
             self?.handleEvent(data)
+            if !Set(fields).isDisjoint(with: ["ctx", "native_state", "native_host_preferences"]) {
+                NotificationCenter.default.post(name: Self.xperienceContextChangedNote, object: nil)
+            }
         }
         let result = nativeFacadeLock.withLock { () -> (Bool, VortxNativeCoreFacade?) in
             guard CredentialScopeRegistry.shared.isCurrent(capture), nativeInstallGeneration == installGeneration else { return (false, nil) }
@@ -854,6 +858,7 @@ final class CoreBridge: ObservableObject {
         nativeFacadeLock.withLock { nativePublishedAccountGeneration = nil }
         invalidatePublicationEpoch()
         clearNativePublishedState()
+        NotificationCenter.default.post(name: Self.xperienceContextChangedNote, object: nil)
     }
     private func clearNativePublishedState() {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -6417,3 +6422,85 @@ private func coreEventCallback(ctx: UnsafeMutableRawPointer?, data: UnsafePointe
     let bytes = Data(bytes: data, count: len) // copy synchronously, `data` is only valid during this call
     CoreBridge.shared.handleEvent(bytes)
 }
+
+// MARK: - Captured Xperience host-profile adapter
+#if VORTX_NATIVE_DATA_ENGINE
+extension CoreBridge {
+    static let xperienceContextChangedNote = Notification.Name("vortx.xperienceContextChanged")
+    struct NativeXperienceTarget {
+        fileprivate let owner: NativeWatchlistTarget
+        fileprivate let registry: VortxNativeCoreFacade.RegistryBinding
+        fileprivate let authority: NativeXperienceCommitAuthority
+        fileprivate let lifetime: XperienceImportLifetime
+    }
+    /// Lock-only worker receipt. Credential publication cannot overtake the checkpoint because it
+    /// shares the Outbox mutation lease with bind/clear; installation swap shares nativeFacadeLock.
+    fileprivate final class NativeXperienceCommitAuthority: VortxMutationAuthority, @unchecked Sendable {
+        private weak var core: CoreBridge?
+        private let facade: VortxNativeCoreFacade
+        private let credential: CredentialScopeRegistry.Capture
+        private let installation: UUID
+        private let lifetime: XperienceImportLifetime
+        init(core: CoreBridge, target: NativeWatchlistTarget, lifetime: XperienceImportLifetime) {
+            self.core = core; facade = target.facade
+            credential = target.owner.credential; installation = target.owner.sessionGeneration
+            self.lifetime = lifetime
+        }
+        func withActive(_ operation: () throws -> Void) throws {
+            guard let publication = CredentialPublicationOutbox.beginMutation() else { throw VortxNativeError.superseded }
+            defer { CredentialPublicationOutbox.endMutation(publication) }
+            guard let core, CredentialScopeRegistry.shared.isCurrent(credential) else { throw VortxNativeError.superseded }
+            try core.nativeFacadeLock.withLock {
+                guard core.nativeFacadeStorage === facade, core.nativeCredentialCapture == credential,
+                      core.nativeInstallGeneration == installation else { throw VortxNativeError.superseded }
+                try lifetime.withActive(operation)
+            }
+        }
+    }
+    @MainActor func captureNativeXperienceTarget() throws -> NativeXperienceTarget {
+        // No deferred preparation/recapture: if the exact original gesture cannot be admitted,
+        // the user must retry it after native restore/profile publication is ready.
+        guard let owner = captureNativeWatchlistTarget(), let registry = owner.facade.registryBinding,
+              owner.facade.capturedHostProfileSnapshot(expected: owner.binding, registry: registry) != nil else {
+            throw XperiencePersistenceFailure.unavailable
+        }
+        let lifetime = XperienceImportLifetime()
+        return .init(owner: owner, registry: registry, authority: .init(core: self, target: owner, lifetime: lifetime), lifetime: lifetime)
+    }
+    @MainActor func retireNativeXperienceTarget(_ target: NativeXperienceTarget) {
+        // Own-lock-only revocation. Release it before callers clear or publish UI state.
+        target.lifetime.revoke()
+    }
+    @MainActor func nativeXperienceTargetIsCurrent(_ target: NativeXperienceTarget) -> Bool {
+        target.lifetime.isActive && nativeWatchlistTargetIsCurrent(target.owner)
+            && target.owner.facade.capturedHostProfileSnapshot(expected: target.owner.binding, registry: target.registry) != nil
+    }
+    @MainActor func nativeXperienceSnapshot(target: NativeXperienceTarget) throws
+        -> (registers: [String: VortxJSON], candidates: [XperienceAddonBinding.Candidate]) {
+        guard target.lifetime.isActive, nativeWatchlistTargetIsCurrent(target.owner),
+              let snapshot = target.owner.facade.capturedHostProfileSnapshot(expected: target.owner.binding, registry: target.registry) else {
+            throw XperiencePersistenceFailure.staleContext
+        }
+        return (snapshot.registers.filter { $0.key.hasPrefix("xperience.import.") },
+                try XperienceInstalledCatalogs.candidates(snapshot.registry))
+    }
+    @MainActor func prepareNativeXperienceExportBudget(target: NativeXperienceTarget) async throws -> XperiencePreparedExport {
+        guard nativeXperienceTargetIsCurrent(target) else { throw XperiencePersistenceFailure.staleContext }
+        return try await VortXSyncManager.shared.prepareXperienceExportBudget(capture: target.owner.owner.credential,
+            sourceIsCurrent: { [weak self] in self?.nativeXperienceTargetIsCurrent(target) == true })
+    }
+    @MainActor func saveNativeXperienceImport(_ edit: XperienceImportNamespace.Edit, target: NativeXperienceTarget,
+                                            validator: XperiencePreparedExport) async throws -> VortxJSON {
+        try Task.checkCancellation()
+        guard edit.field == XperienceImportNamespace.field(edit.namespace),
+              nativeXperienceTargetIsCurrent(target) else { throw XperiencePersistenceFailure.staleContext }
+        try XperienceImportPrivacy.validate(edit)
+        let result = try await target.owner.facade.setCapturedHostProfileField(edit.nativeEdit,
+            expected: target.owner.binding, registry: target.registry,
+            sourceAuthority: target.authority, checkpointValidator: validator,
+            admission: { fields in try XperienceNativeHostFieldAdmission.validate(edit, fields: fields) })
+        guard nativeXperienceTargetIsCurrent(target) else { throw XperiencePersistenceFailure.staleContext }
+        return result
+    }
+}
+#endif

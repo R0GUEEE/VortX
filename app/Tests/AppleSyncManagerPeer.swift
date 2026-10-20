@@ -40,6 +40,7 @@ private enum DiagnosticsLog { static func log(_ category: String, _ text: String
             try! PropertyListSerialization.data(fromPropertyList: values, format: .binary, options: 0).write(to: file, options: .atomic)
         }
         func object(forKey: String) -> Any? { values[forKey] }
+        func data(forKey: String) -> Data? { values[forKey] as? Data }
         func dictionary(forKey: String) -> [String: Any]? { values[forKey] as? [String: Any] }
         func persistentDomain(forName: String) -> [String: Any]? { values }
         func set(_ value: Any?, forKey: String) { values[forKey] = value; persist() }
@@ -99,8 +100,13 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
     }
     func settleResidentNativeSession(capture: CredentialScopeRegistry.Capture) async {}
     func mergeNativeAccountDocument(_ remote: VortxJSON?, hostRemote: VortxJSON?, capture: CredentialScopeRegistry.Capture,
-        legacyMaterial: Data, hostEdits: [VortxNativeHostPreferences.Edit] = [], websiteEvents: [Int], websiteAddonEvents: [Int],
-        legacyWatchlists: [UUID: [VortxNativeWatchlist.Entry]], sourceAuthority: Int?, authenticatedSourceArchive: Data?) async throws -> VortxJSON {
+        legacyMaterial: Data?, hostEdits: [VortxNativeHostPreferences.Edit] = [], websiteEvents: [Int], websiteAddonEvents: [Int],
+        legacyWatchlists: [UUID: [VortxNativeWatchlist.Entry]], sourceAuthority: VortxNativeOwnAccountProducer.Authority?, authenticatedSourceArchive: Data?) async throws -> VortxJSON {
+        // This upload fixture does not perform legacy/provider conversion. Fail closed if
+        // its existing synthetic preparation collaborator supplies real migration state.
+        guard legacyMaterial?.isEmpty != false, sourceAuthority == nil, authenticatedSourceArchive == nil else {
+            throw VortxNativeError.invalidSnapshot
+        }
         guard capture.generation == generation, let session else { throw VortxNativeError.superseded }
         let action = remote.map { VortxJSON.object(["type": .string("merge_native_sync"), "document": $0]) }
             ?? .object(["type": .string("get_state")])
@@ -178,8 +184,9 @@ private struct FixtureProviders { var document: VortxJSON { .object([:]) } }
     func publishAppliedAddonOrder(_ order: [String]) {}
     func nativeEmptyAccountDocument(capture: CredentialScopeRegistry.Capture) throws -> [String: Any] { ["fixtureSibling": "retained"] }
     func mergedNativeProviderState(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) throws -> FixtureProviders { FixtureProviders() }
-    struct Preparation { let material = Data(); let authority: Int? = nil; let sourceArchive: Data? = nil }
-    func prepareNativeLegacyMaterial(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) async throws -> Preparation { Preparation() }
+    private func prepareNativeLegacyMaterial(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) async throws -> NativeLegacyPreparation {
+        NativeLegacyPreparation(material: Data(), authority: nil, sourceArchive: nil)
+    }
     static func nativeWebsiteEvents(_ doc: [String: Any]) throws -> [Int] { [] }
     static func nativeWebsiteAddonEvents(_ doc: [String: Any]) throws -> [Int] { [] }
     func nativeLegacyWatchlists(_ doc: [String: Any]) throws -> [UUID: [VortxNativeWatchlist.Entry]] { [:] }

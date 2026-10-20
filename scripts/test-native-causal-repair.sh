@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/native-watched-swift-inputs.sh
+source scripts/xperience-observation-swift-inputs.sh
 causal_sdk="${VORTX_SYNC_TEST_SDK:?exact accepted dd520 macOS static SDK required}"
 causal_library="$causal_sdk/libvortx_ffi.a"
 causal_headers="$causal_sdk/Headers/vortx"
@@ -20,6 +21,7 @@ node test/native-causal-repair.mjs --extract "$causal_dir"
 causal_inputs=(
     app/SourcesShared/VortxNativeRuntime.swift app/SourcesShared/VortxResourceBridge.swift app/SourcesShared/VortxResourceProjection.swift
     app/SourcesShared/VortxNativeBootstrapArchive.swift app/SourcesShared/VortxNativeHostPreferences.swift "${native_watched_swift_inputs[@]}"
+    "${xperience_observation_swift_inputs[@]}"
     app/SourcesShared/VortxNativeSession.swift app/SourcesShared/VortxNativeCoreFacade.swift app/SourcesShared/VortxNativePreviouslyWatched.swift app/SourcesShared/VortxNativeProfiles.swift
     app/SourcesShared/ProfileAddonPreferences.swift app/SourcesShared/VortxNativeProfileEditHost.swift app/SourcesShared/VortxNativeProviderCredentials.swift app/SourcesShared/VortxProfileOverlayWitness.swift
     app/SourcesShared/CatalogRowResolution.swift app/SourcesShared/VortXSyncCrypto.swift app/SourcesShared/NativeForegroundSyncPolicy.swift app/SourcesShared/SyncBackupUploadFailure.swift
@@ -27,14 +29,15 @@ causal_inputs=(
     app/SourcesShared/HomeCatalogLoadPolicy.swift app/SourcesShared/TabBarPrefs.swift
     app/SourcesShared/BecauseYouWatchedHistoryPolicy.swift app/SourcesShared/ContinueWatchingPreferences.swift app/SourcesShared/HomeContinueWatchingSelection.swift
     app/SourcesShared/SettingsDirtyKeys.swift app/SourcesShared/SyncDocumentRevisionPolicy.swift app/SourcesShared/NativePreferenceIntentStore.swift
-    app/SourcesShared/VortXSyncManager.swift "$causal_dir/UserProfile.swift" "$causal_dir/Discovery.swift" "$causal_dir/Models.swift" "$causal_dir/CatalogConsumers.swift" "$causal_dir/HomeRails.swift" "$causal_dir/Combined.swift"
+    app/SourcesShared/CredentialRetryCoordinator.swift "$causal_dir/UserProfile.swift" "$causal_dir/Discovery.swift" "$causal_dir/Models.swift" "$causal_dir/CatalogConsumers.swift" "$causal_dir/HomeRails.swift" "$causal_dir/Combined.swift"
 )
 for causal_source in "${causal_inputs[@]}"; do
     [[ "$causal_source" == app/SourcesShared/*.swift ]] || continue
     causal_expected=$(git -C "$PWD" show "$VORTX_RECEIVE_PRODUCTION_REF:$causal_source" | shasum -a 256 | awk '{print $1}')
     test "$(shasum -a 256 "$causal_source" | awk '{print $1}')" = "$causal_expected"
 done
-causal_hash_inputs=("$causal_library" "$causal_headers/vortx_ffi.h" "$causal_headers/module.modulemap" app/Tests/NativeCausalRepairHarness.swift.in test/native-causal-repair.mjs scripts/test-native-causal-repair.sh)
+causal_hash_inputs=("$causal_library" "$causal_headers/vortx_ffi.h" "$causal_headers/module.modulemap" app/Tests/NativeCausalRepairHarness.swift.in test/native-causal-repair.mjs scripts/test-native-causal-repair.sh
+    scripts/xperience-observation-swift-inputs.sh test/xperience-harness-inputs.cjs)
 for causal_source in "${causal_inputs[@]}"; do
     [[ "$causal_source" != *.swift ]] || causal_hash_inputs+=("$causal_source")
 done
@@ -44,7 +47,7 @@ if [[ ${1:-} == --extract-only ]]; then
     exit 0
 fi
 test $# -eq 0
-xcrun swiftc -j 2 -swift-version 6 -parse-as-library -strict-concurrency=complete -warnings-as-errors \
+nice -n 15 xcrun swiftc -j 1 -num-threads 1 -whole-module-optimization -swift-version 6 -parse-as-library -strict-concurrency=complete -warnings-as-errors \
     -D CREDENTIAL_RETRY_COORDINATOR_STANDALONE -D VORTX_NATIVE_DATA_ENGINE -D VORTX_ENGINE_STATE_BRIDGE -D VORTX_ENGINE_RESOURCE_HOST -I "$causal_headers" "${causal_inputs[@]}" \
     "$causal_library" -framework Security -framework SystemConfiguration -o "$causal_dir/causal-peer" > "$causal_dir/compiler.log" 2>&1
 node test/native-causal-repair.mjs "$causal_dir/causal-peer" "$causal_dir" 2>&1 | tee "$causal_dir/runtime.log"
