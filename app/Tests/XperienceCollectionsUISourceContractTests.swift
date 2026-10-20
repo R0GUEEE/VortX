@@ -46,6 +46,9 @@ require(touch.contains("XperienceHomeEntry()") && touch.contains("navigationDest
         "iOS and Mac Home register the value route for their explicit path")
 require(integrations.contains("XperienceCollectionsConnectCard()") && integrations.contains("NuvioConnectCard()"),
         "JSON import and existing manifest-link import remain distinct")
+require(view.contains("Save first checks your VortX account backup and may merge account updates on this device. The import is confirmed after its local save; cloud upload is separate.") &&
+        !view.contains("Save checks and synchronizes your VortX account first"),
+        "Save copy distinguishes account preparation and local acknowledgement from cloud upload")
 // Resource ownership boundaries. These assertions inspect wiring; they do not execute cancellation.
 require(model.contains("private var readWorker: Task<XperienceCollections.Document, Error>?") &&
         model.contains("withTaskCancellationHandler") && model.contains("worker.cancel()"),

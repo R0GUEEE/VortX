@@ -237,7 +237,7 @@ struct XperienceCollectionsBrowserView: View {
             }
             Text("Instance numbers follow the installed add-on registry order. Configured addresses and private parameters stay hidden. If the instances are unclear, leave that source unavailable.")
                 .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
-            Text("Save checks and synchronizes your VortX account first; the collection save is confirmed after that.")
+            Text("Save first checks your VortX account backup and may merge account updates on this device. The import is confirmed after its local save; cloud upload is separate.")
                 .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
             Button {
                 if model.stageSave() { confirmReplacement = true }
