@@ -7,8 +7,8 @@ import SwiftUI
 ///   2. Trakt: scrobble + watchlist (existing card, via ExternalServicesSettingsView).
 ///   3. SIMKL: mark-watched + plan-to-watch (existing card, via ExternalServicesSettingsView).
 ///   4. Nuvio: bring the Stremio-compatible add-on(s) you use in Nuvio in (NuvioConnectCard, opens
-///      NuvioImportView). Nuvio has no account/sync service of its own, so unlike Stremio there is
-///      nothing to sign into; the card just opens the paste-URL importer.
+///      NuvioImportView). This imports manifest links, not Nuvio account data or collection layouts;
+///      the card opens the paste-URL importer rather than an account connection.
 ///   5. List import: paste a public Letterboxd / MDBList / Trakt list URL and browse it as a native Home
 ///      row (ListImportConnectCard, opens ListImportView). On-device only; never touches account/library.
 ///   6. My Trakt lists: pick your OWN Trakt lists (private ones included) and the ones you liked, and show
@@ -53,8 +53,8 @@ struct IntegrationsSettingsView: View {
 
 /// "Nuvio" card for the Integrations screen: opens `NuvioImportView`, the paste-URL import for bringing a
 /// Nuvio user's Stremio-compatible add-on(s) into VortX. Styled to match the Stremio/Trakt/SIMKL cards
-/// (surface1, rounded, same title/body type). Unlike those three, Nuvio has no account or sign-in state to
-/// reflect here (see NuvioImportView's header comment for why), so this is a plain NavigationLink card
+/// (surface1, rounded, same title/body type). This importer does not connect to Nuvio's account service,
+/// so it has no connected-account state to reflect and uses a plain NavigationLink card
 /// rather than an inline connect/disconnect control, matching the AddonsView "Discover add-ons" link.
 private struct NuvioConnectCard: View {
     var body: some View {
