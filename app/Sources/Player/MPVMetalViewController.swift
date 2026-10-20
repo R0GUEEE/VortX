@@ -84,9 +84,78 @@ enum MPVHardwareDecodePolicy {
 /// controller reference inside means a callback racing teardown resolves to nil instead of
 /// dereferencing a freed controller. Released only after `mpv_terminate_destroy` returns,
 /// at which point mpv guarantees no further callbacks.
-private final class WakeupRelay {
-    weak var controller: MPVMetalViewController?
-    init(_ controller: MPVMetalViewController) { self.controller = controller }
+fileprivate final class WakeupRelay: @unchecked Sendable {
+    // Immutable configuration + thread-safe weak reference; mutable admission is lock-protected.
+    private weak var controller: MPVMetalViewController?
+    private let handle: OpaquePointer
+    private let coalescesPreviewWakeups: Bool
+    private let lock = NSLock()
+    private enum Phase { case idle, scheduled, draining }
+    private var phase = Phase.idle
+    private var pending = false
+    private var retired = false
+
+    init(_ controller: MPVMetalViewController, handle: OpaquePointer,
+         coalescesPreviewWakeups: Bool) {
+        self.controller = controller
+        self.handle = handle
+        self.coalescesPreviewWakeups = coalescesPreviewWakeups
+    }
+
+    /// Notification only: never call mpv or hold this lock across dispatch/controller work.
+    /// A native callback may occur reentrantly while the caller owns loadTokenLock.
+    func signal() {
+        guard coalescesPreviewWakeups else {
+            controller?.readEvents()
+            return
+        }
+        lock.lock()
+        guard !retired else { lock.unlock(); return }
+        pending = true
+        guard phase == .idle else { lock.unlock(); return }
+        phase = .scheduled
+        lock.unlock()
+        enqueueDrain()
+    }
+
+    private func enqueueDrain() {
+        guard let controller else { retire(); return }
+        controller.enqueueEventDrain(previewRelay: self)
+    }
+
+    /// The queued closure retains this exact relay; it never substitutes a newer relay.
+    func beginDrain() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !retired, phase == .scheduled else { return false }
+        phase = .draining
+        pending = false
+        return true
+    }
+
+    func permitsPolling(handle: OpaquePointer) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !retired && phase == .draining && self.handle == handle
+    }
+
+    /// Atomic pending/idle handoff closes the last-wake race after MPV_EVENT_NONE.
+    /// A wake before finish gets one continuation; a wake after idle enqueues itself.
+    func finishDrain() {
+        lock.lock()
+        guard !retired, phase == .draining else { lock.unlock(); return }
+        let continueDraining = pending
+        phase = continueDraining ? .scheduled : .idle
+        lock.unlock()
+        if continueDraining { enqueueDrain() }
+    }
+
+    /// Permanent native-context retirement, never reset by logical media replacement.
+    /// Already-queued closures become inert; native destruction stays on the serial queue.
+    func retire() {
+        lock.lock(); defer { lock.unlock() }
+        retired = true
+        pending = false
+        phase = .idle
+    }
 }
 
 /// Mutable Core Image and receipt state confined to one explicit serial capture queue.
@@ -1217,11 +1286,12 @@ final class MPVMetalViewController: PlatformViewController {
         // mpv gets a retained relay holding a WEAK controller reference, never the controller
         // itself: an unretained `self` was a use-after-free if the wakeup fired (on mpv's
         // internal thread) while the controller was mid-dealloc.
-        let relay = Unmanaged.passRetained(WakeupRelay(self))
+        let relay = Unmanaged.passRetained(WakeupRelay(self, handle: self.mpv,
+            coalescesPreviewWakeups: startMuted && loopPlayback))
         wakeupRelay = relay
         mpv_set_wakeup_callback(self.mpv, { ctx in
             guard let ctx else { return }
-            Unmanaged<WakeupRelay>.fromOpaque(ctx).takeUnretainedValue().controller?.readEvents()
+            Unmanaged<WakeupRelay>.fromOpaque(ctx).takeUnretainedValue().signal()
         }, relay.toOpaque())
 
         setupNotification()
@@ -1437,6 +1507,8 @@ final class MPVMetalViewController: PlatformViewController {
         }
 #endif
         appliedDynamicRange = nil
+        // Fence every preview wake/continuation before clearing or destroying this context.
+        wakeupRelay?.takeUnretainedValue().retire()
         guard let handle = mpv else { return }
         // Nil the handle SYNCHRONOUSLY so exactly one owner destroys it: deinit's safety net
         // sees nil (no double terminate when dealloc beats the queued block), the event drain
@@ -1467,6 +1539,7 @@ final class MPVMetalViewController: PlatformViewController {
         // nil the handle synchronously (one owner) and dispatch the destroy onto the event queue.
         // The gate is main-queue-owned. stop()/invalidateLoadToken() cancels its timeout before normal teardown;
         // if deinit is the safety-net path, the timeout's weak self capture makes the queued work a no-op.
+        wakeupRelay?.takeUnretainedValue().retire()
         if let handle = mpv {
             mpv = nil
             mpv_set_wakeup_callback(handle, nil, nil)
@@ -4671,14 +4744,27 @@ final class MPVMetalViewController: PlatformViewController {
     }
 
     func readEvents() {
+        // Main-player and non-looping preview scheduling remains one block per notification.
+        enqueueEventDrain(previewRelay: nil)
+    }
+
+    fileprivate func enqueueEventDrain(previewRelay: WakeupRelay?) {
         queue.async { [weak self] in
-            guard let self else { return }
+            // The closure strongly captures the relay, independently of the native +1 retain.
+            // In particular, a continuation queued behind destruction only sees a retired relay.
+            if let previewRelay, !previewRelay.beginDrain() { return }
+            defer { previewRelay?.finishDrain() }
+            guard let self else { previewRelay?.retire(); return }
             
             while true {
                 // Re-check per iteration and hold a local: stop() nils `mpv` from the main
                 // thread mid-drain, and the handle itself stays valid until stop()'s destroy
                 // block, which is queued BEHIND this drain on the same serial queue.
-                guard let handle = self.mpv else { break }
+                guard let handle = self.mpv else { previewRelay?.retire(); break }
+                if let previewRelay, !previewRelay.permitsPolling(handle: handle) {
+                    previewRelay.retire()
+                    break
+                }
                 // Command admission and dequeue share this boundary; queued main callbacks carry
                 // immutable evidence instead of adopting a newer transport generation.
                 self.loadTokenLock.lock()
@@ -5231,6 +5317,7 @@ final class MPVMetalViewController: PlatformViewController {
                     // "quit" landed (only stop() sends it). Destruction belongs to stop()'s
                     // queued block, which runs after this drain on the same serial queue;
                     // destroying here too was a double terminate. Just stop draining.
+                    previewRelay?.retire()
                     return
                 case MPV_EVENT_LOG_MESSAGE:
                     if let msg = UnsafeMutablePointer<mpv_event_log_message>(OpaquePointer(event!.pointee.data)) {
