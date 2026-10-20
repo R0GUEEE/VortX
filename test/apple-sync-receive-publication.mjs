@@ -35,6 +35,7 @@ if (process.argv[2] === '--extract') {
   }
   function member(file, marker) {
     let start = file.text.indexOf(marker); assert(start >= 0, `missing ${marker}`);
+    assert.equal(file.text.indexOf(marker, start + marker.length), -1, `ambiguous ${marker}`);
     const markerStart = start;
     // Attributes are semantic source, including MainActor on bridge merge/profile publication.
     while (start > 0) {
@@ -64,16 +65,57 @@ if (process.argv[2] === '--extract') {
     '    private func pushSyncDocAt(', '    private func commitNativePulledDocument(', '    private func applyNativeGlobals(',
     '    static func ownedAddons(', '    func syncDown(', '    private func handle(', '    private func startPoll()'];
   let combined = await readFile('app/Tests/AppleSyncReceivePublicationPeer.swift', 'utf8');
+  function exactDeclaration(expression, label) {
+    const matches = [...manager.text.matchAll(expression)];
+    assert.equal(matches.length, 1, `missing or ambiguous ${label}`);
+    const selected = matches[0][0];
+    receipts.push({ path: manager.path, marker: label, sourceSHA256: sha256(manager.text), sliceSHA256: sha256(selected) });
+    return selected;
+  }
+  const storedDeclarations = [
+    exactDeclaration(/^    private var nativeDocumentCommitGeneration: UInt64 = 0$/gm, 'conversion generation'),
+    exactDeclaration(/^    private var ws: URLSessionWebSocketTask\?.*$/gm, 'poll socket'),
+    exactDeclaration(/^    private var wsHeardAt: Date\?.*$/gm, 'last socket frame'),
+    exactDeclaration(/^    private var lastPollPullAt: Date\?.*$/gm, 'last poll pull')
+  ];
+  const managerAnchor = '@MainActor final class VortXSyncManager {';
+  assert.equal(combined.split(managerAnchor).length, 2, 'unique manager environment');
+  combined = combined.replace(managerAnchor, managerAnchor + '\n' + storedDeclarations.join('\n'));
+  const conversionMembers = ['    private struct NativeLegacyPreparation {', '    private func nativeLegacyConversionDigest(',
+    '    private func nativeLegacyConversionKey(', '    private func nativeLegacyConversionDecision(',
+    '    private func recordNativeLegacyConversion('].map(marker => member(manager, marker));
+  conversionMembers.push(exactDeclaration(/^    private static let nativeExportKeys = \[[^\]]+\]/gm, 'native export keys'));
   const observation = xperienceInputs.observationProperty(manager.text);
   if (observation) receipts.push({ path: manager.path, marker: 'exact Xperience observation property',
     sourceSHA256: sha256(manager.text), sliceSHA256: sha256(observation) });
   combined += '\nextension VortXSyncManager {\n'
     + observation + '\n'
+    + conversionMembers.join('\n') + '\n'
     + ['    private struct NativeReceiveReceipt {', '    private enum VersionedPull ', '    private enum PushOutcome ', '    private struct PendingDebridApply:',
       '    private enum ProviderApplyService:', '    private enum ProviderApplyValue:', '    private struct PendingProviderApply:']
       .map(marker => member(manager, marker)).join('\n')
     + '\n' + managerMethods.map(marker => member(manager, marker)).join('\n')
-    + '\n    func uploadForFixture(_ document: [String: Any], version: Int) async -> Bool { if case .accepted = await pushSyncDocAt(document, version: version) { return true }; return false }\n}\n';
+    + `
+    func uploadForFixture(_ document: [String: Any], version: Int) async -> Bool {
+        let capture = credentialAuthority.capture()
+        let capturedKey = dataKey
+        let base: Int?
+        switch await pullDocVersionedResult(credentialCapture: capture) {
+        case .empty: base = nil
+        case .doc(_, let revision): base = revision
+        case .failed, .unchanged: return false
+        }
+        guard isCurrent(capture), dataKey == capturedKey,
+              SyncDocumentRevisionPolicy.next(after: base) == version else { return false }
+        if case .accepted = await pushSyncDocAt(document, version: version, baseRevision: base,
+            credentialCapture: capture, sourceIsCurrent: { self.dataKey == capturedKey }) { return true }
+        return false
+    }
+    func invalidateConversionReceiptForFixture() {
+        UserDefaults.standard.removeObject(forKey: nativeLegacyConversionKey(credentialAuthority.capture()))
+    }
+}
+`;
   combined += '\nextension VortXSyncManager {\n'
     + '    func broadcastForFixture(version: Int) { handle(.string("{\\"type\\":\\"updated\\",\\"version\\":\\(version)}"), credentialCapture: credentialAuthority.capture()) }\n'
     + '    func pollForFixture() { startPoll() }\n}\n';
@@ -123,7 +165,8 @@ if (process.argv[2] === '--extract') {
   await writeFile(join(output, 'extraction.json'), JSON.stringify({ sourceHEAD: process.env.VORTX_RECEIVE_SOURCE_HEAD, receipts, productionMatches,
     boundaries: ['Synthetic keys and owned encrypted checkpoint directories', 'Loopback HTTP request environment',
       'ProfileStore presentation sink invokes actual discovery apply; quarantine/admission and UI board rendering are not exercised',
-      'No provider, legacy migration or open-detail refresh exercised'],
+      'Fresh fixture sessions perform genuine deterministic empty legacy import and exact receipt replay; no real-account preparation, provider fetch or open-detail refresh exercised',
+      'Explicit fixture uploader obtains an authenticated GET witness and requires exact create0/base-plus-one; it does not perform the manager upload merge'],
     combinedSHA256: sha256(combined) }, null, 2));
   process.exit(0);
 }
@@ -145,17 +188,20 @@ const server = createServer(async (req, res) => {
       if (conditionalReply !== 'missing') res.setHeader('ETag', conditionalReply === 'weak' ? `W/${tag}` : conditionalReply === 'wrong' ? '"999"' : tag);
       res.statusCode = 304; res.end(); return;
     }
-    res.statusCode = stored ? 200 : 404; res.end(JSON.stringify(stored ?? {})); return;
+    res.statusCode = stored ? 200 : 404; res.end(stored ? JSON.stringify(stored) : undefined); return;
   }
   assert.equal(req.method, 'PUT');
   let bytes = ''; for await (const part of req) bytes += part;
   const body = JSON.parse(bytes);
-  assert.deepEqual(Object.keys(body).sort(), ['document', 'version']);
-  assert(body.document.startsWith('v2.')); assert(Number.isSafeInteger(body.version) && body.version > 0);
-  const accepted = !stored || body.version > stored.version;
-  if (accepted) stored = body;
-  wire.push({ method: 'PUT', accepted, version: stored.version });
-  res.end(JSON.stringify({ accepted, version: stored.version }));
+  assert.deepEqual(Object.keys(body).sort(), ['baseRevision', 'document', 'version']);
+  assert(body.document.startsWith('v2.')); assert(Number.isSafeInteger(body.version) && body.version >= 0);
+  assert(body.baseRevision === null || (Number.isSafeInteger(body.baseRevision) && body.baseRevision >= 0));
+  assert.equal(body.version, body.baseRevision === null ? 0 : body.baseRevision + 1);
+  const previousVersion = stored?.version ?? null;
+  const accepted = body.baseRevision === previousVersion;
+  if (accepted) stored = { document: body.document, version: body.version };
+  wire.push({ method: 'PUT', accepted, baseRevision: body.baseRevision, version: body.version, previousVersion });
+  res.end(JSON.stringify({ accepted, version: stored?.version ?? null }));
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const baseURL = `http://127.0.0.1:${server.address().port}`;
@@ -190,12 +236,16 @@ async function warmReceiver(name = 'sequence-b') {
     finally { clearTimeout(timer); }
   }
   const ready = await next(); assert(ready.ready);
+  assert.deepEqual(ready.homeOrderBeforeReceive, [], 'actual Home consumer is warm before the first remote order');
+  assert.deepEqual(ready.homeHiddenBeforeReceive, [], 'actual Home hidden consumer is warm before the first remote hidden set');
   return { ready, async send(instruction) { child.stdin.write(`${instruction}\n`); return next(); },
     async close() { child.stdin.end('close\n'); await finished; }, abort() { child.kill(); } };
 }
 let checks = 0;
 function check(condition, label) { assert(condition, label); checks++; console.log(`PASS ${label}`); }
 try {
+  const seed = await peer('baseline-seed', 'seed-empty');
+  assert(seed.accepted && seed.version === 0);
   const upload = await peer('peer-a', 'upload');
   check(upload.accepted && upload.stamped === 1 && upload.version === 1, 'actual encrypted uploader acknowledges exact peer-A document revision');
   const received = await peer('peer-b', 'receive');
@@ -215,10 +265,16 @@ try {
   check(received.revision > 0 && received.changedFields.includes('library') && received.changedFields.includes('continue_watching_preview'), 'actual NewState common tail publishes history changed fields and revision');
   check(received.staleLibraryRejected && received.staleCWRejected && received.staleReceiptRejected, 'late main-queue library/CW/receipt callbacks reject changed credential owner');
   check(received.staleSelectionRejected, 'captured Home intent rejects changed credential owner');
-  check(wire.length === 2 && wire[0].method === 'PUT' && wire[1].method === 'GET', 'receive uses one ordinary encrypted relay upload and one actual manager GET');
+  check(wire.length === 5 && wire[0].method === 'GET' && wire[0].status === 404
+    && wire[1].method === 'PUT' && wire[1].baseRevision === null && wire[1].version === 0
+    && wire[2].method === 'GET' && wire[2].version === 0
+    && wire[3].method === 'PUT' && wire[3].baseRevision === 0 && wire[3].version === 1
+    && wire[4].method === 'GET', 'create0 uses authenticated bodyless404; upload1 uses exact GET base0 before actual receive');
   const baseline = { checks, wire: [...wire], upload, received };
   assert.equal(checks, 16, 'original acceptance case count must remain unchanged');
   stored = null; wire.length = 0;
+  const sequenceSeed = await peer('sequence-seed', 'seed-empty');
+  assert(sequenceSeed.accepted && sequenceSeed.version === 0);
   const urls = Object.fromEntries(['a', 'b', 'c', 'd'].map(id => [id, `https://synthetic.invalid/${id}/manifest.json`]));
   const row = url => url + '|movie|popular';
   const receiver = await warmReceiver();
@@ -255,8 +311,17 @@ try {
         check(JSON.stringify(pulled.inventory) === JSON.stringify([urls.c, urls.a, urls.b]), 'remote native installed inventory uses intentional reorder rather than install order');
         check(JSON.stringify(pulled.addons) === JSON.stringify([urls.c, urls.a]) && pulled.rawAddons.length === 2, 'actual typed/raw add-on publication applies owner visibility without uninstalling hidden member');
         check(JSON.stringify(pulled.catalogOrder) === JSON.stringify([urls.c, urls.a, urls.b].map(row)) && pulled.catalogHidden[0] === row(urls.b), 'real discovery apply and catalog consumers expose received per-profile catalog order/hidden preferences');
-        check(pulled.homeLayout === 'rails' && pulled.homeRails.slice(0, 2).join(',') === 'addonCatalogs,topPicks'
-          && pulled.homeHidden.join(',') === 'collectionsHub', 'actual global apply reloads Home section order and hidden consumer');
+        const savedHomeOrder = ['addonCatalogs', 'topPicks'];
+        const arrangedHomeOrder = ['forYou', 'smartCollections', 'collectionsHub', 'addonCatalogs',
+          'editorialCollections', 'importedLists', 'topPicks', 'becauseYouWatched', 'traktWatchlist',
+          'simklWatchlist', 'mediaServers', 'upcomingEpisodes', 'upcomingMovies'];
+        check(pulled.homeLayout === 'rails'
+          && JSON.stringify(pulled.homeStoredOrder) === JSON.stringify(savedHomeOrder)
+          && JSON.stringify(pulled.homeSavedOrder) === JSON.stringify(savedHomeOrder)
+          && JSON.stringify(pulled.homeRails) === JSON.stringify(arrangedHomeOrder)
+          && pulled.homeStoredHidden.join(',') === 'collectionsHub'
+          && pulled.homeHidden.join(',') === 'collectionsHub',
+          'actual global apply persists and reloads Home order/hidden; arrangement inserts missing platform defaults without changing saved order');
       } else if (stage === 2) {
         check(!pulled.pendingPush, 'matching received carrier joins without requesting a causal-repair push');
         check(pulled.viewerName === 'Edited Viewer' && pulled.viewerAvatar === '🐯' && pulled.viewerKids
@@ -303,13 +368,15 @@ try {
     check(stale.staleSelectionRejected, 'late captured Home intent rejects changed owner after newest progress');
     check(revisions.filter(value => !value.repeated).every(value => value.installationActor === '00000000-0000-4000-8000-000000000042'
       && value.hostActor === '00000000-0000-4000-8000-000000000041'), 'persisted peer-B host actor stays distinct from actual received peer-A register actor');
-    check(wire.filter(value => value.method === 'PUT').length === 4 && wire.filter(value => value.method === 'GET').length === 5,
-      'revision sequence uses four ordinary encrypted uploads and five actual manager pulls');
+    check(wire.filter(value => value.method === 'PUT').length === 5 && wire.filter(value => value.method === 'GET').length === 10,
+      'revision sequence uses one create0, four GET-bound uploads, and five actual manager receive pulls');
     await receiver.close();
   } catch (error) { receiver.abort(); throw error; }
   const sequenceWire = [...wire];
   stored = null; wire.length = 0;
-  await peer('conditional-a-v11', 'upload-sequence', { stage: 1, version: 11 }, 'conditional-a');
+  const conditionalSeed = await peer('conditional-seed', 'seed-empty');
+  assert(conditionalSeed.accepted && conditionalSeed.version === 0);
+  await peer('conditional-a-v1', 'upload-sequence', { stage: 1, version: 1 }, 'conditional-a');
   const conditional = await warmReceiver('conditional-b');
   const conditionalResults = [];
   async function receiveConditional(instruction = 'conditional') {
@@ -325,11 +392,11 @@ try {
     conditionalReply = 'normal';
     await conditional.send('persisted-highwater');
     let full = await receiveConditional();
-    check(full.version === 11 && full.outcome === 'completed' && full.stamped === 1 && full.historyReceipts > 0
+    check(full.version === 1 && full.outcome === 'completed' && full.stamped === 1 && full.historyReceipts > 0
       && full.selection[0].offset === 234000 && wire.at(-1).validator === null,
       'persisted equal revision without completed mount receipt fully decrypts, commits and publishes');
     let unchanged = await receiveConditional();
-    check(wire.at(-1).status === 304 && wire.at(-1).validator === '"11"' && unchanged.outcome === 'completed',
+    check(wire.at(-1).status === 304 && wire.at(-1).validator === '"1"' && unchanged.outcome === 'completed',
       'routine receive sends exact completed revision and admits matching bodyless 304');
     check(unchanged.stamped === full.stamped && unchanged.historyReceipts === full.historyReceipts && unchanged.accountGeneration === full.accountGeneration
       && JSON.stringify(unchanged.selection) === JSON.stringify(full.selection),
@@ -369,9 +436,9 @@ try {
     await conditional.send('clear-pending');
     full = await receiveConditional();
     check(wire.at(-1).validator === null && full.outcome === 'completed', 'cleared transport pending state still needs a full completed receive');
-    await peer('conditional-a-v12', 'upload-sequence', { stage: 2, version: 12 }, 'conditional-a');
+    await peer('conditional-a-v2', 'upload-sequence', { stage: 2, version: 2 }, 'conditional-a');
     const newer = await receiveConditional();
-    check(wire.at(-1).validator === '"11"' && wire.at(-1).status === 200 && newer.version === 12
+    check(wire.at(-1).validator === '"1"' && wire.at(-1).status === 200 && newer.version === 2
       && newer.selection[0].offset === 678000 && newer.outcome === 'completed', 'newer 200 still decrypts, commits and publishes exact peer progress');
     await conditional.close();
   } catch (error) { conditional.abort(); throw error; }
@@ -383,6 +450,6 @@ try {
       'Exact updated handler and poll bodies run with a shortened injected poll interval; upload-busy and queue-drained flags are fixture inputs, independently proved by manager upload tests',
       'UserDefaults notifications and sync observer/self-echo suppression are not exercised by the RAM environment',
       'Stale carrier test proves retained join and queued causal-repair marker; automatic repair upload is not exercised',
-      'Provider credentials, legacy migration, detail paths and physical Apple devices are outside this proof'] }, null, 2));
+      'Synthetic empty first-import and exact receipt replay are exercised; real-account migration preparation, provider credentials/fetch, detail paths and physical Apple devices are outside this proof'] }, null, 2));
   console.log(`PASS ${checks} actual receive/publication assertions; retained ${root}`);
 } finally { await new Promise(resolve => server.close(resolve)); }

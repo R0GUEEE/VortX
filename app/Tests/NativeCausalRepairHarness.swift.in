@@ -87,13 +87,15 @@
             guard let base = URL(string: command.baseURL), base.host == "127.0.0.1", base.scheme == "http" else { throw VortxNativeError.invalidResponse }
             let manager = VortXSyncManager(directory: URL(fileURLWithPath: command.directory), baseURL: base)
             manager.fixtureBaseline()
-            let checkpoint = try VortxEncryptedCheckpointStore(directory: manager.directory, key: SymmetricKey(data: Seed.key), installationKey: SymmetricKey(data: Data(repeating: 42, count: 32)))
+            let checkpoint = try Seed.makeCheckpoint(directory: manager.directory)
             let actor = command.mode == "upload" ? Seed.actor : (manager.directory.lastPathComponent == "peer-c" ? "00000000-0000-4000-8000-000000000043" : "00000000-0000-4000-8000-000000000042")
-            let session = try VortxNativeSession(scope: .init(account: Seed.account, ownerProfileID: Seed.owner), ownerName: "Synthetic Owner", abi: VortxCABI(), store: checkpoint, transport: Seed.NoResources(), allowNewAccount: true, hostActor: actor)
+            let session = try Seed.makeSession(checkpoint: checkpoint, hostActor: actor)
             if command.mode == "upload" {
                 let earlier = manager.directory.appendingPathComponent("causal-earlier-carrier.json")
                 var document: [String: Any]
-                if command.stage == 4 {
+                if command.stage == 0 {
+                    document = [:] // Explicit encrypted create0, never an invented prior revision.
+                } else if command.stage == 4 {
                     document = try JSONSerialization.jsonObject(with: Data(contentsOf: earlier)) as! [String: Any]
                 } else {
                     try await Seed.stageMutation(command.stage!, session: session)

@@ -78,8 +78,8 @@ if (process.argv[2] === '--extract') {
     '    func ensureNativeCheckpoint(credentialCapture: CredentialScopeRegistry.Capture) async -> Bool { CoreBridge.shared.hasCertifiedNativeSession(capture: credentialCapture, profileID: ProfileStore.shared.activeID) }'
   ];
   remove.forEach(value => replace(value, ''));
-  replace('    func nativeProviderState(capture: CredentialScopeRegistry.Capture) throws -> VortxNativeProviderCredentials {\n        try VortxNativeProviderCredentials(scope: capture.namespace, actor: AppleSyncReceivePublicationPeer.actor)\n    }',
-    '    func nativeProviderState(capture: CredentialScopeRegistry.Capture) throws -> VortxNativeProviderCredentials {\n        if let fixtureProviderState { return fixtureProviderState }; return try VortxNativeProviderCredentials(scope: capture.namespace, actor: AppleSyncReceivePublicationPeer.actor)\n    }');
+  replace('        return try VortxNativeProviderCredentials(scope: capture.namespace, actor: AppleSyncReceivePublicationPeer.actor)',
+    '        if let fixtureProviderState { return fixtureProviderState }; return try VortxNativeProviderCredentials(scope: capture.namespace, actor: AppleSyncReceivePublicationPeer.actor)');
   const keychain = await production('app/SourcesShared/Keychain.swift');
   const keychainPrefix = marker => {
     const start = keychain.indexOf(marker); assert(start >= 0); const end = keychain.indexOf('\n', start);
@@ -148,21 +148,26 @@ const server = createServer(async (req, res) => {
     res.setHeader('content-type', 'application/json');
     if (req.method === 'GET') {
       wire.push({ method: 'GET', version: stored?.version }); res.statusCode = stored ? 200 : 404;
-      res.end(JSON.stringify(stored ?? {})); return;
+      res.end(stored ? JSON.stringify(stored) : undefined); return;
     }
     assert.equal(req.method, 'PUT');
     let raw = ''; for await (const part of req) raw += part;
-    const body = JSON.parse(raw); assert.deepEqual(Object.keys(body).sort(), ['document', 'version']);
-    assert(body.document.startsWith('v2.')); assert(Number.isSafeInteger(body.version));
-    const record = { method: 'PUT', proposed: body.version, behavior }; wire.push(record);
+    const body = JSON.parse(raw); assert.deepEqual(Object.keys(body).sort(), ['baseRevision', 'document', 'version']);
+    assert(body.document.startsWith('v2.')); assert(Number.isSafeInteger(body.version) && body.version >= 0);
+    assert(body.baseRevision === null || (Number.isSafeInteger(body.baseRevision) && body.baseRevision >= 0));
+    assert.equal(body.version, body.baseRevision === null ? 0 : body.baseRevision + 1);
+    const baseMatches = body.baseRevision === (stored?.version ?? null);
+    const record = { method: 'PUT', proposed: body.version, baseRevision: body.baseRevision, previousVersion: stored?.version ?? null, behavior }; wire.push(record);
     if (behavior === 'missing-ack') { behavior = 'normal'; record.accepted = false; res.end(JSON.stringify({ version: stored.version })); return; }
     if (behavior === 'hold-conflict' || behavior === 'hold-ack') {
       const mode = behavior; behavior = 'normal'; held = { body, res, record, mode };
-      if (mode === 'hold-ack') { assert(body.version > stored.version); stored = body; }
+      if (mode === 'hold-ack') {
+        assert(baseMatches); stored = { document: body.document, version: body.version };
+      }
       return;
     }
-    const accepted = !stored || body.version > stored.version;
-    if (accepted) stored = body;
+    const accepted = baseMatches;
+    if (accepted) stored = { document: body.document, version: body.version };
     record.accepted = accepted; record.stored = stored.version;
     res.end(JSON.stringify({ accepted, version: stored.version }));
   } catch (error) { events.push({ relayError: String(error) }); res.statusCode = 500; res.end('{}'); }
@@ -207,11 +212,20 @@ async function receiver(name) {
     async close() { child.stdin.end('{"action":"close"}\n'); await done; }, async abort() { child.kill(); await done.catch(() => {}); } };
 }
 function release(accepted, echoedVersion = stored.version) {
-  assert(held); held.record.accepted = accepted; held.record.stored = stored.version;
+  assert(held);
+  if (held.mode === 'hold-ack') {
+    assert.equal(accepted, true);
+    assert.equal(stored.version, held.body.version); assert.equal(stored.document, held.body.document);
+  } else {
+    assert.equal(accepted, false);
+    assert.notEqual(held.body.baseRevision, stored.version, 'held conflict requires an intervening accepted writer');
+  }
+  held.record.accepted = accepted; held.record.stored = stored.version;
   held.res.end(JSON.stringify({ accepted, version: echoedVersion })); held = null;
 }
 let b; let c;
 try {
+  await upload(0, 0);
   await upload(1, 1);
   b = await receiver('peer-b');
   for (const stage of [1, 2, 3]) {

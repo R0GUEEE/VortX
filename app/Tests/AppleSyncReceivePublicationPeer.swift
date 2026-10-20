@@ -227,9 +227,16 @@ struct SIMKLContinueWatchingShadow {
     func mergedNativeProviderState(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) throws -> VortxNativeProviderCredentials { try nativeProviderState(capture: capture) }
     func persistMergedNativeProviders(_ providers: VortxNativeProviderCredentials, capture: CredentialScopeRegistry.Capture) throws -> VortxNativeProviderCredentials { providers }
     func mirrorNativeProviderKeys(_ providers: VortxNativeProviderCredentials, original: Any?) throws -> [String: Any] { [:] }
-    struct Preparation { let material: Data? = nil; let authority: (any VortxMutationAuthority)? = nil; let sourceArchive: Data? = nil }
-    func prepareNativeLegacyMaterial(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) async throws -> Preparation {
-        if failPreparation { throw VortxNativeError.invalidSnapshot }; return Preparation()
+    private func prepareNativeLegacyMaterial(_ doc: [String: Any], capture: CredentialScopeRegistry.Capture) async throws -> NativeLegacyPreparation {
+        if failPreparation { throw VortxNativeError.invalidSnapshot }
+        guard isCurrent(capture),
+              Set(doc.keys).isSubset(of: ["nativeSync", "nativeHostPreferences", "nativeProviderCredentials",
+                  "profileEditResults", "apiKeys", "causalFixtureSibling"]) else { throw VortxNativeError.invalidSnapshot }
+        // Genuine converter and receipt replay, limited to the empty synthetic legacy
+        // input imported at first creation. Never manufacture or reset an existing baseline.
+        let material = try AppleSyncReceivePublicationPeer.legacyMaterial(document: doc)
+        guard material == (try AppleSyncReceivePublicationPeer.legacyMaterial()) else { throw VortxNativeError.invalidSnapshot }
+        return NativeLegacyPreparation(material: material, authority: nil, sourceArchive: nil)
     }
     static func nativeWebsiteEvents(_ doc: [String: Any]) throws -> [VortxJSON] { [] }
     static func nativeWebsiteAddonEvents(_ doc: [String: Any]) throws -> [VortxJSON] { [] }
@@ -243,7 +250,7 @@ struct SIMKLContinueWatchingShadow {
     func stampSyncSuccess() { stamped += 1 }
     func ensureNativeCheckpoint(credentialCapture: CredentialScopeRegistry.Capture) async -> Bool { CoreBridge.shared.hasCertifiedNativeSession(capture: credentialCapture, profileID: ProfileStore.shared.activeID) }
     struct Roster { let profiles: [UserProfile]; let modified: Double? }
-    static func resolveRoster(from doc: [String: Any]) -> Roster? { nil }
+    static func resolveRoster(from doc: [String: Any], fullOnly: Bool = false) -> Roster? { nil }
     static let appliedAddonOrder: [String] = [] // No legacy add-on carrier in this test.
     private func retireNativeProviderApply(_ service: ProviderApplyService, capture: CredentialScopeRegistry.Capture) {}
     private func providerApplyIntent(keys: [String: String]?, capture: CredentialScopeRegistry.Capture, version: Int) -> PendingProviderApply? { nil }
@@ -270,7 +277,8 @@ struct SIMKLContinueWatchingShadow {
             let callback = afterResponse; afterResponse = nil; try callback?()
             receiveETag?((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "ETag"))
             if (response as? HTTPURLResponse)?.statusCode == 304 { return (304, nil) }
-            return ((response as? HTTPURLResponse)?.statusCode ?? 0, try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            return ((response as? HTTPURLResponse)?.statusCode ?? 0,
+                    data.isEmpty ? nil : try JSONSerialization.jsonObject(with: data) as? [String: Any])
         } catch { return (0, nil) }
     }
 }
@@ -285,6 +293,26 @@ struct SIMKLContinueWatchingShadow {
     nonisolated static let addonC = "https://synthetic.invalid/c/manifest.json"
     nonisolated static let addonD = "https://synthetic.invalid/d/manifest.json"
     nonisolated static let key = Data(repeating: 41, count: 32)
+    static func legacyMaterial(document: [String: Any] = [:]) throws -> Data {
+        let ownerProfile = UserProfile(id: UUID(uuidString: owner)!, name: "Synthetic Owner", avatar: "fixture-owner", isOwner: true)
+        return try VortxLegacyBootstrapMaterial.encode(document: JSONSerialization.data(withJSONObject: document),
+            roster: [ownerProfile], ownerProfileID: ownerProfile.id, rosterModifiedSeconds: 0, deferProfileEdits: true)
+    }
+    static func makeCheckpoint(directory: URL) throws -> VortxEncryptedCheckpointStore {
+        let archive = try VortxNativeBootstrapArchive.encode(document: Data("{}".utf8), material: legacyMaterial())
+        return try VortxEncryptedCheckpointStore(directory: directory, key: SymmetricKey(data: key),
+            installationKey: SymmetricKey(data: Data(repeating: 42, count: 32)), bootstrap: archive,
+            bootstrapScope: .init(account: account, ownerProfileID: owner))
+    }
+    static func makeSession(checkpoint: VortxEncryptedCheckpointStore, hostActor: String) throws -> VortxNativeSession {
+        let material = try legacyMaterial()
+        let action: VortxJSON = .object(["type": .string("import_legacy_sync"), "scope": .string(account),
+            "ownerProfileId": .string(owner), "material": try JSONDecoder().decode(VortxJSON.self, from: material)])
+        return try VortxNativeSession(scope: .init(account: account, ownerProfileID: owner), ownerName: "Synthetic Owner",
+            abi: VortxCABI(), store: checkpoint, transport: NoResources(), allowNewAccount: true,
+            initialActions: [String(decoding: JSONEncoder().encode(action), as: UTF8.self)], hostActor: hostActor,
+            initialLegacyMaterial: material)
+    }
     struct Command: Decodable { let mode: String; let directory: String; let baseURL: String; let stage: Int?; let version: Int? }
     struct NoResources: VortxResourceTransport {
         final class Cancellation: VortxResourceCancellation, @unchecked Sendable { func cancel() {} }
@@ -398,6 +426,8 @@ struct SIMKLContinueWatchingShadow {
             "visiblePosterRadius": CatalogPreferences.shared.posterRadius.rawValue,
             "visibleHideLabels": CatalogPreferences.shared.hidePosterLabels,
             "pendingWidthEdit": manager.dirtySettings[CatalogPrefsStore.widthKey] != nil,
+            "homeStoredOrder": HomeRailStore.order(), "homeSavedOrder": HomeRailPreferences.shared.order,
+            "homeStoredHidden": Array(HomeRailStore.hidden()).sorted(),
             "homeRails": HomeRailPreferences.shared.arrange(HomeRail.iOSDefaultOrder).map(\.rawValue),
             "homeHidden": Array(HomeRailPreferences.shared.hidden).sorted(), "hostActor": hostDocument.globals.fields.values.first?.actor ?? "",
             "installationActor": localHost?.actor ?? ""]
@@ -406,11 +436,14 @@ struct SIMKLContinueWatchingShadow {
         do {
             let command = try JSONDecoder().decode(Command.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
             let manager = VortXSyncManager(directory: URL(fileURLWithPath: command.directory), baseURL: URL(string: command.baseURL)!)
-            let checkpoint = try VortxEncryptedCheckpointStore(directory: manager.directory, key: SymmetricKey(data: key), installationKey: SymmetricKey(data: Data(repeating: 42, count: 32)))
+            let checkpoint = try makeCheckpoint(directory: manager.directory)
             let hostActor = command.mode.hasPrefix("upload") ? actor : "00000000-0000-4000-8000-000000000042"
-            let session = try VortxNativeSession(scope: .init(account: account, ownerProfileID: owner), ownerName: "Synthetic Owner", abi: VortxCABI(), store: checkpoint, transport: NoResources(), allowNewAccount: true, hostActor: hostActor)
+            let session = try makeSession(checkpoint: checkpoint, hostActor: hostActor)
             let core = CoreBridge.shared
-            if command.mode == "upload-sequence" {
+            if command.mode == "seed-empty" {
+                let accepted = await manager.uploadForFixture([:], version: 0)
+                try emit(["accepted": accepted, "version": manager.lastSyncedVersion, "stamped": manager.stamped])
+            } else if command.mode == "upload-sequence" {
                 let document: [String: Any]
                 let earlierCarrier = manager.directory.appendingPathComponent("earlier-synthetic-carrier.json")
                 if command.stage == 4 {
@@ -434,7 +467,9 @@ struct SIMKLContinueWatchingShadow {
                 // Seed the real observable cache before any receive. Reading defaults alone
                 // would pass the old implementation while the open screen stayed stale.
                 _ = CatalogPreferences.shared
-                try emit(["ready": true, "actor": hostActor])
+                let home = HomeRailPreferences.shared
+                try emit(["ready": true, "actor": hostActor,
+                    "homeOrderBeforeReceive": home.order, "homeHiddenBeforeReceive": Array(home.hidden).sorted()])
                 while let instruction = readLine() {
                     if instruction == "close" { break }
                     if instruction == "broadcast-while-pending" {
@@ -480,7 +515,7 @@ struct SIMKLContinueWatchingShadow {
                     }
                     if instruction == "persisted-highwater" {
                         // A persisted push/previous-process version is not this mount's receive receipt.
-                        manager.lastSyncedVersion = 11; manager.hasAppliedAccountDoc = true
+                        manager.lastSyncedVersion = 1; manager.hasAppliedAccountDoc = true
                         try emit(["seededHighwater": true]); continue
                     }
                     if instruction == "stale" {
@@ -499,6 +534,7 @@ struct SIMKLContinueWatchingShadow {
                     let conditionalInstructions = ["conditional", "forced", "fail-prepare", "pending-apply", "replace-mount", "mount-during", "aba-during", "pending-during", "mount-before-ack"]
                     guard instruction == "pull" || conditionalInstructions.contains(instruction) else { throw VortxNativeError.invalidResponse }
                     manager.failPreparation = instruction == "fail-prepare"
+                    if manager.failPreparation { manager.invalidateConversionReceiptForFixture() }
                     manager.pendingApplyFixture = instruction == "pending-apply"
                     manager.providerSnapshotReads = 0
                     manager.replaceMountBeforeAcknowledgement = instruction == "mount-before-ack"
