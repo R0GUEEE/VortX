@@ -6475,6 +6475,53 @@ extension CoreBridge {
         target.lifetime.isActive && nativeWatchlistTargetIsCurrent(target.owner)
             && target.owner.facade.capturedHostProfileSnapshot(expected: target.owner.binding, registry: target.registry) != nil
     }
+    @MainActor func nativeCurationRegisters() throws -> [String: VortxJSON] {
+        guard let facade = nativeFacade, let snapshot = facade.profileSnapshot(),
+              case .string(let id) = snapshot.state["activeProfileId"], let profile = UUID(uuidString: id),
+              ProfileStore.shared.activeID == profile,
+              case .object(let fields) = snapshot.host["profiles"]?[profile.uuidString]?["fields"] else {
+            throw CurationFailure.unavailable
+        }
+        return fields
+    }
+
+    @MainActor func nativeCurationRegisters(target: NativeXperienceTarget) throws -> [String: VortxJSON] {
+        guard nativeXperienceTargetIsCurrent(target),
+              let snapshot = target.owner.facade.capturedHostProfileSnapshot(
+                expected: target.owner.binding, registry: target.registry) else {
+            throw CurationFailure.staleContext
+        }
+        return snapshot.registers
+    }
+
+    @MainActor func saveNativeCuration(_ edit: CurationNativeEdit, target: NativeXperienceTarget,
+                                      validator: XperiencePreparedExport) async throws -> VortxJSON {
+        try Task.checkCancellation()
+        guard nativeXperienceTargetIsCurrent(target) else { throw CurationFailure.staleContext }
+        // Decode/validate our bounded document again at the production seam. Native host admission
+        // independently applies reserved-key/credential checks and full prospective export budget.
+        _ = try CurationDocument(raw: edit.document.raw)
+        let result = try await target.owner.facade.setCapturedHostProfileField(edit.nativeEdit,
+            expected: target.owner.binding, registry: target.registry,
+            sourceAuthority: target.authority, checkpointValidator: validator,
+            admission: { fields in try edit.validateAdmission(fields) })
+        guard nativeXperienceTargetIsCurrent(target) else { throw CurationFailure.staleContext }
+        return result
+    }
+
+    @MainActor func saveNativeLegacyCuration(_ edit: VortxNativeHostFieldEdit, target: NativeXperienceTarget,
+                                            validator: XperiencePreparedExport) async throws -> VortxJSON {
+        try Task.checkCancellation()
+        guard ForYouSync.isCollectionField(edit.field), nativeXperienceTargetIsCurrent(target) else {
+            throw CurationFailure.staleContext
+        }
+        try ForYouSync.validate(edit.field, value: edit.value)
+        let result = try await target.owner.facade.setCapturedHostProfileField(edit,
+            expected: target.owner.binding, registry: target.registry,
+            sourceAuthority: target.authority, checkpointValidator: validator)
+        guard nativeXperienceTargetIsCurrent(target) else { throw CurationFailure.staleContext }
+        return result
+    }
     @MainActor func nativeXperienceSnapshot(target: NativeXperienceTarget) throws
         -> (registers: [String: VortxJSON], candidates: [XperienceAddonBinding.Candidate]) {
         guard target.lifetime.isActive, nativeWatchlistTargetIsCurrent(target.owner),
