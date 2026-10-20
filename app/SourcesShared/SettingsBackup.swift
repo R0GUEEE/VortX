@@ -109,6 +109,9 @@ enum SettingsBackup {
     /// VortXSyncManager writes on push and applies on pull. The blob was never its transport.
     static let deviceLocalKeyPrefixes: [String] = [
         "vortx.sync.",
+        // Per-account receipt that THIS device converted legacy account data into its native store.
+        // A peer's receipt must not suppress this device's conversion or appear as a user settings edit.
+        "vortx.native.legacyConversion.",
         // Effective active-viewer projections are rebuilt from the full profile roster. A peer's
         // selected profile must not overwrite this device's visibility/ranking mirrors.
         "stremiox.profile.",

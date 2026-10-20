@@ -13,7 +13,8 @@ const out = mkdtempSync(join(build, 'settings-backup-secrets.'));
 const backupPath = join(root, 'app/SourcesShared/SettingsBackup.swift');
 const testPath = join(root, 'app/Tests/SettingsBackupSecretsTests.swift');
 const backup = readFileSync(backupPath, 'utf8');
-const sharedInputs = ['CredentialScope.swift', 'Keychain.swift', 'LegacySyncRetention.swift']
+const sharedInputs = ['CredentialScope.swift', 'Keychain.swift', 'LegacySyncRetention.swift',
+  'SettingsDirtyKeys.swift', 'NativeForegroundSyncPolicy.swift']
   .map(name => join(root, 'app/SourcesShared', name));
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const inputs = [backupPath, testPath, ...sharedInputs].map(path => ({
@@ -36,6 +37,9 @@ const variants = [
   { name: 'invalidation-negative', source: replaceOnce(backup,
     'Keychain.invalidationKeyPrefix,', ''), expected: 1,
     failures: ['T1.5', 'T2.3', 'T3.4', 'T5.5'] },
+  { name: 'conversion-cursor-negative', source: replaceOnce(backup,
+    '"vortx.native.legacyConversion.",', ''), expected: 1,
+    failures: ['T9.1', 'T9.3', 'T9.6', 'T9.8', 'T9.9', 'T9.10', 'T9.12', 'T9.13', 'T9.14'] },
 ];
 const receipt = { inputs, compiler: 'xcrun swiftc -swift-version 5', variants: [], passed: false };
 writeFileSync(join(out, 'receipt.json'), JSON.stringify(receipt, null, 2));
@@ -61,7 +65,7 @@ try {
     const source = join(dir, 'SettingsBackup.swift');
     const binary = join(dir, 'settings-backup-test');
     writeFileSync(source, variant.source);
-    const compilation = command('xcrun', ['swiftc', '-swift-version', '5', '-o', binary,
+    const compilation = command('xcrun', ['swiftc', '-j', '1', '-num-threads', '1', '-whole-module-optimization', '-swift-version', '5', '-o', binary,
       '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', plist,
       source, ...sharedInputs, testPath], join(dir, 'compiler.log'));
     if (compilation.status !== 0) throw new Error(`${variant.name} compile failed; inspect ${dir}/compiler.log`);

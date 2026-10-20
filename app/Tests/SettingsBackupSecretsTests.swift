@@ -20,6 +20,10 @@
 
 import Foundation
 
+// NativeForegroundSyncPolicy's unrelated carrier-comparison signature needs an Equatable token.
+// The conversion record, encoder, digest and decision under test are the actual production source.
+struct VortxJSON: Equatable {}
+
 // MARK: - Stubs (only for what SettingsBackup.reloadLiveStores touches; no test calls it)
 
 enum MoatConsent { static let key = "stremiox.moat.consent" }
@@ -121,6 +125,140 @@ struct SettingsBackupSecretsTests {
         if text.contains(secretToken) || text.contains(secretDataKey) { return true }
         let flat = rawPayload(data).map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
         return flat.contains(secretToken) || flat.contains(secretDataKey)
+    }
+
+    @MainActor
+    static func testNativeLegacyConversionCursor(bundleID: String) {
+        typealias Record = NativeForegroundSyncPolicy.LegacyConversionRecord
+        let defaults = UserDefaults.standard
+        let cursorA = "vortx.native.legacyConversion.0123456789abcdef"
+        let cursorB = "vortx.native.legacyConversion.fedcba9876543210"
+        let cursorKeys = [cursorA, cursorB]
+        let preference = "stremiox.accentColor"
+        let nativeSibling = "vortx.native.futurePreference"
+        let peerSibling = "vortx.native.futurePeerPreference"
+        let adjacent = "vortx.native.legacyConversionPolicy"
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        // This is the account document to be converted later, separate from the transferred backup file.
+        // A matching copied record would skip conversion; a fresh device must instead have no record.
+        let conversionSource: [String: Any] = ["library": ["fixture-title": ["watched": true]], "futureField": 7]
+        guard let digest = Record.digest(of: conversionSource, excluding: []),
+              let peerRecordData = try? JSONEncoder().encode(Record(digest: digest, convertedAt: now)),
+              let localRecordData = try? JSONEncoder().encode(Record(digest: String(repeating: "a", count: 64), convertedAt: now)),
+              let otherLocalData = try? JSONEncoder().encode(Record(digest: String(repeating: "b", count: 64), convertedAt: now)),
+              let updatedRecordData = try? JSONEncoder().encode(Record(digest: digest, convertedAt: now.addingTimeInterval(1))) else {
+            check("T9.0 actual legacy conversion record fixture encodes", false)
+            return
+        }
+        check("T9.1 every account-suffixed conversion cursor is device-local",
+              cursorKeys.allSatisfy { !SettingsBackup.isSyncable($0) })
+        check("T9.2 the exact prefix preserves genuine and unknown neighboring preferences",
+              [preference, nativeSibling, peerSibling, adjacent, "vortx.downloads.autoDeleteWatched"].allSatisfy(SettingsBackup.isSyncable))
+
+        defaults.setPersistentDomain([
+            cursorA: localRecordData, cursorB: otherLocalData, preference: "local-blue",
+            nativeSibling: ["unknown": [1, 2]], adjacent: "user-policy", "vortx.downloads.autoDeleteWatched": true
+        ], forName: bundleID)
+        guard let exported = try? SettingsBackup.makeBackup() else {
+            check("T9.0 actual cursor backup exports", false)
+            return
+        }
+        let exportedRaw = rawPayload(exported) // Must bypass decodeDomain so export cannot hide a leak.
+        check("T9.3 actual user backup never encodes either local conversion cursor",
+              cursorKeys.allSatisfy { exportedRaw[$0] == nil })
+        check("T9.4 actual export retains user policy and unknown native sibling fields",
+              exportedRaw[preference] as? String == "local-blue"
+                && exportedRaw[adjacent] as? String == "user-policy"
+                && exportedRaw["vortx.downloads.autoDeleteWatched"] as? Bool == true
+                && SettingsDirtyKeys.valuesEqual(exportedRaw[nativeSibling], ["unknown": [1, 2]]))
+
+        let peerDomain: [String: Any] = [cursorA: peerRecordData, cursorB: peerRecordData,
+                                       preference: "peer-red", peerSibling: ["future": ["retained": true]]]
+        guard let encoded = try? SettingsBackup.encode(domain: peerDomain, bundleID: bundleID, app: "VortX"),
+              var peerEnvelope = (try? JSONSerialization.jsonObject(with: encoded)) as? [String: Any] else {
+            check("T9.0 original peer backup fixture encodes", false)
+            return
+        }
+        peerEnvelope["futureEnvelope"] = ["version": 7, "note": "keep-original"]
+        guard let peerBackup = try? JSONSerialization.data(withJSONObject: peerEnvelope, options: [.sortedKeys]),
+              let decoded = try? SettingsBackup.decodeDomain(from: peerBackup) else {
+            check("T9.0 original peer backup fixture decodes", false)
+            return
+        }
+        let originalPeerBytes = peerBackup
+        let peerRecord = try? JSONDecoder().decode(Record.self, from: peerRecordData)
+        check("T9.5 raw old peer backup really contains a matching skip-capable cursor",
+              rawPayload(peerBackup)[cursorA] as? Data == peerRecordData
+                && Record.decide(peerRecord, digest: digest, hasLinkedAccounts: false, now: now) == .skip)
+        check("T9.6 actual decoder and applied baseline exclude every peer cursor",
+              cursorKeys.allSatisfy { decoded[$0] == nil }
+                && Set(cursorKeys).isDisjoint(with: SettingsBackup.appliedKeys(from: peerBackup)))
+        check("T9.7 filtering preserves the original peer bytes and unknown preference values",
+              peerBackup == originalPeerBytes
+                && rawPayload(peerBackup)[cursorA] as? Data == peerRecordData
+                && SettingsDirtyKeys.valuesEqual(decoded[peerSibling], peerDomain[peerSibling]))
+
+        // All defaults access is inside the existing fresh embedded test-domain guard in main().
+        // A fresh local cursor stays absent; an existing other-account cursor stays byte-identical.
+        defaults.removeObject(forKey: cursorA)
+        let restored = try? SettingsBackup.restore(from: peerBackup)
+        check("T9.8 actual restore cannot install a peer cursor or replace another local cursor",
+              restored == decoded.count && defaults.data(forKey: cursorA) == nil
+                && defaults.data(forKey: cursorB) == otherLocalData)
+        let afterPeerCopy = defaults.data(forKey: cursorA).flatMap { try? JSONDecoder().decode(Record.self, from: $0) }
+        check("T9.9 actual conversion decision still requires first local conversion after peer copy",
+              Record.decide(afterPeerCopy, digest: digest, hasLinkedAccounts: false, now: now) == .first)
+        defaults.set(localRecordData, forKey: cursorA)
+        _ = try? SettingsBackup.restore(from: peerBackup)
+        check("T9.10 an existing local cursor remains byte-identical across explicit file restore",
+              defaults.data(forKey: cursorA) == localRecordData)
+        check("T9.11 actual restore still applies user preferences and unknown peer fields",
+              defaults.string(forKey: preference) == "peer-red"
+                && SettingsDirtyKeys.valuesEqual(defaults.object(forKey: peerSibling), peerDomain[peerSibling]))
+
+        let beforeWrite = defaults.persistentDomain(forName: bundleID) ?? [:]
+        // Same real Data write shape as recordNativeLegacyConversion; no manager implementation copy.
+        defaults.set(updatedRecordData, forKey: cursorA)
+        let afterWrite = defaults.persistentDomain(forName: bundleID) ?? [:]
+        let directDelta = SettingsDirtyKeys.changedSyncableKeys(from: beforeWrite, to: afterWrite,
+                                                               isSyncable: SettingsBackup.isSyncable)
+        let withoutCursor = beforeWrite.filter { $0.key != cursorA }
+        let addedDelta = SettingsDirtyKeys.changedSyncableKeys(from: withoutCursor, to: afterWrite,
+                                                              isSyncable: SettingsBackup.isSyncable)
+        let removedDelta = SettingsDirtyKeys.changedSyncableKeys(from: afterWrite, to: withoutCursor,
+                                                                isSyncable: SettingsBackup.isSyncable)
+        let observerDelta = SettingsDirtyKeys.changedSyncableKeys(
+            from: beforeWrite.filter { SettingsBackup.isSyncable($0.key) },
+            to: afterWrite.filter { SettingsBackup.isSyncable($0.key) }, isSyncable: SettingsBackup.isSyncable)
+        var dirty: [String: Double] = [preference: 100]
+        SettingsDirtyKeys.mark(observerDelta, at: 200, into: &dirty)
+        check("T9.12 actual conversion Data write creates no user-dirty delta and preserves prior user dirty",
+              defaults.data(forKey: cursorA) == updatedRecordData
+                && directDelta.isEmpty && addedDelta.isEmpty && removedDelta.isEmpty
+                && observerDelta.isEmpty && dirty == [preference: 100])
+        defaults.set("user-green", forKey: preference)
+        let afterUserEdit = defaults.persistentDomain(forName: bundleID) ?? [:]
+        let userDelta = SettingsDirtyKeys.changedSyncableKeys(from: beforeWrite, to: afterUserEdit,
+                                                            isSyncable: SettingsBackup.isSyncable)
+        check("T9.13 a genuine user preference edit is still tracked exactly",
+              userDelta == Set([preference]))
+
+        // This tests the legacy helper directly. Modern native export preserves doc.settings unchanged.
+        guard let merged = SettingsBackup.mergedSyncBlob(onto: peerBackup.base64EncodedString()),
+              let mergedEnvelope = (try? JSONSerialization.jsonObject(with: merged)) as? [String: Any] else {
+            check("T9.0 actual legacy settings helper merges", false)
+            return
+        }
+        let mergedRaw = rawPayload(merged)
+        check("T9.14 legacy merged settings output excludes local and old peer cursors",
+              cursorKeys.allSatisfy { mergedRaw[$0] == nil })
+        check("T9.15 legacy helper preserves genuine preferences and unknown payload/envelope fields",
+              mergedRaw[preference] as? String == "user-green"
+                && SettingsDirtyKeys.valuesEqual(mergedRaw[nativeSibling], ["unknown": [1, 2]])
+                && SettingsDirtyKeys.valuesEqual(mergedRaw[peerSibling], peerDomain[peerSibling])
+                && SettingsDirtyKeys.valuesEqual(mergedEnvelope["futureEnvelope"], peerEnvelope["futureEnvelope"]))
+        check("T9.16 original peer backup remains byte-identical and retains its original raw cursor",
+              peerBackup == originalPeerBytes && rawPayload(peerBackup)[cursorA] as? Data == peerRecordData)
     }
 
     @MainActor
@@ -329,6 +467,9 @@ struct SettingsBackupSecretsTests {
               derivedCacheKeys.allSatisfy {
                   UserDefaults.standard.string(forKey: $0) == "local-cache:\($0)"
               })
+
+        print("\n=== T9: native legacy conversion cursors are per-device bookkeeping ===")
+        testNativeLegacyConversionCursor(bundleID: bundleID)
 
         UserDefaults.standard.removePersistentDomain(forName: bundleID)
         check("T7.1 only the owned test defaults domain is retired",
