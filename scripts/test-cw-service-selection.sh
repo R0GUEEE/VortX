@@ -141,12 +141,12 @@ cw_inputs=(
     "$cw_build_dir/FixtureSIMKLHTTPClient.swift"
     app/Tests/ContinueWatchingServiceTests.swift
 )
-swiftc -parse-as-library -D VORTX_NATIVE_DATA_ENGINE -D CW_SERVICE_FIXTURE -D CW_SERVICE_BASELINE "${cw_inputs[@]}" "$cw_build_dir/BaselineServiceSelection.swift" -o "$cw_build_dir/baseline"
+nice -n 15 xcrun swiftc -j 1 -num-threads 1 -whole-module-optimization -parse-as-library -D VORTX_NATIVE_DATA_ENGINE -D CW_SERVICE_FIXTURE -D CW_SERVICE_BASELINE "${cw_inputs[@]}" "$cw_build_dir/BaselineServiceSelection.swift" -o "$cw_build_dir/baseline"
 if "$cw_build_dir/baseline" > "$cw_build_dir/baseline.log" 2>&1; then
     printf '%s\n' 'FAIL: actual parent unexpectedly supports selected SIMKL'
     exit 1
 fi
 grep -F 'FAIL: actual parent selector supports selected SIMKL' "$cw_build_dir/baseline.log"
-swiftc -parse-as-library -D VORTX_NATIVE_DATA_ENGINE -D CW_SERVICE_FIXTURE "${cw_inputs[@]}" -o "$cw_build_dir/services"
+nice -n 15 xcrun swiftc -j 1 -num-threads 1 -whole-module-optimization -parse-as-library -D VORTX_NATIVE_DATA_ENGINE -D CW_SERVICE_FIXTURE "${cw_inputs[@]}" -o "$cw_build_dir/services"
 "$cw_build_dir/services" | tee "$cw_build_dir/services.log"
 printf '%s\n' "Actual parent RED and candidate receipts: $cw_build_dir"
