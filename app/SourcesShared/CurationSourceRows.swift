@@ -34,7 +34,8 @@ struct CurationResolvedRows {
     private var subscriptions = Set<AnyCancellable>()
 
     init(ticket: CurationReadTicket, resolved: CurationResolvedRows = .init(),
-         imports: XperienceCollectionsViewModel = .init()) {
+         imports: XperienceCollectionsViewModel? = nil) {
+        let imports = imports ?? XperienceCollectionsViewModel()
         self.ticket = ticket; self.resolved = resolved; self.imports = imports
         imports.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &subscriptions)
