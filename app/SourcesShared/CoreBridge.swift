@@ -6475,6 +6475,13 @@ extension CoreBridge {
         target.lifetime.isActive && nativeWatchlistTargetIsCurrent(target.owner)
             && target.owner.facade.capturedHostProfileSnapshot(expected: target.owner.binding, registry: target.registry) != nil
     }
+    // Receipt-only check: a successful save retires its edit lifetime, but may still certify
+    // the same original account/profile/installation/registry for secure connection readback.
+    @MainActor func nativeXperienceContextIsCurrent(_ target: NativeXperienceTarget) -> Bool {
+        nativeWatchlistTargetIsCurrent(target.owner)
+            && target.owner.facade.capturedHostProfileSnapshot(expected: target.owner.binding,
+                                                              registry: target.registry) != nil
+    }
     @MainActor func nativeCurationRegisters() throws -> [String: VortxJSON] {
         guard let facade = nativeFacade, let snapshot = facade.profileSnapshot(),
               case .string(let id) = snapshot.state["activeProfileId"], let profile = UUID(uuidString: id),

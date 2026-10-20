@@ -88,8 +88,13 @@ enum XperienceCollections {
     }
 
     static func parse(_ data: Data) throws -> Document {
+        try project(parseCompleteRaw(data))
+    }
+
+    /// Complete bounded JSON admission, also used before profile-envelope projection.
+    static func parseCompleteRaw(_ data: Data) throws -> VortxJSON {
         var parser = StrictParser(data: data)
-        return try project(parser.parse())
+        return try parser.parse()
     }
 
     /// Revalidate a stored value too. No malformed saved child is silently omitted.

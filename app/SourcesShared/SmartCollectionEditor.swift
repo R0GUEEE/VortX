@@ -148,6 +148,8 @@ extension SmartCollectionRules {
                     }
                     .buttonStyle(ChipButtonStyle())
                     .disabled(saving)
+                    XperienceCurationExportControls(existing: existing)
+                        .disabled(saving)
                 } else {
                     Text("Save this collection to choose its folders, artwork and layout.")
                         .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
