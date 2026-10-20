@@ -300,7 +300,7 @@ enum CoreLoadable<T: Decodable>: Decodable {
     var isLoading: Bool { if case .loading = self { return true } else { return false } }
 }
 
-struct CoreMeta: Decodable, Identifiable {
+struct CoreMeta: Decodable, Identifiable, Sendable {
     let id: String
     let type: String
     let name: String
@@ -860,7 +860,7 @@ struct EPGSchedule {
     }
 }
 
-struct CoreLink: Decodable, Equatable {
+struct CoreLink: Decodable, Equatable, Sendable {
     let name: String
     let category: String
     let url: String?

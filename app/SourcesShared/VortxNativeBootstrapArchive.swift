@@ -437,12 +437,13 @@ enum VortxNativeBootstrapArchive {
     private static func decodeJSON(with data: Data, options: JSONSerialization.ReadingOptions = []) throws -> Any {
         try JSONSerialization.jsonObject(with: jsonUTF8View(data), options: options)
     }
-    /// Admission-only companion to a SUCCESSFUL normalized Foundation parse, not a value decoder.
+    /// Lexical admission companion to a complete value parse, not a value decoder.
+    /// Callers must separately decode and validate the complete value.
     /// Foundation dictionaries can erase duplicate/escaped/canonically equivalent member names.
     /// Inspect the original member stream before admitting any raw carrier. Keep this throwing
     /// call outside JSON probes' try? so ambiguity cannot fall through to another carrier policy.
     /// No value tree, number conversion, credential policy, byte cap or key-count cap is added.
-    private static func requireUnambiguousJSON(_ data: Data) throws {
+    static func requireUnambiguousJSON(_ data: Data) throws {
         let bytes = Array(try jsonUTF8View(data))
         var scanner = JSONMemberScanner(bytes: bytes)
         try scanner.value(depth: 0)
