@@ -323,8 +323,7 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
      *  - UNREACHABLE: pushed nothing (a blip is never treated as a fresh account); realtime's guarded
      *    catch-up pull + poll retry until the doc is reachable.
      */
-    private suspend fun onAuthed() {
-        clearAuthInputs()
+    private suspend fun onAuthed() = finishPostAuth {
         when (sync.reconcileAfterSignIn()) {
             VortXSyncManager.SignInReconcile.SEEDED_FROM_DEVICE -> {
                 _syncNotice.value = null
@@ -339,8 +338,7 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
     }
 
     /** QR is a deliberate transfer from an already approved device, so hydrate it without a second prompt. */
-    private suspend fun onQrAuthed() {
-        clearAuthInputs()
+    private suspend fun onQrAuthed() = finishPostAuth {
         when (sync.reconcileAfterSignIn()) {
             VortXSyncManager.SignInReconcile.SEEDED_FROM_DEVICE -> _syncNotice.value = null
             VortXSyncManager.SignInReconcile.HAS_ACCOUNT_DATA -> {
@@ -351,6 +349,21 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
                 _syncNotice.value = sync.syncProblem.value ?: "Signed in. Your synced data wasn't reachable yet; it will catch up automatically."
         }
         sync.startRealtime()
+    }
+
+    /** Shared signed-in completion boundary: a failed restore must not discard the saved session. */
+    internal suspend fun finishPostAuth(action: suspend () -> Unit) {
+        clearAuthInputs()
+        val admit = sync.captureLocalLibraryMutationAdmission()
+        try {
+            action()
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) {
+            admit?.invoke {
+                _syncNotice.value = POST_AUTH_RETRY_NOTICE
+                true
+            }
+        }
     }
 
     private fun clearAuthInputs() {
@@ -409,10 +422,18 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
     fun syncNow() {
         if (_syncing.value) return
         _syncing.value = true
+        val admit = sync.captureLocalLibraryMutationAdmission()
         viewModelScope.launch {
-            val pushed = sync.mergeBoth()
-            _syncNotice.value = sync.syncProblem.value ?: if (pushed) "Synced." else "Couldn't sync right now. It will retry automatically."
-            _syncing.value = false
+            try {
+                val pushed = sync.mergeBoth()
+                admit?.invoke {
+                    _syncNotice.value = sync.syncProblem.value ?: if (pushed) "Synced." else SYNC_RETRY_NOTICE
+                    true
+                }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) {
+                admit?.invoke { _syncNotice.value = SYNC_RETRY_NOTICE; true }
+            } finally { _syncing.value = false }
         }
     }
 
@@ -441,6 +462,8 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
 
     private companion object {
         /// Floor for a NEW password (register/recover). Sign-in never gates: existing accounts rule.
+        const val POST_AUTH_RETRY_NOTICE = "Signed in. Sync could not finish. Your saved data is preserved. Try Sync now again."
+        const val SYNC_RETRY_NOTICE = "Couldn't sync right now. Your saved data is preserved. Try Sync now again."
         const val RECONCILE_RETRY_NOTICE = "Couldn't finish syncing. Your saved data is preserved. Choose an option to retry."
         const val MIN_PASSWORD_LENGTH = 8
         const val QR_POLL_INTERVAL_MS = 2_000L

@@ -86,10 +86,24 @@ jobs:
       # CodeQL only extracts Kotlin from a compilation it traces. This task configures the Android
       # modules and compiles the Play variant without invoking the private-engine release pipeline.
       - name: Compile Android Kotlin for CodeQL
+        id: android_compile
         working-directory: android
-        run: ./gradlew :app:compilePlayDebugKotlin --no-daemon --stacktrace
+        run: ./gradlew :app:compilePlayDebugKotlin -Pvortx.nativeEngine=true -Pvortx.nativeResourceHost=true --no-daemon --stacktrace
+
+      # Gradle uses current app/test dependencies from this checked-out source.
+      - name: Test Android sync and account recovery
+        working-directory: android
+        run: >-
+          ./gradlew :app:testPlayDebugUnitTest
+          -Pvortx.nativeEngine=true -Pvortx.nativeResourceHost=true
+          --tests com.vortx.android.sync.AndroidRealtimeSyncTest
+          --tests com.vortx.android.sync.DurableSessionStateTest
+          --tests com.vortx.android.sync.NativeAccountSyncTest
+          --tests com.vortx.android.sync.VortXSessionOwnerTransitionContractTest
+          --no-daemon --stacktrace
 
       - name: Perform CodeQL analysis
+        if: ${{ always() && !cancelled() && steps.android_compile.outcome == 'success' }}
         uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           category: "/language:java-kotlin"

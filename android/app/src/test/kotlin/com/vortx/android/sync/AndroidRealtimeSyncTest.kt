@@ -11,6 +11,8 @@ import com.vortx.android.profile.UserProfile
 import com.vortx.android.sync.VortXSyncManager.SessionUiState
 import java.lang.reflect.Proxy
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import com.vortx.android.ui.viewmodel.VortXAccountFormState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -188,6 +190,149 @@ class AndroidRealtimeSyncTest {
     private fun test(block: suspend TestScope.() -> Unit) = runTest {
         Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
         try { block() } finally { NativeProviderAccess.unbindForTest(); Dispatchers.resetMain() }
+    }
+
+    @Test fun synchronousSocketStartupFailureRetainsSessionWorkerPollingAndRetry() = test {
+        val f = Fixture(testScheduler)
+        var attempts = 0
+        val channel = VortXSyncRealtime(f.manager, f.work, "wss://fixture.invalid/v1/sync/connect",
+            clockMs = { testScheduler.currentTime }) { _, _ ->
+            attempts++
+            throw IllegalStateException("https://fixture.invalid/private?token=fixture-private")
+        }
+        try {
+            val saved = f.manager.currentSession()
+            f.context.getSharedPreferences("fixture-retained", 0).edit().putString("saved", "keep").commit()
+            f.manager.installRealtimeTestSeam(channel)
+            f.manager.setRealtimeForeground(true); runCurrent()
+            assertTrue(channel.isActive()); assertEquals(1, attempts); assertEquals(1, f.gets)
+            assertSame(saved, f.manager.currentSession()); assertEquals(account, f.manager.account.value)
+            advanceTimeBy(3_001); runCurrent()
+            assertTrue(attempts >= 2)
+            val afterRetries = f.gets
+            advanceTimeBy(3_001); runCurrent() // Poll at 6 s; next socket retry is at 7 s.
+            assertTrue(f.gets > afterRetries)
+            assertEquals("keep", f.context.getSharedPreferences("fixture-retained", 0).getString("saved", null))
+            f.manager.setRealtimeForeground(false)
+            val stoppedGets = f.gets
+            advanceTimeBy(30_000); runCurrent()
+            assertFalse(channel.isActive()); assertEquals(stoppedGets, f.gets)
+            assertSame(saved, f.manager.currentSession())
+        } finally { channel.stop(); f.close() }
+    }
+
+    @Test fun synchronousSocketFailureCanReconnectUsingCapturedSession() = test {
+        val f = Fixture(testScheduler)
+        var attempts = 0
+        val channel = VortXSyncRealtime(f.manager, f.work, "wss://fixture.invalid/v1/sync/connect",
+            clockMs = { testScheduler.currentTime }) { request, listener ->
+            if (++attempts == 1) throw IllegalStateException("fixture startup")
+            Socket(request, listener).also(f.sockets::add)
+        }
+        try {
+            f.manager.installRealtimeTestSeam(channel)
+            f.manager.setRealtimeForeground(true); runCurrent()
+            assertTrue(f.sockets.isEmpty())
+            advanceTimeBy(1_001); runCurrent()
+            assertEquals(2, attempts); assertEquals(1, f.sockets.size)
+            assertEquals("Bearer fixture-a", f.sockets.single().request().header("authorization"))
+            assertEquals(account, f.manager.account.value)
+        } finally { channel.stop(); f.close() }
+    }
+
+    @Test fun realtimeStartupCancellationPropagatesAndDiscardsPartialChannel() = test {
+        val f = Fixture(testScheduler)
+        val cancelled = CancellationException("fixture cancellation")
+        val channel = VortXSyncRealtime(f.manager, f.work, "wss://fixture.invalid/v1/sync/connect") { _, _ -> throw cancelled }
+        try {
+            f.manager.installRealtimeTestSeam(channel)
+            try {
+                f.manager.setRealtimeForeground(true)
+                fail("Cancellation was converted to a startup success")
+            } catch (actual: CancellationException) { assertSame(cancelled, actual) }
+            runCurrent()
+            assertFalse(channel.isActive()); assertEquals(0, f.gets); assertEquals(account, f.manager.account.value)
+        } finally { channel.stop(); f.close() }
+    }
+
+    @Test fun realtimeStartupDoesNotSwallowFatalErrors() = test {
+        val f = Fixture(testScheduler)
+        val fatal = AssertionError("fixture fatal")
+        val channel = VortXSyncRealtime(f.manager, f.work, "wss://fixture.invalid/v1/sync/connect") { _, _ -> throw fatal }
+        try {
+            f.manager.installRealtimeTestSeam(channel)
+            try {
+                f.manager.setRealtimeForeground(true)
+                fail("Fatal error was converted to a startup success")
+            } catch (actual: AssertionError) { assertSame(fatal, actual) }
+            assertEquals(account, f.manager.account.value)
+        } finally { channel.stop(); f.close() }
+    }
+
+    @Test fun postAuthRestoreExceptionKeepsSavedSessionClearsSecretsAndUsesFixedNotice() = test {
+        val f = Fixture(testScheduler)
+        val model = VortXAccountViewModel(f.manager)
+        try {
+            val saved = f.manager.currentSession()
+            model.onPasswordChange("fixture password"); model.onTotpChange("123456")
+            model.onRecoveryInputChange("fixture recovery")
+            model.finishPostAuth {
+                assertEquals("", model.password.value); assertEquals("", model.totp.value)
+                assertEquals("", model.recoveryInput.value)
+                throw IllegalStateException("https://fixture.invalid/private?token=fixture-private")
+            }
+            assertSame(saved, f.manager.currentSession()); assertEquals(account, model.account.value)
+            assertEquals(VortXAccountFormState.Idle, model.formState.value)
+            assertFalse(model.syncing.value); assertFalse(f.realtime.isActive())
+            assertEquals("Signed in. Sync could not finish. Your saved data is preserved. Try Sync now again.", model.syncNotice.value)
+            assertFalse(model.syncNotice.value!!.contains("fixture-private"))
+        } finally { model.viewModelScope.cancel(); f.close() }
+    }
+
+    @Test fun failedPostAuthCompletionCannotPublishIntoReplacementSession() = test {
+        val f = Fixture(testScheduler)
+        val model = VortXAccountViewModel(f.manager)
+        try {
+            val replacement = account.copy(id = "00000000-0000-0000-0000-000000000999")
+            model.finishPostAuth {
+                f.manager.replaceSyncSessionTestSeam(VortXSyncManager.Session("fixture-b", replacement, key))
+                throw IllegalStateException("fixture superseded restore")
+            }
+            assertEquals(replacement, model.account.value)
+            assertNull(model.syncNotice.value)
+        } finally { model.viewModelScope.cancel(); f.close() }
+    }
+
+    @Test fun postAuthCancellationAndFatalErrorsRetainOriginalIdentity() = test {
+        val f = Fixture(testScheduler)
+        val model = VortXAccountViewModel(f.manager)
+        try {
+            val cancelled = CancellationException("fixture cancellation")
+            try {
+                model.finishPostAuth { throw cancelled }
+                fail("Post-auth cancellation was swallowed")
+            } catch (actual: CancellationException) { assertSame(cancelled, actual) }
+            val fatal = AssertionError("fixture fatal")
+            try {
+                model.finishPostAuth { throw fatal }
+                fail("Post-auth fatal error was swallowed")
+            } catch (actual: AssertionError) { assertSame(fatal, actual) }
+            assertEquals(account, model.account.value)
+        } finally { model.viewModelScope.cancel(); f.close() }
+    }
+
+    @Test fun cancellingManualSyncClearsBusyStateWithoutDiscardingSession() = test {
+        val f = Fixture(testScheduler)
+        val model = VortXAccountViewModel(f.manager)
+        try {
+            val saved = f.manager.currentSession()
+            f.getGate = CompletableDeferred()
+            model.syncNow(); runCurrent()
+            assertTrue(model.syncing.value); assertEquals(1, f.gets)
+            model.viewModelScope.cancel(); runCurrent()
+            assertFalse(model.syncing.value); assertSame(saved, f.manager.currentSession())
+            assertEquals(0, f.puts)
+        } finally { model.viewModelScope.cancel(); f.close() }
     }
 
     @Test fun `conditional idle poll skips export reopen decode and apply but newer document applies`() = test {

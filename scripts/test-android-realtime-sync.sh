@@ -13,8 +13,13 @@ test -f "$android_jar"
 jar() { rg --files "$cache_root/$1/$2/$3" | rg "/$2-$3.jar$" | head -1; }
 stdlib="$(jar org.jetbrains.kotlin kotlin-stdlib 2.2.10)"
 annotations="$(jar org.jetbrains annotations 13.0)"
-coroutines="$(jar org.jetbrains.kotlinx kotlinx-coroutines-core-jvm 1.10.2)"
-compiler_cp="$(jar org.jetbrains.kotlin kotlin-compiler-embeddable 2.2.10):$stdlib:$(jar org.jetbrains.kotlin kotlin-reflect 1.6.10):$annotations:$coroutines"
+# Match the application pin, not a newer unrelated harness dependency. The
+# compiler's own retained POM requires 1.8.0 independently of the app runtime.
+coroutines_version="$(sed -n 's/^coroutines = "\([0-9.]*\)"$/\1/p' "$repo_root/android/gradle/libs.versions.toml")"
+test -n "$coroutines_version"
+coroutines="$(jar org.jetbrains.kotlinx kotlinx-coroutines-core-jvm "$coroutines_version")"
+compiler_coroutines="$(jar org.jetbrains.kotlinx kotlinx-coroutines-core-jvm 1.8.0)"
+compiler_cp="$(jar org.jetbrains.kotlin kotlin-compiler-embeddable 2.2.10):$stdlib:$(jar org.jetbrains.kotlin kotlin-reflect 1.6.10):$annotations:$compiler_coroutines"
 dependency_cp="$(rg --files "$cache_root" "$transforms_root" | rg '\.jar$' | paste -sd ':' -)"
 mkdir -p "$repo_root/android/app/build"
 test_dir="$(mktemp -d "$repo_root/android/app/build/realtime-sync-kotlin.XXXXXX")"

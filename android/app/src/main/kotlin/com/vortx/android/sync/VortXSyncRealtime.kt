@@ -1,5 +1,7 @@
 package com.vortx.android.sync
 
+import com.vortx.android.diagnostics.DiagnosticsLog
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -53,22 +55,35 @@ internal class VortXSyncRealtime(
         val prior = synchronized(this) { channel }
         if (prior != null && current(prior)) return
         var next: Channel? = null
-        // Final outbound admission follows auth → channel, the same order as sign-out.
-        manager.admitRealtimeLease(lease) {
-            synchronized(this) {
-                stopLocked()
-                next = Channel(lease).also { channel = it; connectLocked(it); startKeepAliveLocked(it); startPollLocked(it) }
+        try {
+            // Final outbound admission follows auth → channel, the same order as sign-out.
+            manager.admitRealtimeLease(lease) {
+                synchronized(this) {
+                    stopLocked()
+                    val opening = Channel(lease)
+                    next = opening
+                    channel = opening
+                    if (connectLocked(opening)) startKeepAliveLocked(opening)
+                    startPollLocked(opening)
+                }
+                true
             }
-            true
-        }
-        val opened = next ?: return
-        val worker = scope.launch(start = CoroutineStart.LAZY) {
-            opened.requests.receiveAsFlow().takeWhile { current(opened) }.collect {
-                manager.syncDownForRealtime(opened.lease)
+            val opened = next ?: return
+            val worker = scope.launch(start = CoroutineStart.LAZY) {
+                opened.requests.receiveAsFlow().takeWhile { current(opened) }.collect {
+                    manager.syncDownForRealtime(opened.lease)
+                }
             }
+            val admitted = synchronized(this) { if (channel === opened) { opened.pull = worker; true } else false }
+            if (admitted) { worker.start(); queuePull(opened) } else worker.cancel()
+        } catch (cancel: CancellationException) {
+            synchronized(this) { if (next != null && channel === next) stopLocked() }
+            throw cancel
+        } catch (_: Exception) {
+            synchronized(this) { if (next != null && channel === next) stopLocked() }
+            // Closed categories only: exception messages can contain an endpoint or bearer.
+            DiagnosticsLog.log("sync", "realtime result=unavailable stage=start reason=setup_failed")
         }
-        val admitted = synchronized(this) { if (channel === opened) { opened.pull = worker; true } else false }
-        if (admitted) { worker.start(); queuePull(opened) } else worker.cancel()
     }
 
     fun stop() { synchronized(this) { stopLocked() } }
@@ -85,16 +100,25 @@ internal class VortXSyncRealtime(
     private fun current(expected: Channel): Boolean =
         synchronized(this) { channel === expected } && manager.isRealtimeLeaseCurrent(expected.lease)
 
-    private fun connectLocked(expected: Channel) {
-        val request = Request.Builder().url(wssUrl)
-            .header("authorization", "Bearer ${expected.lease.token}").build()
-        val listener = object : WebSocketListener() {
-            override fun onMessage(webSocket: WebSocket, text: String) = handleMessage(expected, webSocket, text)
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) = handleMessage(expected, webSocket, bytes.utf8())
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = scheduleReconnect(expected, webSocket)
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) = scheduleReconnect(expected, webSocket)
+    private fun connectLocked(expected: Channel): Boolean {
+        return try {
+            val request = Request.Builder().url(wssUrl)
+                .header("authorization", "Bearer " + expected.lease.token).build()
+            val listener = object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, text: String) = handleMessage(expected, webSocket, text)
+                override fun onMessage(webSocket: WebSocket, bytes: ByteString) = handleMessage(expected, webSocket, bytes.utf8())
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = scheduleReconnect(expected, webSocket)
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) = scheduleReconnect(expected, webSocket)
+            }
+            expected.socket = socketFactory?.invoke(request, listener) ?: client.newWebSocket(request, listener)
+            true
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) {
+            expected.socket = null
+            DiagnosticsLog.log("sync", "realtime result=degraded stage=connect reason=socket_start_failed")
+            scheduleReconnectLocked(expected)
+            false // Startup still installs the captured pull worker and fallback poll.
         }
-        expected.socket = socketFactory?.invoke(request, listener) ?: client.newWebSocket(request, listener)
     }
 
     private fun handleMessage(expected: Channel, socket: WebSocket, text: String) {
@@ -123,25 +147,30 @@ internal class VortXSyncRealtime(
         synchronized(this) {
             if (channel !== expected || expected.socket !== failed) return
             expected.socket = null
-            expected.heardAtMs = null
             failed.cancel()
-            expected.keepAlive?.cancel(); expected.keepAlive = null
-            val waitMs = expected.backoffSeconds * 1_000
-            expected.backoffSeconds = minOf(expected.backoffSeconds * 2, 30)
-            expected.reconnect?.cancel()
-            expected.reconnect = scope.launch {
-                delay(waitMs)
-                if (!isActive || !current(expected)) return@launch
-                manager.admitRealtimeLease(expected.lease) {
-                    synchronized(this@VortXSyncRealtime) {
-                        if (channel === expected && expected.socket == null) {
-                            connectLocked(expected); startKeepAliveLocked(expected)
-                        }
+            scheduleReconnectLocked(expected)
+        }
+    }
+
+    /** Caller holds the channel monitor. The same backoff covers synchronous and callback failures. */
+    private fun scheduleReconnectLocked(expected: Channel) {
+        expected.heardAtMs = null
+        expected.keepAlive?.cancel(); expected.keepAlive = null
+        val waitMs = expected.backoffSeconds * 1_000
+        expected.backoffSeconds = minOf(expected.backoffSeconds * 2, 30)
+        expected.reconnect?.cancel()
+        expected.reconnect = scope.launch {
+            delay(waitMs)
+            if (!isActive || !current(expected)) return@launch
+            manager.admitRealtimeLease(expected.lease) {
+                synchronized(this@VortXSyncRealtime) {
+                    if (channel === expected && expected.socket == null) {
+                        if (connectLocked(expected)) startKeepAliveLocked(expected)
                     }
-                    true
                 }
-                queuePull(expected) // reconnect catches broadcasts missed while disconnected
+                true
             }
+            queuePull(expected) // reconnect catches broadcasts missed while disconnected
         }
     }
 
