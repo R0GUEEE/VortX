@@ -243,16 +243,21 @@ async function run(label, command, timeout, helper, cwd = root) {
 
 async function main() {
     const stage = process.argv[2];
-    if (process.platform !== 'darwin' || process.argv.length !== 3 || !['watched', 'session', 'bootstrap', 'restore', 'publication', 'parse', 'owner-source', 'owner-prepare'].includes(stage)) {
-        throw new Error('Usage on macOS: bash scripts/test-native-migration-phase-a.sh watched|session|bootstrap|restore|publication|parse|owner-source|owner-prepare');
+    if (process.platform !== 'darwin' || process.argv.length !== 3 || !['watched', 'session', 'bootstrap', 'restore', 'publication', 'parse', 'owner-source', 'owner-prepare', 'fifo'].includes(stage)) {
+        throw new Error('Usage on macOS: bash scripts/test-native-migration-phase-a.sh watched|session|bootstrap|restore|publication|parse|owner-source|owner-prepare|fifo');
     }
     const ownerSource = stage === 'owner-source' || stage === 'owner-prepare';
+    const fifo = stage === 'fifo';
     if (process.env.VORTX_NATIVE_PERSISTENCE_SDK) throw new Error('Unset VORTX_NATIVE_PERSISTENCE_SDK; this fixture never consumes a packaged SDK');
     const scripts = ['scripts/test-native-migration-phase-a.sh', 'scripts/test-native-migration-phase-a.cjs',
         'scripts/native-migration-supervisor.cjs', 'scripts/test-native-watched-archive.sh'];
     scripts.forEach(capture);
     let sources, consumers = [], links = [];
-    if (stage === 'publication') {
+    if (fifo) {
+        sources = ['app/SourcesShared/VortxNativeRuntime.swift', 'app/SourcesShared/VortxResourceBridge.swift',
+            'app/SourcesShared/VortxNativeHostFieldMutation.swift', 'app/SourcesShared/VortxNativeFIFOAdmission.swift',
+            'app/Tests/VortxNativeFIFOAdmissionTests.swift', 'app/Tests/VortxNativeFIFOAdmissionMain.swift'];
+    } else if (stage === 'publication') {
         sources = ['app/Tests/CoreBridgePublicationFenceContractTests.swift'];
         consumers = publicationConsumers();
         consumers.forEach(capture);
@@ -353,7 +358,7 @@ async function main() {
     }
     const flags = ['-O', '-whole-module-optimization', '-j', '1', '-num-threads', '1', '-swift-version', '6',
         '-parse-as-library', '-strict-concurrency=complete', '-warnings-as-errors', '-module-cache-path', path.join(directory, 'module-cache')];
-    if (ownerSource) {
+    if (ownerSource || fifo || stage === 'session') {
         // Host-beta OS versions must not invent an unavailable standard-library target.
         // Use the same explicit macOS 14 fixture floor as the existing native test lanes.
         await run('sdk-path', ['/usr/bin/nice', '-n', '15', '/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-path'], 30_000, helper);
@@ -361,6 +366,18 @@ async function main() {
         if (!path.isAbsolute(sdk) || !fs.statSync(sdk).isDirectory() || /[\r\n]/.test(sdk)) throw new Error('Invalid actual macOS SDK');
         if (!['arm64', 'x64'].includes(process.arch)) throw new Error('Unsupported fixture host');
         flags.push('-sdk', sdk, '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx14.0`);
+    }
+    if (fifo) {
+        await run('sdk-platform', ['/usr/bin/nice', '-n', '15', '/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-platform-path'], 30_000, helper);
+        const platform = fs.readFileSync(path.join(directory, 'sdk-platform.log'), 'utf8').trim();
+        const frameworks = path.join(platform, 'Developer/Library/Frameworks');
+        const swiftLibraries = path.join(platform, 'Developer/usr/lib');
+        if (!path.isAbsolute(platform) || /[\r\n]/.test(platform)
+            || !fs.statSync(path.join(frameworks, 'XCTest.framework')).isDirectory()
+            || !fs.statSync(path.join(swiftLibraries, 'libXCTestSwiftSupport.dylib')).isFile()) throw new Error('Invalid actual XCTest platform');
+        flags.push('-F', frameworks, '-framework', 'XCTest', '-I', swiftLibraries, '-L', swiftLibraries,
+            '-lXCTestSwiftSupport', '-Xlinker', '-rpath', '-Xlinker', frameworks,
+            '-Xlinker', '-rpath', '-Xlinker', swiftLibraries);
     }
     if (stage === 'restore') flags.push('-D', 'VORTX_NATIVE_DATA_ENGINE');
     // Exactly one compiler then one fixture, at nice 15. Deadlines are hang guards,

@@ -17,7 +17,8 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     private var registrySnapshot: [VortxResourceAddon] { lock.withLock { registry } }
     // Dispatch admission is one synchronous transaction, including nested begin/enqueue helpers.
     // This prevents a profile change/rebind from slipping between a UI identity read and enqueue.
-    private let lock = NSRecursiveLock()
+    private let lock: NSRecursiveLock
+    private let mutationFIFO: VortxNativeFIFOAdmission
     private var values: [String: VortxJSON] = [:]
     private var selections: [String: VortxJSON] = [:]
     private var generations: [String: UUID] = [:]
@@ -181,6 +182,8 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     }
     private init(session: VortxNativeSession, registry: [VortxResourceAddon], mutationAccepted: @escaping @Sendable () -> Void,
                  progressAccepted: (@Sendable () -> Void)?, changed: @escaping @Sendable ([String]) -> Void) {
+        let lock = NSRecursiveLock()
+        self.lock = lock; self.mutationFIFO = VortxNativeFIFOAdmission(lock: lock)
         self.session = session; self.registry = registry; self.changed = changed; self.mutationAccepted = mutationAccepted
         self.progressAccepted = progressAccepted
     }
@@ -209,7 +212,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         }
     }
     func close() {
-        lock.lock(); closed = true; let old = Array(tasks.values); tasks.removeAll(); generations.removeAll(); values.removeAll(); addonInventories.removeAll(); addonConfirmation = nil; addonOperation = UUID(); lock.unlock()
+        lock.lock(); closed = true; mutationFIFO.close(); let old = Array(tasks.values); tasks.removeAll(); generations.removeAll(); values.removeAll(); addonInventories.removeAll(); addonConfirmation = nil; addonOperation = UUID(); lock.unlock()
         session.revoke()
         old.forEach { $0.cancel() }; Task { await session.close() }
     }
@@ -345,23 +348,35 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                                  admission: (@Sendable () throws -> Bool)? = nil,
                                  websiteEvents: [VortxJSON] = [], websiteAddonEvents: [VortxJSON] = [], websiteBaseline: VortxNativeProfileEditHost.Baselines = [:],
                                  sourceAuthority: (any VortxMutationAuthority)? = nil, authenticatedSourceArchive: Data? = nil,
+                                 fifoMember: VortxNativeFIFOAdmission.Member? = nil, forceProfileTransition: Bool = false,
                                  completion: (@Sendable (Result<VortxJSON, Error>) -> Void)? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }; guard !closed else { return false }
         guard !checkpointReopenRequired else { return fail("checkpoint_uncertain_reopen_required") }
         if !admitProgress(type: type, raw: raw), completion == nil { return true }
+        let queueMember: VortxNativeFIFOAdmission.Member
+        let mutationAuthority: (any VortxMutationAuthority)?
+        do {
+            if let fifoMember {
+                mutationAuthority = try mutationFIFO.capturedAuthority(for: fifoMember)
+                queueMember = fifoMember
+            } else { queueMember = try mutationFIFO.admit(); mutationAuthority = sourceAuthority }
+        } catch { return fail("native_fifo_unavailable") }
         let predecessor = tasks["native_state"]
         let ticket = UUID(); generations["native_state"] = ticket
-        let profileTransition = ["switch_profile", "delete_profile", "merge_native_sync", "patch_profile", "rebind_profile_account"].contains(type)
+        let profileTransition = forceProfileTransition || ["switch_profile", "delete_profile", "merge_native_sync", "patch_profile", "rebind_profile_account"].contains(type)
         if profileTransition { pendingProfileTransitions += 1 }
         // State intents are FIFO, never latest-wins: dropping one would lose progress/profile edits.
         tasks["native_state"] = Task { [weak self] in
             await predecessor?.value
+            defer { queueMember.finish() }
             guard let self else { completion?(.failure(VortxNativeError.closed)); return }
             var transitionReleased = false
             defer { if profileTransition && !transitionReleased { self.lock.withLock { self.pendingProfileTransitions -= 1 } } }
             var durableCommitted = false
             do {
                 try Task.checkCancellation()
+                try queueMember.begin()
+                if fifoMember != nil { try mutationAuthority?.withActive {} }
                 // Resource-backed gestures may wait behind an add-on/profile mutation.  Their
                 // metadata was accepted for an earlier registry generation, so revalidate at
                 // the FIFO boundary rather than treating the pre-enqueue check as durable.
@@ -372,7 +387,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                 }
                 _ = try await session.dispatch(actions ?? [raw], now: UInt64(Date().timeIntervalSince1970), legacyMaterial: legacyMaterial,
                                                hostRemote: hostRemote, hostEdits: hostEdits, legacyWatchlists: legacyWatchlists, websiteEvents: websiteEvents, websiteAddonEvents: websiteAddonEvents, websiteBaseline: websiteBaseline,
-                                               sourceAuthority: sourceAuthority, authenticatedSourceArchive: authenticatedSourceArchive,
+                                               sourceAuthority: mutationAuthority, authenticatedSourceArchive: authenticatedSourceArchive,
                                                hostFieldCAS: hostFieldCAS, checkpointValidator: checkpointValidator)
                 durableCommitted = true
                 let addonSnapshot = try await session.addonSnapshot()
@@ -439,7 +454,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                 }
                 completion?(.success(document))
             } catch VortxNativeError.checkpointUncertain {
-                self.lock.withLock { self.checkpointReopenRequired = true }
+                self.lock.withLock { self.checkpointReopenRequired = true; self.mutationFIFO.markUncertain() }
                 _ = self.fail("checkpoint_uncertain_reopen_required"); completion?(.failure(VortxNativeError.checkpointUncertain))
             } catch {
                 if durableCommitted {
@@ -487,13 +502,19 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     func flushPendingProgress(completion: (@Sendable () -> Void)? = nil) {
         lock.lock(); defer { lock.unlock() }
         guard !closed, !checkpointReopenRequired else { completion?(); return }
+        guard let queueMember = try? mutationFIFO.admit() else { completion?(); return }
         let predecessor = tasks["native_state"]
         tasks["native_state"] = Task { [weak self] in
             await predecessor?.value
+            defer { queueMember.finish() }
             guard let self else { completion?(); return }
-            do { try await self.session.flushPendingProgress() }
+            do {
+                try Task.checkCancellation()
+                try queueMember.begin()
+                try await self.session.flushPendingProgress()
+            }
             catch VortxNativeError.checkpointUncertain {
-                self.lock.withLock { self.checkpointReopenRequired = true }
+                self.lock.withLock { self.checkpointReopenRequired = true; self.mutationFIFO.markUncertain() }
                 _ = self.fail("checkpoint_uncertain_reopen_required")
             } catch {
                 _ = self.fail("native_progress_flush_failed")
@@ -1416,6 +1437,67 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                         "state": .object(["timeOffset": .unsigned(offset), "duration": .unsigned(duration),
                                           "video_id": row["videoId"] ?? .null, "lastWatched": isoTimestamp(row["updatedAt"], formatter: formatter),
                                           "flaggedWatched": .integer(watched ? 1 : 0), "timesWatched": .unsigned(count)])])
+    }
+}
+
+// MARK: - Original read capability to own running FIFO member
+extension VortxNativeCoreFacade {
+    typealias OriginalReadCapability = VortxNativeFIFOAdmission.ReadCapability
+
+    /// Call before provider awaits, without holding the Facade lock. Original source authority
+    /// owns credential/account/install/cancellation checks; no credential bytes are copied here.
+    func captureNativeMutationRead(expected: WatchlistBinding, registry expectedRegistry: RegistryBinding,
+                                   sourceAuthority: any VortxMutationAuthority) throws -> OriginalReadCapability {
+        let originalSession = ObjectIdentifier(session)
+        return try mutationFIFO.capture(source: sourceAuthority) { [weak self] in
+            guard let self, !self.closed, !self.checkpointReopenRequired,
+                  ObjectIdentifier(self.session) == originalSession, self.resourceRegistryValid,
+                  expected.scope == self.session.scope, expectedRegistry.scope == expected.scope,
+                  expectedRegistry.profileID == expected.profileID,
+                  expected.accountGeneration == self.accountEpoch,
+                  expected.profileGeneration == self.watchlistProfileGeneration,
+                  expectedRegistry.generation == self.registryGeneration,
+                  self.values["native_state"]?["activeProfileId"] == .string(expected.profileID) else {
+                throw VortxNativeError.superseded
+            }
+            // Deliberately no pendingProfileTransitions/latest-enqueued-generation test here:
+            // later FIFO intents cannot revoke this earlier member. Actual ACK identity can.
+        }
+    }
+
+    /// Generic current-Session adapter, not an owner-history import or a source-to-action
+    /// converter. The supplied actions still pass the real Session candidate/checkpoint path.
+    /// Owner-history requires a separate typed Session method and raw publication integration.
+    func dispatchCapturedNativeActions(_ actions: [String], read: OriginalReadCapability,
+                                       checkpointValidator: any VortxProspectiveCheckpointValidator) async throws -> VortxJSON {
+        guard !actions.isEmpty else { throw VortxNativeError.invalidSnapshot }
+        let types = try actions.map { raw -> String in
+            let action = try JSONDecoder().decode(VortxJSON.self, from: Data(raw.utf8))
+            guard case .string(let type) = action["type"] else { throw VortxNativeError.invalidSnapshot }
+            return type
+        }
+        let transitionTypes: Set<String> = ["switch_profile", "delete_profile", "merge_native_sync", "patch_profile", "rebind_profile_account"]
+        let transition = types.contains { transitionTypes.contains($0) }
+        let type = types.allSatisfy { $0 == "get_state" } ? "get_state" : "captured_native_mutation"
+        return try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<VortxJSON, Error>) in
+                do {
+                    // Source -> Facade lock. Consume and install the task in the SAME critical
+                    // section; competing dispatch cannot slip between validation and insertion.
+                    try mutationFIFO.admit(read) { member in
+                        guard enqueueMutation(type: type, raw: "", actions: actions,
+                            checkpointValidator: checkpointValidator,
+                            fifoMember: member, forceProfileTransition: transition,
+                            completion: { continuation.resume(with: $0) }) else {
+                            member.finish()
+                            continuation.resume(throwing: VortxNativeError.closed)
+                            return
+                        }
+                    }
+                } catch { continuation.resume(throwing: error) }
+            }
+        }, onCancel: { read.cancel() })
     }
 }
 

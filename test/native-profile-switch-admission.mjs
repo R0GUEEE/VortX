@@ -176,7 +176,7 @@ async function extract(outDir, baselineRef) {
     "app/SourcesShared/Profiles.swift", "app/SourcesShared/CoreBridge.swift", "app/SourcesShared/VortXSyncManager.swift",
     "app/SourcesShared/VortxNativeProfiles.swift", "app/SourcesShared/NativePreferenceIntentStore.swift",
     "app/SourcesShared/ProfileDiscoveryPreferences.swift",
-    "app/SourcesShared/VortxNativeCoreFacade.swift", "app/SourcesShared/VortxNativeSession.swift",
+    "app/SourcesShared/VortxNativeCoreFacade.swift", "app/SourcesShared/VortxNativeFIFOAdmission.swift", "app/SourcesShared/VortxNativeSession.swift",
     "app/Tests/NativeProfileSwitchAdmissionLiveTests.swift",
   ];
   const sourceHashes = {};

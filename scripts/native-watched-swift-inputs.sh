@@ -9,6 +9,7 @@ native_watched_swift_inputs=(
   app/SourcesShared/VortxNativeWatchedArchive.swift
   app/SourcesShared/VortxNativeWatchlist.swift
   app/SourcesShared/VortxNativeHostFieldMutation.swift
+  app/SourcesShared/VortxNativeFIFOAdmission.swift
   app/SourcesShared/VortxNativeWebsiteAddonEdits.swift
   -lz
 )

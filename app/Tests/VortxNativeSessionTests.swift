@@ -94,6 +94,60 @@ private final class SessionStore: VortxCheckpointStore, @unchecked Sendable {
     }
 }
 
+// Fixture-only source witness: genuinely nonrecursive, never a fake production API.
+private final class FIFOTestSource: VortxMutationAuthority, @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = true
+    func revoke() { lock.withLock { active = false } }
+    func withActive(_ operation: () throws -> Void) throws {
+        try lock.withLock {
+            guard active else { throw VortxNativeError.superseded }
+            try operation()
+        }
+    }
+}
+
+/// Synthetic external budget/witness boundary only, not a complete-account budget proof.
+/// Session invokes withActive BEFORE taking its lease, original source or Facade commit locks.
+private final class FIFOTestCheckpoint: VortxProspectiveCheckpointValidator, @unchecked Sendable {
+    private let lock = NSLock()
+    private var hold: Bool
+    private var validations = 0
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    init(hold: Bool = false) { self.hold = hold }
+    var validationCount: Int { lock.withLock { validations } }
+    func withActive(_ operation: () throws -> Void) throws {
+        let wait = lock.withLock { let value = hold; hold = false; return value }
+        if wait {
+            entered.signal()
+            precondition(release.wait(timeout: .now() + 5) == .success, "unreleased FIFO validator")
+        }
+        try operation()
+    }
+    func validate(native: VortxJSON, host: VortxJSON, profileEditResults: VortxJSON) throws {
+        lock.withLock { validations += 1 }
+    }
+}
+
+private final class FIFOTestPublications: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var facade: VortxNativeCoreFacade?
+    private var snapshots: [VortxJSON] = []
+    func attach(_ value: VortxNativeCoreFacade) { lock.withLock { facade = value } }
+    func record(_ fields: [String]) {
+        guard fields.contains("native_state") else { return }
+        // Never acquire Facade while holding this fixture's observation lock.
+        let current = lock.withLock { facade }
+        guard let bytes = current?.stateData("native_state"),
+              let state = try? JSONDecoder().decode(VortxJSON.self, from: bytes) else {
+            preconditionFailure("FIFO publication had no actual acknowledged state")
+        }
+        lock.withLock { snapshots.append(state) }
+    }
+    var states: [VortxJSON] { lock.withLock { snapshots } }
+}
+
 private enum MigrationDraftFixtureFailure: Error { case read, witnessReached, wrongDispatch, lostAcknowledgement }
 
 /// Deliberately implements only the old synchronous draft requirement, and returns
@@ -1094,8 +1148,18 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         check(report("tt1", nil, 60_000) && report("tt1", "tt1", 60_400))                  // both lanes of one movie tick
         await facade.settleNativeMutations()
         check(laneABI.progressDispatches == base + 1)
+        guard let duplicateBinding = facade.watchlistBinding, let duplicateRegistry = facade.registryBinding else {
+            preconditionFailure("missing acknowledged progress fixture binding")
+        }
+        let duplicateRead = try facade.captureNativeMutationRead(expected: duplicateBinding, registry: duplicateRegistry,
+            sourceAuthority: FIFOTestSource())
+        check(report("tt1", nil, 60_400)); await facade.settleNativeMutations()
+        check(laneABI.progressDispatches == base + 1) // duplicate admits no member and preserves read authority
+        try duplicateRead.withActive {}
         check(report("tt1", nil, 65_000)); await facade.settleNativeMutations()
         check(laneABI.progressDispatches == base + 2)                                      // a real move still reports
+        do { try duplicateRead.withActive {}; preconditionFailure("real progress admission revived old read") }
+        catch VortxNativeError.superseded {}
         check(report("tt2", "tt2:1:1", 65_000)); await facade.settleNativeMutations()
         check(laneABI.progressDispatches == base + 3)                                      // another title still reports
         check(facade.dispatchForProfile(.object(["type": .string("mark_watched"), "metaId": .string("tt2"),
@@ -1106,11 +1170,181 @@ private final class DetailFanoutTransport: VortxResourceTransport, @unchecked Se
         await facade.shutdown()
         print("Native progress writes: duplicate lane dropped, 30 s coalescing, immediate non-progress writes, flush and failure passed")
     }
+    // Actual Facade/Session task-chain tests; only kernel, transport, checkpoint and
+    // external witness boundaries are synthetic. No owner-history transaction is wired.
+    static func fifoHandoffTests() async throws {
+        func mount(_ label: String, publications: FIFOTestPublications = FIFOTestPublications(),
+                   accepted: MutationCounter = MutationCounter()) async throws
+            -> (VortxNativeCoreFacade, VortxNativeSession, SessionStore, FIFOTestPublications, MutationCounter) {
+            let scope = VortxAccountScope(account: "fifo-handoff-" + label, ownerProfileID: "owner")
+            let store = SessionStore()
+            let session = try VortxNativeSession(scope: scope, ownerName: "Owner", abi: SessionABI(),
+                store: store, transport: SessionTransport(), allowNewAccount: true)
+            let facade = try await VortxNativeCoreFacade.create(session: session, registry: [],
+                mutationAccepted: { accepted.increment() }, changed: { publications.record($0) })
+            publications.attach(facade)
+            return (facade, session, store, publications, accepted)
+        }
+        func capture(_ facade: VortxNativeCoreFacade, _ source: FIFOTestSource) throws
+            -> VortxNativeCoreFacade.OriginalReadCapability {
+            guard let binding = facade.watchlistBinding, let registry = facade.registryBinding else {
+                throw VortxNativeError.superseded
+            }
+            return try facade.captureNativeMutationRead(expected: binding, registry: registry, sourceAuthority: source)
+        }
+        func rejected(_ expected: VortxNativeError = .superseded, _ operation: () throws -> Void) throws {
+            do { try operation(); preconditionFailure("FIFO authority unexpectedly remained usable") }
+            catch let error as VortxNativeError { check(error == expected) }
+        }
+        func waitFor(_ semaphore: DispatchSemaphore) async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().async {
+                    precondition(semaphore.wait(timeout: .now() + 5) == .success, "FIFO barrier not reached")
+                    continuation.resume()
+                }
+            }
+        }
+        func action(_ type: String, id: String? = nil) throws -> Data {
+            var value: [String: VortxJSON] = ["type": .string(type)]
+            if let id { value["id"] = .string(id) }
+            return try JSONEncoder().encode(VortxJSON.object(["action": .string("Vortx"), "args": .object(value)]))
+        }
+        let currentWatch = #"{"type":"mark_watched","metaId":"fifo-fixture-title","name":"Fixture"}"#
+
+        // An admitted predecessor retires an old read even after its task settles.
+        do {
+            let (facade, _, store, _, _) = try await mount("predecessor")
+            let source = FIFOTestSource(), read = try capture(facade, source)
+            store.blockNextWrite()
+            check(facade.dispatch(data: try action("get_state"), field: nil))
+            await waitFor(store.entered)
+            try rejected { _ = try capture(facade, source) } // actual busy queue, not profile getter rejection
+            try rejected { try read.withActive {} }
+            store.release.signal(); await facade.settleNativeMutations()
+            try rejected { try read.withActive {} }
+            try capture(facade, source).withActive {}
+            await facade.shutdown()
+        }
+        // The actual public flush path participates even if there is no buffered progress.
+        do {
+            let (facade, _, _, _, _) = try await mount("flush")
+            let source = FIFOTestSource(), read = try capture(facade, source)
+            facade.flushPendingProgress()
+            try rejected { try read.withActive {} }
+            await facade.settleNativeMutations()
+            try rejected { try read.withActive {} }
+            try capture(facade, source).withActive {}
+            await facade.shutdown()
+        }
+        // Hold BEFORE commit locks so a genuine later profile intent can enqueue safely.
+        do {
+            let (facade, _, store, publications, accepted) = try await mount("later-profile")
+            let source = FIFOTestSource(), read = try capture(facade, source)
+            let validator = FIFOTestCheckpoint(hold: true)
+            let before = store.commits
+            let submitted = Task.detached {
+                try await facade.dispatchCapturedNativeActions([currentWatch], read: read, checkpointValidator: validator)
+            }
+            await waitFor(validator.entered)
+            try rejected { _ = try capture(facade, source) }
+            check(facade.dispatch(data: try action("switch_profile", id: "kid"), field: nil))
+            try read.withActive {} // later pending transition must not revoke OWN running member
+            check(store.commits == before && publications.states.isEmpty && accepted.value == 0)
+            validator.release.signal()
+            _ = try await submitted.value
+            await facade.settleNativeMutations()
+            let states = publications.states
+            check(states.count == 2)
+            check(states[0]["activeProfileId"] == .string("owner"))
+            check(states[0]["fixtureMutation"] == .string("mark_watched"))
+            check(states[1]["activeProfileId"] == .string("kid"))
+            check(store.commits == before + 2 && validator.validationCount == 1 && accepted.value == 2)
+            try rejected { try read.withActive {} }
+            await facade.shutdown()
+        }
+        // Revocation/cancellation before the final source check writes nothing and does
+        // not consume a later legitimate profile intent or invent a successful callback.
+        for cancel in [false, true] {
+            let (facade, _, store, publications, accepted) = try await mount(cancel ? "cancel" : "source-revoke")
+            let source = FIFOTestSource(), read = try capture(facade, source)
+            let validator = FIFOTestCheckpoint(hold: true)
+            let before = store.commits
+            let submitted = Task.detached {
+                try await facade.dispatchCapturedNativeActions([currentWatch], read: read, checkpointValidator: validator)
+            }
+            await waitFor(validator.entered)
+            if cancel { submitted.cancel() } else { source.revoke() }
+            check(facade.dispatch(data: try action("switch_profile", id: "kid"), field: nil))
+            check(store.commits == before && publications.states.isEmpty && accepted.value == 0)
+            validator.release.signal()
+            do { _ = try await submitted.value; preconditionFailure("revoked source saved") }
+            catch VortxNativeError.superseded {}
+            await facade.settleNativeMutations()
+            check(store.commits == before + 1 && validator.validationCount == 0 && accepted.value == 1)
+            check(publications.states.count == 1 && publications.states[0]["activeProfileId"] == .string("kid"))
+            await facade.shutdown()
+        }
+        // Acknowledged A -> B -> A does not revive the original read.
+        do {
+            let (facade, _, _, _, _) = try await mount("profile-aba")
+            let source = FIFOTestSource(), read = try capture(facade, source)
+            check(facade.dispatch(data: try action("switch_profile", id: "kid"), field: nil))
+            await facade.settleNativeMutations()
+            check(facade.dispatch(data: try action("switch_profile", id: "owner"), field: nil))
+            await facade.settleNativeMutations()
+            try rejected { try read.withActive {} }
+            try capture(facade, source).withActive {}
+            await facade.shutdown()
+        }
+        // Registry generation retires the read even when replacement values return to A.
+        do {
+            let (facade, _, _, _, _) = try await mount("registry-aba")
+            let source = FIFOTestSource(), read = try capture(facade, source)
+            guard let first = facade.registryBinding else { preconditionFailure("missing registry A") }
+            let replacement: [VortxResourceAddon] = [.init(id: "fifo-registry-b", transportUrl: "https://fixture.invalid/manifest.json",
+                manifest: .object(["id": .string("fifo-registry-b"), "name": .string("Fixture B")]))]
+            try await facade.rebindRegistry(replacement, expected: first)
+            guard let second = facade.registryBinding else { preconditionFailure("missing registry B") }
+            try await facade.rebindRegistry([], expected: second)
+            check(first != second)
+            try rejected { try read.withActive {} }
+            try capture(facade, source).withActive {}
+            await facade.shutdown()
+        }
+        // A possibly installed checkpoint cannot reopen this Facade/FIFO for another write.
+        do {
+            let (facade, _, store, publications, accepted) = try await mount("uncertain")
+            let source = FIFOTestSource(), read = try capture(facade, source)
+            let validator = FIFOTestCheckpoint()
+            store.failWrites(afterInstall: true)
+            do {
+                _ = try await facade.dispatchCapturedNativeActions([currentWatch], read: read, checkpointValidator: validator)
+                preconditionFailure("uncertain captured checkpoint reported success")
+            } catch VortxNativeError.checkpointUncertain {}
+            await facade.settleNativeMutations()
+            check(facade.requiresCheckpointReopen && !facade.isAvailable)
+            check(publications.states.isEmpty && accepted.value == 0)
+            try rejected(.checkpointUncertain) { try read.withActive {} }
+            check(!facade.dispatch(data: try action("get_state"), field: nil))
+            await facade.shutdown()
+        }
+        do {
+            let (facade, _, _, _, _) = try await mount("closed")
+            let source = FIFOTestSource(), read = try capture(facade, source)
+            facade.close()
+            try rejected(.closed) { try read.withActive {} }
+            check(!facade.dispatch(data: try action("get_state"), field: nil))
+            await facade.shutdown()
+        }
+        print("Native FIFO handoff: actual Facade membership, later profile ordering, revocation, flush, ABA and uncertainty passed")
+    }
+
     static func main() async throws {
         try await migrationDraftProtocolTests()
         try await migrationProgressLeaseTests()
         try hydrationPreservationTests()
         try await progressWriteTests()
+        try await fifoHandoffTests()
 #if canImport(VortxEngine) && VORTX_ENGINE_STATE_BRIDGE
         try liveHydrationPreservationTests()
 #endif
