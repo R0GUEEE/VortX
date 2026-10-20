@@ -110,7 +110,7 @@ struct LibraryView: View {
                             .buttonStyle(ChipButtonStyle(selected: false))
                             if profiles.active?.isKids != true {
                                 NavigationLink { TVSmartCollectionsView() } label: {
-                                    Label("Smart collections", systemImage: "line.3.horizontal.decrease.circle")
+                                    Label("Collections", systemImage: "square.grid.2x2")
                                 }
                                 .buttonStyle(ChipButtonStyle(selected: false))
                                 // Folders on a NAS or computer (WebDAV / web folder), saved on this Apple TV.

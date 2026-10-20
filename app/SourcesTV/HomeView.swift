@@ -179,7 +179,6 @@ struct HomeView: View {
                         // Every other Home section renders in the user's arranged order, minus the hidden ones
                         // (HomeRailPreferences). Default order + nothing hidden == today's Home exactly, so this
                         // is a no-op until the user customizes via the "Customize Home" manage screen.
-                        XperienceHomeEntry()
                         ForEach(railPrefs.arrange(HomeRail.tvDefaultOrder)) { section in
                             if !railPrefs.isHidden(section) {
                                 homeSection(section)
@@ -326,7 +325,7 @@ struct HomeView: View {
     private func refreshForYou() {
         let owned = Set((continueWatching + libraryItems)
             .filter { !$0.id.isEmpty && $0.removed != true && $0.temp != true }.map(\.id))
-        forYouRows.refresh(profileID: profiles.activeID, interests: forYou.interests, collections: forYou.collections,
+        forYouRows.refresh(profileID: profiles.activeID, interests: forYou.interests, collections: [],
                            owned: owned, watched: WatchedIndex.shared.ids, enabled: forYouEnabled)
         offerInterestsIfNeeded()
     }
@@ -465,9 +464,8 @@ struct HomeView: View {
                                     onTune: { interestsPresentation = ForYouInterestsPresentation(firstRun: false) })
             }
         case .smartCollections:
-            // The profile's own rule-built collections that are pinned to Home.
-            ForEach(forYouRows.collectionRows) { row in
-                ExternalWatchlistRow(eyebrow: row.eyebrow, title: row.title, items: row.items, focusModel: focusModel)
+            if forYouEnabled {
+                CurationCollectionsHome(resolved: .init(interests: forYouRows.interestRows.flatMap(\.items)))
             }
         case .collectionsHub:
             // Collections hub (Discover cards, Streaming-service tiles, Genre tiles). Each tile opens a

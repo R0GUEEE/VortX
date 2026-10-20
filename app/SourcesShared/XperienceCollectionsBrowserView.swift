@@ -52,11 +52,11 @@ struct XperienceCollectionsConnectCard: View {
         } label: {
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
                 HStack {
-                    Text("Nuvio / Xperience collections").font(Theme.Typography.cardTitle)
+                    Text("Nuvio / Xperience collection imports").font(Theme.Typography.cardTitle)
                     Spacer()
                     Image(systemName: "chevron.right").accessibilityHidden(true)
                 }
-                Text("Import a JSON collection export, review its installed add-on sources, and browse saved folders in this profile.")
+                Text("Import a JSON collection export and review its installed add-on sources. Saved imports appear beside your VortX collections in Library.")
                     .font(Theme.Typography.body).foregroundStyle(Theme.Palette.textSecondary)
             }
             .padding(Theme.Space.md).frame(maxWidth: .infinity, alignment: .leading)
@@ -76,8 +76,8 @@ struct XperienceCollectionsBrowserView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                Text("Imported collections").screenTitleStyle()
-                Text("Import a collections.json export from Nuvio/Xperience, review its sources, then browse it manually in this profile.")
+                Text("Import collections").screenTitleStyle()
+                Text("Import a collections.json export from Nuvio/Xperience, review its sources, then open Library > Collections to browse its folders.")
                     .font(Theme.Typography.body).foregroundStyle(Theme.Palette.textSecondary)
                 supportNotice
                 inputCard
@@ -144,9 +144,9 @@ struct XperienceCollectionsBrowserView: View {
 
     private var supportNotice: some View {
         card {
-            Text("Manual collection browser").font(Theme.Typography.cardTitle)
-            Text("Collections keep their exported order within pinned and unpinned groups. Folders keep their exported order. The optional All entry lists catalogs from every folder in that order.")
-            Text("This first browser uses named folder and title tiles. Artwork and animation fields are retained, but artwork, focus videos, full tabbed/Follow Layout presentation and Nuvio cloud/Home row ordering are not reproduced here.")
+            Text("Your Collections library").font(Theme.Typography.cardTitle)
+            Text("Imported folders use the same static collection presentation as VortX collections. Collection pins and folder order stay within Collections; Home keeps your saved section order and visibility.")
+            Text("Unsupported fields stay saved. Animated artwork does not autoplay. You can link a saved catalog source to a collection you create in VortX.")
                 .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
         }
     }
@@ -258,11 +258,8 @@ struct XperienceCollectionsBrowserView: View {
                 VStack(alignment: .leading, spacing: Theme.Space.sm) {
                     Text(namespace.label).font(Theme.Typography.cardTitle)
                     ForEach(XperiencePresentationPolicy.ordered(namespace.document.collections), id: \.id) { collection in
-                        NavigationLink(value: model.route(.collection(namespace.field, collection.id))) {
-                            Label(collection.title, systemImage: collection.pinToTop ? "pin.fill" : "folder")
-                                .padding(Theme.Space.md).frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .buttonStyle(RowFocusStyle())
+                        Label(collection.title, systemImage: collection.pinToTop ? "pin.fill" : "folder")
+                            .padding(Theme.Space.sm).frame(maxWidth: .infinity, alignment: .leading)
                     }
                     Button("Review sources or replace this import") { model.reviewSaved(namespace.field) }
                         .buttonStyle(ChipButtonStyle()).disabled(model.busy)

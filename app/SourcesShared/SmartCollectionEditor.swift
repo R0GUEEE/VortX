@@ -28,8 +28,13 @@ extension SmartCollectionRules {
 /// Builds or edits one smart collection with a live preview. Shared by tvOS and iPhone/iPad/Mac: the
 /// platform wrapper supplies the preview row (`ExternalWatchlistRow` on TV, `PosterRail` on touch) so
 /// the cards are the same ones each platform's Home uses. `watched` drives "Hide what I've watched".
-struct SmartCollectionEditor<Preview: View>: View {
+@MainActor struct SmartCollectionEditor<Preview: View>: View {
     let existing: SmartCollection?
+    private let legacySession: CurationLegacyEditSession
+    private let readTicket: CurationReadTicket?
+    private let originalReadGeneration: UUID
+    @ObservedObject private var readLifetime: CurationReadLifetime
+    @ObservedObject private var forYouStore = ForYouStore.shared
     let watched: Set<String>
     let onFinish: () -> Void
     let preview: (_ items: [MetaPreview], _ loading: Bool) -> Preview
@@ -44,14 +49,21 @@ struct SmartCollectionEditor<Preview: View>: View {
     @State private var saving = false
     @State private var errorMessage: String?
     @State private var confirmDelete = false
+    @State private var appearanceSession: CurationEditSession?
 
     private static var fromYears: [Int?] { [nil, 1970, 1980, 1990, 2000, 2010, 2020] }
     private static var toYears: [Int?] { [nil, 1979, 1989, 1999, 2009, 2019] }
     private static var ratings: [Double?] { [nil, 6, 7, 8] }
 
-    init(existing: SmartCollection?, watched: Set<String>, onFinish: @escaping () -> Void,
+    init(existing: SmartCollection?, legacySession: CurationLegacyEditSession,
+         readTicket: CurationReadTicket? = nil, watched: Set<String>, onFinish: @escaping () -> Void,
          @ViewBuilder preview: @escaping (_ items: [MetaPreview], _ loading: Bool) -> Preview) {
         self.existing = existing
+        self.legacySession = legacySession
+        self.readTicket = readTicket
+        let lifetime = readTicket?.lifetime ?? CurationReadLifetime()
+        _readLifetime = ObservedObject(wrappedValue: lifetime)
+        originalReadGeneration = readTicket?.generation ?? lifetime.generation
         self.watched = watched
         self.onFinish = onFinish
         self.preview = preview
@@ -61,9 +73,14 @@ struct SmartCollectionEditor<Preview: View>: View {
     }
 
     private var shown: [MetaPreview] { rules.hideWatched ? items.filter { !watched.contains($0.id) } : items }
+    private var editIsCurrent: Bool {
+        forYouStore.isCurrentLegacyEdit(legacySession)
+            && (readTicket?.isCurrent ?? readLifetime.accepts(originalReadGeneration))
+    }
 
     var body: some View {
         ScrollView {
+            if editIsCurrent {
             VStack(alignment: .leading, spacing: Theme.Space.lg) {
                 Text(existing == nil ? LocalizedStringKey("New smart collection") : LocalizedStringKey("Edit smart collection"))
                     .screenTitleStyle()
@@ -124,6 +141,17 @@ struct SmartCollectionEditor<Preview: View>: View {
                     chip(String(localized: "Hide what I've watched"), selected: rules.hideWatched) { rules.hideWatched.toggle() }
                     chip(String(localized: "Show on Home"), selected: home) { home.toggle() }
                 }
+                if let existing {
+                    Button("Appearance and folders") {
+                        do { appearanceSession = try forYouStore.captureRichEdit(existing) }
+                        catch { errorMessage = String(localized: "This collection changed. Close and reopen its editor.") }
+                    }
+                    .buttonStyle(ChipButtonStyle())
+                    .disabled(saving)
+                } else {
+                    Text("Save this collection to choose its folders, artwork and layout.")
+                        .font(Theme.Typography.label).foregroundStyle(Theme.Palette.textSecondary)
+                }
                 VStack(alignment: .leading, spacing: Theme.Space.sm) {
                     Text(previewCaption).eyebrowStyle()
                     preview(shown, loading)
@@ -145,6 +173,13 @@ struct SmartCollectionEditor<Preview: View>: View {
             .padding(.horizontal, Theme.Space.screenInset)
             .padding(.vertical, Theme.Space.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                VStack(alignment: .leading, spacing: Theme.Space.md) {
+                    Text("This collection or profile changed. Open a fresh editor to continue.")
+                    Button("Close", action: onFinish).buttonStyle(ChipButtonStyle())
+                }
+                .padding(Theme.Space.screenInset)
+            }
         }
         .background(Theme.Palette.canvas.ignoresSafeArea())
         .confirmationDialog("Delete this collection?", isPresented: $confirmDelete) {
@@ -154,6 +189,31 @@ struct SmartCollectionEditor<Preview: View>: View {
         .onAppear { schedulePreview(immediately: true) }
         .onChange(of: rules) { _ in schedulePreview(immediately: false) }
         .onDisappear { previewTask?.cancel() }
+        .onChange(of: readLifetime.generation) { _ in previewTask?.cancel(); items = []; loading = false }
+        #if os(tvOS)
+        .fullScreenCover(isPresented: appearancePresented) { appearanceEditor }
+        #else
+        .sheet(isPresented: appearancePresented) { appearanceEditor }
+        #endif
+    }
+
+    private var appearancePresented: Binding<Bool> {
+        Binding(get: { appearanceSession != nil }, set: { presented in
+            if !presented, let session = appearanceSession {
+                forYouStore.retireRichEdit(session)
+                appearanceSession = nil
+            }
+        })
+    }
+
+    @ViewBuilder private var appearanceEditor: some View {
+        if let session = appearanceSession {
+            CurationAppearanceEditor(session: session) {
+                forYouStore.retireRichEdit(session)
+                appearanceSession = nil
+            }
+            .environmentObject(theme)
+        }
     }
 
     private var previewCaption: String {
@@ -182,13 +242,14 @@ struct SmartCollectionEditor<Preview: View>: View {
     /// Debounced: picking several chips in a row runs one query.
     private func schedulePreview(immediately: Bool) {
         previewTask?.cancel()
+        guard editIsCurrent else { items = []; loading = false; return }
         let snapshot = rules
         loading = true
         previewTask = Task { @MainActor in
             if !immediately { try? await Task.sleep(nanoseconds: 500_000_000) }
             guard !Task.isCancelled else { return }
             let found = await ForYouRowsModel.titles(for: snapshot)
-            guard !Task.isCancelled, snapshot == rules else { return }
+            guard !Task.isCancelled, snapshot == rules, editIsCurrent else { return }
             items = found
             loading = false
         }
@@ -200,16 +261,16 @@ struct SmartCollectionEditor<Preview: View>: View {
         if let from = rules.yearFrom, let to = rules.yearTo, from > to {
             errorMessage = String(localized: "The start year is after the end year."); return
         }
-        var collection = existing ?? SmartCollection.make(name: trimmed, rules: rules, home: home)
+        var collection = legacySession.collection
         collection.name = String(trimmed.prefix(80))
         collection.rules = rules
         collection.home = home
-        persist { try await ForYouStore.shared.save(collection) }
+        persist { try await forYouStore.saveLegacy(collection, session: legacySession) }
     }
 
     private func delete() {
-        guard let existing else { return }
-        persist { try await ForYouStore.shared.delete(existing) }
+        guard existing != nil else { return }
+        persist { try await forYouStore.deleteLegacy(legacySession) }
     }
 
     private func persist(_ operation: @escaping () async throws -> Void) {
@@ -217,6 +278,10 @@ struct SmartCollectionEditor<Preview: View>: View {
         errorMessage = nil
         Task { @MainActor in
             defer { saving = false }
+            guard editIsCurrent else {
+                errorMessage = String(localized: "This collection or profile changed. Open a fresh editor to continue.")
+                return
+            }
             do { try await operation(); onFinish() }
             catch { errorMessage = String(localized: "Couldn't save. Check your connection and try again.") }
         }

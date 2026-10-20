@@ -384,6 +384,16 @@ final class XperienceCollectionsViewModel: ObservableObject {
         return .init(generation: generation, source: source, candidate: candidate)
     }
 
+    /// VortX-authored semantic sources may use a current installed catalog only when its exact
+    /// manifest/type/catalog tuple has one legitimate configured instance. Ambiguity stays visible.
+    func catalogRequest(unambiguousInstalledSource source: XperienceCollections.Source) throws -> XperienceCatalogRequest {
+        guard isLive,
+              case .resolved(let candidate) = XperienceAddonBinding.resolve(source, installed: installed) else {
+            throw Failure.bindingRequired
+        }
+        return .init(generation: generation, source: source, candidate: candidate)
+    }
+
     private func clearPreview() {
         cancelRead()
         preview = nil; bindingRows = []; mappings = [:]; sourceOrder = []; choices = [:]

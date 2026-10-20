@@ -41,8 +41,11 @@ enum XperienceArtworkClient {
 
     /// Inspect dimensions before decoding, then use ImageIO's bounded thumbnail path. There is no
     /// platform decoder fallback and no SVG, video, animated-image or remote-media request path.
-    static func decode(_ data: Data) throws -> CGImage {
+    static func decode(_ data: Data, thumbnailDimension: Int = maximumThumbnailDimension) throws -> CGImage {
         try Task.checkCancellation()
+        // Small collection tiles request a small decode; existing callers keep the previous limit.
+        // The caller can lower the bound, but can never raise the guarded decoder's maximum.
+        let targetDimension = min(maximumThumbnailDimension, max(64, thumbnailDimension))
         guard !data.isEmpty, data.count <= AddonURLGuard.ResponseContext.xperienceArtwork.maximumBytes,
               let source = CGImageSourceCreateWithData(data as CFData,
                   [kCGImageSourceShouldCache: false] as CFDictionary),
@@ -61,7 +64,7 @@ enum XperienceArtworkClient {
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maximumThumbnailDimension,
+            kCGImageSourceThumbnailMaxPixelSize: targetDimension,
         ] as [CFString: Any] as CFDictionary
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options),
               decodedDimensionsAreAllowed(width: image.width, height: image.height,

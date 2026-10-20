@@ -1538,7 +1538,6 @@ struct iOSHomeView: View {
                     // Every other Home section renders in the user's arranged order, minus the hidden ones
                     // (HomeRailPreferences). Default order + nothing hidden == today's Home exactly, so this is
                     // a no-op until the user customizes via the "Customize Home" editor.
-                    XperienceHomeEntry()
                     ForEach(railPrefs.arrange(HomeRail.iOSDefaultOrder)) { section in
                         if !railPrefs.isHidden(section) {
                             homeSection(section)
@@ -1953,9 +1952,9 @@ struct iOSHomeView: View {
     /// The profile's own rule-built collections that are pinned to Home.
     @ViewBuilder
     private var smartCollectionHomeRails: some View {
-        ForEach(forYouRows.collectionRows) { row in
-            homeRail(PosterRail(title: row.title, eyebrow: row.eyebrow, items: row.items.map(forYouRailItem),
-                                onTap: handleTap, showWatchedBadges: true))
+        if forYouEnabled {
+            CurationCollectionsHome(onOpen: { item in handleTap(forYouRailItem(item)) },
+                resolved: .init(interests: forYouRows.interestRows.flatMap(\.items)))
         }
     }
 
@@ -1974,7 +1973,7 @@ struct iOSHomeView: View {
             ? (core.library?.catalog ?? []) : profiles.libraryItems
         let owned = Set((localContinueWatchingItems + library)
             .filter { !$0.id.isEmpty && $0.removed != true && $0.temp != true }.map(\.id))
-        forYouRows.refresh(profileID: profiles.activeID, interests: forYou.interests, collections: forYou.collections,
+        forYouRows.refresh(profileID: profiles.activeID, interests: forYou.interests, collections: [],
                            owned: owned, watched: WatchedIndex.shared.ids, enabled: forYouEnabled)
         offerInterestsIfNeeded()
     }
@@ -2667,7 +2666,7 @@ struct iOSLibraryView: View {
                     .buttonStyle(.plain)
                     if profiles.active?.isKids != true {
                         NavigationLink(value: LibraryRoute.smartCollections) {
-                            iOSLibraryHubCard(title: "Smart collections", subtitle: "Rows built from genres, people, years and ratings",
+                            iOSLibraryHubCard(title: "Collections", subtitle: "VortX, your rules, folders and optional imports",
                                               systemImage: "line.3.horizontal.decrease.circle.fill")
                         }
                         .buttonStyle(.plain)

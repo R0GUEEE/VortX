@@ -41,7 +41,7 @@ final class ForYouStore: ObservableObject {
         for name in contextNotes {
             // Native notifications may originate off-main after releasing their source locks.
             // Do not receive(on:) and leave the previous owner's data visible for another turn.
-            center.publisher(for: name).sink { [weak self] _ in
+            center.publisher(for: name).sink { @Sendable [weak self] _ in
                 if Thread.isMainThread {
                     MainActor.assumeIsolated { self?.checkCurationContext() }
                 } else {

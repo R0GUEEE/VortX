@@ -13,6 +13,8 @@ let view = source("app/SourcesShared/XperienceCollectionsBrowserView.swift")
 let model = source("app/SourcesShared/XperienceCollectionsViewModel.swift")
 let tv = source("app/SourcesTV/HomeView.swift")
 let touch = source("app/SourcesiOS/iOSRootView.swift")
+let collections = source("app/SourcesShared/CurationCollectionsIntegration.swift")
+let scope = source("app/SourcesShared/CurationReadScope.swift")
 let integrations = source("app/SourcesShared/IntegrationsSettingsView.swift")
 require(!view.isEmpty && !model.isEmpty, "UI source exists")
 require(view.contains("#if os(iOS) || os(macOS)\n/// One immutable presenter identity") && view.contains("allowedContentTypes: [.json]"),
@@ -40,10 +42,19 @@ require(view.contains("collections.filter(\\.pinToTop) + collections.filter { !$
         view.contains("if collection.showAllTab"), "pinned ordering and optional All visibility use export semantics")
 require(view.contains("DetailView(type: type, id: id)") && view.contains("iOSDetailView(id: id, type: type, title: title)"),
         "title selection opens existing native detail routes")
-require(tv.contains("XperienceHomeEntry()") && tv.contains("navigationDestination(for: XperienceHomeRoute.self)"),
-        "tvOS Home has a registered manual browser route")
-require(touch.contains("XperienceHomeEntry()") && touch.contains("navigationDestination(for: XperienceHomeRoute.self)"),
-        "iOS and Mac Home register the value route for their explicit path")
+require(!tv.contains("XperienceHomeEntry()") && tv.contains("navigationDestination(for: XperienceHomeRoute.self)") &&
+        tv.contains("CurationCollectionsHome(resolved:") && tv.contains("railPrefs.arrange(HomeRail.tvDefaultOrder)"),
+        "tvOS retains its registered import route while collections stay inside arranged Home sections")
+require(!touch.contains("XperienceHomeEntry()") && touch.contains("navigationDestination(for: XperienceHomeRoute.self)") &&
+        touch.contains("CurationCollectionsHome(onOpen:") && touch.contains("railPrefs.arrange(HomeRail.iOSDefaultOrder)"),
+        "iOS and Mac retain native detail callbacks without an unconditional import entry above Home sections")
+require(!collections.isEmpty && collections.contains("ForEach(editableCollections)") &&
+        collections.contains("ticket.isCurrent ? store.collections : []") &&
+        collections.contains("store.captureLegacyEdit(original, isNew: existing == nil)"),
+        "legacy labels and editor gestures use the original current common read owner")
+require(scope.contains("@ObservedObject private var lifetime: CurationReadLifetime") &&
+        scope.contains("ticket.isCurrent && ticket.artworkLifetime.isActive && store.ready"),
+        "nested collection destinations independently observe and gate their original lifetime")
 require(integrations.contains("XperienceCollectionsConnectCard()") && integrations.contains("NuvioConnectCard()"),
         "JSON import and existing manifest-link import remain distinct")
 require(view.contains("Save first checks your VortX account backup and may merge account updates on this device. The import is confirmed after its local save; cloud upload is separate.") &&
