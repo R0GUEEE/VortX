@@ -450,6 +450,76 @@ enum VortxNativeBootstrapArchive {
         scanner.whitespace()
         guard scanner.index == bytes.count else { throw Failure.malformed }
     }
+
+    /// Raw values for narrow session-bound cache retention. This adds no credential/sanitizer
+    /// exemption: it only reuses lexical ambiguity admission and a complete JSON value parse.
+    /// Callers own their byte cap and must keep owned keys authoritative when merging the result.
+    struct RawJSONMember: Sendable {
+        let key: String
+        let keyJSON: Data
+        let valueJSON: Data
+    }
+    static func rawJSONObjectMembers(_ data: Data, maximumBytes: Int, maximumMembers: Int = 512) throws -> [RawJSONMember] {
+        guard maximumMembers >= 0 else { throw Failure.malformed }
+        let bytes = try rawJSONBytes(data, maximumBytes: maximumBytes)
+        var scanner = JSONMemberScanner(bytes: bytes)
+        scanner.whitespace()
+        guard scanner.take(123) else { throw Failure.malformed }
+        scanner.whitespace()
+        if scanner.take(125) { return [] }
+        var result: [RawJSONMember] = []
+        while true {
+            scanner.whitespace()
+            let keyRange = try scanner.stringToken()
+            guard let key = try decodeJSON(with: Data(bytes[keyRange]), options: [.fragmentsAllowed]) as? String else {
+                throw Failure.malformed
+            }
+            scanner.whitespace()
+            guard scanner.take(58) else { throw Failure.malformed }
+            scanner.whitespace()
+            let start = scanner.index
+            try scanner.value(depth: 1)
+            guard result.count < maximumMembers else { throw Failure.malformed }
+            result.append(.init(key: key, keyJSON: Data(bytes[keyRange]),
+                                valueJSON: Data(bytes[start..<scanner.index])))
+            scanner.whitespace()
+            if scanner.take(125) { return result }
+            guard scanner.take(44) else { throw Failure.malformed }
+        }
+    }
+    static func rawJSONArrayValues(_ data: Data, maximumBytes: Int, maximumValues: Int = 400) throws -> [Data] {
+        guard maximumValues >= 0 else { throw Failure.malformed }
+        let bytes = try rawJSONBytes(data, maximumBytes: maximumBytes)
+        var scanner = JSONMemberScanner(bytes: bytes)
+        scanner.whitespace()
+        guard scanner.take(91) else { throw Failure.malformed }
+        scanner.whitespace()
+        if scanner.take(93) { return [] }
+        var result: [Data] = []
+        while true {
+            scanner.whitespace()
+            let start = scanner.index
+            try scanner.value(depth: 1)
+            guard result.count < maximumValues else { throw Failure.malformed }
+            result.append(Data(bytes[start..<scanner.index]))
+            scanner.whitespace()
+            if scanner.take(93) { return result }
+            guard scanner.take(44) else { throw Failure.malformed }
+        }
+    }
+    private static func rawJSONBytes(_ data: Data, maximumBytes: Int) throws -> [UInt8] {
+        guard maximumBytes >= 0, data.count <= maximumBytes,
+              String(data: data, encoding: .utf8) != nil else { throw Failure.malformed }
+        // No transcoding: retained source value bytes must be the original UTF-8 bytes.
+        let bytes = Array(data)
+        var scanner = JSONMemberScanner(bytes: bytes)
+        try scanner.value(depth: 0)
+        scanner.whitespace()
+        guard scanner.index == bytes.count else { throw Failure.malformed }
+        _ = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        return bytes
+    }
+
     private struct JSONMemberScanner {
         let bytes: [UInt8]
         var index = 0
