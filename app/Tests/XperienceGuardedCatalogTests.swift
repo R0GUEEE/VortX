@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 import ImageIO
 
-// Proposed production-source contract tests. UNRUN. Compile with the actual parser, binder,
+// Production-component checks. Compile with the actual parser, binder,
 // AddonURLGuard, CoreModels, the actual lexical admission helper and their production dependencies.
 // No response model or duplicate-member scanner is replaced by a stub.
 @main
