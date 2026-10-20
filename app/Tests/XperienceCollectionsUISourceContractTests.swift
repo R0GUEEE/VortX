@@ -118,5 +118,30 @@ require(model.contains("chooserAdmission.permitsPublication(originalTicket.admis
         "the original chooser ticket remains active through file publication")
 require(!view.contains("model.previewFile(url)") && !view.contains("model.cancelInput()"),
         "negative control rejects ticketless result and cancellation calls")
+let defaultsModel = source("app/SourcesShared/CurationDefaultsModel.swift")
+let defaultsShelf = source("app/SourcesShared/CurationDefaultsHomeShelf.swift")
+let appearance = source("app/SourcesShared/CurationAppearanceEditor.swift")
+let curated = source("app/SourcesShared/CuratedCollections.swift")
+require(collections.contains("return defaults.currentCollections() + store.richCollections") &&
+        collections.contains(".task { await defaults.loadIfNeeded() }") &&
+        defaultsModel.contains("fallback: @escaping Fallback = { CurationStarterCollections.collections }"),
+        "remote public definitions retain the local fallback and join one shared metadata model")
+for (platform, home) in [("TV", tv), ("iOS/Mac", touch)] {
+    let hub = home.components(separatedBy: "case .collectionsHub:").dropFirst().first?
+        .components(separatedBy: "case .topPicks:").first ?? ""
+    require(home.components(separatedBy: "CurationDefaultsHomeShelf(").count == 2 &&
+            hub.contains("CurationDefaultsHomeShelf(") && hub.contains("showCollectionsHub, CollectionsHubModel.isAvailable"),
+            "\(platform) inserts one defaults shelf only in the existing arranged Home hub")
+}
+require(defaultsShelf.contains("defaults.currentCollections().filter { $0.id != \"vortx.discover\" }") &&
+        defaultsShelf.contains("guard ticket.isCurrent else { return [] }") &&
+        defaultsShelf.contains("CurationCollectionDestination(collection: collection, ticket: ticket, onOpen: onOpen)"),
+        "Home avoids duplicate Discover and retains original read ownership and detail routing")
+let selectedEditorial = curated.components(separatedBy: "static func collectionTitles(for id: String)").last?
+    .components(separatedBy: "/// Build the editorial rails once").first ?? ""
+require(selectedEditorial.contains("definitions.first(where: { $0.id == id })") &&
+        selectedEditorial.contains("return await fetch(definition: definition)") && !selectedEditorial.contains("fetchAll") &&
+        appearance.contains("ForEach(defaults.currentCollections())"),
+        "editorial folders resolve only a known selected definition without loading every rail")
 if failures > 0 { print("\n\(failures) Xperience UI source failure(s)"); exit(1) }
 print("\nALL PASS")

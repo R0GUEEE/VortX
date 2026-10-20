@@ -471,6 +471,7 @@ struct HomeView: View {
             // Collections hub (Discover cards, Streaming-service tiles, Genre tiles). Each tile opens a
             // sub-catalog browse grid. Needs a TMDB key; hidden without one.
             if showCollectionsHub, CollectionsHubModel.isAvailable {
+                CurationDefaultsHomeShelf()
                 TVCollectionsHub(model: collectionsHub)
             }
         case .topPicks:

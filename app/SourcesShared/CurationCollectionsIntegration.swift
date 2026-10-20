@@ -198,6 +198,7 @@ enum CurationImportProjection {
     @EnvironmentObject private var theme: ThemeManager
     @ObservedObject private var store = ForYouStore.shared
     @ObservedObject private var watched = WatchedIndex.shared
+    @ObservedObject private var defaults = CurationDefaultsModel.shared
     @StateObject private var imports = XperienceCollectionsViewModel()
     @StateObject private var lifetime = CurationReadLifetime()
     @State private var editing: Editing?
@@ -211,7 +212,7 @@ enum CurationImportProjection {
 
     private var definitions: [CurationCollection] {
         guard ticket.isCurrent else { return [] }
-        return CurationStarterCollections.collections + store.richCollections + imports.namespaces.flatMap(CurationImportProjection.collections)
+        return defaults.currentCollections() + store.richCollections + imports.namespaces.flatMap(CurationImportProjection.collections)
     }
     private var ticket: CurationReadTicket {
         .init(lifetime: lifetime, generation: lifetime.generation, legacy: store.collections,
@@ -267,6 +268,7 @@ enum CurationImportProjection {
         }
         .background(Theme.Palette.canvas.ignoresSafeArea())
         .onAppear { reload() }
+        .task { await defaults.loadIfNeeded() }
         .onChange(of: store.profileID) { _ in reload() }
         .onReceive(imports.store.revisionEvents) { _ in
             lifetime.revalidate()

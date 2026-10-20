@@ -7,6 +7,7 @@ import SwiftUI
     let session: CurationEditSession
     let onFinish: () -> Void
     @ObservedObject private var store = ForYouStore.shared
+    @ObservedObject private var defaults = CurationDefaultsModel.shared
     @StateObject private var imports = XperienceCollectionsViewModel()
     @State private var draft: CurationCollection
     @State private var sourcePicker: String?
@@ -61,7 +62,7 @@ import SwiftUI
             }
         }
         .background(Theme.Palette.canvas.ignoresSafeArea())
-        .task { imports.reload() }
+        .task { imports.reload(); await defaults.loadIfNeeded() }
         .onDisappear {
             saveTask?.cancel()
             imports.stop()
@@ -104,10 +105,10 @@ import SwiftUI
                     addSource(.legacyRules(collectionID: session.collection.id), to: id)
                 }
                 .buttonStyle(ChipButtonStyle())
-                ForEach(CurationStarterCollections.collections) { collection in
+                ForEach(defaults.currentCollections()) { collection in
                     ForEach(collection.folders) { folder in
                         ForEach(Array(folder.sources.enumerated()), id: \.element.id) { index, source in
-                            Button("VortX · \(folder.name) · \(index == 0 ? String(localized: "Movies") : String(localized: "Shows"))") {
+                            Button(folder.sources.count == 1 ? "VortX · \(folder.name)" : "VortX · \(folder.name) · \(String(localized: "Source \(index + 1)"))") {
                                 addSource(source.kind, to: id)
                             }
                             .buttonStyle(ChipButtonStyle())

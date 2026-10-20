@@ -120,6 +120,8 @@ struct CurationResolvedRows {
                     let page = await catalog.load(1)
                     guard !page.items.isEmpty || page.cause == nil else { throw CurationFailure.unavailable }
                     items = Array(page.items.prefix(20))
+                } else if let row = await CuratedCollectionsModel.collectionTitles(for: collectionID) {
+                    items = Array(row.prefix(20))
                 } else { throw CurationFailure.unavailable }
             case .interests:
                 guard !resolved.interests.isEmpty else { throw CurationFailure.unavailable }

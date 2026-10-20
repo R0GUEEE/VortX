@@ -1905,6 +1905,7 @@ struct iOSHomeView: View {
             // Collections hub (Discover cards, Streaming-service tiles, Genre tiles). Each tile pushes a
             // sub-catalog browse grid. Needs a TMDB key; hidden without one.
             if showCollectionsHub, CollectionsHubModel.isAvailable {
+                CurationDefaultsHomeShelf(onOpen: { item in handleTap(forYouRailItem(item)) })
                 iOSCollectionsHub(model: collectionsHub)
             }
         case .topPicks:
