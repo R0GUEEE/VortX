@@ -87,6 +87,7 @@ struct ProfilePickerView: View {
     private var profilesArePreparing: Bool {
         nativeSync.nativeCheckpointStatus == "restoring" || nativeSync.accountRestoreState == .restoring
     }
+    #endif
 
     /// The device log spans every profile's activity. With a PIN-protected profile here, export waits until
     /// a profile is unlocked (Settings has it), unless profiles failed to load, the stuck case it exists for.
@@ -97,7 +98,6 @@ struct ProfilePickerView: View {
         #endif
         return !store.profiles.contains { $0.pin != nil }
     }
-    #endif
 
     init(core: CoreBridge = .shared) { self.core = core }
 

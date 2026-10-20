@@ -49,6 +49,28 @@ assert(inset.includes('.disabled(pinTarget != nil)') && inset.includes('.accessi
 assert(inset.includes('if exportAllowedBeforeProfile'));
 const gate = member(picker, 'private var exportAllowedBeforeProfile: Bool');
 assert(gate.includes('$0.pin != nil') && gate.includes('profileAction.errorMessage != nil') && gate.includes('accountRestoreState == .failed'));
+// The shared call site also compiles in Lite/legacy shells. A lexical member extraction alone
+// misses an enclosing #if that removes the whole declaration in those builds.
+function requireSharedPickerMember(source, signature) {
+  const offset = source.indexOf(signature);
+  assert(offset >= 0, `missing ${signature}`);
+  const conditions = [];
+  for (const line of source.slice(0, offset).split('\n')) {
+    const directive = line.match(/^\s*#(if|elseif|else|endif)\b(.*)$/);
+    if (!directive) continue;
+    if (directive[1] === 'if') conditions.push(directive[2]);
+    else if (directive[1] === 'endif') conditions.pop();
+    else if (directive[1] === 'elseif') conditions[conditions.length - 1] += directive[2];
+  }
+  assert(!conditions.some(condition => condition.includes('VORTX_NATIVE_DATA_ENGINE')),
+    `${signature} must exist in both native and Lite/legacy shells`);
+}
+requireSharedPickerMember(picker, 'private var exportAllowedBeforeProfile: Bool');
+requireSharedPickerMember(picker, '.safeAreaInset(edge: .bottom)');
+const nativeOnlyGate = picker.replace('private var exportAllowedBeforeProfile: Bool',
+  '#if VORTX_NATIVE_DATA_ENGINE\nprivate var exportAllowedBeforeProfile: Bool');
+assert.throws(() => requireSharedPickerMember(nativeOnlyGate, 'private var exportAllowedBeforeProfile: Bool'),
+  /must exist in both native and Lite\/legacy shells/);
 for (const path of paths.slice(3)) assert(sources[path].includes('DiagnosticLogExportButton()'), `${path} missing export`);
 for (const path of ['app/SourcesTV/LoginView.swift', 'app/SourcesTV/BackupImportView.swift']) {
   const scroll = member(sources[path], 'ScrollView');
@@ -93,7 +115,7 @@ function run(name, command, args) {
   });
 }
 const binary = join(output, 'controls');
-await run('compile-controls', 'xcrun', ['swiftc', '-parse-as-library', '-swift-version', '6', '-strict-concurrency=complete', '-warnings-as-errors', swift, '-o', binary]);
+await run('compile-controls', 'xcrun', ['swiftc', '-j', '1', '-num-threads', '1', '-parse-as-library', '-swift-version', '6', '-strict-concurrency=complete', '-warnings-as-errors', swift, '-o', binary]);
 await run('controls', binary, []);
 for (const [name, tests, deps] of [
   ['channels', 'DiagnosticsChannelGateTests.swift', ['VXProbeRedaction.swift', 'VXDiagExportPolicy.swift']],
@@ -101,7 +123,7 @@ for (const [name, tests, deps] of [
   ['redaction', 'VXProbeRedactionTests.swift', ['VXProbeRedaction.swift']]
 ]) {
   const exe = join(output, name);
-  await run(`compile-${name}`, 'xcrun', ['swiftc', '-warnings-as-errors', ...deps.map(p => `app/SourcesShared/${p}`), `app/Tests/${tests}`, '-o', exe]);
+  await run(`compile-${name}`, 'xcrun', ['swiftc', '-j', '1', '-num-threads', '1', '-warnings-as-errors', ...deps.map(p => `app/SourcesShared/${p}`), `app/Tests/${tests}`, '-o', exe]);
   await run(name, exe, []);
 }
 const sha = text => createHash('sha256').update(text).digest('hex');
