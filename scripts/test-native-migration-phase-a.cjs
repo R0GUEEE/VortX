@@ -243,9 +243,10 @@ async function run(label, command, timeout, helper, cwd = root) {
 
 async function main() {
     const stage = process.argv[2];
-    if (process.platform !== 'darwin' || process.argv.length !== 3 || !['watched', 'session', 'bootstrap', 'restore', 'publication', 'parse'].includes(stage)) {
-        throw new Error('Usage on macOS: bash scripts/test-native-migration-phase-a.sh watched|session|bootstrap|restore|publication|parse');
+    if (process.platform !== 'darwin' || process.argv.length !== 3 || !['watched', 'session', 'bootstrap', 'restore', 'publication', 'parse', 'owner-source', 'owner-prepare'].includes(stage)) {
+        throw new Error('Usage on macOS: bash scripts/test-native-migration-phase-a.sh watched|session|bootstrap|restore|publication|parse|owner-source|owner-prepare');
     }
+    const ownerSource = stage === 'owner-source' || stage === 'owner-prepare';
     if (process.env.VORTX_NATIVE_PERSISTENCE_SDK) throw new Error('Unset VORTX_NATIVE_PERSISTENCE_SDK; this fixture never consumes a packaged SDK');
     const scripts = ['scripts/test-native-migration-phase-a.sh', 'scripts/test-native-migration-phase-a.cjs',
         'scripts/native-migration-supervisor.cjs', 'scripts/test-native-watched-archive.sh'];
@@ -278,7 +279,15 @@ async function main() {
             'app/SourcesShared/VortxNativeProfileEditHost.swift', ...shared.sources];
         capture('app/SourcesShared/Profiles.swift');
         capture('app/SourcesShared/ProfileDiscoveryPreferences.swift');
-        if (stage === 'watched') {
+        if (ownerSource) {
+            sources.push('app/SourcesShared/VortxNativeProfiles.swift',
+                'app/SourcesShared/AuthenticatedHTTPTransport.swift', 'app/SourcesShared/LinkAuthService.swift',
+                'app/SourcesShared/VortxLegacyWatchedMetadataTransport.swift',
+                'app/SourcesShared/VortxNativeOwnerHistorySource.swift',
+                'app/SourcesShared/VortxNativeOwnerHistoryPreparation.swift',
+                stage === 'owner-source' ? 'app/Tests/VortxNativeOwnerHistorySourceTests.swift'
+                    : 'app/Tests/VortxNativeOwnerHistoryPreparationTests.swift');
+        } else if (stage === 'watched') {
             sources.push('app/SourcesShared/SettingsDirtyKeys.swift', 'app/SourcesShared/HomeRailPreferences.swift',
                 'app/Tests/VortxNativeWatchedArchiveTests.swift', 'app/Tests/VortxNativeWatchedStreamTests.swift');
             capture('app/SourcesShared/CoreBridge.swift');
@@ -304,7 +313,7 @@ async function main() {
         inputs.push(write('generated/NativeRestoreAdmission.swift', extractRestoreAdmission()));
     } else if (stage === 'bootstrap') {
         inputs.push(write('generated/SettingsBackup.swift', extractSettingsBackupEncoder()));
-    } else if (stage === 'watched' || stage === 'session') {
+    } else if (stage === 'watched' || stage === 'session' || ownerSource) {
         inputs.push(write('generated/UserProfile.swift', extractProfile()), write('generated/Discovery.swift', extractDiscovery()));
     }
     write('compiler-inputs.sha256', inputs.map(file => `${digest(fs.readFileSync(file))}  ${path.relative(directory, file)}\n`).join(''));
@@ -344,6 +353,15 @@ async function main() {
     }
     const flags = ['-O', '-whole-module-optimization', '-j', '1', '-num-threads', '1', '-swift-version', '6',
         '-parse-as-library', '-strict-concurrency=complete', '-warnings-as-errors', '-module-cache-path', path.join(directory, 'module-cache')];
+    if (ownerSource) {
+        // Host-beta OS versions must not invent an unavailable standard-library target.
+        // Use the same explicit macOS 14 fixture floor as the existing native test lanes.
+        await run('sdk-path', ['/usr/bin/nice', '-n', '15', '/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-path'], 30_000, helper);
+        const sdk = fs.readFileSync(path.join(directory, 'sdk-path.log'), 'utf8').trim();
+        if (!path.isAbsolute(sdk) || !fs.statSync(sdk).isDirectory() || /[\r\n]/.test(sdk)) throw new Error('Invalid actual macOS SDK');
+        if (!['arm64', 'x64'].includes(process.arch)) throw new Error('Unsupported fixture host');
+        flags.push('-sdk', sdk, '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx14.0`);
+    }
     if (stage === 'restore') flags.push('-D', 'VORTX_NATIVE_DATA_ENGINE');
     // Exactly one compiler then one fixture, at nice 15. Deadlines are hang guards,
     // never throughput/RSS/UI-latency acceptance thresholds or device evidence.

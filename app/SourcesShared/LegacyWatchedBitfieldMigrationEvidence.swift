@@ -45,6 +45,7 @@ enum LegacyWatchedBitfieldMigrationEvidence {
         case authenticatedProfileLibrary(index: Int)
         case authenticatedOwnerHistory(sourceProfileID: String, index: Int)
         case ownAccountLibraryResponse(index: Int)
+        case ownerAccountLibraryResponse(index: Int)
         case ownAccountProfileLibrary(index: Int)
         case ownAccountOwnerHistory(index: Int)
 
@@ -55,6 +56,7 @@ enum LegacyWatchedBitfieldMigrationEvidence {
             case .authenticatedProfileLibrary(let index): return "/vortx/byProfile/<captured-profile>/library/\(index)"
             case .authenticatedOwnerHistory(let sourceProfileID, let index): return "/vortx/byProfile/\(sourceProfileID)/ownerHistory/\(index)"
             case .ownAccountLibraryResponse(let index): return "/libraryResponseBase64/result/\(index)"
+            case .ownerAccountLibraryResponse(let index): return "/libraryResponseBase64/result/\(index)"
             case .ownAccountProfileLibrary(let index): return "/profileOverlayBase64/vortx/byProfile/<captured-profile>/library/\(index)"
             case .ownAccountOwnerHistory(let index): return "/profileOverlayBase64/vortx/byProfile/<captured-profile>/ownerHistory/\(index)"
             }
@@ -67,11 +69,17 @@ enum LegacyWatchedBitfieldMigrationEvidence {
             }
         }
 
+        var isOwnerAccount: Bool {
+            if case .ownerAccountLibraryResponse = self { return true }
+            return false
+        }
+
         var sourceIndex: Int {
             switch self {
             case .authenticatedOwnerLibrary(let index), .authenticatedLegacyRootLibrary(let index),
                  .authenticatedProfileLibrary(let index), .authenticatedOwnerHistory(_, let index),
                  .ownAccountLibraryResponse(let index), .ownAccountProfileLibrary(let index),
+                 .ownerAccountLibraryResponse(let index),
                  .ownAccountOwnerHistory(let index): return index
             }
         }
@@ -179,6 +187,9 @@ enum LegacyWatchedBitfieldMigrationEvidence {
         if rowLocator.isOwnAccount {
             guard scope.verifiedStreamingUID != nil, scope.profileID != scope.ownerProfileID else { throw Failure.malformed("Own source requires verified secondary streaming identity") }
             try requireOwnEnvelope(sourceTree)
+        } else if rowLocator.isOwnerAccount {
+            guard scope.verifiedStreamingUID != nil else { throw Failure.malformed("Owner source requires verified streaming identity") }
+            try requireOwnerEnvelope(sourceTree, scope: scope)
         } else {
             guard scope.verifiedStreamingUID == nil else { throw Failure.malformed("Shared source cannot claim an own identity") }
         }
@@ -220,7 +231,7 @@ enum LegacyWatchedBitfieldMigrationEvidence {
             let profiles = try strictObject(strictValue(vortx, "byProfile"))
             let bucket = try profileBucket(profiles, id: id, exactKey: sourceProfileID)
             return try sharedRow(try strictArray(strictValue(bucket, "ownerHistory")), index: index)
-        case .ownAccountLibraryResponse(let index):
+        case .ownAccountLibraryResponse(let index), .ownerAccountLibraryResponse(let index):
             guard index >= 0, scope.verifiedStreamingUID != nil else { throw Failure.malformed("Own source requires verified streaming identity") }
             let envelope = try strictObject(try StrictJSON.value(try strictEnvelopeBytes(rootObject, "libraryResponseBase64")))
             let rows = try strictArray(strictValue(envelope, "result"))
@@ -267,6 +278,32 @@ enum LegacyWatchedBitfieldMigrationEvidence {
         _ = try strictEnvelopeBytes(object, "profileOverlayBase64")
     }
 
+    private static func requireOwnerEnvelope(_ source: StrictJSON.Value, scope: Scope? = nil) throws {
+        let object = try strictObject(source)
+        let expected = ["schemaVersion", "kind", "scope", "ownerProfileId", "profileId",
+                        "verifiedStreamingUid", "libraryResponseBase64", "addonsResponseBase64"].map { Data($0.utf8) }
+        guard object.members.count == expected.count, Set(object.members.map(\.keyBytes)) == Set(expected),
+              case .number("1") = try strictValue(object, "schemaVersion"),
+              exactUTF8(try strictString(object.value("kind")), "vortx.owner-history.source/1") else {
+            throw Failure.malformed("Malformed owner source frame")
+        }
+        if let scope {
+            guard exactUTF8(try strictString(object.value("scope")), scope.accountID),
+                  exactUTF8(try strictString(object.value("ownerProfileId")), scope.ownerProfileID.uuidString),
+                  exactUTF8(try strictString(object.value("profileId")), scope.profileID.uuidString),
+                  exactUTF8(try strictString(object.value("verifiedStreamingUid")), scope.verifiedStreamingUID ?? "") else {
+                throw Failure.malformed("Owner source frame binding mismatch")
+            }
+        }
+        _ = try strictEnvelopeBytes(object, "libraryResponseBase64")
+        _ = try strictEnvelopeBytes(object, "addonsResponseBase64")
+    }
+
+    static func validateOwnerSource(scope: Scope, source: Data) throws {
+        guard scope.verifiedStreamingUID != nil else { throw Failure.malformed("Owner source requires verified streaming identity") }
+        try requireOwnerEnvelope(StrictJSON.value(source), scope: scope)
+    }
+
     private static func sharedRow(_ rows: [StrictJSON.Value], index: Int) throws -> SourceRow {
         guard let raw = rows[safe: index] else { throw Failure.malformed("Source row is absent") }
         let row = try strictObject(raw)
@@ -289,6 +326,7 @@ enum LegacyWatchedBitfieldMigrationEvidence {
     static func originalAddons(source: Data, rowLocator: SourceRowLocator) throws -> [AuthorizedAddon] {
         let root = try StrictJSON.value(source)
         if rowLocator.isOwnAccount { try requireOwnEnvelope(root) }
+        if rowLocator.isOwnerAccount { try requireOwnerEnvelope(root) }
         return try sourceDescriptors(root, locator: rowLocator).map { raw in
             let descriptor = try strictObject(raw)
             let manifest = try strictValue(descriptor, "manifest")
@@ -299,7 +337,7 @@ enum LegacyWatchedBitfieldMigrationEvidence {
     private static func sourceDescriptors(_ root: StrictJSON.Value, locator: SourceRowLocator) throws -> [StrictJSON.Value] {
         let rootObject = try strictObject(root)
         let descriptors: [StrictJSON.Value]
-        if locator.isOwnAccount {
+        if locator.isOwnAccount || locator.isOwnerAccount {
             let envelope = try StrictJSON.value(try strictEnvelopeBytes(rootObject, "addonsResponseBase64"))
             let result = try strictObject(strictValue(try strictObject(envelope), "result"))
             descriptors = try strictArray(strictValue(result, "addons"))

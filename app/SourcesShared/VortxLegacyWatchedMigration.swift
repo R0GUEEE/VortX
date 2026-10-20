@@ -49,6 +49,14 @@ enum VortxLegacyWatchedMigration {
                 && evidence.rowLocator == locator
         }
 
+        func validateOwnerHistorySource(accountID: String, ownerProfileID: UUID, profileID: UUID,
+                                        verifiedUID: String, sourceDocument: Data) throws {
+            guard evidence.rowLocator.isOwnerAccount, exact(evidence.scope.accountID, accountID),
+                  evidence.scope.ownerProfileID == ownerProfileID, evidence.scope.profileID == profileID,
+                  optionalExact(evidence.scope.verifiedStreamingUID, verifiedUID),
+                  evidence.source == sourceDocument else { throw Failure.staleBinding }
+        }
+
         func validateSource(accountID: String, ownerProfileID: UUID, document: Data, roster: [UserProfile],
                             ownAccountSources: [VortxLegacyBootstrapMaterial.OwnAccountSource]) throws {
             guard exact(evidence.scope.accountID, accountID), evidence.scope.ownerProfileID == ownerProfileID,
@@ -170,6 +178,84 @@ enum VortxLegacyWatchedMigration {
                            locator: { .ownAccountOwnerHistory(index: $0) }, to: &candidates)
             }
         }
+        return try await prepareCandidates(candidates, accountID: accountID, ownerProfileID: ownerProfileID,
+            archivedEvidence: archivedEvidence, archivedEvidenceLookup: archivedEvidenceLookup,
+            receiptSink: receiptSink, isCurrent: isCurrent, fetch: fetch)
+    }
+
+    /// Same metadata capture/replay worker as legacy preparation, but an explicit owner-source
+    /// locator/binding. No OwnAccountSource, overlay attribution or baseline import is created.
+    static func prepareOwnerHistory(accountID: String, ownerProfileID: UUID, profileID: UUID,
+                                    verifiedUID: String, sourceDocument: Data,
+                                    archivedEvidence: [Data] = [], receiptSink: ReceiptSink? = nil,
+                                    isCurrent: @escaping @Sendable () -> Bool,
+                                    fetch: Evidence.MetadataFetcher) async throws -> Preparation {
+        let candidates = try ownerHistoryCandidates(accountID: accountID, ownerProfileID: ownerProfileID,
+            profileID: profileID, verifiedUID: verifiedUID, sourceDocument: sourceDocument)
+        return try await prepareCandidates(candidates, accountID: accountID, ownerProfileID: ownerProfileID,
+            archivedEvidence: archivedEvidence, archivedEvidenceLookup: nil, receiptSink: receiptSink,
+            isCurrent: isCurrent, fetch: fetch)
+    }
+
+    /// Complete, offline metadata replay for final checkpoint/open validation. Missing, extra,
+    /// duplicate and retargeted receipts fail; no fetch, cache or decoded-ID shortcut is available.
+    static func replayOwnerHistory(accountID: String, ownerProfileID: UUID, profileID: UUID,
+                                   verifiedUID: String, sourceDocument: Data, archives: [Data],
+                                   isCurrent: @escaping @Sendable () -> Bool) throws -> [ValidatedRow] {
+        try requireAdmission(isCurrent)
+        let candidates = try ownerHistoryCandidates(accountID: accountID, ownerProfileID: ownerProfileID,
+            profileID: profileID, verifiedUID: verifiedUID, sourceDocument: sourceDocument)
+        guard archives.count == candidates.count else { throw Failure.malformedArchive }
+        var remaining = maximumEagerReceiptBytes
+        for bytes in archives {
+            guard bytes.count <= remaining else { throw Failure.processingLimit }
+            remaining -= bytes.count
+        }
+        let retained = try archives.map(decodeArchive)
+        var rows: [ValidatedRow] = []
+        for candidate in candidates {
+            try requireAdmission(isCurrent)
+            let matches = retained.filter { sameScope($0.scope, candidate.scope)
+                && $0.source == candidate.source && $0.locator == candidate.locator }
+            guard matches.count == 1, let archive = matches.first else { throw Failure.staleBinding }
+            rows.append(ValidatedRow(try Evidence.replay(scope: candidate.scope, source: candidate.source,
+                rowLocator: candidate.locator, addon: archive.addon, metadata: archive.metadata, isCurrent: isCurrent)))
+        }
+        try requireAdmission(isCurrent)
+        return rows
+    }
+
+    private static func ownerHistoryCandidates(accountID: String, ownerProfileID: UUID, profileID: UUID,
+                                               verifiedUID: String, sourceDocument: Data) throws -> [Candidate] {
+        let root = try VortxProfileOverlayWitness.decodeObject(json: sourceDocument)
+        let library = try VortxProfileOverlayWitness.decodeObject(json: bytes(root, "libraryResponseBase64"))
+        let scope = try Evidence.Scope(accountID: accountID, profileID: profileID,
+                                       verifiedStreamingUID: verifiedUID, ownerProfileID: ownerProfileID)
+        try Evidence.validateOwnerSource(scope: scope, source: sourceDocument)
+        var candidates: [Candidate] = []
+        guard let rows = try array(library, "result") else { throw Failure.malformedArchive }
+        for (index, raw) in rows.enumerated() {
+            // Discovery selects only well-shaped bitmap-series candidates. The actual pure row
+            // converter separately holds malformed/unsupported rows, preserving their original
+            // source in a pending result. Existing shared/Own append validation stays unchanged.
+            guard index < Evidence.maximumSourceRows, let row = raw as? Object,
+                  let state = row["state"] as? Object, let bitmap = state["watched"] as? String,
+                  !bitmap.isEmpty, row["type"] as? String == "series",
+                  let meta = row["_id"] as? String, !meta.isEmpty else { continue }
+            candidates.append(.init(scope: scope, source: sourceDocument,
+                locator: .ownerAccountLibraryResponse(index: index), metaID: meta))
+        }
+        guard candidates.count <= 10_000 else { throw Failure.malformedArchive }
+        for candidate in candidates {
+            try Evidence.validateSource(scope: scope, source: sourceDocument, rowLocator: candidate.locator)
+        }
+        return candidates
+    }
+
+    private static func prepareCandidates(_ candidates: [Candidate], accountID: String, ownerProfileID: UUID,
+                                          archivedEvidence: [Data], archivedEvidenceLookup: ArchivedEvidenceLookup?,
+                                          receiptSink: ReceiptSink?, isCurrent: @escaping @Sendable () -> Bool,
+                                          fetch: Evidence.MetadataFetcher) async throws -> Preparation {
         guard candidates.count <= 10_000, archivedEvidence.count <= 10_000 else { throw Failure.malformedArchive }
         guard archivedEvidence.isEmpty || archivedEvidenceLookup == nil else { throw Failure.malformedArchive }
         var rows = [ValidatedRow](), archives = [Data](), pending = [Pending]()
@@ -306,8 +392,18 @@ enum VortxLegacyWatchedMigration {
         try requireAdmission(isCurrent)
         var accepted: Evidence.Evidence?
         var ambiguous = false
-        let addons = try Evidence.originalAddons(source: candidate.source, rowLocator: candidate.locator)
-            .filter { try supports($0, metaID: candidate.metaID) }
+        let addons: [Evidence.AuthorizedAddon]
+        do {
+            addons = try Evidence.originalAddons(source: candidate.source, rowLocator: candidate.locator)
+                .filter { try supports($0, metaID: candidate.metaID) }
+        } catch {
+            try requireAdmission(isCurrent)
+            guard candidate.locator.isOwnerAccount else { throw error }
+            // The immutable owner source remains recoverable when its original registry cannot
+            // authorize an inventory request. Never substitute the current registry. Reuse the
+            // existing pending reason so offline validation and retry retain the exact source.
+            return .pending("episode_inventory_unavailable")
+        }
         for addon in addons {
             do {
                 let evidence = try await Evidence.capture(scope: candidate.scope, source: candidate.source,
@@ -478,6 +574,7 @@ enum VortxLegacyWatchedMigration {
         case .authenticatedProfileLibrary(let index): return ["kind": "profile_library", "index": index]
         case .authenticatedOwnerHistory(let sourceProfileID, let index): return ["kind": "owner_history", "index": index, "sourceProfileId": sourceProfileID]
         case .ownAccountLibraryResponse(let index): return ["kind": "own_library", "index": index]
+        case .ownerAccountLibraryResponse(let index): return ["kind": "owner_account_library", "index": index]
         case .ownAccountProfileLibrary(let index): return ["kind": "own_profile_library", "index": index]
         case .ownAccountOwnerHistory(let index): return ["kind": "own_owner_history", "index": index]
         }
@@ -497,6 +594,7 @@ enum VortxLegacyWatchedMigration {
             guard let source = row["sourceProfileId"] as? String, UUID(uuidString: source) != nil else { throw Failure.malformedArchive }
             return .authenticatedOwnerHistory(sourceProfileID: source, index: index)
         case "own_library": return .ownAccountLibraryResponse(index: index)
+        case "owner_account_library": return .ownerAccountLibraryResponse(index: index)
         case "own_profile_library": return .ownAccountProfileLibrary(index: index)
         case "own_owner_history": return .ownAccountOwnerHistory(index: index)
         default: throw Failure.malformedArchive

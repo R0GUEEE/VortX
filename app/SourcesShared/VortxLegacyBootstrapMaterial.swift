@@ -306,6 +306,40 @@ enum VortxLegacyBootstrapMaterial {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
+    struct OwnerHistoryProjection: Sendable {
+        /// Exactly library/watches/identityLinks, without roster/import schema/baseline/receipt.
+        let carrier: Data
+        let held: [Held]
+    }
+
+    /// Pure owner-source projection through the existing row/time/watch converters. Never calls
+    /// build/encode/import_legacy_sync, never constructs OwnAccountSource, never reads the clock.
+    static func projectOwnerHistory(accountID: String, ownerProfileID: UUID, profileID: UUID,
+                                    verifiedUID: String, sourceDocument: Data,
+                                    watchedEvidence: [VortxLegacyWatchedMigration.ValidatedRow]) throws -> OwnerHistoryProjection {
+        let scope = try LegacyWatchedBitfieldMigrationEvidence.Scope(accountID: accountID, profileID: profileID,
+            verifiedStreamingUID: verifiedUID, ownerProfileID: ownerProfileID)
+        try LegacyWatchedBitfieldMigrationEvidence.validateOwnerSource(scope: scope, source: sourceDocument)
+        let frame = try VortxProfileOverlayWitness.decodeObject(json: sourceDocument)
+        guard let encoded = frame["libraryResponseBase64"] as? String,
+              let bytes = Data(base64Encoded: encoded), bytes.base64EncodedString() == encoded,
+              let raw = try VortxProfileOverlayWitness.decodeObject(json: bytes)["result"] as? [Any] else {
+            throw fail("Malformed owner history source")
+        }
+        for row in watchedEvidence {
+            try row.validateOwnerHistorySource(accountID: accountID, ownerProfileID: ownerProfileID,
+                profileID: profileID, verifiedUID: verifiedUID, sourceDocument: sourceDocument)
+        }
+        var roster = [UserProfile(id: ownerProfileID, name: "Owner", avatar: "", isOwner: true)]
+        if profileID != ownerProfileID { roster.append(UserProfile(id: profileID, name: "Viewer", avatar: "", isOwner: false)) }
+        let adapter = try Adapter(document: [:], roster: roster, ownerID: ownerProfileID, modified: nil,
+            deferProfileEdits: false, accountID: accountID, sourceSHA256: sha256(sourceDocument),
+            verifiedStreamingUID: verifiedUID, watchedEvidence: watchedEvidence)
+        let carrier = try adapter.ownerHistoryRows(raw, profileID: profileID)
+        return OwnerHistoryProjection(carrier: try JSONSerialization.data(withJSONObject: carrier,
+            options: [.sortedKeys, .withoutEscapingSlashes]), held: adapter.held)
+    }
+
     private final class Adapter {
         typealias Object = [String: Any]
         let document: Object
@@ -812,6 +846,35 @@ enum VortxLegacyBootstrapMaterial {
                 throw fail("Malformed own-account millisecond state " + key)
             }
             return number.int64Value
+        }
+
+        func ownerHistoryRows(_ rows: [Any], profileID: UUID) throws -> Object {
+            let profile = profileID.uuidString
+            var items: [Object] = []
+            var identities: [String: Data] = [:]
+            for (index, raw) in rows.enumerated() {
+                try unit("owner_history_row") {
+                    let row = try Self.projectOwnLibraryRow(raw)
+                    let id = try string(row, "id"), type = try contentType(row), key = type + ":" + id
+                    guard identities[key] == nil else { throw fail("Duplicate or Unicode-ambiguous owner history identity") }
+                    identities[key] = Data(key.utf8)
+                    try known(profile, id, row)
+                    // Membership and watch remain distinct source facts. A removed/temp source row
+                    // contributes no saved item and NO invented membership tombstone/weak epoch.
+                    // This additive evidence cannot erase an earlier source or a native register.
+                    if try boolean(row, "removed") != true && boolean(row, "temp") != true {
+                        var item: Object = ["kind": "standard", "id": id, "type": type,
+                                             "name": try optionalString(row, "name") ?? ""]
+                        if let poster = try optionalString(row, "poster"), !poster.isEmpty { item["poster"] = poster }
+                        items.append(item)
+                    }
+                    try importWatch(profile, id, row, history: false, overlay: false,
+                        locator: .ownerAccountLibraryResponse(index: index))
+                    try importMarks(profile, id, row, sourceField: "/libraryResponseBase64/result/\(index)")
+                }
+            }
+            let resolved = try resolveWatches(watches[profile] ?? [], held: &held, kind: "owner_history_watch")
+            return ["library": ["items": items, "intents": []], "watches": resolved, "identityLinks": []]
         }
 
         /// `milliseconds` below parses the decimal representation and multiplies it by 1,000.
