@@ -189,6 +189,9 @@ final class MPVMetalViewController: PlatformViewController {
     private var seekEOFTerminalPark = SeekEOFTerminalParkPolicy<PlayerLoadToken>()
     /// Protected by loadTokenLock, including command admission and raw event dequeue.
     private var seekSettlement = MPVSeekSettlementPolicy<PlayerLoadToken>()
+    // All three policies share loadTokenLock and reset only on accepted replacement/invalidation.
+    private var nativeSeekDiagnostics = MPVNativeSeekDiagnosticPolicy<PlayerLoadToken>()
+    private var previewSeekStorm = MPVPreviewSeekStormPolicy<PlayerLoadToken>()
     private var latestAcceptedAbsoluteSeek: MPVResumeSeekTicket<PlayerLoadToken>?
     /// A callback can cross the main queue after a newer seek on the SAME file was issued.
     /// Source ownership alone is insufficient; retain the generation captured at raw dequeue.
@@ -1366,6 +1369,8 @@ final class MPVMetalViewController: PlatformViewController {
         loadTokenLock.lock(); defer { loadTokenLock.unlock() }
         loadProvenance.invalidate()
         seekSettlement.reset(owner: nil)
+        nativeSeekDiagnostics.reset(owner: nil)
+        previewSeekStorm.reset(owner: nil)
         latestAcceptedAbsoluteSeek = nil
         initializationFailure.invalidateLoad()
         freshOrigin.supersede()
@@ -1853,6 +1858,8 @@ final class MPVMetalViewController: PlatformViewController {
         )
         if commandResult >= 0 {
             seekSettlement.reset(owner: issuedToken)
+            nativeSeekDiagnostics.reset(owner: issuedToken)
+            previewSeekStorm.reset(owner: issuedToken)
             latestAcceptedAbsoluteSeek = nil
             // Refused replacements do not consume configuration. A concurrent newer configure call
             // belongs to a later load and must not be cleared by this command's admission.
@@ -4442,6 +4449,12 @@ final class MPVMetalViewController: PlatformViewController {
         return strArgs
     }
     
+    private func previewSeekStormHasFailed(owner: PlayerLoadToken) -> Bool {
+        guard startMuted, loopPlayback else { return false }
+        loadTokenLock.lock(); defer { loadTokenLock.unlock() }
+        return previewSeekStorm.hasFailed(owner: owner)
+    }
+
     /// Deliver a property change on the main thread, dropping it if the player has been torn
     /// down (mpv == nil). Without the guard, a queued block force-unwraps the nil IUO mpv and
     /// traps, the crash on close.
@@ -4452,6 +4465,9 @@ final class MPVMetalViewController: PlatformViewController {
                   PlayerLoadProvenanceState.accepts(
                     callbackToken: capturedToken, activeToken: self.activeLoadToken
                   ) else { return }
+            // A contained preview can only deliver its error, never stale progress/completion.
+            guard name == MPVProperty.endFileError
+                || !self.previewSeekStormHasFailed(owner: capturedToken) else { return }
             if let exhaustion = data as? SeekEOFRecoveryExhaustion,
                !self.seekEOFRecovery.acceptsExhaustion(exhaustion, owner: capturedToken) { return }
             var deliveredData = data
@@ -4474,6 +4490,7 @@ final class MPVMetalViewController: PlatformViewController {
     /// Deliver every EOF as terminal media state. Cache maintenance uses a normal low-level seek and must never
     /// hide an EOF from a finite source.
     private func emitEndFileEOF(loadToken: PlayerLoadToken, seekEvidence: MPVSeekSettlementEvidence?) {
+        guard !previewSeekStormHasFailed(owner: loadToken) else { return }
         let exhaustion = seekEOFRecovery.exhaustion(owner: loadToken,
             reason: "source ended again after its seek reopen")
         DispatchQueue.main.async { [weak self] in
@@ -4482,6 +4499,7 @@ final class MPVMetalViewController: PlatformViewController {
                     callbackToken: loadToken, activeToken: self.activeLoadToken
                   ) else { return }
             guard self.acceptsCurrentTerminalSeekEvent(seekEvidence, owner: loadToken) else { return }
+            guard !self.previewSeekStormHasFailed(owner: loadToken) else { return }
             if let exhaustion,
                !self.seekEOFRecovery.acceptsExhaustion(exhaustion, owner: loadToken) { return }
             self.failFreshOriginCorrection(owner: loadToken, reason: "EOF before opening position")
@@ -4510,6 +4528,7 @@ final class MPVMetalViewController: PlatformViewController {
     /// semantics. A failed reopen becomes an error so the UI can offer source recovery without marking the
     /// episode watched or advancing it.
     private func handleEndFileEOF(loadToken: PlayerLoadToken, seekEvidence: MPVSeekSettlementEvidence?) {
+        guard !previewSeekStormHasFailed(owner: loadToken) else { return }
         guard acceptsCurrentTerminalSeekEvent(seekEvidence, owner: loadToken), mpv != nil,
               PlayerLoadProvenanceState.accepts(
                 callbackToken: loadToken, activeToken: activeLoadToken
@@ -4685,6 +4704,15 @@ final class MPVMetalViewController: PlatformViewController {
                 let rawSeekEvidence = rawSeekOwner.map {
                     self.seekSettlement.evidence(owner: $0, seeking: rawSeeking, eofReached: rawEOF)
                 }
+                let isLoopingPreview = self.startMuted && self.loopPlayback
+                if isLoopingPreview, let owner = rawSeekOwner {
+                    if eventID == MPV_EVENT_SEEK {
+                        self.previewSeekStorm.recordNativeSeek(owner: owner)
+                    }
+                    if samplesPosition, rawSeekEvidence?.settled == true {
+                        self.previewSeekStorm.recordSettledPlayback(owner: owner)
+                    }
+                }
                 let rawTerminalOwner = eventID == MPV_EVENT_END_FILE ? self.loadProvenance.activeToken : nil
                 let rawTerminalSeekEvidence = rawTerminalOwner.map {
                     self.seekSettlement.evidence(owner: $0, seeking: nil, eofReached: nil)
@@ -4699,9 +4727,26 @@ final class MPVMetalViewController: PlatformViewController {
                     ? self.cacheReanchorNativeSample(handle: handle) : nil
                 let rawRestartPosition = eventID == MPV_EVENT_PLAYBACK_RESTART
                     ? self.diagnosticDouble(MPVProperty.timePos, handle: handle) : nil
-                let nativeSeekSnapshot = (eventID == MPV_EVENT_SEEK || eventID == MPV_EVENT_PLAYBACK_RESTART)
-                    && self.seekSettlement.current != nil ? self.nativeSeekSnapshot(handle: handle) : nil
+                // Settlement above still sees every event. Only the expensive diagnostic reads
+                // and their file records are sampled; error and terminal events are never gated.
+                let nativeSeekEvent = eventID == MPV_EVENT_SEEK || eventID == MPV_EVENT_PLAYBACK_RESTART
+                let nativeSeekNow = ProcessInfo.processInfo.systemUptime
+                let diagnosticAdmission = nativeSeekEvent && self.seekSettlement.current != nil
+                    ? rawSeekOwner.flatMap { self.nativeSeekDiagnostics.admit(owner: $0, now: nativeSeekNow) }
+                    : nil
+                let nativeSeekSnapshot = diagnosticAdmission != nil
+                    ? self.nativeSeekSnapshot(handle: handle) : nil
                 let nativeSeekTransport = nativeSeekSnapshot != nil ? MPVSeekTransportDiagnostic.read(from: handle) : nil
+                var containedPreview: (owner: PlayerLoadToken, stopStatus: Int32)?
+                if isLoopingPreview, let owner = rawSeekOwner, let snapshot = nativeSeekSnapshot,
+                   self.previewSeekStorm.observe(owner: owner, now: nativeSeekNow, sample: .init(
+                    position: snapshot.position, seeking: snapshot.seeking, paused: snapshot.paused,
+                    cacheSeconds: snapshot.cacheDuration, forwardBytes: snapshot.forwardBytes)) {
+                    // Fence admission and the stop command against source replacement. Stop is
+                    // a failure containment, not EOF; destruction remains owned by normal stop().
+                    let status = mpv_command_string(handle, "stop")
+                    containedPreview = (owner, status)
+                }
                 var drainedRestart: (PlayerLoadToken, Double, MPVSeekSettlementEvidence)?
                 if eventID == MPV_EVENT_NONE,
                    self.seekSettlement.needsDrainedRestartConfirmation,
@@ -4719,9 +4764,18 @@ final class MPVMetalViewController: PlatformViewController {
                 }
                 self.loadTokenLock.unlock()
                 if let snapshot = nativeSeekSnapshot, let transport = nativeSeekTransport,
-                   let owner = rawSeekOwner, let evidence = rawSeekEvidence {
+                   let owner = rawSeekOwner, let evidence = rawSeekEvidence,
+                   let admission = diagnosticAdmission {
                     let kind = eventID == MPV_EVENT_SEEK ? "seek" : "restart"
-                    DiagnosticsLog.log("playback", "seek-native event=\(kind) load=\(owner.hashValue) seek=\(evidence.generation) settled=\(evidence.settled) attributed=\(evidence.attributed) \(snapshot.receipt) \(transport.receipt)")
+                    let surface = self.startMuted ? "ambient" : self.probeChannel.description
+                    DiagnosticsLog.log("playback", "seek-native event=\(kind) surface=\(surface) load=\(owner.hashValue) seek=\(evidence.generation) suppressed=\(admission.suppressedEvents) settled=\(evidence.settled) attributed=\(evidence.attributed) \(snapshot.receipt) \(transport.receipt)")
+                }
+                if let contained = containedPreview {
+                    // One owner-fenced failure survives sampling and lets the hero fall back to art.
+                    DiagnosticsLog.log("trailer", "preview-native-seek-storm contained surface=ambient load=\(contained.owner.hashValue) stopStatus=\(contained.stopStatus)")
+                    self.emit(MPVProperty.endFileError,
+                              "The preview could not continue playing.",
+                              loadToken: contained.owner)
                 }
                 if event?.pointee.event_id == MPV_EVENT_NONE {
                     if let (owner, position, evidence) = drainedRestart {
@@ -5005,6 +5059,10 @@ final class MPVMetalViewController: PlatformViewController {
                         }
                     }
                 case MPV_EVENT_SEEK:
+                    // Full muted loops have no viewer resume/cache-maintenance transaction.
+                    // Native settlement and containment were already processed above; avoid
+                    // one unused main-queue closure per internal EOF-loop seek.
+                    if isLoopingPreview { break }
                     if let owner = self.callbackLoadToken(requiresLoadedFile: true) {
                         self.loadTokenLock.lock()
                         self.freshOrigin.observedSeek(owner: owner)
@@ -5039,6 +5097,7 @@ final class MPVMetalViewController: PlatformViewController {
                                   PlayerTimePositionEvent(seconds: position, loadToken: owner,
                                                           mpvSeekSettlement: evidence),
                                   loadToken: owner)
+                        if isLoopingPreview { break }
                         DispatchQueue.main.async { [weak self] in
                             guard let self, self.activeLoadToken == owner else { return }
                             self.completeSeekEOFRecovery(loadToken: owner, position: position,
@@ -5046,6 +5105,7 @@ final class MPVMetalViewController: PlatformViewController {
                         }
                     }
                     #if canImport(UIKit)
+                    if isLoopingPreview { break }
                     guard let loadToken = self.callbackLoadToken(requiresLoadedFile: true) else { break }
                     let cacheWitness = rawCacheWitness
                     let cacheSeeks = rawCacheNativeSample?.lowLevelSeeks
