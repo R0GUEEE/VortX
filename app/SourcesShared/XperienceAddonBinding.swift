@@ -141,8 +141,9 @@ enum XperienceImportNamespace {
     }
     static func field(_ namespace: UUID) -> String { "xperience.import." + namespace.uuidString.lowercased() }
 
-    static func append(document: XperienceCollections.Document, label: String, namespace: UUID = UUID()) throws -> Edit {
-        let value = try envelope(document: document, label: label, namespace: namespace, previous: nil, bindings: [:])
+    static func append(document: XperienceCollections.Document, label: String, namespace: UUID = UUID(),
+                       bindings: [String: XperienceAddonBinding.Mapping] = [:]) throws -> Edit {
+        let value = try envelope(document: document, label: label, namespace: namespace, previous: nil, bindings: bindings)
         return .init(namespace: namespace, field: field(namespace), expectedRegister: nil, value: value)
     }
     static func replace(document: XperienceCollections.Document, label: String, namespace: UUID,

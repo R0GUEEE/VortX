@@ -89,6 +89,46 @@ private final class NativeFieldNotifications: @unchecked Sendable {
         await facade.shutdown()
         print("Live native field notifications: no-op acknowledgments quiet; progress changes playback/CW without ctx/search; equal-descriptor profile identity, addon change and explicit rebind each notify ctx; library remains live")
     }
+    /// Real shared host-field contracts in the NORMAL full ABI module. No Xperience/parser,
+    /// Keychain/UI shim, alternate Facade, conditional exclusion or extra compiler list is used.
+    static func nativeHostFieldCAS() async throws {
+        let scope = VortxAccountScope(account: "native-host-field-fixture", ownerProfileID: "native-host-field-owner")
+        let checkpoint = try VortxEncryptedCheckpointStore(
+            directory: URL(fileURLWithPath: CommandLine.arguments[3]).appendingPathComponent("native-host-field"),
+            key: SymmetricKey(size: .bits256))
+        let session = try VortxNativeSession(scope: scope, ownerName: "Fixture", abi: VortxCABI(), store: checkpoint,
+                                            transport: VortxCResourceTransport(), allowNewAccount: true)
+        let field = "hostFieldFixture", nfc = "\u{00e9}", nfd = "e\u{0301}"
+        _ = try await session.dispatch([], now: 1000,
+            hostEdits: [.init(profileID: scope.ownerProfileID, fields: [field: .object(["label": .string(nfc)])])],
+            hostFieldCAS: .init(profileID: scope.ownerProfileID, field: field, register: nil))
+        let host = try await session.hostPreferencesDocument()
+        guard let accepted = host["profiles"]?[scope.ownerProfileID]?["fields"]?[field] else {
+            preconditionFailure("normal ABI host-field receipt missing")
+        }
+        var byteDistinct = try accepted.decode([String: VortxJSON].self)
+        byteDistinct["value"] = .object(["label": .string(nfd)])
+        let wrongRegister = VortxJSON.object(byteDistinct)
+        check(nfc == nfd && Data(nfc.utf8) != Data(nfd.utf8))
+        check(accepted == wrongRegister) // negative control: Swift equality would miss this conflict
+        check(!VortxNativeHostFieldEvidence.json(accepted, wrongRegister))
+        let durableHost = try checkpoint.readHostPreferences(scope: scope)
+        do {
+            _ = try await session.dispatch([], now: 1001,
+                hostEdits: [.init(profileID: scope.ownerProfileID, fields: [field: .object(["label": .string("must-not-write")])])],
+                hostFieldCAS: .init(profileID: scope.ownerProfileID, field: field, register: wrongRegister))
+            preconditionFailure("normal ABI accepted byte-distinct expected register")
+        } catch VortxNativeHostFieldMutationError.staleRegister {}
+        check(try checkpoint.readHostPreferences(scope: scope) == durableHost)
+        _ = try await session.dispatch([], now: 1002,
+            hostEdits: [.init(profileID: scope.ownerProfileID, fields: [field: .object(["label": .string("accepted")])])],
+            hostFieldCAS: .init(profileID: scope.ownerProfileID, field: field, register: accepted))
+        let after = try await session.hostPreferencesDocument()
+        check(after["profiles"]?[scope.ownerProfileID]?["fields"]?[field]?["value"]?["label"] == .string("accepted"))
+        await session.close()
+        print("Live native host-field: shared Foundation contracts, exact Unicode CAS rejection, unchanged failed checkpoint, subsequent valid commit")
+    }
+
     static func main() async throws {
         try shortUnwatchedEpisode()
         let runtime = try VortxNativeRuntime(abi: VortxCABI(), ownerID: "fixture-owner", ownerName: "Fixture")
@@ -109,6 +149,7 @@ private final class NativeFieldNotifications: @unchecked Sendable {
         let port = CommandLine.arguments[2]
         let addon = VortxResourceAddon(id: "source-identity", transportUrl: "http://127.0.0.1:\(port)/manifest.json", manifest: fixture["manifest"])
         try await changedFieldNotifications(addon: addon)
+        try await nativeHostFieldCAS()
         let bridge = VortxResourceBridge(transport: try VortxCResourceTransport())
         for resource in [VortxResourceRequest.Resource.catalog, .meta, .stream, .subtitles] {
             let id = resource == .catalog ? "popular" : "tt-fixture"

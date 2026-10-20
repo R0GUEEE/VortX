@@ -24,14 +24,15 @@ sed -n '1,/^\/\/\/ The profile roster and the active selection\./{ /^\/\/\/ The 
     printf '%s\n' 'import Foundation'
     sed -n '/^struct ProfileDiscoveryPreferences: /,/^}$/p' app/SourcesShared/ProfileDiscoveryPreferences.swift
 } > "$native_live_dir/Discovery.swift"
-xcrun swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors \
+nice -n 15 xcrun swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors \
+    -j 1 -num-threads 1 -whole-module-optimization \
     -D VORTX_ENGINE_STATE_BRIDGE -D VORTX_ENGINE_RESOURCE_HOST -I "$native_live_dir" \
     app/SourcesShared/VortxNativeRuntime.swift app/SourcesShared/VortxResourceBridge.swift \
     app/SourcesShared/VortxResourceProjection.swift app/SourcesShared/VortxNativeBootstrapArchive.swift app/SourcesShared/VortxNativeHostPreferences.swift "${native_watched_swift_inputs[@]}" app/SourcesShared/VortxNativeSession.swift app/SourcesShared/VortxNativeCoreFacade.swift app/SourcesShared/VortxNativePreviouslyWatched.swift \
     "$native_live_dir/UserProfile.swift" "$native_live_dir/Discovery.swift" app/SourcesShared/ProfileAddonPreferences.swift app/SourcesShared/VortxProfileOverlayWitness.swift app/SourcesShared/VortxNativeProfiles.swift app/SourcesShared/VortxNativeProviderCredentials.swift \
     app/SourcesShared/VortxNativeProfileEditHost.swift app/Tests/VortxNativeLiveABITests.swift "$library" -o "$native_live_dir/live-abi"
 DYLD_LIBRARY_PATH="$(dirname "$library"):$(dirname "$library")/deps" \
-    "$native_live_dir/live-abi" test/fixtures/native-resource-contract.json "$(<"$native_live_dir/port")" "$native_live_dir/checkpoints" "$native_live_dir/delay-meta"
+    nice -n 15 "$native_live_dir/live-abi" test/fixtures/native-resource-contract.json "$(<"$native_live_dir/port")" "$native_live_dir/checkpoints" "$native_live_dir/delay-meta"
 test "$library_hash" = "$(shasum -a 256 "$library" | awk '{print $1}')"
 test "$header_hash" = "$(shasum -a 256 "$header" | awk '{print $1}')"
 printf 'Verified unchanged library %s\nVerified unchanged header %s\n' "$library_hash" "$header_hash"

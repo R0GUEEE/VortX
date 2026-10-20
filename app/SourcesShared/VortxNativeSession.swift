@@ -281,11 +281,7 @@ protocol VortxCheckpointStore: Sendable {
         scope: VortxAccountScope, expected: Data?, authority: any VortxMutationAuthority) throws
     func commit(_ snapshot: String, scope: VortxAccountScope, hostPreferences: Data) throws
 }
-/// Optional external-source authentication lease. Its implementation linearizes credential
-/// invalidation with the final checkpoint, without exposing credentials to the native runtime.
-protocol VortxMutationAuthority: Sendable {
-    func withActive(_ operation: () throws -> Void) throws
-}
+// VortxMutationAuthority is declared in the shared native host-field transaction contracts.
 extension VortxCheckpointStore {
     func readHostPreferences(scope: VortxAccountScope) throws -> Data? { nil }
     func readLegacyMaterial(scope: VortxAccountScope) throws -> Data? { nil }
@@ -1354,7 +1350,9 @@ actor VortxNativeSession {
                                     hostRemote: VortxJSON? = nil, hostEdits: [VortxNativeHostPreferences.Edit] = [],
                                     legacyWatchlists: [UUID: [VortxNativeWatchlist.Entry]] = [:],
                                     websiteEvents: [VortxJSON] = [], websiteAddonEvents: [VortxJSON] = [], websiteBaseline: VortxNativeProfileEditHost.Baselines = [:],
-                                    sourceAuthority: (any VortxMutationAuthority)? = nil, authenticatedSourceArchive: Data? = nil) throws -> [String] {
+                                    sourceAuthority: (any VortxMutationAuthority)? = nil, authenticatedSourceArchive: Data? = nil,
+                                    hostFieldCAS: VortxHostFieldCAS? = nil,
+                                    checkpointValidator: (any VortxProspectiveCheckpointValidator)? = nil) throws -> [String] {
         guard !closed else { throw VortxNativeError.closed }
         guard !persistenceFailed else { throw VortxNativeError.checkpointUncertain }
         let old = try stateJSON()
@@ -1387,6 +1385,9 @@ actor VortxNativeSession {
             // profile or block unrelated sync because its historical ledger cannot be seeded.
             guard let record = state["roster"]?["profiles"]?[profile.uuidString], record["deleted"] != .bool(true) else { continue }
             try VortxNativeWatchlist.seed(entries, profileID: profile, into: &candidateHost)
+        }
+        if let hostFieldCAS, !hostFieldCAS.matches(try candidateHost.document) {
+            throw VortxNativeHostFieldMutationError.staleRegister
         }
         for edit in hostEdits {
             if let profile = edit.profileID {
@@ -1505,18 +1506,32 @@ actor VortxNativeSession {
         if holdBack {
             pendingProgressCommit = true
         } else {
+            var checkpointStarted = false
             do {
-                try lease.withActive {
-                    func commit() throws {
-                        if let encodedHost { try store.commit(updated, scope: scope, hostPreferences: encodedHost) }
-                        else { try store.commit(updated, scope: scope) }
+                func commit() throws {
+                    // Complete-candidate preflight and checkpoint share every final authority.
+                    if let checkpointValidator {
+                        try validateProspectiveCheckpoint(candidateState: updated, candidateHost: candidateHost,
+                            now: now, validator: checkpointValidator)
                     }
-                    if let sourceAuthority { try sourceAuthority.withActive(commit) } else { try commit() }
+                    checkpointStarted = true
+                    if let encodedHost { try store.commit(updated, scope: scope, hostPreferences: encodedHost) }
+                    else { try store.commit(updated, scope: scope) }
                 }
+                func checkpoint() throws {
+                    try lease.withActive {
+                        if let sourceAuthority { try sourceAuthority.withActive(commit) } else { try commit() }
+                    }
+                }
+                // Provider publications can synchronously read CoreBridge. Acquire their existing
+                // store lock BEFORE the session/Bridge/facade locks, never in the reverse order.
+                if let checkpointValidator { try checkpointValidator.withActive(checkpoint) }
+                else { try checkpoint() }
             }
             catch VortxNativeError.closed { throw VortxNativeError.closed }
             catch VortxNativeError.superseded { throw VortxNativeError.superseded }
             catch {
+                guard checkpointStarted else { throw error }
                 // A rename may have succeeded before a readback/fsync failure. Do not overwrite that
                 // uncertain checkpoint with another transaction; reopen and validate it first.
                 VortxCheckpointDiagnostics.report(stage: .transactionCommit, error: error)
@@ -1530,6 +1545,20 @@ actor VortxNativeSession {
         if try scope.validateSnapshot(old)["activeProfileId"] != state["activeProfileId"] { invalidateScreens() }
         return results
     }
+    /// The witness came from the complete existing sync/export pipeline after Save confirmation.
+    /// Substitute the exact prospective candidate's three native export carriers. No partial
+    /// kernel merge, guessed sibling allowance, pruning, upload or checkpoint occurs here.
+    private func validateProspectiveCheckpoint(candidateState: String, candidateHost: VortxNativeHostPreferences,
+        now: UInt64, validator: any VortxProspectiveCheckpointValidator) throws {
+        let state = try scope.validateSnapshot(candidateState)
+        guard let native = state["nativeSync"],
+              case .object(var outcome) = try VortxNativeProfileEditHost.outcome(candidateHost.local) else {
+            throw VortxNativeError.invalidSnapshot
+        }
+        outcome["addonConflicts"] = try JSONDecoder().decode(VortxJSON.self, from: JSONEncoder().encode(candidateHost.local.websiteAddonConflicts ?? []))
+        try validator.validate(native: native, host: candidateHost.document, profileEditResults: .object(outcome))
+    }
+
     /// Write a position the 30 s coalescing held back, and write the next position report at once too (it may
     /// still be on its way from the player). Failure is handled exactly like a failed commit in dispatch.
     func flushPendingProgress() throws {
