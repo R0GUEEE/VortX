@@ -36,9 +36,16 @@ enum TopShelfSnapshot {
 
     /// Most items the Top Shelf row carries. The Top Shelf is a glance surface, not a browse surface:
     /// it is the resume queue's head, and the system only ever shows a handful before the row scrolls
-    /// out of reach. Capping the write also bounds the payload the extension has to decode inside its
-    /// response deadline.
+    /// out of reach. The item cap bounds constructed rows; the separate byte ceiling below bounds
+    /// the file passed to the extension's decoder.
     static let maxItems = 8
+
+    /// Ceiling for the complete UTF-8 JSON cache, including metadata and all eight items. A 256 KiB
+    /// budget allows roughly 32 KiB per row for existing titles/URLs without admitting an unbounded file into
+    /// the extension. This is a conservative cache policy, not a measured system memory allowance.
+    /// Only reads enforce this limit: producer size budgeting is separate, and writes must not retain
+    /// a previous owner's visible cache just because a new publication is oversized.
+    static let maxSnapshotBytes = 256 * 1024
 
     /// Payload schema version. Bumped when the shape changes so an OLD extension paired with a NEW
     /// app (or the reverse, mid-update) rejects a payload it cannot read instead of mis-rendering it.
@@ -70,6 +77,33 @@ enum TopShelfSnapshot {
         /// stale resume row is still a useful row and the app rewrites on every Home refresh anyway.
         let writtenAt: Date
         let items: [Item]
+
+        private enum CodingKeys: String, CodingKey { case version, writtenAt, items }
+
+        init(version: Int, writtenAt: Date, items: [Item]) {
+            self.version = version
+            self.writtenAt = writtenAt
+            self.items = items
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            version = try container.decode(Int.self, forKey: .version)
+            writtenAt = try container.decode(Date.self, forKey: .writtenAt)
+            var rows = try container.nestedUnkeyedContainer(forKey: .items)
+            if let count = rows.count, count > TopShelfSnapshot.maxItems {
+                throw DecodingError.dataCorruptedError(in: rows, debugDescription: "Too many Top Shelf items")
+            }
+            var decoded: [Item] = []
+            decoded.reserveCapacity(TopShelfSnapshot.maxItems)
+            while !rows.isAtEnd {
+                guard decoded.count < TopShelfSnapshot.maxItems else {
+                    throw DecodingError.dataCorruptedError(in: rows, debugDescription: "Too many Top Shelf items")
+                }
+                decoded.append(try rows.decode(Item.self))
+            }
+            items = decoded
+        }
     }
 
     /// Pure state transitions used by the app-side private Trakt publisher. Keeping these rules in the
@@ -211,6 +245,12 @@ enum TopShelfSnapshot {
     /// directory or touch disk. Callers must validate the source URL before requesting a path here.
     static func localArtworkURL(for sourceURL: String) -> URL? {
         guard !sourceURL.isEmpty, let directory = artworkDirectoryURL else { return nil }
+        return localArtworkURL(for: sourceURL, in: directory)
+    }
+
+    /// Pure path calculation also used by disposable source-unit fixtures; it never resolves an App Group.
+    static func localArtworkURL(for sourceURL: String, in directory: URL) -> URL? {
+        guard !sourceURL.isEmpty else { return nil }
         let sourceExtension = URL(string: sourceURL)?.pathExtension.lowercased()
         let allowedExtensions = Set(["jpg", "jpeg", "png", "webp", "heic", "avif", "gif"])
         let fileExtension = sourceExtension.flatMap { allowedExtensions.contains($0) ? $0 : nil } ?? "image"
@@ -247,12 +287,50 @@ enum TopShelfSnapshot {
     /// unreadable bytes, or a version we do not understand. Never throws, never traps. The extension
     /// turns [] into nil content, which is the system's cue to show the static Top Shelf image.
     static func read() -> [Item] {
-        guard let url = fileURL,
-              let data = try? Data(contentsOf: url),
-              let payload = try? decoder.decode(Payload.self, from: data),
-              payload.version == currentVersion
-        else { return [] }
-        return Array(payload.items.prefix(maxItems))
+        guard let url = fileURL else { return [] }
+        return read(from: url)
+    }
+
+    /// An explicit file seam keeps fixtures out of the real App Group. Invalid input is read-only:
+    /// return no content without deleting, rewriting, normalizing or pruning any cache/history.
+    static func read(from url: URL) -> [Item] {
+        readPayload(from: url)?.items ?? []
+    }
+
+    private static func readPayload(from url: URL) -> Payload? {
+        guard url.isFileURL else { return nil }
+        do {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else { return nil }
+            if let size = values.fileSize, size > maxSnapshotBytes { return nil }
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            guard let data = boundedSnapshotData(readChunk: { try handle.read(upToCount: $0) }),
+                  let payload = try? decoder.decode(Payload.self, from: data),
+                  payload.version == currentVersion else { return nil }
+            return payload
+        } catch {
+            return nil
+        }
+    }
+
+    /// FileHandle may return a short chunk before EOF. Keep reading within a single byte budget;
+    /// one extra byte distinguishes an exact-limit file from an oversized file or stale size hint.
+    /// JSONDecoder sees at most maxSnapshotBytes; only the byte reader may retain the sentinel byte.
+    static func boundedSnapshotData(readChunk: (Int) throws -> Data?) -> Data? {
+        var data = Data()
+        do {
+            while data.count <= maxSnapshotBytes {
+                let requested = min(16 * 1024, maxSnapshotBytes + 1 - data.count)
+                guard let chunk = try readChunk(requested), !chunk.isEmpty else { break }
+                guard chunk.count <= requested else { return nil }
+                data.append(chunk)
+            }
+            guard !data.isEmpty, data.count <= maxSnapshotBytes else { return nil }
+            return data
+        } catch {
+            return nil
+        }
     }
 
     // MARK: Write (app side)
@@ -269,10 +347,19 @@ enum TopShelfSnapshot {
     @discardableResult
     static func write(_ items: [Item]) -> Bool {
         guard let url = fileURL else { return false }
+        return write(items, to: url)
+    }
+
+    /// Explicit destination is for the same cache contract and disposable fixtures, not account data.
+    @discardableResult
+    static func write(_ items: [Item], to url: URL) -> Bool {
+        guard url.isFileURL else { return false }
         let capped = Array(items.prefix(maxItems))
         // Compare CONTENT, not the encoded bytes: `writtenAt` changes on every call, so comparing
         // payloads would always report a change and defeat the point of the check.
-        if capped == read() { return false }
+        // A failed read is not evidence of an already-empty file: an explicit [] must still clear
+        // a malformed/oversized prior publication on sign-out, profile change or feature-off.
+        if let previous = readPayload(from: url), capped == previous.items { return false }
         let payload = Payload(version: currentVersion, writtenAt: Date(), items: capped)
         guard let data = try? encoder.encode(payload) else { return false }
         // Atomic: the extension can be reading this file in another process at any moment, and a
