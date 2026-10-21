@@ -107,9 +107,12 @@ NODE
 for variant in ${baseline_ref:+baseline} current; do
   xcrun swiftc -parse-as-library -warnings-as-errors "$fixture_dir/$variant-production.swift" \
     app/Tests/TVSearchCollectionsTests.swift -o "$fixture_dir/$variant"
-  args=()
-  if [[ "$variant" == baseline ]]; then args=(--baseline); fi
-  "$fixture_dir/$variant" "${args[@]}" | tee "$fixture_dir/$variant.log"
+  # macOS CI uses Bash 3.2: an empty array expansion is unbound under `set -u`.
+  if [[ "$variant" == baseline ]]; then
+    "$fixture_dir/$variant" --baseline | tee "$fixture_dir/$variant.log"
+  else
+    "$fixture_dir/$variant" | tee "$fixture_dir/$variant.log"
+  fi
 done
 xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
   "$fixture_dir/field-model.swift" app/Tests/TVSearchFieldModelTests.swift -o "$fixture_dir/field-model"
