@@ -8,6 +8,7 @@ on:
       - "scripts/test-apple-playback-recovery.sh"
       - "scripts/test-avplayer-recovery-settlement.sh"
       - "scripts/test-player-skip-chrome.sh"
+      - "scripts/test-tv-search-collections.sh"
       - "scripts/test-addon-selfhosted.sh"
       - "scripts/test-apple-parity-contracts.sh"
       - "scripts/test-apple-player-timeline.sh"
@@ -48,6 +49,7 @@ on:
       - "scripts/test-apple-playback-recovery.sh"
       - "scripts/test-avplayer-recovery-settlement.sh"
       - "scripts/test-player-skip-chrome.sh"
+      - "scripts/test-tv-search-collections.sh"
       - "scripts/test-addon-selfhosted.sh"
       - "scripts/test-apple-parity-contracts.sh"
       - "scripts/test-apple-player-timeline.sh"
@@ -114,6 +116,7 @@ jobs:
       - run: bash scripts/test-cinema-rail-layout.sh
       - run: bash scripts/test-avplayer-recovery-settlement.sh
       - run: bash scripts/test-player-skip-chrome.sh
+      - run: bash scripts/test-tv-search-collections.sh
       - run: bash scripts/test-addon-selfhosted.sh
       - run: bash scripts/test-episode-source-isolation.sh
       - name: Fetch immutable public next-episode cancellation baseline
