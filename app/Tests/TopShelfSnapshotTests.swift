@@ -490,6 +490,45 @@ check(TopShelfSnapshot.boundedSnapshotData { _ in Data() } == nil, "an empty fir
 check(TopShelfSnapshot.boundedSnapshotData { requested in Data(repeating: 0, count: requested + 1) } == nil,
       "a reader violating its requested byte budget is rejected")
 
+// MARK: App Group under a re-signing service
+
+section("the shared group follows what the signed copy was granted")
+
+let canonicalGroup = TopShelfSnapshot.canonicalAppGroupID
+let signerGroup = "group.b0eaaf9ad1ed3ea5.1"
+check(TopShelfSnapshot.selectAppGroup(granted: [signerGroup], canonical: canonicalGroup) { $0 == canonicalGroup } == canonicalGroup,
+      "the project's own group wins when this copy holds it")
+check(TopShelfSnapshot.selectAppGroup(granted: [signerGroup], canonical: canonicalGroup) { $0 == signerGroup } == signerGroup,
+      "a re-signed copy uses the group its signer granted instead of finding no container")
+let grantedA = ["group.zz.second", signerGroup], grantedB = [signerGroup, "group.zz.second"]
+let both = { (id: String) in id == signerGroup || id == "group.zz.second" }
+check(TopShelfSnapshot.selectAppGroup(granted: grantedA, canonical: canonicalGroup, hasContainer: both)
+      == TopShelfSnapshot.selectAppGroup(granted: grantedB, canonical: canonicalGroup, hasContainer: both),
+      "an app and its extension granted the same groups in any order settle on the same one")
+check(TopShelfSnapshot.selectAppGroup(granted: ["group.*", "com.example.notagroup"], canonical: canonicalGroup) { _ in true } == canonicalGroup,
+      "wildcards and non-group identifiers are never used")
+check(TopShelfSnapshot.selectAppGroup(granted: [signerGroup], canonical: canonicalGroup) { _ in false } == nil,
+      "no granted container leaves the feature off")
+
+let profilePlist = """
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Entitlements</key><dict>
+<key>com.apple.security.application-groups</key><array><string>\(signerGroup)</string></array>
+</dict></dict></plist>
+"""
+var envelope = Data([0x30, 0x82, 0x2a, 0x1f, 0x06, 0x09])
+envelope.append(Data(profilePlist.utf8))
+envelope.append(Data([0xa0, 0x82, 0x0b, 0x00]))
+check(TopShelfSnapshot.provisionedAppGroups(profile: envelope) == [signerGroup],
+      "groups are read from the plist inside the signed profile envelope")
+check(TopShelfSnapshot.provisionedAppGroups(profile: Data([0x30, 0x82, 0x00])).isEmpty,
+      "an unreadable profile grants nothing")
+check(TopShelfSnapshot.isTopShelfExtension(["NSExtension": ["NSExtensionPointIdentifier": "com.apple.tv-top-shelf"]]),
+      "the Top Shelf extension is recognised by its extension point")
+check(!TopShelfSnapshot.isTopShelfExtension(["NSExtension": ["NSExtensionPointIdentifier": "com.apple.widgetkit-extension"]])
+      && !TopShelfSnapshot.isTopShelfExtension(nil), "other bundles are not the Top Shelf extension")
+
 // MARK: Result
 
 print("\n\(checks - failures)/\(checks) checks passed")

@@ -21,15 +21,86 @@ import Foundation
 /// lives in `SourcesTV/TopShelfSnapshotWriter.swift`, which the extension does NOT compile.
 enum TopShelfSnapshot {
 
-    /// App Group shared by the tvOS app and its Top Shelf extension. Both must carry this in their
-    /// entitlements for the container to exist (generated from `project.yml`).
+    /// App Group the project provisions for the tvOS app and its Top Shelf extension (`project.yml`).
     ///
     /// VortX Lite deliberately does NOT declare the group (it ships no Top Shelf extension in v1), so
     /// on Lite `containerURL` is nil, every write is a silent no-op, and nothing else changes. That is
     /// also exactly what happens in an UNSIGNED / CODE_SIGNING_ALLOWED=NO build, where the entitlement
     /// is not provisioned: the whole feature degrades to "no snapshot, static Top Shelf image", never
     /// to a crash. Every entry point here is nil-tolerant for that reason.
-    static let appGroupID = "group.com.stremiox.tv"
+    static let canonicalAppGroupID = "group.com.stremiox.tv"
+
+    /// The App Group this signed copy actually shares with its Top Shelf extension.
+    ///
+    /// A sideload signer re-signs under its own team, which cannot hold `canonicalAppGroupID`, so it grants
+    /// the app and the extension a group of its own instead (a FlareStore log shows `group.<hex>.1`). Asking
+    /// only for the canonical ID then found no container in either process, so the shelf stayed the static
+    /// image under every signing service. Both processes now resolve the same group from what their signed
+    /// copy was granted: the canonical group when held, else the first granted group with a container.
+    ///
+    /// A signer's group can be shared by every app that service signs for the viewer, so it is used only by
+    /// a bundle that ships or is the Top Shelf extension; Lite never writes there. What it carries is the
+    /// Continue Watching row the Home screen already shows. Nil means the feature is off, never an error.
+    static let appGroupID: String? = resolveAppGroupID(bundle: .main)
+
+    enum AppGroupSource: String, Sendable { case canonical, signer, none }
+
+    /// Which kind of group this copy uses, for diagnostics; the identifier itself is not logged.
+    static var appGroupSource: AppGroupSource {
+        guard let appGroupID else { return .none }
+        return appGroupID == canonicalAppGroupID ? .canonical : .signer
+    }
+
+    static func resolveAppGroupID(bundle: Bundle) -> String? {
+        let granted = carriesTopShelf(bundle) ? grantedAppGroups(bundle: bundle) : []
+        return selectAppGroup(granted: granted, canonical: canonicalAppGroupID) {
+            FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0) != nil
+        }
+    }
+
+    /// The canonical group first when this copy holds it, then the signer's groups in a stable order, so an
+    /// app and its extension granted the same groups settle on the same one. Wildcards are never groups.
+    static func selectAppGroup(granted: [String], canonical: String, hasContainer: (String) -> Bool) -> String? {
+        var seen = Set<String>()
+        let candidates = ([canonical] + granted.sorted()).filter {
+            $0.hasPrefix("group.") && !$0.contains("*") && seen.insert($0).inserted
+        }
+        return candidates.first(where: hasContainer)
+    }
+
+    /// Groups this signed bundle was granted: AltStore and SideStore record their rewritten groups in
+    /// `ALTAppGroups`, and every signer embeds the provisioning profile whose entitlements list them.
+    static func grantedAppGroups(bundle: Bundle) -> [String] {
+        var groups = bundle.object(forInfoDictionaryKey: "ALTAppGroups") as? [String] ?? []
+        if let url = bundle.url(forResource: "embedded", withExtension: "mobileprovision"),
+           let profile = try? Data(contentsOf: url, options: .mappedIfSafe) {
+            groups += provisionedAppGroups(profile: profile)
+        }
+        return groups
+    }
+
+    /// The application groups in a provisioning profile, a signed envelope around an XML property list.
+    static func provisionedAppGroups(profile: Data) -> [String] {
+        guard let start = profile.range(of: Data("<?xml".utf8)),
+              let end = profile.range(of: Data("</plist>".utf8), in: start.lowerBound..<profile.endIndex),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: profile.subdata(in: start.lowerBound..<end.upperBound), format: nil) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any] else { return [] }
+        return entitlements["com.apple.security.application-groups"] as? [String] ?? []
+    }
+
+    /// True for the Top Shelf extension itself and for an app that embeds one.
+    static func carriesTopShelf(_ bundle: Bundle) -> Bool {
+        if isTopShelfExtension(bundle.infoDictionary) { return true }
+        guard let plugins = bundle.builtInPlugInsURL,
+              let entries = try? FileManager.default.contentsOfDirectory(at: plugins, includingPropertiesForKeys: nil)
+        else { return false }
+        return entries.contains { $0.pathExtension == "appex" && isTopShelfExtension(Bundle(url: $0)?.infoDictionary) }
+    }
+
+    static func isTopShelfExtension(_ info: [String: Any]?) -> Bool {
+        (info?["NSExtension"] as? [String: Any])?["NSExtensionPointIdentifier"] as? String == "com.apple.tv-top-shelf"
+    }
 
     /// Snapshot filename inside the group container.
     private static let filename = "top-shelf.json"
@@ -214,7 +285,8 @@ enum TopShelfSnapshot {
     /// The shared container, or nil when the App Group is not provisioned (unsigned build, Lite, or a
     /// profile without the capability). Callers MUST treat nil as "feature off", never as an error.
     static var containerURL: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
+        guard let appGroupID else { return nil }
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
     }
 
     private static var fileURL: URL? {
