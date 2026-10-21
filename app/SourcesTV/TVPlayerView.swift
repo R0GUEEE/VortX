@@ -2746,6 +2746,11 @@ struct TVPlayerView: View {
             return
         }
         if controlsHidden {
+            // Neither hidden prompt consumes Up. Reveal before inspecting their episode inventory.
+            if type == .upArrow {
+                showControls()
+                return
+            }
             // Up Next band visible: it owns Left/Right/Select/Down (pick + activate + dismiss) so they
             // never fall through to the seek-while-hidden nudge below. Menu (exit), Play/Pause, and Up
             // still behave normally, so the band never traps the remote.
