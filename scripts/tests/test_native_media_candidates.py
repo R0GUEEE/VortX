@@ -22,7 +22,9 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertNotIn(name, names)
             names.add(name)
             self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), expected)
-        self.assertEqual(len(names), 16)
+        self.assertEqual(len(names), 18)
+        self.assertIn('scripts/native-media-hosted/android/buildscripts/include/download-libunibreak.sh', names)
+        self.assertIn('scripts/native-media-hosted/android/buildscripts/scripts/ffmpeg.sh', names)
 
     def fixture(self, out, *, missing=None, bad_abi=False, bad_tls=False):
         native_patch = (ROOT / "scripts/native-media-hosted/android/buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch").read_text()

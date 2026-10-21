@@ -40,7 +40,7 @@ jobs:
       - name: Verify reviewed recipes
         run: |
           set -euo pipefail
-          printf '%s  %s\n' 3f02efb5cf610568aa724950859f454af2d4c90fbb8c5c758412a1cdfd0056f4 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
+          printf '%s  %s\n' b5a4cf9d8d4af22065850ce471a09478d2f5d162d001388d614e1265ca48cb6a scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
           shasum -a 256 -c scripts/native-media-hosted/inputs.sha256
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -85,7 +85,7 @@ jobs:
       - name: Verify reviewed recipes
         run: |
           set -euo pipefail
-          printf '%s  %s\n' 3f02efb5cf610568aa724950859f454af2d4c90fbb8c5c758412a1cdfd0056f4 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
+          printf '%s  %s\n' b5a4cf9d8d4af22065850ce471a09478d2f5d162d001388d614e1265ca48cb6a scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
           shasum -a 256 -c scripts/native-media-hosted/inputs.sha256
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -101,7 +101,14 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y autoconf automake pkgconf libtool ninja-build meson python3-jinja2 gperf nasm cmake
+          sudo apt-get install -y autoconf automake pkgconf libtool ninja-build meson python3-jinja2 gperf nasm cmake python3-venv
+          # Fontconfig 2.18.3 requires Meson >=1.11; keep distro Python/packages untouched.
+          tools="$RUNNER_TEMP/vortx-native-media-tools"
+          [[ ! -e "$tools" && ! -L "$tools" ]] || exit 1
+          python3 -m venv "$tools"
+          "$tools/bin/python" -m pip --disable-pip-version-check install --no-index --no-deps --only-binary=:all: \
+            'https://files.pythonhosted.org/packages/57/99/36cd25f9598eef70db97577440a70a360af505f6f01c2338a18d1556079c/meson-1.12.1-py3-none-any.whl#sha256=930bc7542cbd9f57009e182fd014eba48cf1a0180a7b9006d2d32d8f168d8b02'
+          echo "$tools/bin" >> "$GITHUB_PATH"
       - name: Build unpromoted Android candidate
         run: |
           set -euo pipefail

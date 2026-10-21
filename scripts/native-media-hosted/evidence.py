@@ -28,7 +28,7 @@ def save(path, data):
 
 
 def android(out, upstream, sdk):
-    readelf = sdk / 'ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf'
+    readelf = sdk / 'ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf'
     aar = out / 'libmpv-release-candidate.aar'
     machines = {'arm64-v8a': ('ELF64', 'AArch64'), 'armeabi-v7a': ('ELF32', 'ARM'),
                 'x86_64': ('ELF64', 'Advanced Micro Devices X86-64')}

@@ -59,7 +59,8 @@ else
     overlay="$root/scripts/native-media-hosted/android"
     # Exact public checkout plus reviewed overlay; never use an existing dirty dependency directory.
     for relative in buildscripts/include/depinfo.sh buildscripts/include/download-deps.sh \
-        buildscripts/include/download-lua.sh buildscripts/patch.sh \
+        buildscripts/include/download-lua.sh buildscripts/include/download-libunibreak.sh \
+        buildscripts/scripts/ffmpeg.sh buildscripts/patch.sh \
         buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch; do
         mkdir -p "$upstream/$(dirname "$relative")"
         cp "$overlay/$relative" "$upstream/$relative"
@@ -73,7 +74,7 @@ else
     sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
     [[ -x $sdkmanager ]] || exit 1
     printf 'y\n' | "$sdkmanager" --sdk_root="$ANDROID_HOME" \
-        'platforms;android-36' 'build-tools;37.0.0' 'ndk;29.0.14206865' 'cmake;4.1.2'
+        'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;30.0.16248370' 'cmake;4.1.2'
     gas="$upstream/buildscripts/sdk/bin/gas-preprocessor.pl"
     curl --fail --location --proto '=https' --proto-redir '=https' --max-time 120 \
         'https://raw.githubusercontent.com/FFmpeg/gas-preprocessor/ac1836309c2e77023c228b7184485597286289d3/gas-preprocessor.pl' -o "$gas"
@@ -85,7 +86,7 @@ else
         cmake --version
         ninja --version
         dpkg-query -W autoconf automake libtool pkgconf meson ninja-build nasm gperf python3-jinja2
-        cat "$ANDROID_HOME/ndk/29.0.14206865/source.properties"
+        cat "$ANDROID_HOME/ndk/30.0.16248370/source.properties"
     } > "$out/toolchain.txt" 2>&1
     cd "$upstream/buildscripts"
     bash -e include/download-deps.sh
