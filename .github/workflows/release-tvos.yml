@@ -238,11 +238,11 @@ jobs:
             *) exit 1 ;;
           esac
           [ "$VORTX_NATIVE_ONLY" = true ] && [ "$TVOS_TEST_ONLY" != true ] && [ -z "$RESUME_HANDOFF" ] && [ -z "$MPVKIT_URL$MPVKIT_SHA" ] || exit 1
-          # The executing player must still match the historical cut. Its native core is
-          # selected separately, only after this entire source/tag/draft admission succeeds.
+          # Authenticate the current workflow's reviewed normal player before historical checkout.
+          # The recovered checkout's own immutable player is verified separately below, unchanged.
           PLAYER_PINS="$(awk '/^      - name: Fetch the MPVKit-DVFEL artifacts / {step=1; next} step && /^      - / {exit} step && /^          (URL|EXPECTED)=/ {sub(/^          /, ""); print}' .github/workflows/release-tvos.yml)"
-          [ "$PLAYER_PINS" = 'EXPECTED="737073f587b4d78c0436d3dc08c40bfab72b26e3d3a3ac3eab11a7a3a1c288d1"
-          URL="https://github.com/VortXTV/VortX/releases/download/vendor-mpvkit-dvfel-3/mpvkit-dvfel-artifacts-http-seek-20261009.zip"' ] || exit 1
+          [ "$PLAYER_PINS" = 'EXPECTED="f4e4fcc25a61997ee4e74a7ad155d46192f4d86d7953ce1a352da796b8765672"
+          URL="https://github.com/VortXTV/VortX/releases/download/vendor-mpvkit-dvfel-ffmpeg9-20261021/mpvkit-dvfel-ffmpeg-9.0.2-candidate.zip"' ] || exit 1
           gh api -- "repos/$GH_REPO/compare/$BUILD_SOURCE_SHA...$GITHUB_SHA" | jq -e --arg source "$BUILD_SOURCE_SHA" '
             (.status == "ahead" or .status == "identical") and .merge_base_commit.sha == $source' >/dev/null
           REF_JSON="$(gh api -- "repos/$GH_REPO/git/ref/tags/$TAG")"
@@ -722,8 +722,8 @@ jobs:
           set -euo pipefail
           DEST="app/Vendor/MPVKit-DVFEL"
           LEGACY_MPVKIT_SHA256="6b22848743a9744dc4d61edadf6ae82eac583ea6802e2d154f4a6fbc9aa03fc1"
-          EXPECTED="737073f587b4d78c0436d3dc08c40bfab72b26e3d3a3ac3eab11a7a3a1c288d1"
-          URL="https://github.com/VortXTV/VortX/releases/download/vendor-mpvkit-dvfel-3/mpvkit-dvfel-artifacts-http-seek-20261009.zip"
+          EXPECTED="f4e4fcc25a61997ee4e74a7ad155d46192f4d86d7953ce1a352da796b8765672"
+          URL="https://github.com/VortXTV/VortX/releases/download/vendor-mpvkit-dvfel-ffmpeg9-20261021/mpvkit-dvfel-ffmpeg-9.0.2-candidate.zip"
           # Empty dispatch inputs (including push events) use the exact reviewed public package.
           # Overrides are one URL/digest decision; never fall back after a partial or invalid pair.
           if [ -n "$REVIEWED_MPVKIT_URL" ] || [ -n "$REVIEWED_MPVKIT_SHA256" ]; then

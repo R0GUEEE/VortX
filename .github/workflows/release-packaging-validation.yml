@@ -293,12 +293,12 @@ jobs:
 
       - name: Fetch MPVKit-DVFEL artifacts (public release asset, sha256-verified)
         env:
-          MPVKIT_ARTIFACTS_SHA256: "737073f587b4d78c0436d3dc08c40bfab72b26e3d3a3ac3eab11a7a3a1c288d1"
+          MPVKIT_ARTIFACTS_SHA256: "f4e4fcc25a61997ee4e74a7ad155d46192f4d86d7953ce1a352da796b8765672"
         run: |
           set -euo pipefail
           DEST="app/Vendor/MPVKit-DVFEL"
           curl -sfL --retry 3 -o "$RUNNER_TEMP/mpvkit.zip" \
-            "https://github.com/VortXTV/VortX/releases/download/vendor-mpvkit-dvfel-3/mpvkit-dvfel-artifacts-http-seek-20261009.zip"
+            "https://github.com/VortXTV/VortX/releases/download/vendor-mpvkit-dvfel-ffmpeg9-20261021/mpvkit-dvfel-ffmpeg-9.0.2-candidate.zip"
           ACTUAL="$(shasum -a 256 "$RUNNER_TEMP/mpvkit.zip" | cut -d' ' -f1)"
           if [ "$ACTUAL" != "$MPVKIT_ARTIFACTS_SHA256" ]; then
             echo "::error::MPVKit artifact checksum mismatch: expected $MPVKIT_ARTIFACTS_SHA256 got $ACTUAL"

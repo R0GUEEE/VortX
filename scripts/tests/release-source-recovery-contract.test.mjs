@@ -11,7 +11,9 @@ const source = '844782d29a93ae51991bfadc639d50bc3619d40b', code = 'a'.repeat(40)
 const normalNative = 'a3169f338f3f05da4ad3adb39a1e557c3ddcac33';
 const historicalNative = '0c201563c6aa54eeb0545b55ad01582c0c3bcae3';
 const beta1RecordedNative = '7e3e68be5bf2b11c65d158c1823be94bd1608d1b';
-const playerDigest = '737073f587b4d78c0436d3dc08c40bfab72b26e3d3a3ac3eab11a7a3a1c288d1';
+const playerDigest = '737073f587b4d78c0436d3dc08c40bfab72b26e3d3a3ac3eab11a7a3a1c288d1'; // immutable historical checkout only
+const normalPlayerDigest = 'f4e4fcc25a61997ee4e74a7ad155d46192f4d86d7953ce1a352da796b8765672';
+const normalPlayerURL = 'https://github.com/VortXTV/VortX/releases/download/vendor-mpvkit-dvfel-ffmpeg9-20261021/mpvkit-dvfel-ffmpeg-9.0.2-candidate.zip';
 // Retained selection lines from each immutable workflow: Beta 1 records 7e3e68b;
 // Beta 3 records 0c20156. Both authenticated recovery routes still execute 0c20156.
 // Never use the executing workflow's new normal pin as historical checkout evidence.
@@ -110,8 +112,9 @@ for (const cut of recoveryCuts) test(`actual recovery admission accepts exactly 
   assert.equal(admit({}, { release: { id: Number(cut.releaseId), tag_name: cut.tag, draft: true, prerelease: false,
     body: 'Release notes\r\n<!-- vortx-channel: latest-beta -->\r\n' } }).status, 0);
   const player = step('Fetch the MPVKit-DVFEL artifacts (pinned, sha256-verified)');
-  for (const changed of [player.replace('vendor-mpvkit-dvfel-3/', 'vendor-mpvkit-dvfel-4/'),
-    player.replace('737073f587b4d78c0436d3dc08c40bfab72b26e3d3a3ac3eab11a7a3a1c288d1', 'd'.repeat(64))]) {
+  for (const changed of [player.replace(normalPlayerURL, normalPlayerURL.replace('/vendor-', '/vendor-unreviewed-')),
+    player.replace(normalPlayerDigest, 'd'.repeat(64))]) {
+    assert.notEqual(changed, player, 'negative fixture must mutate the actual current player pair');
     assert.notEqual(admit({}, {}, workflow.replace(player, changed)).status, 0);
   }
 });
@@ -349,7 +352,9 @@ test('recovery preserves only the verifier outside the source checkout and retai
   assert.match(workflow, /environment: engine-ci/);
   assert.match(workflow, /environment: release-approval/);
   assertNativeWiring();
-  assert.match(step('Fetch the MPVKit-DVFEL artifacts (pinned, sha256-verified)'), /vendor-mpvkit-dvfel-3\/mpvkit-dvfel-artifacts-http-seek-20261009.zip/);
+  const currentPlayer = step('Fetch the MPVKit-DVFEL artifacts (pinned, sha256-verified)');
+  assert(currentPlayer.includes(`EXPECTED="${normalPlayerDigest}"`));
+  assert(currentPlayer.includes(`URL="${normalPlayerURL}"`));
   assert.match(step('Build the content-addressed release feed artifact'), /--source-commit "\$BUILD_SOURCE_SHA"/);
   assert.doesNotMatch(step('Build the content-addressed release feed artifact'), /\$GITHUB_SHA/);
   assert.match(step('Bind the draft release, tag commit, and monotonic source before any write'), /TAG_SHA" = "\$BUILD_SOURCE_SHA/);
