@@ -919,6 +919,19 @@ final class MPVMetalViewController: PlatformViewController {
         #endif
     }
 
+    /// Mandatory TLS setup owns the handle retirement on rejection, before native initialization.
+    private func applyRequiredTLSPolicy() -> Bool {
+        guard let handle = mpv else { return false }
+        guard let rejection = MPVTLSOptions.enforceInitialization(setOption: { name, value in
+            mpv_set_option_string(handle, name, value)
+        }) else { return true }
+        checkError(rejection.status)
+        initializationFailure.fail("VortX Player could not enable secure connections. Try another player or reopen playback.")
+        mpv = nil
+        mpv_terminate_destroy(handle)
+        return false
+    }
+
     func setupMpv() {
         // The in-hero trailer preview (#44) is silent, so it must NOT claim the `.playback` audio
         // session: doing so would interrupt other audio and fight the main player's session. Only the
@@ -1224,13 +1237,14 @@ final class MPVMetalViewController: PlatformViewController {
         }
         mpvLog.log("video upscaling preset = \(upscaling.rawValue, privacy: .public)")
 
-        // Power-user custom mpv options. Applied LAST, after every VortX baseline option above, so an
-        // advanced viewer can override the defaults (the "mpv conf" setting). Each option is set with
-        // its own fail-safe: a bad key/value logs and is skipped, it must never abort the baseline
-        // config or crash playback. Set here (before mpv_initialize) so options that are pre-init-only
-        // also take effect; properties that only apply at runtime would need the property API instead,
-        // a known limitation documented in the setting hint.
+        // Power-user rendering/audio options retain their existing precedence. Trust/config/script
+        // channels are app-owned: do not let a custom option load a later policy or a custom CA.
+        // Malformed or reserved options are skipped; the mandatory policy below still must succeed.
         for (key, value) in PlaybackSettings.parsedCustomMpvOptions {
+            guard MPVTLSOptions.allowsCustomOption(key, value: value) else {
+                mpvLog.error("custom mpv option reserved by TLS policy: \(key, privacy: .public)")
+                continue
+            }
             let err = mpv_set_option_string(mpv, key, value)
             if err < 0 {
                 mpvLog.error("custom mpv option rejected: \(key, privacy: .public)=\(value, privacy: .public) (\(String(cString: mpv_error_string(err)), privacy: .public))")
@@ -1238,6 +1252,8 @@ final class MPVMetalViewController: PlatformViewController {
                 mpvLog.log("custom mpv option applied: \(key, privacy: .public)=\(value, privacy: .public)")
             }
         }
+
+        guard applyRequiredTLSPolicy() else { return }
 
         // A decorative preview must never open an AO or claim the shared audio session. Apply this
         // after custom options so a saved aid/ audio override cannot reactivate preview audio.
@@ -2041,18 +2057,16 @@ final class MPVMetalViewController: PlatformViewController {
         if live {
             mpv_set_property_string(mpv, "demuxer-readahead-secs", "18")
             mpv_set_property_string(mpv, "demuxer-max-back-bytes", "8MiB")
-            mpv_set_property_string(mpv, "demuxer-lavf-o", "live_start_index=-3")
+            checkError(mpv_set_property_string(mpv, "demuxer-lavf-o", MPVTLSOptions.demuxerOptions(live: true)))
             // The VOD/debrid reconnect settings are hostile to HLS live: normal
             // playlist/segment EOFs trigger ffmpeg's exponential "reconnect at 0"
             // delay (1s, 3s, 7s), which is exactly the recurring live stall.
-            mpv_set_property_string(mpv, "stream-lavf-o",
-                                    "reconnect=1,reconnect_streamed=0,reconnect_delay_max=1")
+            checkError(mpv_set_property_string(mpv, "stream-lavf-o", MPVTLSOptions.streamOptions(live: true)))
         } else {
             mpv_set_property_string(mpv, "demuxer-readahead-secs", "300")
             mpv_set_property_string(mpv, "demuxer-max-back-bytes", "64MiB")
-            mpv_set_property_string(mpv, "demuxer-lavf-o", "")
-            mpv_set_property_string(mpv, "stream-lavf-o",
-                                    "reconnect=1,reconnect_streamed=1,reconnect_delay_max=7,multiple_requests=1")
+            checkError(mpv_set_property_string(mpv, "demuxer-lavf-o", MPVTLSOptions.demuxerOptions(live: false)))
+            checkError(mpv_set_property_string(mpv, "stream-lavf-o", MPVTLSOptions.streamOptions(live: false)))
         }
     }
     

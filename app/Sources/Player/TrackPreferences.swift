@@ -41,9 +41,9 @@ enum PlaybackSettings {
 
     /// Power-user libmpv options, supplied as a free-form "key=value per line" snippet (an mpv.conf
     /// fragment, e.g. "profile=gpu-hq", "scale=ewa_lanczossharp", "video-sync=display-resample").
-    /// Applied verbatim during player setup after VortX's own baseline options, so an advanced viewer
-    /// can override the defaults. Default empty (no options). A malformed line is logged and skipped;
-    /// it never blocks the baseline config or crashes playback.
+    /// Rendering/audio overrides apply after VortX's baseline. TLS/config/script channels are reserved;
+    /// only the documented built-in gpu-hq/fast profiles are accepted. Default empty (no options).
+    /// Malformed or reserved lines are skipped; mandatory TLS setup still must succeed.
     static var customMpvOptions: String {
         get { UserDefaults.standard.string(forKey: Key.customMpvOptions) ?? "" }
         set { loggedSet(newValue, forKey: Key.customMpvOptions) }

@@ -260,20 +260,25 @@ async function run(label, command, timeout, helper, cwd = root) {
 
 async function main() {
     const stage = process.argv[2];
-    if (process.platform !== 'darwin' || process.argv.length !== 3 || !['watched', 'session', 'bootstrap', 'restore', 'publication', 'parse', 'owner-source', 'owner-prepare', 'owner-json', 'fifo', 'owner-raw', 'owner-cold', 'trakt-next-progress', 'trakt-next-consumer'].includes(stage)) {
-        throw new Error('Usage on macOS: bash scripts/test-native-migration-phase-a.sh watched|session|bootstrap|restore|publication|parse|owner-source|owner-prepare|owner-json|fifo|owner-raw|owner-cold|trakt-next-progress|trakt-next-consumer');
+    if (process.platform !== 'darwin' || process.argv.length !== 3 || !['watched', 'session', 'bootstrap', 'restore', 'publication', 'parse', 'owner-source', 'owner-prepare', 'owner-json', 'fifo', 'owner-raw', 'owner-cold', 'trakt-next-progress', 'trakt-next-consumer', 'mpv-tls'].includes(stage)) {
+        throw new Error('Usage on macOS: bash scripts/test-native-migration-phase-a.sh watched|session|bootstrap|restore|publication|parse|owner-source|owner-prepare|owner-json|fifo|owner-raw|owner-cold|trakt-next-progress|trakt-next-consumer|mpv-tls');
     }
     const ownerSource = stage === 'owner-source' || stage === 'owner-prepare';
     const fifo = stage === 'fifo';
     const ownerJSON = stage === 'owner-json';
     const ownerRaw = stage === 'owner-raw', ownerCold = stage === 'owner-cold';
     const traktNext = stage === 'trakt-next-progress' || stage === 'trakt-next-consumer';
+    const mpvTLS = stage === 'mpv-tls';
     if (process.env.VORTX_NATIVE_PERSISTENCE_SDK) throw new Error('Unset VORTX_NATIVE_PERSISTENCE_SDK; this fixture never consumes a packaged SDK');
     const scripts = ['scripts/test-native-migration-phase-a.sh', 'scripts/test-native-migration-phase-a.cjs',
         'scripts/native-migration-supervisor.cjs', 'scripts/test-native-watched-archive.sh'];
     scripts.forEach(capture);
     let sources, consumers = [], links = [];
-    if (traktNext) {
+    if (mpvTLS) {
+        sources = ['app/Sources/Player/MPVTLSOptions.swift', 'app/Sources/Player/MPVInitializationFailureState.swift',
+            'app/Tests/MPVTLSOptionsTests.swift'];
+        ['test/xperience-harness-inputs.cjs', 'app/Sources/Player/MPVMetalViewController.swift'].forEach(capture);
+    } else if (traktNext) {
         capture('test/xperience-harness-inputs.cjs');
         sources = ['app/SourcesShared/TraktNextEpisodeProgress.swift', 'app/SourcesShared/TraktModels.swift',
             'app/SourcesShared/VortxNativeBootstrapArchive.swift', 'app/SourcesShared/WatchedFold.swift'];
@@ -357,7 +362,21 @@ async function main() {
     const copies = new Map();
     for (const [file, bytes] of captured) copies.set(file, write(`source-evidence/${file}`, bytes));
     const inputs = sources.map(file => copies.get(file));
-    if (stage === 'restore') {
+    if (mpvTLS) {
+        const controller = captured.get('app/Sources/Player/MPVMetalViewController.swift').toString('utf8');
+        const declarations = ['    private func applyRequiredTLSPolicy() -> Bool',
+            '    private func configureLiveMode(_ live: Bool)'].map(signature => ({
+                signature, bytes: extractDeclaration(controller, signature)
+            }));
+        inputs.push(write('generated/MPVTLSControllerFixture.swift',
+            "import Foundation\n@MainActor\nfinal class ExtractedMPVTLSController {\n    var mpv: OpaquePointer?\n    var initializationFailure = MPVInitializationFailureState<Int>()\n    var configuredLiveMode = false\n    var errors: [Int32] = []\n    init(handle: OpaquePointer?) { mpv = handle }\n    func checkError(_ status: Int32) { if status < 0 { errors.append(status) } }\n    func applyTLS() -> Bool { applyRequiredTLSPolicy() }\n    func configure(_ live: Bool) { configureLiveMode(live) }\n" + declarations.map(item => item.bytes).join('\n\n') + '\n}\n'));
+        write('mpv-tls-extraction.json', JSON.stringify({
+            owner: 'app/Sources/Player/MPVMetalViewController.swift',
+            ownerSHA256: digest(captured.get('app/Sources/Player/MPVMetalViewController.swift')),
+            declarations: declarations.map(({ signature, bytes }) => ({ signature, sha256: digest(Buffer.from(bytes)) })),
+            declarationTransformations: [], nativeBoundary: 'inert test setters/retirement, no Libmpv'
+        }, null, 2) + '\n');
+    } else if (stage === 'restore') {
         inputs.push(write('generated/NativeRestoreAdmission.swift', extractRestoreAdmission()));
     } else if (stage === 'bootstrap') {
         inputs.push(write('generated/SettingsBackup.swift', extractSettingsBackupEncoder()));
@@ -411,7 +430,7 @@ async function main() {
     }
     const flags = ['-O', '-whole-module-optimization', '-j', '1', '-num-threads', '1', '-swift-version', '6',
         '-parse-as-library', '-strict-concurrency=complete', '-warnings-as-errors', '-module-cache-path', path.join(directory, 'module-cache')];
-    if (ownerSource || ownerJSON || fifo || stage === 'session' || ownerRaw || ownerCold || traktNext) {
+    if (ownerSource || ownerJSON || fifo || stage === 'session' || ownerRaw || ownerCold || traktNext || mpvTLS) {
         // Host-beta OS versions must not invent an unavailable standard-library target.
         // Use the same explicit macOS 14 fixture floor as the existing native test lanes.
         await run('sdk-path', ['/usr/bin/nice', '-n', '15', '/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-path'], 30_000, helper);
@@ -435,10 +454,10 @@ async function main() {
     if (stage === 'restore') flags.push('-D', 'VORTX_NATIVE_DATA_ENGINE');
     // Exactly one compiler then one fixture, at nice 15. Deadlines are hang guards,
     // never throughput/RSS/UI-latency acceptance thresholds or device evidence.
-    await run('compile', ['/usr/bin/nice', '-n', '15', '/usr/bin/xcrun', 'swiftc', ...flags, ...inputs, ...links, '-o', executable], 600_000, helper);
+    await run('compile', ['/usr/bin/nice', '-n', '15', '/usr/bin/xcrun', 'swiftc', ...flags, ...inputs, ...links, '-o', executable], mpvTLS ? 120_000 : 600_000, helper);
     write('executable.sha256', `${digest(fs.readFileSync(executable))}  fixture\n`);
     const args = stage === 'watched' ? [path.join(evidenceRoot, 'app/build/synthetic-drafts'), evidenceRoot]
-        : stage === 'session' ? [directory] : [];
+        : stage === 'session' ? [directory] : mpvTLS ? [evidenceRoot] : [];
     await run('test', ['/usr/bin/nice', '-n', '15', executable, ...args], 120_000, helper);
 }
 
