@@ -234,8 +234,13 @@ enum VortxNativeOwnerHistorySource {
         // Any exclusion or rewrite is a whole-source hold; unknown safe fields remain in bytes.
         let inspected = try VortxNativeBootstrapArchive.encode(document: bytes)
         guard let checked = try AuthenticatedHTTPTransport.jsonObject(from: inspected) as? [String: Any],
-              let exclusions = checked["excludedCredentialPaths"] as? [String], exclusions.isEmpty,
-              let host = checked["hostDocument"], try canonical(host) == canonical(object) else { throw Failure.credentialCarrier }
+              let exclusions = checked["excludedCredentialPaths"] as? [String], exclusions.isEmpty else { throw Failure.credentialCarrier }
+        // Compare the inspector's complete serialized tree without another NSNumber
+        // roundtrip (which can turn -0 into 0). Both sides still traverse the same
+        // privacy policy; only the original caller bytes are ever retained as evidence.
+        let host = try OwnerHistoryExactJSON.Object(inspected).required("hostDocument")
+        guard try OwnerHistoryExactJSON.canonical(host)
+            == OwnerHistoryExactJSON.canonical(canonical(object)) else { throw Failure.credentialCarrier }
         try inspectText(object, prohibitedCredential: prohibitedCredential)
         return object
     }

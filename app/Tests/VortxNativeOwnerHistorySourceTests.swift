@@ -201,6 +201,13 @@ private final class OwnerSourceCalls: @unchecked Sendable {
         }
         let safeUnknown = Data(#"{"result":[],"unknown":{"future":17,"poster":"https://example.invalid/public.jpg"}}"#.utf8)
         check(try await fetch(safeUnknown).response == safeUnknown)
+        let exactNumbers = Data(#"{"result":[],"unknown":{"exponent":1e3,"negativeZero":-0.0,"wide":9007199254740993}}"#.utf8)
+        let exactSource = try await fetch(exactNumbers)
+        check(exactSource.response == exactNumbers)
+        check(try Source.decodeArchive(exactSource.archive, scope: scope.account,
+            ownerProfileID: owner, profileID: owner, verifiedUID: uid).response == exactNumbers)
+        let numericCredential = Data(#"{"result":[],"unknown":{"negativeZero":-0.0,"authKey":"never-archive"}}"#.utf8)
+        do { _ = try await fetch(numericCredential); fatalError("numeric carrier hid a credential") } catch {}
         let scalar = try JSONSerialization.data(withJSONObject: token, options: [.fragmentsAllowed])
         let plist = try PropertyListSerialization.data(fromPropertyList: ["innocuousKey": token], format: .binary, options: 0)
         let nestedData = try PropertyListSerialization.data(fromPropertyList: ["innocuousData": scalar], format: .binary, options: 0)
