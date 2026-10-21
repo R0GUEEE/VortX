@@ -257,19 +257,288 @@ def inventory(config):
             "coverage_gaps": sorted(gaps, key=lambda x: (x["source"], x["reason"]))}
 
 
+GITHUB_PAGES = 20
+GITHUB_OBSERVATIONS = 20_000
+GITHUB_SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+
+
+class GitHubNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        raise ValueError("GitHub source redirects require explicit reconciliation")
+
+
+def github_repository(name):
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}", name):
+        raise ValueError("Invalid public GitHub repository identity")
+    if name.split("/")[1] in {".", ".."}: raise ValueError("Invalid public GitHub repository identity")
+    return name.lower()
+
+
+def github_endpoint(url):
+    """Only constructed same-origin repository GETs; GH_HOST cannot redirect credentials."""
+    parsed = urllib.parse.urlsplit(url)
+    match = re.fullmatch(r"/repos/([^/]+/[^/]+)(.*)", parsed.path)
+    if parsed.scheme != "https" or parsed.netloc != "api.github.com" or parsed.fragment or not match:
+        raise ValueError("Unsupported GitHub metadata origin")
+    github_repository(match[1])
+    suffix = match[2]
+    if suffix in {"", "/git/matching-refs/tags/"}:
+        if parsed.query: raise ValueError("Unexpected GitHub query")
+    elif suffix in {"/tags", "/releases"} or re.fullmatch(r"/releases/[1-9][0-9]*/assets", suffix):
+        pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        if (len(pairs) != 2 or pairs[0] != ("per_page", "100") or pairs[1][0] != "page"
+                or not re.fullmatch(r"[1-9][0-9]*", pairs[1][1]) or int(pairs[1][1]) > GITHUB_PAGES):
+            raise ValueError("Unexpected GitHub pagination")
+    else: raise ValueError("Unsupported GitHub metadata endpoint")
+    return parsed.path.lstrip("/") + ("?" + parsed.query if parsed.query else "")
+
+
+def github_text(value):
+    if not isinstance(value, str) or not value or len(value) > 4096 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError("Malformed GitHub text metadata")
+    return value
+
+
+def github_id(value):
+    if type(value) is not int or value <= 0: raise ValueError("Malformed GitHub immutable identity")
+    return value
+
+
+def github_stamp(value):
+    github_text(value)
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value):
+        raise ValueError("Malformed GitHub timestamp")
+    dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return value
+
+
+def github_fingerprint(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+
+
+def github_optional_text_hash(value):
+    if value is not None and not isinstance(value, str): raise ValueError("Malformed GitHub optional text")
+    return None if value is None else github_fingerprint(value)
+
+
+def github_asset_urls(row, name, asset_id):
+    """Validate URL metadata, never follow asset/download URLs or retain unsafe origins."""
+    api = urllib.parse.urlsplit(github_text(row["url"]))
+    if (api.scheme != "https" or api.netloc != "api.github.com" or api.query or api.fragment
+            or api.path.lower() != f"/repos/{name}/releases/assets/{asset_id}"):
+        raise ValueError("Unexpected release asset metadata origin")
+    download = urllib.parse.urlsplit(github_text(row["browser_download_url"]))
+    prefix = "/" + name + "/releases/download/"
+    decoded = urllib.parse.unquote(download.path)
+    if "\\" in decoded or any(part in {".", ".."} for part in decoded.split("/")):
+        raise ValueError("Unexpected release asset path")
+    if (download.scheme != "https" or download.netloc != "github.com" or download.query or download.fragment
+            or not download.path.lower().startswith(prefix) or len(download.path) <= len(prefix)
+            or "/" not in download.path[len(prefix):]):
+        raise ValueError("Unexpected release asset download origin")
+
+
+def github_list(base, identity):
+    rows, seen = [], set()
+    for page in range(1, GITHUB_PAGES + 1):
+        batch = json.loads(get(f"{base}?per_page=100&page={page}", github=True))
+        if not isinstance(batch, list) or len(batch) > 100: raise ValueError("Malformed GitHub list")
+        for row in batch:
+            if not isinstance(row, dict): raise ValueError("Malformed GitHub list row")
+            key = github_id(row[identity]) if identity == "id" else github_text(row[identity])
+            if key in seen: raise ValueError("Overlapping GitHub pagination")
+            seen.add(key); rows.append(row)
+        if len(batch) < 100: return rows
+    raise ValueError("GitHub pagination exceeds coverage bound")
+
+
+def validate_github_observations(data):
+    if type(data.get("github_history_schema")) is not int or data["github_history_schema"] != 2:
+        raise ValueError("GitHub observation schema requires fresh enrollment")
+    github_repository(data["repository"])
+    if data["source"] != f"https://api.github.com/repos/{data['repository']}/releases":
+        raise ValueError("Unexpected retained GitHub source")
+    if (not isinstance(data["versions"], list)
+            or any(not isinstance(version, str) or github_text(version) != version for version in data["versions"])
+            or data["versions"] != sorted(set(data["versions"]))):
+        raise ValueError("Malformed GitHub version history")
+    legacy = data["legacy_published_versions"]
+    if (not isinstance(legacy, list) or any(not isinstance(version, str) or github_text(version) != version for version in legacy)
+            or legacy != sorted(set(legacy)) or not set(legacy) <= set(data["versions"])):
+        raise ValueError("Malformed retained GitHub publication provenance")
+    if data["latest_stable"] is not None and (data["latest_stable"] not in data["versions"]
+                                              or stable_key(data["latest_stable"]) is None):
+        raise ValueError("Malformed GitHub stable observation")
+    observations = data["observations"]
+    if not isinstance(observations, dict) or len(observations) > GITHUB_OBSERVATIONS:
+        raise ValueError("GitHub observations exceed coverage bound")
+    for identity, record in observations.items():
+        if not isinstance(record, dict) or record.get("version") not in data["versions"]:
+            raise ValueError("Malformed GitHub observation")
+        kind = record.get("kind")
+        if kind == "tag":
+            if (set(record) != {"kind", "version", "commit", "ref_type", "ref"}
+                    or identity != "tag:" + record["version"] or record["ref_type"] not in {"tag", "commit"}
+                    or not GITHUB_SHA.fullmatch(record["commit"]) or not GITHUB_SHA.fullmatch(record["ref"])
+                    or (record["ref_type"] == "commit" and record["ref"] != record["commit"])):
+                raise ValueError("Malformed GitHub tag binding")
+        elif kind == "release":
+            if (set(record) != {"kind", "version", "id", "revision"}
+                    or identity != f"release:{github_id(record['id'])}"):
+                raise ValueError("Malformed GitHub release binding")
+        elif kind == "asset":
+            if (set(record) != {"kind", "version", "id", "release_id", "revision", "digest"}
+                    or identity != f"asset:{github_id(record['release_id'])}:{github_id(record['id'])}"
+                    or (record["digest"] is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", record["digest"]))):
+                raise ValueError("Malformed GitHub asset binding")
+        else: raise ValueError("Unknown GitHub observation")
+        if kind != "tag" and not re.fullmatch(r"[0-9a-f]{64}", record["revision"]):
+            raise ValueError("Malformed GitHub metadata fingerprint")
+    return data
+
+
+def github_releases(name):
+    name = github_repository(name)
+    base = f"https://api.github.com/repos/{name}"
+    repository = json.loads(get(base))  # Anonymous visibility check before authenticated public history.
+    if (not isinstance(repository, dict) or repository.get("private") is not False
+            or repository.get("visibility") != "public" or repository.get("full_name", "").lower() != name):
+        raise ValueError("GitHub public source identity is unconfirmed")
+    tags = github_list(base + "/tags", "name")
+    refs = json.loads(get(base + "/git/matching-refs/tags/", github=True))
+    if not isinstance(refs, list) or len(refs) > GITHUB_PAGES * 100:
+        raise ValueError("GitHub tag-ref coverage exceeds bound")
+    by_ref = {}
+    for row in refs:
+        if not isinstance(row, dict) or not github_text(row["ref"]).startswith("refs/tags/"):
+            raise ValueError("Malformed GitHub tag reference")
+        tag = row["ref"][len("refs/tags/"):]
+        if tag in by_ref: raise ValueError("Duplicate GitHub tag reference")
+        by_ref[tag] = row["object"]
+    if set(by_ref) != {row["name"] for row in tags}:
+        raise ValueError("GitHub tags and ref coverage differ")
+    observations, versions, stable = {}, set(), []
+    for row in tags:
+        tag, commit, ref = row["name"], row["commit"]["sha"], by_ref[row["name"]]
+        versions.add(tag)
+        observations["tag:" + tag] = {"kind":"tag", "version":tag, "commit":commit,
+                                      "ref_type":ref["type"], "ref":ref["sha"]}
+    for row in github_list(base + "/releases", "id"):
+        if type(row["draft"]) is not bool: raise ValueError("Malformed GitHub draft flag")
+        if row["draft"]: continue  # Authenticated draft visibility is not public release enrollment.
+        tag, release_id = github_text(row["tag_name"]), github_id(row["id"])
+        if type(row["prerelease"]) is not bool: raise ValueError("Malformed GitHub prerelease flag")
+        if row.get("immutable") is not None and type(row["immutable"]) is not bool:
+            raise ValueError("Malformed GitHub immutable flag")
+        versions.add(tag)
+        if not row["prerelease"] and stable_key(tag) is not None: stable.append(tag)
+        metadata = {key: github_stamp(row[key]) for key in ("created_at", "published_at")}
+        metadata["updated_at"] = github_stamp(row["updated_at"]) if row.get("updated_at") is not None else None
+        metadata.update({"prerelease":row["prerelease"], "immutable":row.get("immutable"),
+                         "name":github_optional_text_hash(row.get("name")),
+                         "body":github_optional_text_hash(row.get("body"))})
+        observations[f"release:{release_id}"] = {"kind":"release", "version":tag, "id":release_id,
+                                                "revision":github_fingerprint(metadata)}
+        for asset in github_list(base + f"/releases/{release_id}/assets", "id"):
+            asset_id = github_id(asset["id"])
+            github_asset_urls(asset, name, asset_id)
+            digest = asset.get("digest")
+            if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)):
+                raise ValueError("Malformed GitHub asset digest")
+            if type(asset["size"]) is not int or asset["size"] < 0: raise ValueError("Malformed GitHub asset size")
+            metadata = {key: github_stamp(asset[key]) for key in ("created_at", "updated_at")}
+            metadata.update({key:github_text(asset[key]) for key in ("name", "state", "content_type")})
+            metadata.update({"size":asset["size"], "digest":digest,
+                             "label":github_optional_text_hash(asset.get("label")),
+                             "url":asset["url"], "download_url":asset["browser_download_url"]})
+            observations[f"asset:{release_id}:{asset_id}"] = {"kind":"asset", "version":tag, "id":asset_id,
+                "release_id":release_id, "revision":github_fingerprint(metadata), "digest":digest}
+            if len(observations) > GITHUB_OBSERVATIONS: raise ValueError("GitHub observation coverage exceeds bound")
+    data = {"versions":sorted(versions), "latest_stable":max(stable, key=lambda v: (stable_key(v), v)) if stable else None,
+            "source":base + "/releases", "repository":name, "github_history_schema":2, "legacy_published_versions":[], "observations":observations}
+    return validate_github_observations(data)
+
+
+def merge_github_observations(previous, data):
+    """Retain known identities/revisions through deletion; absence is never an all-clear."""
+    validate_github_observations(data)
+    if (previous.get("source") != data["source"]
+            or previous.get("repository", data["repository"]) != data["repository"]):
+        raise ValueError("Retained GitHub repository identity changed")
+    if ("github_history_schema" in previous
+            and (type(previous["github_history_schema"]) is not int or previous["github_history_schema"] != 2)):
+        raise ValueError("Unknown retained GitHub schema")
+    if "github_history_schema" not in previous:
+        if "legacy_published_versions" in previous: raise ValueError("Unversioned publication provenance")
+        if (not isinstance(previous.get("versions"), list) or not previous["versions"]
+                or any(not isinstance(version, str) or github_text(version) != version for version in previous["versions"])
+                or previous["versions"] != sorted(set(previous["versions"]))):
+            raise ValueError("Malformed legacy GitHub cursor")
+        latest = data["latest_stable"]
+        prior_latest = previous.get("latest_stable")
+        if prior_latest is not None:
+            if prior_latest not in previous["versions"]: raise ValueError("Malformed legacy GitHub head")
+            if stable_key(prior_latest) is not None and (latest is None or stable_key(prior_latest) > stable_key(latest)):
+                latest = prior_latest
+        return {**data, "latest_stable":latest, "versions":sorted(set(previous["versions"]) | set(data["versions"])),
+                "legacy_published_versions":list(previous["versions"]),
+                "observation_history":{key:{github_fingerprint(value):value} for key,value in data["observations"].items()},
+                "absent_observations":[], "absent_versions":sorted(set(previous["versions"]) - set(data["versions"]))}, [], True
+    validate_github_observations(previous)
+    if previous["repository"] != data["repository"]: raise ValueError("GitHub repository identity changed")
+    old, current = previous["observations"], data["observations"]
+    absent = set(previous.get("absent_observations", []))
+    if not absent <= old.keys(): raise ValueError("Malformed GitHub retained presence")
+    history = {key:dict(values) for key,values in previous.get("observation_history", {}).items()}
+    for key, value in old.items():
+        history.setdefault(key, {}).setdefault(github_fingerprint(value), value)
+    for key, records in history.items():
+        if key not in old or not records: raise ValueError("Malformed GitHub retained history")
+        for fingerprint, value in records.items():
+            if github_fingerprint(value) != fingerprint: raise ValueError("Malformed GitHub retained history")
+            validate_github_observations({**previous, "observations":{key:value}})
+    changes = []
+    def changed(key, kind, before=None, after=None):
+        changes.append({"identity":key, "change":kind, "version":(after or before)["version"],
+                        "before":github_fingerprint(before) if before else None,
+                        "after":github_fingerprint(after) if after else None})
+    for key, value in current.items():
+        if key not in old: changed(key, "added", after=value)
+        else:
+            if key in absent: changed(key, "reappeared", old[key], value)
+            if value != old[key]: changed(key, "changed", old[key], value)
+        history.setdefault(key, {})[github_fingerprint(value)] = value
+    for key in old.keys() - current.keys() - absent: changed(key, "disappeared", before=old[key])
+    latest = data["latest_stable"]
+    if previous["latest_stable"] is not None and (latest is None or stable_key(previous["latest_stable"]) > stable_key(latest)):
+        latest = previous["latest_stable"]
+    return {**data, "versions":sorted(set(previous["versions"]) | set(data["versions"])), "latest_stable":latest,
+            "observations":{**old, **current}, "observation_history":history,
+            "legacy_published_versions":list(previous["legacy_published_versions"]),
+            "absent_observations":sorted(old.keys() - current.keys()),
+            "absent_versions":sorted(set(previous["versions"]) - set(data["versions"]))}, changes, False
+
+
 def get(url, github=False):
     if not url.startswith("https://"): raise ValueError("HTTPS required")
     headers = {"User-Agent": "VortX-dependency-health/1.0", "Accept": "application/json"}
     if github:
         # CLI handles authentication; never extract or echo credentials. This is a read-only GET.
-        result = subprocess.run(["gh", "api", "--method", "GET", url.removeprefix("https://api.github.com/")], capture_output=True, timeout=45)
+        result = subprocess.run(["gh", "api", "--hostname", "github.com", "--method", "GET", github_endpoint(url)], capture_output=True, timeout=45)
         if result.returncode: raise ValueError("GitHub metadata read failed")
         raw = result.stdout
     else:
         if url.startswith("https://registry.npmjs.org/"):
             headers["Accept"] = "application/vnd.npm.install-v1+json"
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
-            raw = response.read(LIMIT + 1)
+        request = urllib.request.Request(url, headers=headers)
+        if url.startswith("https://api.github.com/"):
+            github_endpoint(url)
+            # No CLI token/config and no redirects on the public-visibility prerequisite.
+            with urllib.request.build_opener(GitHubNoRedirect()).open(request, timeout=30) as response:
+                raw = response.read(LIMIT + 1)
+        else:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                raw = response.read(LIMIT + 1)
     if len(raw) > LIMIT: raise ValueError("Registry response exceeds bound")
     return raw
 
@@ -312,18 +581,7 @@ def releases(ecosystem, name):
         stable = [version for version in versions if stable_key(version) is not None]
         latest = max(stable, key=stable_key) if stable else None
     elif ecosystem == "github":
-        if not re.fullmatch(r"[\w.-]+/[\w.-]+", name): raise ValueError("Invalid GitHub repository")
-        source = f"https://api.github.com/repos/{name}/releases"
-        rows = []
-        for page in range(1, 21):
-            batch = json.loads(get(f"{source}?per_page=100&page={page}", github=True))
-            if not isinstance(batch, list): raise ValueError("Unexpected GitHub metadata")
-            rows.extend(row for row in batch if not row.get("draft"))
-            if len(batch) < 100: break
-        else: raise ValueError("Release pagination exceeds coverage bound")
-        versions = [row["tag_name"] for row in rows]
-        try: latest = json.loads(get(source + "/latest", github=True))["tag_name"]
-        except ValueError: latest = None
+        return github_releases(name)
     else:
         raise ValueError("Component requires a release-source adapter")
     if not versions: raise ValueError("No release versions returned")
@@ -334,32 +592,57 @@ def releases(ecosystem, name):
 def compare(inventory_result, prior, workers, checkpoint=None, reuse=None):
     identities = sorted(set((entry["ecosystem"], entry["name"]) for entry in inventory_result["entries"]))
     # A temporarily missing source is not explicit component retirement. Preserve its cursor.
-    result, errors, changes, enrolled = dict(prior.get("releases", {})), [], [], []
+    result, errors, changes, enrolled, observations = dict(prior.get("releases", {})), [], [], [], []
     def fetch(identity):
         ecosystem, name = identity; key = f"{ecosystem}:{name}"
-        if reuse and key in reuse: return key, reuse[key], None
         try:
-            metadata = releases(ecosystem, name)
-            metadata["observed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+            metadata = dict(reuse[key]) if reuse and key in reuse else releases(ecosystem, name)
+            if ecosystem == "github":
+                validate_github_observations(metadata)
+                if metadata["legacy_published_versions"]: raise ValueError("Fresh observation contains retained provenance")
+                if metadata["repository"] != github_repository(name): raise ValueError("Unexpected GitHub repository")
+            metadata = {**metadata, "observed_at":metadata.get("observed_at", dt.datetime.now(dt.timezone.utc).isoformat())}
             return key, metadata, None
         except Exception as error: return key, None, type(error).__name__
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         for key, data, error in pool.map(fetch, identities):
-            if checkpoint is not None: checkpoint(key, data, error)
+            fetched = data
+            previous = prior.get("releases", {}).get(key)
+            history_enrolled, events = False, []
+            if not error and previous is not None and key.startswith("github:"):
+                try: data, events, history_enrolled = merge_github_observations(previous, data)
+                except Exception as failure: error = type(failure).__name__
+            if checkpoint is not None: checkpoint(key, fetched if not error else None, error)
             if error:
                 errors.append({"component": key, "reason": error})
-                # Never erase a successful observation on a failed fetch; no false all-clear.
-                if key in prior.get("releases", {}): result[key] = prior["releases"][key]
+                # No partial pages, malformed metadata, or failed refresh may erase the cursor.
+                if previous is not None: result[key] = previous
                 continue
-            previous = prior.get("releases", {}).get(key)
             if previous is not None:
-                new = sorted(set(data["versions"]) - set(previous["versions"]))
+                if history_enrolled:
+                    enrolled.append({"component":key, "latest_stable":data["latest_stable"], "source":data["source"],
+                                     "kind":"github-history-baseline"})
+                if key.startswith("github:"):
+                    # A tag is an observation, not proof a release was published. Legacy
+                    # cursors contain release-only versions; rich cursors retain release IDs.
+                    published = {record["version"] for record in fetched["observations"].values()
+                                 if record["kind"] == "release"}
+                    known_published = (set(previous["versions"]) if history_enrolled else
+                                       set(previous["legacy_published_versions"]) |
+                                       {record["version"] for record in previous["observations"].values()
+                                        if record["kind"] == "release"})
+                    new = sorted(published - known_published)
+                else:
+                    new = sorted(set(data["versions"]) - set(previous["versions"]))
                 if new: changes.append({"component": key, "new_versions": new, "source": data["source"]})
-                # Latest metadata is fresh; an old version reappearing is not a new release.
+                observations.extend({"component":key, **event} for event in events)
                 data = {**data, "versions": sorted(set(previous["versions"]) | set(data["versions"]))}
             elif prior:
                 enrolled.append({"component": key, "latest_stable": data["latest_stable"], "source": data["source"]})
             result[key] = data
+    contractions = [{"component":key, "missing_observations":metadata.get("absent_observations", []),
+                     "missing_versions":metadata.get("absent_versions", [])}
+                    for key,metadata in sorted(result.items()) if metadata.get("absent_observations") or metadata.get("absent_versions")]
     for entry in inventory_result["entries"]:
         key = f"{entry['ecosystem']}:{entry['name']}"; metadata = result.get(key, {})
         entry["latest_stable"] = metadata.get("latest_stable")
@@ -370,7 +653,7 @@ def compare(inventory_result, prior, workers, checkpoint=None, reuse=None):
                 r"v?\d+\.\d+\.\d+(?:\+[0-9A-Za-z.-]+)?", entry["current"])))
         current = None if constraint else stable_key(entry["current"])
         latest = stable_key(metadata.get("latest_stable") or "")
-        entry["status"] = "unverified" if key in {e["component"] for e in errors} or not metadata else "latest-comparison-needs-resolution"
+        entry["status"] = "unverified" if key in {e["component"] for e in errors} or not metadata or metadata.get("absent_observations") or metadata.get("absent_versions") else "latest-comparison-needs-resolution"
         if entry["status"] != "unverified" and current is not None and latest is not None:
             entry["status"] = "outdated" if current < latest else "current-or-newer"
         elif entry["status"] != "unverified" and not constraint and entry["current"].lstrip("v") == (metadata.get("latest_stable") or "").lstrip("v"):
@@ -380,7 +663,8 @@ def compare(inventory_result, prior, workers, checkpoint=None, reuse=None):
     return {**inventory_result, "checked_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "releases": result, "registry_errors": errors, "new_releases": changes, "newly_tracked": enrolled,
             "baseline": not bool(prior), "unresolved_entries": unresolved,
-            "complete": not errors and not inventory_result["coverage_gaps"] and unresolved == 0}
+            "github_observation_changes": observations, "history_contractions": contractions,
+            "complete": not errors and not contractions and not inventory_result["coverage_gaps"] and unresolved == 0}
 
 
 def main():

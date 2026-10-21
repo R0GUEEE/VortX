@@ -44,6 +44,18 @@ def render(data):
         lines.append(f"- {cell(release['component'])}: {', '.join(cell(v) for v in release['new_versions'])}. Source: {cell(release['source'])}")
     if not data.get("new_releases"):
         lines.append("Initial baseline, or no new versions compared with the retained cursor; this does not mean all current versions are latest.")
+    lines += ["", "## Every GitHub metadata observation change", ""]
+    for event in data.get("github_observation_changes", []):
+        lines.append(f"- {cell(event['component'])}: {cell(event['change'])} {cell(event['identity'])}; version {cell(event['version'])}; before {cell(event.get('before'))}; after {cell(event.get('after'))}.")
+    if not data.get("github_observation_changes"): lines.append("None compared with the retained metadata cursor.")
+    lines += ["", "## History enrollment (not newly released versions)", ""]
+    for entry in data.get("newly_tracked", []):
+        lines.append(f"- {cell(entry['component'])}: {cell(entry.get('kind', 'component-baseline'))}; source {cell(entry['source'])}.")
+    if not data.get("newly_tracked"): lines.append("None recorded.")
+    lines += ["", "## Retained GitHub history contractions", ""]
+    for entry in data.get("history_contractions", []):
+        lines.append(f"- {cell(entry['component'])}: missing identities {', '.join(cell(v) for v in entry['missing_observations']) or 'none'}; missing versions {', '.join(cell(v) for v in entry['missing_versions']) or 'none'}. Historical values remain retained; this component is unverified.")
+    if not data.get("history_contractions"): lines.append("None recorded.")
     lines += ["", "## All registry failures", ""]
     for error in data.get("registry_errors", []):
         lines.append(f"- {cell(error['component'])}: {cell(error['reason'])}")

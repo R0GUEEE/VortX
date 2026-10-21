@@ -264,6 +264,289 @@ class DependencyHealthTests(unittest.TestCase):
         self.assertEqual(report["unresolved_entries"], 1)
         self.assertFalse(report["complete"])
 
+class GitHubHistoryTests(unittest.TestCase):
+    name = "public/example"
+    source = "https://api.github.com/repos/public/example/releases"
+    stamp = "2026-10-21T00:00:00Z"
+
+    def inventory(self):
+        return {"entries":[{"ecosystem":"github", "name":self.name, "current":"v1.0.0", "kind":"github-action"}],
+                "coverage_gaps":[]}
+
+    def metadata(self, commit="a"*40, asset_revision="c"*64):
+        return {"github_history_schema":2, "legacy_published_versions":[], "repository":self.name, "source":self.source,
+                "versions":["v1.0.0"], "latest_stable":"v1.0.0", "observations":{
+                    "tag:v1.0.0":{"kind":"tag", "version":"v1.0.0", "commit":commit, "ref_type":"commit", "ref":commit},
+                    "release:1":{"kind":"release", "version":"v1.0.0", "id":1, "revision":"b"*64},
+                    "asset:1:2":{"kind":"asset", "version":"v1.0.0", "release_id":1, "id":2,
+                                 "revision":asset_revision, "digest":None}}}
+
+    def report(self, metadata, prior):
+        with patch.object(health, "releases", return_value=metadata):
+            return health.compare(self.inventory(), prior, 1)
+
+    def api(self, tags=("v1.0.0", "v2.0.0-rc.1", "v99.0.0"), releases=True):
+        base = self.source.removesuffix("/releases")
+        release = {"id":1, "tag_name":"v1.0.0", "draft":False, "prerelease":False,
+                   "created_at":self.stamp, "published_at":self.stamp, "updated_at":self.stamp, "body":None, "name":None}
+        rc = {**release, "id":3, "tag_name":"v2.0.0-rc.1", "prerelease":True}
+        asset = {"id":2, "name":"component.zip", "size":12, "state":"uploaded", "content_type":"application/zip",
+                 "created_at":self.stamp, "updated_at":self.stamp, "digest":"sha256:"+"d"*64,
+                 "url":base+"/releases/assets/2",
+                 "browser_download_url":"https://github.com/public/example/releases/download/v1.0.0/component.zip"}
+        data = {base:{"private":False,"visibility":"public","full_name":self.name},
+                base+"/tags?per_page=100&page=1":[{"name":tag,"commit":{"sha":"a"*40}} for tag in tags],
+                base+"/git/matching-refs/tags/":[{"ref":"refs/tags/"+tag,"object":{"type":"commit","sha":"a"*40}} for tag in tags],
+                self.source+"?per_page=100&page=1":[release,rc] if releases else [],
+                base+"/releases/1/assets?per_page=100&page=1":[asset],
+                base+"/releases/3/assets?per_page=100&page=1":[]}
+        return data
+
+    def test_all_tags_rc_and_published_releases_union_without_tag_stable_inference(self):
+        data = self.api()
+        with patch.object(health, "get", side_effect=lambda url,github=False: json.dumps(data[url]).encode()) as fetch:
+            result = health.releases("github", self.name)
+        self.assertEqual(result["versions"], ["v1.0.0","v2.0.0-rc.1","v99.0.0"])
+        self.assertEqual(result["latest_stable"], "v1.0.0")
+        self.assertIn("asset:1:2", result["observations"])
+        self.assertTrue(all(call.args[0].startswith("https://api.github.com/repos/public/example") for call in fetch.call_args_list))
+        self.assertFalse(any("/latest" in call.args[0] or "/download/" in call.args[0] for call in fetch.call_args_list))
+        data = self.api(tags=("v99.0.0",), releases=False)
+        with patch.object(health, "get", side_effect=lambda url,github=False: json.dumps(data[url]).encode()):
+            tags_only = health.releases("github", self.name)
+        self.assertEqual(tags_only["versions"], ["v99.0.0"])
+        self.assertIsNone(tags_only["latest_stable"])
+
+    def test_private_or_foreign_repository_stops_before_history_and_no_origin_is_retained(self):
+        for repository in ({"private":True,"visibility":"private","full_name":self.name},
+                           {"private":False,"visibility":"public","full_name":"foreign/example"}):
+            with self.subTest(repository=repository), patch.object(health, "get", return_value=json.dumps(repository).encode()) as fetch:
+                with self.assertRaises(ValueError): health.releases("github", self.name)
+                self.assertEqual(fetch.call_count, 1)
+                self.assertEqual(fetch.call_args.kwargs, {})
+
+    def test_github_cli_has_fixed_host_and_rejects_foreign_query_or_path_before_process(self):
+        from types import SimpleNamespace
+        bad = ("https://private.invalid/repos/public/example", "https://api.github.com.evil/repos/public/example",
+               "https://user@api.github.com/repos/public/example", "https://api.github.com:443/repos/public/example",
+               self.source+"?token=DO_NOT_LEAK", self.source+"/latest", self.source+"#fragment")
+        with patch.object(health.subprocess, "run") as run:
+            for url in bad:
+                with self.subTest(url=url), self.assertRaises(ValueError): health.get(url, github=True)
+            run.assert_not_called()
+        with patch.dict(health.os.environ, {"GH_HOST":"private.invalid"}), patch.object(
+                health.subprocess, "run", return_value=SimpleNamespace(returncode=0,stdout=b"[]")) as run:
+            self.assertEqual(health.get(self.source+"?per_page=100&page=1", github=True), b"[]")
+        self.assertEqual(run.call_args.args[0][:5], ["gh","api","--hostname","github.com","--method"])
+        self.assertEqual(run.call_args.args[0][-1], "repos/public/example/releases?per_page=100&page=1")
+        with patch.object(health.urllib.request, "build_opener") as build, patch.object(health.subprocess, "run") as run:
+            build.return_value.open.return_value.__enter__.return_value.read.return_value = b"{}"
+            self.assertEqual(health.get(self.source.removesuffix("/releases")), b"{}")
+            request = build.return_value.open.call_args.args[0]
+            self.assertNotIn("Authorization", request.headers)
+            run.assert_not_called()
+        with self.assertRaises(ValueError):
+            health.GitHubNoRedirect().redirect_request(None,None,302,"",{},"https://private.invalid/DO_NOT_LEAK")
+
+    def test_pagination_bound_overlap_malformed_and_ref_mismatch_fail_instead_of_truncate(self):
+        full = [{"id":number+1} for number in range(100)]
+        with patch.object(health, "GITHUB_PAGES", 1), patch.object(health, "get", return_value=json.dumps(full).encode()):
+            with self.assertRaises(ValueError): health.github_list(self.source, "id")
+        with patch.object(health, "get", side_effect=[json.dumps(full).encode(),json.dumps([full[0]]).encode()]):
+            with self.assertRaises(ValueError): health.github_list(self.source, "id")
+        for value in ({}, [None], [{"id":True}]):
+            with self.subTest(value=value), patch.object(health, "get", return_value=json.dumps(value).encode()):
+                with self.assertRaises((ValueError,KeyError,TypeError)): health.github_list(self.source, "id")
+        data = self.api(); data[self.source.removesuffix("/releases")+"/git/matching-refs/tags/"] = []
+        with patch.object(health, "get", side_effect=lambda url,github=False: json.dumps(data[url]).encode()):
+            with self.assertRaises(ValueError): health.releases("github", self.name)
+
+    def test_bad_asset_url_or_schema_fails_whole_component_and_retains_cursor(self):
+        previous = self.metadata()
+        for field,value in (("browser_download_url","https://user:DO_NOT_LEAK@private.invalid/asset"),
+                            ("url","https://private.invalid/metadata"), ("size",-1), ("digest","md5:untrusted")):
+            data = self.api()
+            data[self.source.removesuffix("/releases")+"/releases/1/assets?per_page=100&page=1"][0][field] = value
+            checkpoints = []
+            with self.subTest(field=field), patch.object(health,"get",side_effect=lambda url,github=False: json.dumps(data[url]).encode()):
+                report = health.compare(self.inventory(), {"releases":{"github:"+self.name:previous}}, 1,
+                                        lambda *args: checkpoints.append(args))
+            self.assertEqual(report["releases"]["github:"+self.name], previous)
+            self.assertEqual(report["new_releases"], [])
+            self.assertEqual(report["entries"][0]["status"], "unverified")
+            self.assertIsNone(checkpoints[0][1])
+            self.assertNotIn("DO_NOT_LEAK", json.dumps(report))
+            self.assertNotIn("private.invalid", json.dumps(report))
+
+    def test_retag_and_asset_metadata_change_keep_every_revision_without_new_version(self):
+        before = self.metadata()
+        after = self.metadata(commit="e"*40, asset_revision="f"*64)
+        report = self.report(after, {"releases":{"github:"+self.name:before}})
+        self.assertEqual(report["new_releases"], [])
+        changed = {(event["identity"],event["change"]) for event in report["github_observation_changes"]}
+        self.assertEqual(changed, {("tag:v1.0.0","changed"),("asset:1:2","changed")})
+        history = report["releases"]["github:"+self.name]["observation_history"]
+        self.assertEqual(len(history["tag:v1.0.0"]), 2)
+        self.assertEqual(len(history["asset:1:2"]), 2)
+        # Annotated tag replacement at the same peeled commit is also observable.
+        old = self.metadata(); old["observations"]["tag:v1.0.0"].update(ref_type="tag",ref="d"*40)
+        new = self.metadata(); new["observations"]["tag:v1.0.0"].update(ref_type="tag",ref="e"*40)
+        annotated = self.report(new, {"releases":{"github:"+self.name:old}})
+        self.assertEqual(annotated["github_observation_changes"][0]["change"], "changed")
+
+    def test_disappearance_reappearance_preserves_cursor_head_and_is_not_a_new_release(self):
+        before = self.metadata()
+        gone = self.metadata(); del gone["observations"]["asset:1:2"]
+        contracted = self.report(gone, {"releases":{"github:"+self.name:before}})
+        retained = contracted["releases"]["github:"+self.name]
+        self.assertIn("asset:1:2", retained["observations"])
+        self.assertEqual(retained["absent_observations"], ["asset:1:2"])
+        self.assertEqual(contracted["entries"][0]["status"], "unverified")
+        self.assertFalse(contracted["complete"])
+        self.assertEqual(contracted["github_observation_changes"][0]["change"], "disappeared")
+        restored = self.report(before, contracted)
+        self.assertEqual(restored["new_releases"], [])
+        self.assertEqual(restored["releases"]["github:"+self.name]["absent_observations"], [])
+        self.assertEqual(restored["github_observation_changes"][0]["change"], "reappeared")
+        lost_version = self.metadata()
+        lost_version["versions"] = []; lost_version["latest_stable"] = None; lost_version["observations"] = {}
+        contraction = self.report(lost_version, {"releases":{"github:"+self.name:before}})
+        self.assertEqual(contraction["releases"]["github:"+self.name]["latest_stable"], "v1.0.0")
+        self.assertEqual(contraction["releases"]["github:"+self.name]["versions"], ["v1.0.0"])
+        self.assertEqual(len(contraction["history_contractions"][0]["missing_observations"]), 3)
+        returned = self.report(before, contraction)
+        self.assertEqual(returned["new_releases"], [])
+        self.assertEqual(len(returned["github_observation_changes"]), 3)
+
+    def test_legacy_baseline_notifies_new_published_version_but_quietly_enrolls_old_tag(self):
+        old = {"versions":["v0.9.0"],"latest_stable":"v0.9.0","source":self.source}
+        current = self.metadata()
+        current["versions"].append("v99.0.0")
+        current["observations"]["tag:v99.0.0"] = {
+            "kind":"tag","version":"v99.0.0","commit":"a"*40,"ref_type":"commit","ref":"a"*40}
+        report = self.report(current, {"releases":{"github:"+self.name:old}})
+        self.assertEqual(report["new_releases"][0]["new_versions"], ["v1.0.0"])
+        self.assertNotIn("v99.0.0", report["new_releases"][0]["new_versions"])
+        self.assertEqual(report["github_observation_changes"], [])
+        self.assertEqual(report["newly_tracked"][0]["kind"], "github-history-baseline")
+        self.assertEqual(report["releases"]["github:"+self.name]["versions"], ["v0.9.0","v1.0.0","v99.0.0"])
+        self.assertEqual(report["history_contractions"][0]["missing_versions"], ["v0.9.0"])
+
+    def test_tag_previously_observed_then_published_notifies_once_and_new_tag_is_not_release(self):
+        tag_only = self.metadata()
+        tag_only["latest_stable"] = None
+        tag_only["observations"] = {"tag:v1.0.0":tag_only["observations"]["tag:v1.0.0"]}
+        published = self.report(self.metadata(), {"releases":{"github:"+self.name:tag_only}})
+        self.assertEqual(published["new_releases"][0]["new_versions"], ["v1.0.0"])
+        unchanged = self.report(self.metadata(), published)
+        self.assertEqual(unchanged["new_releases"], [])
+        current = self.metadata(); current["versions"].append("v99.0.0")
+        current["observations"]["tag:v99.0.0"] = {
+            "kind":"tag","version":"v99.0.0","commit":"a"*40,"ref_type":"commit","ref":"a"*40}
+        tag_added = self.report(current, unchanged)
+        self.assertEqual(tag_added["new_releases"], [])
+        self.assertTrue(any(event["identity"] == "tag:v99.0.0" and event["change"] == "added"
+                            for event in tag_added["github_observation_changes"]))
+
+    def test_prior_repository_mismatch_fails_before_success_checkpoint(self):
+        legacy = {"versions":["v0.9.0"],"latest_stable":"v0.9.0","source":self.source}
+        foreign = self.metadata(); foreign["repository"] = "foreign/example"
+        foreign["source"] = "https://api.github.com/repos/foreign/example/releases"
+        for previous in ({**legacy,"source":"https://api.github.com/repos/foreign/example/releases"},
+                         {**legacy,"repository":"foreign/example"}, foreign):
+            checkpoints = []
+            with self.subTest(previous=previous), patch.object(health,"releases",return_value=self.metadata()):
+                report = health.compare(self.inventory(), {"releases":{"github:"+self.name:previous}}, 1,
+                                        lambda *args: checkpoints.append(args))
+            self.assertEqual(report["releases"]["github:"+self.name], previous)
+            self.assertEqual(report["new_releases"], [])
+            self.assertIsNone(checkpoints[0][1])
+            self.assertIsNotNone(checkpoints[0][2])
+
+    def test_malformed_prior_history_preserves_exact_cursor_and_failed_checkpoint(self):
+        previous = self.metadata()
+        previous["observation_history"] = {
+            "tag:v1.0.0":{"not-a-fingerprint":previous["observations"]["tag:v1.0.0"]}}
+        checkpoints = []
+        with patch.object(health,"releases",return_value=self.metadata()):
+            report = health.compare(self.inventory(), {"releases":{"github:"+self.name:previous}}, 1,
+                                    lambda *args: checkpoints.append(args))
+        self.assertEqual(report["releases"]["github:"+self.name], previous)
+        self.assertEqual(report["new_releases"], [])
+        self.assertIsNone(checkpoints[0][1])
+        self.assertIsNotNone(checkpoints[0][2])
+
+    def test_legacy_publication_aba_is_quiet_but_old_tag_later_publication_notifies_once(self):
+        old = {"versions":["v0.9.0"],"latest_stable":"v0.9.0","source":self.source}
+        current = self.metadata(); current["versions"].append("v99.0.0")
+        current["observations"]["tag:v99.0.0"] = {
+            "kind":"tag","version":"v99.0.0","commit":"a"*40,"ref_type":"commit","ref":"a"*40}
+        migrated = self.report(current, {"releases":{"github:"+self.name:old}})
+        self.assertEqual(migrated["new_releases"][0]["new_versions"], ["v1.0.0"])
+        self.assertEqual(migrated["releases"]["github:"+self.name]["legacy_published_versions"], ["v0.9.0"])
+        returned = json.loads(json.dumps(current))
+        returned["versions"].insert(0, "v0.9.0")
+        returned["observations"]["release:9"] = {
+            "kind":"release","version":"v0.9.0","id":9,"revision":"9"*64}
+        reappeared = self.report(returned, migrated)
+        self.assertEqual(reappeared["new_releases"], [])
+        self.assertEqual(reappeared["releases"]["github:"+self.name]["legacy_published_versions"], ["v0.9.0"])
+        published = json.loads(json.dumps(returned))
+        published["observations"]["release:99"] = {
+            "kind":"release","version":"v99.0.0","id":99,"revision":"f"*64}
+        notified = self.report(published, reappeared)
+        self.assertEqual(notified["new_releases"][0]["new_versions"], ["v99.0.0"])
+        self.assertEqual(self.report(published, notified)["new_releases"], [])
+
+    def test_unknown_rich_schema_and_malformed_retained_legacy_provenance_fail_checkpoint(self):
+        cases = []
+        for schema in (1, 3, None, True):
+            value = self.metadata(); value["github_history_schema"] = schema; cases.append(value)
+        for marker in ("v1.0.0", ["v99.0.0"], ["v1.0.0","v1.0.0"]):
+            value = self.metadata(); value["legacy_published_versions"] = marker; cases.append(value)
+        unsorted = self.metadata(); unsorted["versions"] = ["v0.9.0","v1.0.0"]
+        unsorted["legacy_published_versions"] = ["v1.0.0","v0.9.0"]; cases.append(unsorted)
+        for previous in cases:
+            checkpoints = []
+            with self.subTest(previous=previous), patch.object(health,"releases",return_value=self.metadata()):
+                report = health.compare(self.inventory(), {"releases":{"github:"+self.name:previous}}, 1,
+                                        lambda *args: checkpoints.append(args))
+            self.assertEqual(report["releases"]["github:"+self.name], previous)
+            self.assertEqual(report["new_releases"], [])
+            self.assertIsNone(checkpoints[0][1]); self.assertIsNotNone(checkpoints[0][2])
+
+    def test_malformed_unversioned_publication_cursor_never_becomes_provenance(self):
+        legacy = {"versions":["v0.9.0"],"latest_stable":"v0.9.0","source":self.source}
+        for previous in ({**legacy,"versions":["v0.9.0","v0.9.0"]},
+                         {**legacy,"versions":["v1.0.0","v0.9.0"]},
+                         {**legacy,"legacy_published_versions":["v99.0.0"]}):
+            checkpoints = []
+            with self.subTest(previous=previous), patch.object(health,"releases",return_value=self.metadata()):
+                report = health.compare(self.inventory(), {"releases":{"github:"+self.name:previous}}, 1,
+                                        lambda *args: checkpoints.append(args))
+            self.assertEqual(report["releases"]["github:"+self.name], previous)
+            self.assertIsNone(checkpoints[0][1]); self.assertIsNotNone(checkpoints[0][2])
+
+    def test_failed_schema_or_refresh_cannot_advance_report_or_success_journal(self):
+        previous = self.metadata(); malformed = self.metadata()
+        malformed["observations"]["tag:v1.0.0"]["commit"] = "not-a-commit"
+        checkpoints = []
+        with patch.object(health,"releases",return_value=malformed):
+            failed = health.compare(self.inventory(), {"releases":{"github:"+self.name:previous}}, 1,
+                                    lambda *args: checkpoints.append(args))
+        self.assertEqual(failed["releases"]["github:"+self.name], previous)
+        self.assertIsNone(checkpoints[0][1])
+        with patch.object(health,"releases",side_effect=RuntimeError("DO_NOT_LEAK")):
+            failed = health.compare(self.inventory(), {"releases":{"github:"+self.name:previous}}, 1)
+        self.assertEqual(failed["releases"]["github:"+self.name], previous)
+        self.assertNotIn("DO_NOT_LEAK", json.dumps(failed))
+        with patch.object(health,"releases") as fetch:
+            replay = health.compare(self.inventory(), {"releases":{"github:"+self.name:previous}}, 1,
+                                    reuse={"github:"+self.name:{"versions":["v9.0.0"]}})
+        fetch.assert_not_called()
+        self.assertEqual(replay["releases"]["github:"+self.name], previous)
+
+
 
 if __name__ == "__main__":
     unittest.main()

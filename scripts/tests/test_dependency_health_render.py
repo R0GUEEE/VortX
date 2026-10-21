@@ -33,5 +33,23 @@ class DependencyHealthRenderTests(unittest.TestCase):
         self.assertNotIn("<img", text)
         self.assertNotIn("![image]", text)
 
+    def test_every_metadata_change_enrollment_and_contraction_is_escaped_and_retained(self):
+        malicious = '<script> ![asset](https://invalid/) | tag'
+        data = {"entries":[], "coverage_gaps":[], "complete":False,
+                "github_observation_changes":[
+                    {"component":"github:public/example","identity":identity,"version":malicious,
+                     "change":kind,"before":"a"*64,"after":"b"*64}
+                    for identity,kind in (("tag:"+malicious,"changed"),("asset:1:2","disappeared"),("asset:1:2","reappeared"))],
+                "newly_tracked":[{"component":"github:public/example","kind":"github-history-baseline",
+                                 "source":"https://api.github.com/repos/public/example/releases"}],
+                "history_contractions":[{"component":"github:public/example","missing_observations":[malicious],
+                                         "missing_versions":["v1.0.0","v2.0.0-rc.1"]}]}
+        text = render.render(data)
+        for word in ("changed", "disappeared", "reappeared", "github-history-baseline", "v2.0.0-rc.1"):
+            self.assertIn(word, text)
+        self.assertIn("Historical values remain retained", text)
+        self.assertNotIn("<script>", text)
+        self.assertNotIn("![asset]", text)
+
 
 if __name__ == "__main__": unittest.main()
