@@ -134,6 +134,7 @@ jobs:
           --tests com.vortx.android.sync.VortXSessionOwnerTransitionContractTest
           --tests com.vortx.android.player.ExoPlayerEngineStatePolicyTest
           --tests com.vortx.android.player.PlaybackMetadataTest
+          --tests 'com.vortx.android.engine.NativeOwnAccountSourcesTest.malformed own row is held without losing valid siblings or raw source bytes'
           --no-daemon --stacktrace
 
       - name: Test Full player native-load metadata identity

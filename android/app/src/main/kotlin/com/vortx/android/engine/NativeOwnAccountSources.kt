@@ -74,7 +74,9 @@ internal class NativeOwnAccountSource private constructor(
     }
     private fun projectLibraryOrHeld(raw: Any?): JSONObject = try {
         projectLibrary(raw as? JSONObject ?: error("Malformed own-account library row"))
-    } catch (error: RuntimeException) {
+    } catch (error: Exception) {
+        // Android's JSONException is a checked Exception, unlike some JVM org.json versions.
+        // Only the same malformed-row cases become held markers; all other exceptions escape.
         if (error !is IllegalStateException && error !is IllegalArgumentException && error !is org.json.JSONException) throw error
         JSONObject().put(NATIVE_LEGACY_HELD_REASON, "Malformed own-account library row")
     }

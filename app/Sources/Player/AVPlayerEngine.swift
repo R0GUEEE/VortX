@@ -3964,7 +3964,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         }
         badgeMetadataTask = Task { @MainActor [weak self, weak item] in
             guard let self, let item else { return }
-            func current() -> Bool {
+            @MainActor func current() -> Bool {
                 !Task.isCancelled && self.player.currentItem === item
                     && self.activeLoadToken == loadToken
                     && self.badgeMetadataRevision == revision
