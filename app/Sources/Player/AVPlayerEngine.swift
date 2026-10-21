@@ -3759,7 +3759,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// them into the renderer, and drive the overlay from the player clock. Turning this on hides any
     /// AVPlayer-native legible track so subtitles never double up. `completion(true)` once cues are loaded.
     func addExternalSubtitle(url: String, title: String, lang: String,
-                             timeout: TimeInterval, completion: ((Bool) -> Void)?) {
+                             privateAddonOrigin: URL?, timeout: TimeInterval, completion: ((Bool) -> Void)?) {
         externalSubtitleRequestRevision &+= 1
         let requestRevision = externalSubtitleRequestRevision
         // Keep the current selection during I/O. A failed/empty subtitle must not erase a working native
@@ -3772,7 +3772,15 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
             return
         }
         let finish: @MainActor @Sendable (Bool) -> Void = { ok in completion?(ok) }
-        SubtitleFileFetcher.fetch(remote, timeout: timeout) { [weak self] data in
+        // A self-hosted add-on's own file takes the add-on transport; every other subtitle stays pinned.
+        let fetch: (@escaping @Sendable (Data?) -> Void) -> Void = { done in
+            if let privateAddonOrigin {
+                PrivateAddonSubtitle.fetch(remote, origin: privateAddonOrigin, timeout: timeout) { data, _ in done(data) }
+            } else {
+                SubtitleFileFetcher.fetch(remote, timeout: timeout, done: done)
+            }
+        }
+        fetch { [weak self] data in
             guard let data else {
                 Task { @MainActor in finish(false) }
                 return

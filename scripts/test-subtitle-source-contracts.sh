@@ -22,6 +22,7 @@ swiftc -strict-concurrency=complete -warnings-as-errors \
 "$build_dir/subtitle-style-background"
 swiftc -strict-concurrency=complete -warnings-as-errors \
   app/SourcesShared/SubtitleRequestMetadata.swift app/SourcesShared/SubtitleAddons.swift \
+  app/SourcesShared/AddonURLGuard.swift \
   app/Tests/SubtitleAddonFileMatchingTests.swift -o "$build_dir/subtitle-file-matching"
 "$build_dir/subtitle-file-matching"
 swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors \

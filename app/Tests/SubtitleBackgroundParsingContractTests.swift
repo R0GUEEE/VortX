@@ -39,6 +39,13 @@ private enum SubtitleFileFetcher {
         control.set(done)
     }
 }
+// A public fixture row must never take the self-hosted add-on transport.
+private enum PrivateAddonSubtitle {
+    static func fetch(_ url: URL, origin: URL, timeout: TimeInterval,
+                      done: @escaping @Sendable (Data?, String?) -> Void) {
+        fatalError("public subtitle took the private add-on transport")
+    }
+}
 private final class FixtureItem: @unchecked Sendable {}
 @MainActor private final class FixtureRenderer {
     var loads: [[SubtitleCue]] = []
@@ -63,7 +70,8 @@ private struct FixtureSelectionIntent { mutating func selectExternalSubtitle() {
         nativeDeselections += 1
     }
     func request() {
-        addExternalSubtitle(url: "https://example.invalid/captions.srt", title: "Fixture", lang: "en", timeout: 1) {
+        addExternalSubtitle(url: "https://example.invalid/captions.srt", title: "Fixture", lang: "en",
+                            privateAddonOrigin: nil, timeout: 1) {
             self.results.append($0)
         }
     }

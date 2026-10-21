@@ -13,6 +13,10 @@ struct AddonSubtitle: Identifiable, Equatable {
     let lang: String
     let addonName: String
     var releaseName: String? = nil
+    /// The installed add-on's own origin, set only when that add-on is self-hosted (LAN, loopback or tailnet)
+    /// AND serves this file itself. Only a non-nil value lets a player download outside the pinned public
+    /// transport, and such a subtitle is never pooled into community subtitles.
+    var privateAddonOrigin: URL? = nil
 
     var displayTitle: String {
         guard let releaseName, !releaseName.isEmpty else { return addonName }
@@ -106,7 +110,7 @@ enum SubtitleAddonService {
                                                  lang: sub.lang ?? "und", addonName: source.name,
                                                  releaseName: sub.subtitleFileName)
                         }
-                        return (i, subs)
+                        return (i, markingPrivateOrigin(subs, addonBase: source.baseUrl))
                     }
                     return (i, [])
                 }
@@ -118,5 +122,23 @@ enum SubtitleAddonService {
 
         var seen = Set<String>()
         return collected.flatMap { $0 }.filter { seen.insert($0.url).inserted }
+    }
+
+    /// Mark the rows a self-hosted add-on serves from its own origin. The host is classified only when some
+    /// row shares the add-on's origin, so public add-ons whose files live on a CDN cost no extra lookup.
+    static func markingPrivateOrigin(_ subs: [AddonSubtitle], addonBase: String,
+                                     isSelfHosted: (URL) -> Bool = AddonURLGuard.isSelfHosted) -> [AddonSubtitle] {
+        guard let origin = URL(string: addonBase) else { return subs }
+        let scope = AddonURLGuard.AccessScope.addon(origin: origin)
+        func sameOrigin(_ sub: AddonSubtitle) -> Bool {
+            URL(string: sub.url).map(scope.allowsPrivateAddress(for:)) ?? false
+        }
+        guard subs.contains(where: sameOrigin), isSelfHosted(origin) else { return subs }
+        return subs.map { sub in
+            guard sameOrigin(sub) else { return sub }
+            var marked = sub
+            marked.privateAddonOrigin = origin
+            return marked
+        }
     }
 }

@@ -1,6 +1,10 @@
-// Compile with SubtitleRequestMetadata.swift and SubtitleAddons.swift; the fixture descriptors below
-// only satisfy the unused installation-store boundary. Requests and response decoding use production code.
+// Compile with SubtitleRequestMetadata.swift, SubtitleAddons.swift and AddonURLGuard.swift; the fixture
+// descriptors below only satisfy the unused installation-store boundary. Requests and response decoding use
+// production code.
 import Foundation
+
+// The production pairing protocol owns this URL-size limit; this harness links no app or account runtime.
+enum AddonPairingProtocol { static let maxManifestURLBytes = 2048 }
 
 struct CoreStreamBehaviorHints {
     let filename: String?
@@ -87,6 +91,24 @@ private final class SubtitleFixture: URLProtocol, @unchecked Sendable {
             sources: [.init(baseUrl: "https://unavailable.invalid", name: "Unavailable")], type: "movie", videoId: "tt123",
             metadata: .init(filename: "other-file.mkv"), session: session)
         precondition(unavailable.isEmpty, "server failures remain fail-soft, not a retry storm")
-        print("PASS exact-file subtitle HTTP requests, Unicode/reserved encoding, legacy route, source changes and partial response recovery")
+        // Self-hosted marking: only a self-hosted add-on's OWN-origin rows carry its origin.
+        let lanBase = "http://192.168.1.20:7000/abc"
+        let rows = [AddonSubtitle(id: "a", url: "http://192.168.1.20:7000/abc/subs/a.srt", lang: "en", addonName: "Home"),
+                    AddonSubtitle(id: "b", url: "https://cdn.invalid/b.srt", lang: "en", addonName: "Home"),
+                    AddonSubtitle(id: "c", url: "http://192.168.1.20:7001/c.srt", lang: "en", addonName: "Home"),
+                    AddonSubtitle(id: "d", url: "https://192.168.1.20:7000/d.srt", lang: "en", addonName: "Home")]
+        let marked = SubtitleAddonService.markingPrivateOrigin(rows, addonBase: lanBase) { _ in true }
+        precondition(marked[0].privateAddonOrigin == URL(string: lanBase), "own-origin row of a self-hosted add-on is marked")
+        precondition(marked[1].privateAddonOrigin == nil, "a CDN row of a self-hosted add-on stays on the pinned path")
+        precondition(marked[2].privateAddonOrigin == nil, "another port is another origin")
+        precondition(marked[3].privateAddonOrigin == nil, "another scheme is another origin")
+        let publicMarked = SubtitleAddonService.markingPrivateOrigin(rows, addonBase: lanBase) { _ in false }
+        precondition(publicMarked.allSatisfy { $0.privateAddonOrigin == nil }, "a public add-on marks nothing")
+        var lookups = 0
+        let cdnOnly = SubtitleAddonService.markingPrivateOrigin([rows[1]], addonBase: lanBase) { _ in lookups += 1; return true }
+        precondition(cdnOnly[0].privateAddonOrigin == nil && lookups == 0, "no own-origin row means no host lookup")
+        precondition(AddonSubtitle(id: "x", url: "https://cdn.invalid/x.srt", lang: "en", addonName: "A").privateAddonOrigin == nil,
+                     "rows default to the pinned public path")
+        print("PASS exact-file subtitle HTTP requests, Unicode/reserved encoding, legacy route, source changes, partial response recovery and self-hosted origin marking")
     }
 }

@@ -62,12 +62,15 @@ enum AddonURLGuard {
         case manifest
         case xperienceCatalog
         case xperienceArtwork
+        /// A subtitle file served by a self-hosted add-on's own origin; the same 8 MiB ceiling as every
+        /// other external subtitle.
+        case addonSubtitle
 
         var maximumBytes: Int {
             switch self {
             case .manifest: return AddonURLGuard.maxManifestBytes
             case .xperienceCatalog: return 4 * 1024 * 1024
-            case .xperienceArtwork: return 8 * 1024 * 1024
+            case .xperienceArtwork, .addonSubtitle: return 8 * 1024 * 1024
             }
         }
 
@@ -75,6 +78,7 @@ enum AddonURLGuard {
             switch self {
             case .manifest, .xperienceCatalog: return "application/json"
             case .xperienceArtwork: return "image/png,image/jpeg,image/webp,image/heic,image/heif"
+            case .addonSubtitle: return "text/vtt,application/x-subrip,text/plain,*/*;q=0.5"
             }
         }
     }
@@ -142,6 +146,17 @@ enum AddonURLGuard {
             $0.isBlocked && !(access.allowsPrivateAddress(for: url) && $0.isSelfHostedAddress)
         }) { return .privateAddress }
         return nil
+    }
+
+    /// Whether `url`'s host is self-hosted: every address it resolves to is private AND of a kind an installed
+    /// add-on may use (LAN, loopback, tailnet). Public, mixed, link-local, metadata and unresolvable hosts are
+    /// not. This classifies an add-on the user installed; it grants nothing by itself, and every fetch still
+    /// runs `validate` against the add-on's own origin.
+    static func isSelfHosted(_ url: URL) -> Bool {
+        guard let host = url.host, !host.isEmpty else { return false }
+        let bareHost = host.hasPrefix("[") && host.hasSuffix("]") ? String(host.dropFirst().dropLast()) : host
+        let addresses = IPAddress(parsing: bareHost).map { [$0] } ?? resolve(host: bareHost)
+        return !addresses.isEmpty && addresses.allSatisfy { $0.isBlocked && $0.isSelfHostedAddress }
     }
 
     /// Compatibility surface for existing install/preview callers. Catalog and artwork callers use

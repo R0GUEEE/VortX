@@ -95,8 +95,11 @@ protocol PlayerEngine: AnyObject {
     func tracks(ofType type: String) -> [MPVTrack]
     func setAudioTrack(_ id: Int)
     func setSubtitleTrack(_ id: Int)
+    /// `privateAddonOrigin` is `AddonSubtitle.privateAddonOrigin`: non-nil only for a file a self-hosted
+    /// add-on serves from its own origin. Every other subtitle, including community rows, passes nil and stays
+    /// on the pinned public transport.
     func addExternalSubtitle(url: String, title: String, lang: String,
-                             timeout: TimeInterval, completion: ((Bool) -> Void)?)
+                             privateAddonOrigin: URL?, timeout: TimeInterval, completion: ((Bool) -> Void)?)
     /// Whether the currently selected subtitle path can apply `setSubDelay` live. libmpv supports this for
     /// every selected subtitle; AVPlayer supports it only while the VortX external-cue overlay is active.
     var subtitleDelayAvailable: Bool { get }
@@ -161,13 +164,21 @@ extension PlayerEngine {
     /// chrome holds the engine as `any PlayerEngine`. `MPVMetalViewController`'s own defaulted overload still
     /// wins when the engine is referenced as the concrete type.
     func addExternalSubtitle(url: String, title: String, lang: String) {
-        addExternalSubtitle(url: url, title: title, lang: lang, timeout: 20, completion: nil)
+        addExternalSubtitle(url: url, title: title, lang: lang, privateAddonOrigin: nil, timeout: 20, completion: nil)
     }
 
     /// The form the chrome actually uses: 3 named args plus a trailing `completion` closure (timeout
     /// defaulted). A trailing-closure call binds to this overload, not the no-completion one above.
     func addExternalSubtitle(url: String, title: String, lang: String, completion: ((Bool) -> Void)?) {
-        addExternalSubtitle(url: url, title: title, lang: lang, timeout: 20, completion: completion)
+        addExternalSubtitle(url: url, title: title, lang: lang, privateAddonOrigin: nil, timeout: 20,
+                            completion: completion)
+    }
+
+    /// The add-on row form: the row's own `privateAddonOrigin` decides the transport.
+    func addExternalSubtitle(url: String, title: String, lang: String, privateAddonOrigin: URL?,
+                             completion: ((Bool) -> Void)?) {
+        addExternalSubtitle(url: url, title: title, lang: lang, privateAddonOrigin: privateAddonOrigin,
+                            timeout: 20, completion: completion)
     }
 
     @discardableResult

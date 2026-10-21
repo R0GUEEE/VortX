@@ -10,6 +10,7 @@ on:
       - "scripts/test-player-skip-chrome.sh"
       - "scripts/test-tv-search-collections.sh"
       - "scripts/test-addon-selfhosted.sh"
+      - "scripts/test-private-addon-subtitles.sh"
       - "scripts/test-apple-parity-contracts.sh"
       - "scripts/test-apple-player-timeline.sh"
       - "scripts/test-issue240-playback-failures.sh"
@@ -51,6 +52,7 @@ on:
       - "scripts/test-player-skip-chrome.sh"
       - "scripts/test-tv-search-collections.sh"
       - "scripts/test-addon-selfhosted.sh"
+      - "scripts/test-private-addon-subtitles.sh"
       - "scripts/test-apple-parity-contracts.sh"
       - "scripts/test-apple-player-timeline.sh"
       - "scripts/test-issue240-playback-failures.sh"
@@ -118,6 +120,7 @@ jobs:
       - run: bash scripts/test-player-skip-chrome.sh
       - run: bash scripts/test-tv-search-collections.sh
       - run: bash scripts/test-addon-selfhosted.sh
+      - run: bash scripts/test-private-addon-subtitles.sh
       - run: bash scripts/test-episode-source-isolation.sh
       - name: Fetch immutable public next-episode cancellation baseline
         run: git fetch --no-tags --depth=1 origin f9c45518ba6b8d779343c076da9f0dbcda129a30

@@ -45,6 +45,19 @@ enum AddonSelfHostedTests {
         let publicURL = URL(string: "https://8.8.8.8/manifest.json")!
         let publicResult = await AddonURLGuard.validate(publicURL)
         check(publicResult == nil, "normal public validation unchanged")
+        // Subtitle rows: only a host whose every address is a usable self-hosted kind counts as private.
+        for host in ["192.168.50.20", "10.20.30.40", "172.16.1.2", "100.64.0.1", "127.0.0.1", "[::1]",
+                     "[fd7a:115c:a1e0::1]", "[::ffff:192.168.1.5]"] {
+            check(AddonURLGuard.isSelfHosted(URL(string: "http://\(host):7000/manifest.json")!),
+                  "self-hosted add-on host: \(host)")
+        }
+        for host in ["8.8.8.8", "[2001:4860:4860::8888]", "0.0.0.0", "169.254.169.254", "100.100.100.200",
+                     "[::]", "[fe80::1]", "[fd00:ec2::254]"] {
+            check(!AddonURLGuard.isSelfHosted(URL(string: "http://\(host)/manifest.json")!),
+                  "public, link-local and metadata hosts are not self-hosted: \(host)")
+        }
+        check(AddonURLGuard.ResponseContext.addonSubtitle.maximumBytes == 8 * 1024 * 1024,
+              "add-on subtitles keep the shared 8 MiB subtitle ceiling")
         print("PASS self-hosted add-on policy: \(checks) checks; no network requests")
     }
 }

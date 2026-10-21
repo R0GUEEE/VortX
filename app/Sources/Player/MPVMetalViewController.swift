@@ -3972,9 +3972,13 @@ final class MPVMetalViewController: PlatformViewController {
     /// Fast path: if we already downloaded this URL this session and the file is still on disk, we `sub-add`
     /// it immediately with NO network, so re-selecting a track / re-opening an episode is instant.
     func addExternalSubtitle(url: String, title: String, lang: String,
+                             privateAddonOrigin: URL? = nil,
                              timeout: TimeInterval = MPVMetalViewController.subtitleDownloadTimeout,
                              completion: ((Bool) -> Void)? = nil) {
-        guard let remote = URL(string: url), Self.acceptsExternalSubtitleURL(remote),
+        // The literal prefilter guards the pinned public path. A self-hosted add-on's own file is private by
+        // definition; its origin and addresses are enforced by the add-on transport instead.
+        guard let remote = URL(string: url),
+              privateAddonOrigin != nil || Self.acceptsExternalSubtitleURL(remote),
               let requestToken = activeLoadToken else {
             completion?(false)
             return
@@ -3997,7 +4001,8 @@ final class MPVMetalViewController: PlatformViewController {
             return
         }
 
-        Self.downloadSubtitle(remote, timeout: timeout, retriesLeft: Self.subtitleDownloadRetries) { [weak self] localFile in
+        Self.downloadSubtitle(remote, privateAddonOrigin: privateAddonOrigin, timeout: timeout,
+                              retriesLeft: Self.subtitleDownloadRetries) { [weak self] localFile in
             guard let self, let localFile else { finish(false); return }
             self.queue.async {
                 finish(self.applyExternalSubtitle(
@@ -4039,8 +4044,16 @@ final class MPVMetalViewController: PlatformViewController {
     /// Download `remote` on the shared cached session, write it to a DETERMINISTIC temp file (hashed from the
     /// URL, so it survives and is reused across the session), record it in the cache, and hand the local file
     /// to `done` on failure/success. Retries ONCE on a failed/empty/timed-out response before giving up.
-    private static func downloadSubtitle(_ remote: URL, timeout: TimeInterval, retriesLeft: Int,
-                                         done: @escaping (URL?) -> Void) {
+    private static func downloadSubtitle(_ remote: URL, privateAddonOrigin: URL?, timeout: TimeInterval,
+                                         retriesLeft: Int, done: @escaping (URL?) -> Void) {
+        if let privateAddonOrigin {
+            PrivateAddonSubtitle.fetch(remote, origin: privateAddonOrigin, timeout: timeout,
+                                       retriesLeft: retriesLeft) { data, mimeType in
+                guard let data, data.count <= maximumExternalSubtitleBytes else { done(nil); return }
+                done(storeSubtitleFile(remote, body: data, contentType: mimeType))
+            }
+            return
+        }
         // Route through the pinned transport (resolve-once, connect to a vetted numeric peer) so an add-on
         // subtitle hostname cannot re-resolve to a private address between validation and the socket open.
         // Plain-HTTP subtitle URLs fail closed here, exactly like the AVPlayer overlay path (SubtitleFileFetcher).
@@ -4058,22 +4071,28 @@ final class MPVMetalViewController: PlatformViewController {
                 guard (200 ..< 300).contains(response.statusCode),
                       !response.body.isEmpty,
                       response.body.count <= maximumExternalSubtitleBytes else { done(nil); return }
-                let ext = subtitleExtension(for: remote, contentType: response.headers["content-type"])
-                // Deterministic, content-addressed filename so the same subtitle reuses one on-disk file all session
-                // AND two distinct URLs never collide onto the same file (a 64-bit `hashValue` gives no such
-                // guarantee, which would let one track's file serve the other's cached entry).
-                let digest = SHA256.hash(data: Data(remote.absoluteString.utf8))
-                let name = "stremiox-sub-\(digest.map { String(format: "%02x", $0) }.joined()).\(ext)"
-                let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-                guard (try? response.body.write(to: tmp)) != nil else { done(nil); return }
-                rememberSubtitleFile(remote, tmp)
-                done(tmp)
+                done(storeSubtitleFile(remote, body: response.body, contentType: response.headers["content-type"]))
             } catch {
                 if retriesLeft > 0 {
-                    downloadSubtitle(remote, timeout: timeout, retriesLeft: retriesLeft - 1, done: done)
+                    downloadSubtitle(remote, privateAddonOrigin: nil, timeout: timeout,
+                                     retriesLeft: retriesLeft - 1, done: done)
                 } else { done(nil) }
             }
         }
+    }
+
+    /// Write downloaded subtitle bytes to their session file and remember it; nil when the write fails.
+    private static func storeSubtitleFile(_ remote: URL, body: Data, contentType: String?) -> URL? {
+        let ext = subtitleExtension(for: remote, contentType: contentType)
+        // Deterministic, content-addressed filename so the same subtitle reuses one on-disk file all session
+        // AND two distinct URLs never collide onto the same file (a 64-bit `hashValue` gives no such
+        // guarantee, which would let one track's file serve the other's cached entry).
+        let digest = SHA256.hash(data: Data(remote.absoluteString.utf8))
+        let name = "stremiox-sub-\(digest.map { String(format: "%02x", $0) }.joined()).\(ext)"
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        guard (try? body.write(to: tmp)) != nil else { return nil }
+        rememberSubtitleFile(remote, tmp)
+        return tmp
     }
 
     /// Best-effort subtitle file extension so mpv parses the downloaded bytes (it sniffs format too, but a

@@ -9680,7 +9680,8 @@ struct PlayerScreen: View {
             subtitleLoadingURL = sub.url
             let subtitleLoadToken = player.activeLoadToken
             let subtitleVideoID = curMeta?.videoId
-            player.addExternalSubtitle(url: sub.url, title: sub.displayTitle, lang: sub.lang) { ok in
+            player.addExternalSubtitle(url: sub.url, title: sub.displayTitle, lang: sub.lang,
+                                       privateAddonOrigin: sub.privateAddonOrigin) { ok in
                 guard permitsSubtitlePublication(loadToken: subtitleLoadToken, videoID: subtitleVideoID) else { return }
                 subtitleLoadingURL = nil
                 // Same still-live-engine gate as the manual row: never record an add the live engine never saw.
@@ -10062,7 +10063,9 @@ struct PlayerScreen: View {
     /// gets it without hitting the add-on. Best-effort, off-main, gated + size-capped + fail-soft inside
     /// `SubtitlePoolClient.upload`; never blocks playback. The sub text is downloaded once from the add-on URL.
     private func hoardAddonSubtitle(_ sub: AddonSubtitle) {
-        guard let contentKey = communityContentKey, let subURL = URL(string: sub.url) else { return }
+        // A self-hosted add-on's own files stay on the user's network: never pooled, never re-fetched here.
+        guard sub.privateAddonOrigin == nil,
+              let contentKey = communityContentKey, let subURL = URL(string: sub.url) else { return }
         refreshSubFingerprint()
         let fp = subFingerprint
         let lang = sub.lang
@@ -10356,7 +10359,8 @@ struct PlayerScreen: View {
                         if panelShowsSubtitleList { panelRows = rows(for: panel ?? .subtitles) }   // reflect Loading… in place
                         let subtitleLoadToken = player.activeLoadToken
                         let subtitleVideoID = curMeta?.videoId
-                        player.addExternalSubtitle(url: sub.url, title: sub.displayTitle, lang: sub.lang) { ok in
+                        player.addExternalSubtitle(url: sub.url, title: sub.displayTitle, lang: sub.lang,
+                                                   privateAddonOrigin: sub.privateAddonOrigin) { ok in
                             guard permitsSubtitlePublication(
                                 loadToken: subtitleLoadToken, videoID: subtitleVideoID
                             ) else { return }
@@ -11335,7 +11339,11 @@ struct PlayerScreen: View {
             guard let player = coordinator.player else { return }
             let subtitleLoadToken = player.activeLoadToken
             let subtitleVideoID = curMeta?.videoId
-            player.addExternalSubtitle(url: urlStr, title: title, lang: lang) { ok in
+            // The remembered choice keeps only the URL; the current add-on list says whether it is a
+            // self-hosted add-on's own file.
+            let privateAddonOrigin = addonSubs.first { $0.url == urlStr }?.privateAddonOrigin
+            player.addExternalSubtitle(url: urlStr, title: title, lang: lang,
+                                       privateAddonOrigin: privateAddonOrigin) { ok in
                 guard permitsSubtitlePublication(loadToken: subtitleLoadToken, videoID: subtitleVideoID) else { return }
                 if ok, player === coordinator.player {
                     addedSubURLs.insert(urlStr)
