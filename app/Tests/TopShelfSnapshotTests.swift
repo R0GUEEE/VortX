@@ -321,7 +321,7 @@ do {
     let missing = directory.appendingPathComponent("absent.json", isDirectory: false)
     let eight = (0..<TopShelfSnapshot.maxItems).map { index in
         TopShelfSnapshot.Item(id: "tmdb:\(index)", type: index.isMultiple(of: 2) ? "movie" : "series",
-            title: "Title \(index) — नमस्ते", poster: index.isMultiple(of: 2) ? "https://fixture.invalid/poster/\(index).jpg" : "file:///synthetic/private-poster-\(index).webp",
+            title: "Title \(index) — नमस्ते", poster: index.isMultiple(of: 2) ? "https://fixture.invalid/poster/\(index).jpg" : directory.appendingPathComponent("top-shelf-artwork/private-poster-\(index).webp").absoluteString,
             progress: Double(index) / 8)
     }
     check(TopShelfSnapshot.read(from: missing).isEmpty, "an absent explicit fixture returns no content")
@@ -340,6 +340,17 @@ do {
             userInfo: [NSLocalizedDescriptionKey: "Diagnostic encode/atomic-write replay succeeded; original write check remains failed"])
     }
     check(TopShelfSnapshot.read(from: file) == eight, "all eight rows preserve ids, types, Unicode titles, poster URLs and progress")
+    let untrustedRows = [
+        TopShelfSnapshot.Item(id: "tt1", type: "movie", title: "Outside", poster: "file:///etc/hosts", progress: 0),
+        TopShelfSnapshot.Item(id: "tt2", type: "movie", title: "Plain", poster: "http://fixture.invalid/p.jpg", progress: 0),
+        TopShelfSnapshot.Item(id: "", type: "movie", title: "No id", poster: nil, progress: 0),
+    ]
+    let untrusted = directory.appendingPathComponent("untrusted.json")
+    _ = TopShelfSnapshot.write(untrustedRows, to: untrusted)
+    let shown = TopShelfSnapshot.read(from: untrusted)
+    check(shown.map(\.id) == ["tt1", "tt2"], "a row whose action does not round-trip through the link parser is not shown")
+    check(shown.allSatisfy { $0.poster == nil },
+          "a poster outside the managed artwork folder or not https is dropped, the row kept")
     let original = try Data(contentsOf: file)
     check(!TopShelfSnapshot.write(eight, to: file), "unchanged readable content does not rewrite the cache")
     check(try Data(contentsOf: file) == original, "unchanged publication preserves exact cache bytes")

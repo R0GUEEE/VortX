@@ -115,6 +115,11 @@ enum TopShelfSnapshotWriter {
         guard snapshot.intent.isCurrent() else {
             cancelWarm(clearArtwork: true); publish([]); return
         }
+        // A signing service's group can be shared by other apps it signs for this viewer. Trakt and SIMKL
+        // history, and Trakt's warmed artwork, never go there: such a queue leaves the static shelf image.
+        guard selection.source == .local || TopShelfSnapshot.appGroupSource != .signer else {
+            cancelWarm(clearArtwork: true); publish([]); return
+        }
         // Keep the warm identity exactly aligned with the queue above. Raw Trakt state can still carry
         // finished, removed, or temporary seeds; those rows never render and must not consume one of the
         // bounded eight private-image requests.
