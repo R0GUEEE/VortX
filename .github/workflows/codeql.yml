@@ -55,23 +55,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
         with:
-          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+          packages: "platform-tools platforms;android-37.0 build-tools;36.0.0 cmake;4.1.2"
 
-      # android/app and android/mpv-seam both pin this version. The older 27.0.12077973 CI report
-      # is not authoritative for this source tree: installing it would leave Gradle's pinned NDK absent.
-      - name: Install Android NDK 27.2.12479018
+      # Keep both Android modules and every traced/package build on the same exact NDK.
+      - name: Install Android NDK 30.0.16248370
         run: |
-          yes | sdkmanager "ndk;27.2.12479018"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          yes | sdkmanager "ndk;30.0.16248370"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7

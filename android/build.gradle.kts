@@ -1,15 +1,10 @@
-// Root build file. Plugin versions come from gradle/libs.versions.toml (the S01 version catalog)
-// instead of being hardcoded here -- see that file's header comment for why each version was
-// chosen (AGP 8.10.0 is the floor for compileSdk/targetSdk 36; Kotlin stays 2.2.10, unchanged).
-// Kotlin 2.0+ is required for the standalone Compose compiler plugin
-// (org.jetbrains.kotlin.plugin.compose); Kotlin 2.2+ is required to read dev.jdtech.mpv:libmpv:1.0.0,
-// whose .kotlin_module metadata is 2.2.0 (a 2.0.x compiler can only read metadata up to 2.1 and fails
-// :app:compileFullDebugKotlin on it).
+// Plugin versions are centralized in gradle/libs.versions.toml.
+// AGP 9 supplies built-in Kotlin; the separately versioned Compose plugin matches Kotlin 2.4.21.
+// Do not also apply org.jetbrains.kotlin.android to either Android module.
 plugins {
     alias(libs.plugins.android.application) apply false
     // :mpv-seam (the W1-B source-built libmpv JNI seam) is an Android library module; same AGP pin.
     alias(libs.plugins.android.library) apply false
-    alias(libs.plugins.kotlin.android) apply false
     alias(libs.plugins.kotlin.compose) apply false
 }
 

@@ -121,7 +121,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
         with:
-          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+          packages: "platform-tools platforms;android-37.0 build-tools;36.0.0 cmake;4.1.2"
 
       # The committed wrapper remains the Gradle version authority. This action supplies caching only.
       - name: Set up Gradle
@@ -129,8 +129,8 @@ jobs:
 
       - name: Install Android NDK (must match ndkVersion in app/build.gradle.kts)
         run: |
-          yes | sdkmanager "ndk;27.2.12479018"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          yes | sdkmanager "ndk;30.0.16248370"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
 
       - name: Install Rust nightly + Android targets
         uses: dtolnay/rust-toolchain@4fd1da8b0805d2d2e936788875a7d65dbd677dc2 # nightly branch, 2026-07-19
@@ -181,8 +181,8 @@ jobs:
             echo "::error::expected exactly two release APKs and one AAB"
             exit 1
           fi
-          READELF="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          STRIP="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          READELF="$ANDROID_HOME/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          STRIP="$ANDROID_HOME/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
           DEXDUMP="$ANDROID_HOME/build-tools/36.0.0/dexdump"
           test -x "$READELF" || { echo "::error::pinned NDK llvm-readelf unavailable"; exit 1; }
           test -x "$STRIP" || { echo "::error::pinned NDK llvm-strip unavailable"; exit 1; }

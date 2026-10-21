@@ -4,7 +4,6 @@ import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
@@ -119,13 +118,13 @@ val releaseStoreFile: File? = if (releaseSigningReady) {
 
 android {
     namespace = "com.vortx.android"
-    // compileSdk 36 (Android 16) requires AGP >= 8.10.0 (root build.gradle.kts / the version catalog
-    // carry that pin). targetSdk now tracks compileSdk (S01: Android-16-baseline session) -- both at
-    // 36. minSdk stays 26 (already above Media3 1.9's floor of 23; covers phones and Android TV).
-    compileSdk = 36
+    // Core 1.19.1 and Lifecycle 2.11.0 require API 37 / AGP >= 9.1 in AAR metadata.
+    // Compile against stable API 37.0 without opting into Android 17 target behavior.
+    // targetSdk remains 36 and minSdk remains 26 for phones and Android TV.
+    compileSdk = 37
     // Resolve the native toolchain before defaultConfig/flavor configuration. Keep the pin
     // synchronized with :mpv-seam and the explicit SDK installation in CI.
-    ndkVersion = "27.2.12479018"
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
         applicationId = "com.vortx.android"
@@ -300,7 +299,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     // AndroidX Media3 (ExoPlayer): the player core. All media3 modules MUST share one version
-    // (libs.versions.toml's single `media3` version, unchanged in S01).
+    // (libs.versions.toml's single `media3` version).
     //   - exoplayer:      the player + DefaultRenderersFactory (its built-in DV -> HEVC/AVC/AV1
     //                     fallback is what we rely on; no hand-rolled codec selection).
     //   - exoplayer-hls:  HLS support, the format the in-process streaming server emits for torrents.
@@ -517,7 +516,7 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/community_js/CMakeLists.txt")
-            version = "3.22.1"
+            version = "4.1.2"
         }
     }
 

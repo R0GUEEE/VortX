@@ -6,7 +6,6 @@
 // vendored, or added to any repository by this module.
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
 }
 
 @Suppress("UNCHECKED_CAST")
@@ -14,11 +13,11 @@ val androidAbis = rootProject.extra["vortxAndroidAbis"] as List<String>
 
 android {
     namespace = "com.vortx.android.player.mpv.seam"
-    compileSdk = 36
+    compileSdk = 37
     // Same NDK as the app's own pin (android/app/build.gradle.kts). Without this, AGP falls back to
     // its default NDK on machines with several installed -- the seam would then be built by a
     // different toolchain than everything else in the app.
-    ndkVersion = "27.2.12479018"
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
         minSdk = 26
@@ -48,7 +47,7 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
+            version = "4.1.2"
         }
     }
 

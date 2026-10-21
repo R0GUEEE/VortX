@@ -290,14 +290,14 @@ for wf in "$ANDROID_CI_WF" "$RELEASE_WF" "$VALIDATION_WF" "$CODEQL_WF"; do
     sdk_setup="$(awk '/uses: android-actions\/setup-android@/{active=1}
         active && /^[[:space:]]*-[[:space:]]/{exit} active{print}' "$wf")"
     require_grep "$(basename "$wf") installs supported explicit Android SDK packages" \
-        '^[[:space:]]+packages: "platform-tools platforms;android-36 build-tools;36\.0\.0"$' \
+        '^[[:space:]]+packages: "platform-tools platforms;android-37\.0 build-tools;36\.0\.0 cmake;4\.1\.2"$' \
         <(printf '%s\n' "$sdk_setup")
 done
 
 # Native configuration must see the same pinned NDK before defaultConfig or flavors can resolve
 # a CXX model. A later second android block must not silently leave earlier configuration on AGP's
 # default version. Installation is still required separately; this is not an autobuild workaround.
-readonly NDK_PIN="27.2.12479018"
+readonly NDK_PIN="30.0.16248370"
 app_ndk_pin="$(awk '/^android \{/{active=1}
     active && /^[[:space:]]+defaultConfig \{/{exit}
     active && /^[[:space:]]+ndkVersion[[:space:]]*=/{print $3}' "$GRADLE_BUILD")"
