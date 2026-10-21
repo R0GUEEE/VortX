@@ -71,7 +71,7 @@ require_grep "signed candidate APK and AAB both verify complete engine ABIs" \
     <(printf '%s\n' "$candidate_signing_step")
 ok "Apple and both Android lanes use one exact wrapper revision"
 native_pin="$(awk '/^      NORMAL_NATIVE_REVISION:/{print $2}' "$APPLE_RELEASE_WF")"
-[[ "$native_pin" = af29b22e4c45740a1f5b6cb415b81f8430f55b9f ]] || fail "Apple normal native pin differs from the reviewed revision"
+[[ "$native_pin" = a3169f338f3f05da4ad3adb39a1e557c3ddcac33 ]] || fail "Apple normal native pin differs from the reviewed revision"
 apple_native_ref="$(awk '/repository: VortXTV\/vortx-core/{active=1; next}
     active && /^[[:space:]]+ref:/{sub(/^[[:space:]]+ref: /, ""); print; exit}' "$APPLE_RELEASE_WF")"
 [[ "$apple_native_ref" = '${{ steps.native_source.outputs.revision }}' ]] || fail "Apple checkout must consume the authenticated source selection"
@@ -232,8 +232,27 @@ ok "actual Apple effective selector routes push/default dispatch and every proof
 
 require_grep "Apple builds the native resource host" \
     'run: ./scripts/build-ffi-xcframework.sh --resource-host$' "$APPLE_RELEASE_WF"
-require_grep "Apple verifies resource and state ABI on warm and cold builds" \
-    'run: ./scripts/verify-native-engine-abi.sh apple app/Vendor/VortxEngine.xcframework resource-host$' "$APPLE_RELEASE_WF"
+native_abi_step="$(awk '/name: Verify complete native engine ABI/{active=1; next}
+    active && /^[[:space:]]+- name:/{exit} active{print}' "$APPLE_RELEASE_WF")"
+for native_abi_literal in \
+    'EXPECTED_NATIVE_REVISION: ${{ steps.native_source.outputs.revision }}' \
+    'a3169f338f3f05da4ad3adb39a1e557c3ddcac33)' \
+    './scripts/verify-native-engine-abi.sh apple app/Vendor/VortxEngine.xcframework owner-history ;;' \
+    '0c201563c6aa54eeb0545b55ad01582c0c3bcae3)' \
+    './scripts/verify-native-engine-abi.sh apple app/Vendor/VortxEngine.xcframework resource-host ;;' \
+    '*) echo "::error::native ABI mode has no admitted source revision"; exit 1 ;;'; do
+    grep -Fq -- "$native_abi_literal" <<< "$native_abi_step" || fail "Apple native ABI selection lost $native_abi_literal"
+done
+for owner_history_symbol in vortx_owner_history_canonicalize_evidence_json \
+    vortx_owner_history_session_open vortx_owner_history_session_fork \
+    vortx_owner_history_session_json vortx_owner_history_session_free; do
+    require_grep "Apple owner-history ABI requires $owner_history_symbol" "$owner_history_symbol" \
+        "$REPO_ROOT/scripts/verify-native-engine-abi.sh"
+done
+require_grep "Apple owner-history ABI keeps existing resource symbols" \
+    'mode.*== state.*expected.*resource_symbols' "$REPO_ROOT/scripts/verify-native-engine-abi.sh"
+require_grep "Apple owner-history ABI is an explicit additional symbol gate" \
+    'mode.*!= owner-history.*expected.*owner_history_symbols' "$REPO_ROOT/scripts/verify-native-engine-abi.sh"
 require_grep "Mac server is built from the same pinned private workspace" \
     'run: ./scripts/build-mac-server.sh$' "$APPLE_RELEASE_WF"
 for wf in "$ANDROID_CI_WF" "$RELEASE_WF"; do
@@ -246,8 +265,18 @@ for wf in "$ANDROID_CI_WF" "$RELEASE_WF"; do
     require_grep "$(basename "$wf") invokes native-only staged/package verification" \
         '--native-only --staged-dir android/app/src/main/jniLibs' "$wf"
 done
-require_grep "native-only Android verifier retains resource-host ABI proof" \
-    'verify-native-engine-abi\.sh.*android.*resource-host' "$REPO_ROOT/scripts/verify-native-android-artifacts.sh"
+require_grep "native-only Android verifier invokes its source-selected extended ABI" \
+    'verify-native-engine-abi\.sh.*android.*\$abi_mode' "$REPO_ROOT/scripts/verify-native-android-artifacts.sh"
+for native_abi_literal in \
+    'a3169f338f3f05da4ad3adb39a1e557c3ddcac33) abi_mode=owner-history ;;' \
+    'af29b22e4c45740a1f5b6cb415b81f8430f55b9f) abi_mode=resource-host ;;' \
+    '*) echo "native-only ABI mode has no admitted source revision" >&2; exit 1 ;;'; do
+    grep -Fq -- "$native_abi_literal" "$REPO_ROOT/scripts/verify-native-android-artifacts.sh" ||
+        fail "Android native ABI selection lost $native_abi_literal"
+done
+for method in nativeOwnerHistoryCanonicalize nativeOwnerHistoryOpen nativeOwnerHistoryFork nativeOwnerHistoryRequest nativeOwnerHistoryClose; do
+    require_grep "all-ABI owner-history gate requires $method" "$method" "$REPO_ROOT/scripts/verify-native-engine-abi.sh"
+done
 require_grep "native-only verifier rejects legacy Stremio JNI packaging" \
     'native-only artifact still contains legacy libstremiox_core\.so' "$REPO_ROOT/scripts/verify-native-android-artifacts.sh"
 require_grep "Android quality analysis uses the NDK-aware traced build" \

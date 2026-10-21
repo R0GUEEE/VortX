@@ -30,7 +30,8 @@ REPO = "VortXTV/VortX"
 MARKER = "<!-- vortx-distribution: hosted-direct-beta -->"
 PROVENANCE = "VortX-Hosted-Direct-Beta-Provenance.json"
 SUMS = "SHA256SUMS.txt"
-ENGINE = "af29b22e4c45740a1f5b6cb415b81f8430f55b9f"
+ENGINE = "a3169f338f3f05da4ad3adb39a1e557c3ddcac33"
+HISTORICAL_BETA2_ENGINE = "af29b22e4c45740a1f5b6cb415b81f8430f55b9f"
 STREMIO = "31c66611822043e089f5819ad232a5df93975873"
 BUNDLETOOL_SHA = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
 MAX_ARCHIVE = 5 * 1024**3
@@ -223,6 +224,14 @@ def tag_version(tag):
     match = re.fullmatch(r"v([0-9]+\.[0-9]+\.[0-9]+)-beta\.([1-9][0-9]*)", tag)
     require(match is not None, "only strict beta.N tags are eligible")
     return match[1]
+
+
+def expected_engine(tag):
+    # Exact reviewed tag interpretation, never a caller-supplied/fallback engine pin.
+    if tag == "v0.5.6-beta.2":
+        return HISTORICAL_BETA2_ENGINE
+    require(tag == "v0.5.6-beta.3", "no reviewed native engine pin for this beta tag")
+    return ENGINE
 
 
 def check_tag(tag, source):
@@ -434,6 +443,7 @@ def validate_dispatch(receipt, pointer, tag, source):
 
 
 def inspect_apple(directory, pointer, tag, source, version, build, tools, helper):
+    engine = expected_engine(tag)
     workflow = read_json(directory / "native-workflow-provenance.json")
     require(workflow == {"schemaVersion": 1, "sourceCommit": source, "workflowCommit": source,
                         "verifierSha256": tools["scripts/verify-native-apple-package.py"], "tag": "",
@@ -442,7 +452,7 @@ def inspect_apple(directory, pointer, tag, source, version, build, tools, helper
     dispatch = read_json(directory / "native-ci-dispatch.json")
     validate_dispatch(dispatch, pointer, tag, source)
     inputs = read_json(directory / "native-build-inputs.json")
-    require(inputs.get("schema") == 1 and inputs.get("engineSourceRevision") == ENGINE and
+    require(inputs.get("schema") == 1 and inputs.get("engineSourceRevision") == engine and
             inputs.get("features") == helper.EXPECTED_NATIVE_FEATURES, "native SDK input identity differs")
     index = {}
     for row in inputs["inputs"]:
@@ -463,7 +473,7 @@ def inspect_apple(directory, pointer, tag, source, version, build, tools, helper
         platform = {"tvos-lite": "tvos", "ios-simulator": "ios-sim", "tvos-simulator": "tvos-sim"}.get(key, key)
         raw = read_json(directory / f"native-{key}.json")
         accepted = helper._portable_receipt(raw, platform)
-        require(accepted["engineSourceRevision"] == ENGINE and accepted["version"] == version and
+        require(accepted["engineSourceRevision"] == engine and accepted["version"] == version and
                 accepted["build"] == build, "accepted native app revision/version/build differs")
         for name, value in accepted["loadedArchives"].items():
             if name == "libvortx_ffi.a":
@@ -493,6 +503,7 @@ def inspect_apple(directory, pointer, tag, source, version, build, tools, helper
 
 
 def inspect_android(directory, pointer, tag, source, version, build, root, bundletool):
+    engine = expected_engine(tag)
     _, _, names = file_matrix(tag, version)
     files = {name: directory / name for name in sorted(names)}
     checksums(directory / "SHA256SUMS-android.txt", files)
@@ -500,7 +511,7 @@ def inspect_android(directory, pointer, tag, source, version, build, root, bundl
     lines = evidence.splitlines()
     for label, value in (
         ("release tag", tag), ("release tag commit", source), ("source commit", source),
-        ("native engine source commit", ENGINE), ("native engine Cargo features", "jni,server,resource-host"),
+        ("native engine source commit", engine), ("native engine Cargo features", "jni,server,resource-host"),
         ("legacy Stremio source commit (not packaged)", STREMIO),
         ("workflow run", f"https://github.com/{REPO}/actions/runs/{pointer['runId']}"),
         ("workflow run attempt", str(pointer["attempt"])),
@@ -534,7 +545,7 @@ def inspect_android(directory, pointer, tag, source, version, build, root, bundl
                     "signature": "pinned-production-signer"}) for name, path in files.items()], {
         "signingAndVersionEvidenceSha256": digest(directory / "SIGNING_PROVENANCE.txt"),
         "checksumEvidenceSha256": digest(directory / "SHA256SUMS-android.txt"),
-        "engineSourceCommit": ENGINE, "nativeFeatures": "jni,server,resource-host",
+        "engineSourceCommit": engine, "nativeFeatures": "jni,server,resource-host",
     }
 
 
@@ -616,6 +627,7 @@ def main():
             parser.add_argument(f"--{lane}-{field}", type=int)
     args = parser.parse_args()
     tag_version(args.tag)
+    expected_engine(args.tag)
     sha(args.source_commit, 40)
     positive(args.release_id)
     # Authenticate checked-out helper bytes before importing their package/route inspection.

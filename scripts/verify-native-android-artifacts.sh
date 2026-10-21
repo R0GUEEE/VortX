@@ -5,6 +5,7 @@ set -euo pipefail
 # Release workflows opt into --native-only to require just the reviewed VortX resource-host engine,
 # prove its ABI/JNI surface, and compare it with fresh staged bytes after identical AGP strip handling.
 mode=legacy-both
+abi_mode=resource-host
 staged_dir=""
 source_sha=""
 artifacts=()
@@ -30,6 +31,13 @@ if [[ "$mode" == native-only ]]; then
     [[ -n "$staged_dir" && -d "$staged_dir" ]] || { echo "native-only mode requires the staged jniLibs directory" >&2; exit 1; }
     [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "native-only mode requires the exact 40-character VortX engine source SHA" >&2; exit 1; }
     [[ -n "$strip" && -x "$strip" ]] || { echo "STRIP must point to the pinned NDK llvm-strip" >&2; exit 1; }
+    # Normal source must prove its added owner-history JNI ABI. Explicit beta2 interpretation
+    # retains its real old surface; an arbitrary 40-character string is not an admitted mode.
+    case "$source_sha" in
+        a3169f338f3f05da4ad3adb39a1e557c3ddcac33) abi_mode=owner-history ;;
+        af29b22e4c45740a1f5b6cb415b81f8430f55b9f) abi_mode=resource-host ;;
+        *) echo "native-only ABI mode has no admitted source revision" >&2; exit 1 ;;
+    esac
 fi
 
 scratch="$(mktemp -d)"
@@ -52,7 +60,7 @@ verify_elf() {
 
 verify_vortx_abi() {
     local file="$1" artifact="$2" symbols symbol required
-    READELF="$readelf" bash "$repo_root/scripts/verify-native-engine-abi.sh" android "$file" resource-host
+    READELF="$readelf" bash "$repo_root/scripts/verify-native-engine-abi.sh" android "$file" "$abi_mode"
     required="Java_com_vortx_android_engine_VortxServer_nativeStart Java_com_vortx_android_engine_VortxServer_nativePort Java_com_vortx_android_engine_VortxServer_nativeBaseUrl Java_com_vortx_android_engine_VortxServer_nativeStop"
     symbols="$("$readelf" --dyn-syms --wide "$file")"
     for symbol in $required; do

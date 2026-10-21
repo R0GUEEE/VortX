@@ -8,7 +8,7 @@ import { test } from 'node:test';
 
 const workflow = readFileSync(new URL('../../.github/workflows/release-tvos.yml', import.meta.url), 'utf8');
 const source = '844782d29a93ae51991bfadc639d50bc3619d40b', code = 'a'.repeat(40), tag = 'v0.5.0-beta.1';
-const normalNative = 'af29b22e4c45740a1f5b6cb415b81f8430f55b9f';
+const normalNative = 'a3169f338f3f05da4ad3adb39a1e557c3ddcac33';
 const historicalNative = '0c201563c6aa54eeb0545b55ad01582c0c3bcae3';
 const beta1RecordedNative = '7e3e68be5bf2b11c65d158c1823be94bd1608d1b';
 const playerDigest = '737073f587b4d78c0436d3dc08c40bfab72b26e3d3a3ac3eab11a7a3a1c288d1';
@@ -259,6 +259,13 @@ function assertNativeWiring(text = workflow, android = androidWorkflows) {
   const cache = step('Cache vortx-ffi xcframework', text);
   assert.match(cache, /^          key: .*\$\{\{ env\.VORTX_ENGINE_SOURCE_REVISION \}\}.*hashFiles/m);
   assert.doesNotMatch(cache, /restore-keys:/);
+  const abi = step('Verify complete native engine ABI', text);
+  assert(abi.includes('EXPECTED_NATIVE_REVISION: ${{ steps.native_source.outputs.revision }}'));
+  const abiScript = script('Verify complete native engine ABI', text);
+  assert(abiScript.includes('case "$EXPECTED_NATIVE_REVISION" in'));
+  assert(abiScript.includes(`${normalNative})\n    ./scripts/verify-native-engine-abi.sh apple app/Vendor/VortxEngine.xcframework owner-history ;;`));
+  assert(abiScript.includes(`${historicalNative})\n    ./scripts/verify-native-engine-abi.sh apple app/Vendor/VortxEngine.xcframework resource-host ;;`));
+  assert(abiScript.includes('*) echo "::error::native ABI mode has no admitted source revision"; exit 1 ;;'));
   const ordered = ['Validate immutable Beta 1 source recovery', "Preserve the workflow revision's native acceptance tool",
     'Checkout the immutable recovered app source', 'Verify immutable recovered source checkout',
     'Select the authenticated native source revision', 'Bind native acceptance tooling to workflow and source provenance',
@@ -286,6 +293,8 @@ test('normal and historical native selection wiring rejects scoped workflow muta
     ['Promote the vortx-core engine workspace + verify both engines (fail closed)', '[ "$NATIVE_REVISION" = "$EXPECTED_NATIVE_REVISION" ]', 'true'],
     ['Validate immutable Beta 1 source recovery', `native_revision=${historicalNative}`, `native_revision=${normalNative}`],
     ['Cache vortx-ffi xcframework', '${{ env.VORTX_ENGINE_SOURCE_REVISION }}', 'unbound'],
+    ['Verify complete native engine ABI', 'VortxEngine.xcframework owner-history ;;', 'VortxEngine.xcframework resource-host ;;'],
+    ['Verify complete native engine ABI', '${{ steps.native_source.outputs.revision }}', '${{ inputs.recovery_source_commit }}'],
   ];
   for (const [name, before, after] of mutations) {
     const original = step(name), changed = original.replace(before, after);
@@ -562,3 +571,20 @@ test('hard archive gate refuses a preexisting symlink destination without changi
   assert.equal(result.feedExists, false);
   assert.equal(result.sentinel, 'preserved');
 });
+
+test('actual Apple ABI gate binds normal owner-history and retained historical resource mode', () => fixture(dir => {
+  mkdirSync(join(dir, 'scripts'), { recursive: true });
+  const receipt = join(dir, 'abi-arguments');
+  writeFileSync(join(dir, 'scripts/verify-native-engine-abi.sh'),
+    '#!/usr/bin/env bash\nset -euo pipefail\nprintf "%s\\n" "$*" > "$ABI_ARGUMENTS"\n', { mode: 0o755 });
+  for (const [revision, mode] of [[normalNative, 'owner-history'], [historicalNative, 'resource-host'],
+    ['', null], ['main', null], ['af29b22e4c45740a1f5b6cb415b81f8430f55b9f', null], ['a'.repeat(40), null]]) {
+    writeFileSync(receipt, '');
+    const result = spawnSync('/bin/bash', ['-c', script('Verify complete native engine ABI')], {
+      cwd: dir, encoding: 'utf8', env: { ...process.env, EXPECTED_NATIVE_REVISION: revision, ABI_ARGUMENTS: receipt }
+    });
+    assert.equal(result.status === 0, mode !== null, revision);
+    assert.equal(readFileSync(receipt, 'utf8'), mode === null ? '' :
+      `apple app/Vendor/VortxEngine.xcframework ${mode}\n`);
+  }
+}));

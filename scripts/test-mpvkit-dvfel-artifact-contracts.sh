@@ -56,6 +56,13 @@ grep -Fq 'LIBAVCODEC_VERSION_MAJOR' "$VERIFY" || fail "artifact gate must inspec
 grep -Fq 'LIBAVFORMAT_VERSION_MAJOR' "$VERIFY" || fail "artifact gate must inspect libavformat major"
 grep -Fq 'LIBAVCODEC_VERSION_MAJOR[[:space:]]+63' "$VERIFY" || fail "artifact gate must require libavcodec major 63"
 grep -Fq 'LIBAVFORMAT_VERSION_MAJOR[[:space:]]+63' "$VERIFY" || fail "artifact gate must require libavformat major 63"
+grep -Fq 'verify_ffmpeg_maintenance "$target" "$headers" "$slice"' "$VERIFY" ||
+  fail "artifact gate must reject the superseded 63.1.100 artifact in every FFmpeg slice"
+grep -Fq '${prefix}_VERSION_MINOR[[:space:]]+1' "$VERIFY" || fail "artifact gate must require maintenance minor 1"
+grep -Fq '${prefix}_VERSION_MICRO[[:space:]]+102' "$VERIFY" || fail "artifact gate must require maintenance micro 102"
+grep -Fq 'ffmpegPinnedSHA = "946fcce07b6dcd0331c8cc609192aeff5e1924f8"' "$PATCH" ||
+  fail "builder must bind the reviewed n9.0.2 commit"
+grep -Fq 'ffmpegPinnedBranch = "n9.0.2"' "$PATCH" || fail "builder must fetch the reviewed release tag"
 grep -Fq 'Libmpv-GPL; do' "$VERIFY" || fail "artifact gate must validate Libmpv slices"
 grep -Fq 'expected_arches' "$VERIFY" || fail "artifact gate must require exact per-slice architectures"
 grep -Fq 'tvos-arm64_arm64e' "$VERIFY" || fail "artifact gate must enumerate the tvOS arm64e slice"
@@ -65,7 +72,7 @@ grep -Fq 'if [ "$target" = Libavcodec-GPL ]; then' "$VERIFY" ||
 grep -Fq 'verify-mpvkit-dvfel-apple-tls.sh' "$VERIFY" || fail "artifact gate must retain TLS verification"
 
 # Extract the real fetch step and require the verifier after unzip, before the next workflow step.
-fetch_step="$(awk '/name: Fetch the MPVKit-DVFEL artifacts/{active=1; next}
+fetch_step="$(awk '/^[[:space:]]+- name: Fetch the MPVKit-DVFEL artifacts/{active=1; next}
   active && /^[[:space:]]+- name:/{exit} active{print}' "$WORKFLOW")"
 grep -Fq 'unzip -q /tmp/mpvkit.zip -d "$DEST"' <<<"$fetch_step" ||
   fail "release fetch step must unpack the pinned artifact"
