@@ -25,6 +25,7 @@ private enum CredentialScopeRegistry {
     let relay: BackupRelay
     var sent: [Int] = []
     var witnesses: [Int?] = []
+    var plaintexts: [Data?] = []
     var acceptedCallbacks = 0
     var pendingApply = false
     var networkFailure = false
@@ -42,10 +43,12 @@ private enum CredentialScopeRegistry {
     private func hasPendingAccountDocApply(for capture: CredentialScopeRegistry.Capture) -> Bool { pendingApply }
     private func pushSyncDocAt(_ document: [String: Any], version: Int, baseRevision: Int?,
                                credentialCapture capture: CredentialScopeRegistry.Capture,
+                               plaintextData: Data? = nil,
                                sourceIsCurrent: () -> Bool) async -> PushOutcome {
         guard isCurrent(capture), sourceIsCurrent(), !pendingApply else { return .error }
         sent.append(version)
         witnesses.append(baseRevision)
+        plaintexts.append(plaintextData)
         if upgradeRequired { return .upgradeRequired }
         if networkFailure { return .error }
         if relay.revision != baseRevision { return .rejected(storedVersion: rejectedEcho ?? relay.revision) }
@@ -57,7 +60,7 @@ private enum CredentialScopeRegistry {
     func retire() { credentialAuthority.generation += 1 }
 
     func send(_ document: [String: Any], base: Int?, edit: [String: String],
-              rebuildFails: Bool = false) async -> Bool {
+              rebuildFails: Bool = false, plaintext: Data? = nil, rebuiltPlaintext: Data? = nil) async -> Bool {
         let capture = credentialAuthority.capture()
         let sourceIsCurrent = { [self] in mountCurrent }
         let rebuild = { [self] () async -> DerivedSyncDoc? in
@@ -66,7 +69,7 @@ private enum CredentialScopeRegistry {
             var merged = relay.document
             for (key, value) in edit { merged[key] = value }
             return DerivedSyncDoc(document: merged, baseRevision: relay.revision, credentialCapture: capture,
-                                  sourceIsCurrent: sourceIsCurrent)
+                                  sourceIsCurrent: sourceIsCurrent, plaintextData: rebuiltPlaintext)
         }
 #if BASELINE_SYNC_UPLOAD
         return await pushDerivedDoc(document, onAccepted: { [self] _ in acceptedCallbacks += 1 }) {
@@ -74,7 +77,7 @@ private enum CredentialScopeRegistry {
         }
 #else
         return await pushDerivedDoc(DerivedSyncDoc(document: document, baseRevision: base, credentialCapture: capture,
-                                                 sourceIsCurrent: sourceIsCurrent),
+                                                 sourceIsCurrent: sourceIsCurrent, plaintextData: plaintext),
                                     onAccepted: { [self] _ in acceptedCallbacks += 1 }, rebuild: rebuild)
 #endif
     }
@@ -101,6 +104,16 @@ private enum CredentialScopeRegistry {
               "each attempt uses the base revision of that exact merged document")
         check(a.acceptedCallbacks == 1 && b.acceptedCallbacks == 1, "only stored documents acknowledge edits")
         check(a.witnesses == [100] && b.witnesses == [100, 101], "each PUT witnesses its candidate's own GET")
+
+        let typedRelay = BackupRelay(revision: 11, document: ["peer": "retained"])
+        let typed = UploadHarness(typedRelay)
+        let firstPlaintext = Data(#"{"nativeCounter":18446744073709551615}"#.utf8)
+        let retryPlaintext = Data(#"{"nativeCounter":18446744073709551615,"peer":"retained"}"#.utf8)
+        check(await typed.send(["ackProjection": "first"], base: 10, edit: ["local": "edit"],
+                               plaintext: firstPlaintext, rebuiltPlaintext: retryPlaintext),
+              "typed plaintext candidate retries through the actual production method")
+        check(typed.plaintexts == [firstPlaintext, retryPlaintext] && typed.witnesses == [10, 11],
+              "each attempt forwards its own exact frozen plaintext, not the ACK projection or prior bytes")
 
         let moving = BackupRelay(revision: 51, document: ["peer": "retained"])
         let client = UploadHarness(moving); client.rejectedEcho = 9_999
