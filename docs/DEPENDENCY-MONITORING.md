@@ -42,6 +42,9 @@ Only public registry identities may be queried publicly. npm origin/scope settin
 and local first-party names must be respected; credentials and private registry
 URLs must not be included in the report. GitHub metadata reads use existing CLI
 authentication without extracting or printing a token.
+Maven coordinates and Gradle plugin identities require explicit corroborated
+`public_maven_names` and `public_plugin_names` configuration lists before public
+queries. Unknown/private coordinates become generic gaps, not registry probes.
 
 Example (substitute existing authorized local paths):
 

@@ -137,6 +137,10 @@ def inventory(config):
         if name.startswith("@"): registry = settings.get(name.split("/")[0].lower() + ":registry", registry)
         return isinstance(registry, str) and registry.rstrip("/") == "https://registry.npmjs.org"
     def add(eco, name, current, repo, file, kind):
+        if eco in ("maven", "plugin") and name not in config.get(
+                "public_maven_names" if eco == "maven" else "public_plugin_names", []):
+            gaps.append({"source": f"{repo}/{file}", "reason": "Maven/plugin public origin requires explicit corroboration"})
+            return
         identity = CARGO_PACKAGE if eco == "cargo" else PACKAGE
         if eco in ("npm", "cargo") and not identity.fullmatch(name):
             gaps.append({"source": f"{repo}/{file}", "reason": "Unsupported registry package identity"})
@@ -232,7 +236,7 @@ def inventory(config):
                         if version:
                             add("maven", coordinate, version, label, rel, "declared-library")
                         else:
-                            gaps.append({"source": f"{label}/{rel}", "reason": f"BOM-managed version needs resolved runtime graph: {coordinate}"})
+                            gaps.append({"source": f"{label}/{rel}", "reason": "BOM-managed version needs resolved runtime graph"})
                             add("maven", coordinate, "BOM-managed/unresolved", label, rel, "unresolved-library")
                     for alias, item in data.get("plugins", {}).items():
                         plugin = item["id"]; version = item.get("version")

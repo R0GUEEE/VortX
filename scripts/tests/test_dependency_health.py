@@ -130,10 +130,22 @@ class DependencyHealthTests(unittest.TestCase):
             root = Path(folder)
             (root / "libs.versions.toml").write_text('[libraries]\nui={group="androidx.compose.ui",name="ui"}\n')
             with patch.object(health.subprocess, "check_output", side_effect=["a"*40,b"libs.versions.toml\0"]):
-                result = health.inventory({"repositories":[{"path":folder,"label":"fixture"}]})
+                result = health.inventory({"repositories":[{"path":folder,"label":"fixture"}],
+                                           "public_maven_names":["androidx.compose.ui:ui"]})
             self.assertEqual(result["entries"][0]["name"], "androidx.compose.ui:ui")
             self.assertEqual(result["entries"][0]["current"], "BOM-managed/unresolved")
             self.assertTrue(result["coverage_gaps"])
+
+    def test_unknown_maven_and_plugin_names_never_trigger_public_lookup(self):
+        for value in ('{module="internal.company:secret",version="1.0"}',
+                      '{module="internal.company:secret"}'):
+            with self.subTest(value=value):
+                result = self.fixture_inventory({"libs.versions.toml":
+                    '[libraries]\nprivate=' + value + '\n'
+                    '[plugins]\nprivate={id="internal.company.plugin",version="1.0"}\n'})
+                self.assertEqual(result["entries"], [])
+                self.assertNotIn("internal.company", json.dumps(result))
+                self.assertTrue(result["coverage_gaps"])
 
     def test_multiple_new_versions_including_prerelease_are_all_reported(self):
         inventory = {"entries": [{"ecosystem":"npm", "name":"example", "current":"1.0.0"}], "coverage_gaps":[]}
