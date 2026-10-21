@@ -56,6 +56,58 @@ if [[ $lane == apple ]]; then
         Libavfilter.xcframework.zip Libavformat.xcframework.zip Libavutil.xcframework.zip \
         Libswresample.xcframework.zip Libswscale.xcframework.zip Libplacebo.xcframework.zip
 else
+    # Downstream make/meson generators invoke python3 from PATH. Verify that SAME isolated
+    # interpreter and its complete pinned third-party closure before downloading/building.
+    unset PYTHONPATH PYTHONHOME
+    export PYTHONNOUSERSITE=1
+    export PYTHON="$(command -v python3)"
+    "$PYTHON" -I - "${RUNNER_TEMP:?hosted temporary directory required}/vortx-native-media-tools" \
+        > "$out/python-toolchain.json" <<'PYTHON_TOOLCHAIN'
+import importlib
+import importlib.metadata
+import json
+from pathlib import Path
+import platform
+import site
+import sys
+
+tools = Path(sys.argv[1]).resolve()
+if (Path(sys.prefix).resolve() != tools or sys.prefix == sys.base_prefix
+        or sys.version_info[:2] != (3, 12) or platform.system() != "Linux"
+        or platform.machine() != "x86_64" or site.ENABLE_USER_SITE is not False):
+    raise SystemExit("Unexpected native media Python interpreter/isolation")
+config = dict(line.strip().split(" = ", 1) for line in (tools / "pyvenv.cfg").read_text().splitlines()
+              if " = " in line)
+if config.get("include-system-site-packages") != "false":
+    raise SystemExit("System site packages are not permitted")
+packages = {}
+for distribution, module_name, expected_version in [
+        ("meson", "mesonbuild", "1.12.1"), ("Jinja2", "jinja2", "3.1.6"),
+        ("MarkupSafe", "markupsafe", "3.0.4"), ("jsonschema", "jsonschema", "4.26.0"),
+        ("attrs", "attrs", "26.1.0"),
+        ("jsonschema-specifications", "jsonschema_specifications", "2025.9.1"),
+        ("referencing", "referencing", "0.37.0"), ("rpds-py", "rpds", "2026.9.1"),
+        ("typing-extensions", "typing_extensions", "4.16.0")]:
+    module = importlib.import_module(module_name)
+    origin = Path(module.__file__).resolve()
+    metadata = importlib.metadata.distribution(distribution)
+    if (metadata.version != expected_version or not origin.is_relative_to(tools)
+            or not Path(metadata.locate_file("")).resolve().is_relative_to(tools)):
+        raise SystemExit("Unexpected native media Python package/version/origin")
+    packages[distribution] = {"version": metadata.version, "module": str(origin)}
+# Exercise the actual generator libraries' ordinary APIs, not only metadata imports.
+jinja_module = importlib.import_module("jinja2")
+schema_module = importlib.import_module("jsonschema")
+if jinja_module.Environment().from_string("{{ value|e }}").render(value="<probe>") != "&lt;probe&gt;":
+    raise SystemExit("Jinja2 rendering preflight failed")
+schema_module.validate({"bounded": True}, {"type": "object",
+                       "properties": {"bounded": {"type": "boolean"}},
+                       "required": ["bounded"], "additionalProperties": False})
+json.dump({"executable": sys.executable, "python": sys.version, "basePrefix": sys.base_prefix,
+           "platform": platform.platform(), "systemSitePackages": False,
+           "userSitePackages": False, "packages": packages}, sys.stdout, indent=2, sort_keys=True)
+sys.stdout.write("\n")
+PYTHON_TOOLCHAIN
     overlay="$root/scripts/native-media-hosted/android"
     # Exact public checkout plus reviewed overlay; never use an existing dirty dependency directory.
     for relative in buildscripts/include/depinfo.sh buildscripts/include/download-deps.sh \
