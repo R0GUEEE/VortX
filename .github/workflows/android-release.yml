@@ -134,6 +134,9 @@ jobs:
         run: |
           yes | sdkmanager "ndk;30.0.16248370"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
+          # The runner image also exports an older NDK as ANDROID_NDK_ROOT; point it at the same pin
+          # so no tool can pick the other one.
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
 
       - name: Install Rust nightly + Android targets
         uses: dtolnay/rust-toolchain@4fd1da8b0805d2d2e936788875a7d65dbd677dc2 # nightly branch, 2026-07-19

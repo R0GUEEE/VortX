@@ -169,6 +169,9 @@ jobs:
         run: |
           yes | sdkmanager "ndk;30.0.16248370"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
+          # The runner image also exports an older NDK as ANDROID_NDK_ROOT; point it at the same pin
+          # so no tool can pick the other one.
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
 
       # SHA-pinned (see the pin note above). Pinning drops the toolchain-from-ref-name convention
       # (@nightly), so the toolchain is passed explicitly.
