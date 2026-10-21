@@ -230,9 +230,9 @@ def expected_engine(tag):
     # Exact reviewed tag interpretation, never a caller-supplied/fallback engine pin.
     if tag == "v0.5.6-beta.2":
         return HISTORICAL_BETA2_ENGINE
-    # beta.3 was tagged but never published; beta.4 is its corrected build and beta.5 follows on the
+    # beta.3 was tagged but never published; beta.4 is its corrected build and beta.5/beta.6 follow on the
     # same reviewed engine.
-    require(tag in ("v0.5.6-beta.3", "v0.5.6-beta.4", "v0.5.6-beta.5"), "no reviewed native engine pin for this beta tag")
+    require(tag in ("v0.5.6-beta.3", "v0.5.6-beta.4", "v0.5.6-beta.5", "v0.5.6-beta.6"), "no reviewed native engine pin for this beta tag")
     return ENGINE
 
 

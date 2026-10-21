@@ -25,6 +25,7 @@ on:
       - "scripts/test-episode-source-isolation.sh"
       - "scripts/test-next-preparation-attempt.sh"
       - "test/apple-player-timeline-boundaries.test.js"
+      - "test/native-callback-generation.mjs"
       - "scripts/test-release-orchestration-contracts.sh"
       - "scripts/test-android-native-release-contracts.sh"
       - "scripts/test-android-native-build-config.sh"
@@ -66,6 +67,7 @@ on:
       - "scripts/test-episode-source-isolation.sh"
       - "scripts/test-next-preparation-attempt.sh"
       - "test/apple-player-timeline-boundaries.test.js"
+      - "test/native-callback-generation.mjs"
       - "scripts/test-release-orchestration-contracts.sh"
       - "scripts/test-android-native-release-contracts.sh"
       - "scripts/test-android-native-build-config.sh"
@@ -144,6 +146,7 @@ jobs:
       - run: bash scripts/test-cw-service-selection.sh
       - run: bash scripts/test-home-cw-selection.sh
       - run: bash scripts/test-apple-parity-contracts.sh
+      - run: node test/native-callback-generation.mjs
       - run: bash scripts/test-apple-player-timeline.sh
       - run: swift app/Tests/MacSettingsShellContractTests.swift
       - run: swiftc -parse-as-library app/SourcesShared/TabBarPrefs.swift app/Tests/CompactNavigationPolicyTests.swift -o /tmp/compact-navigation-test && /tmp/compact-navigation-test

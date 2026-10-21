@@ -65,6 +65,10 @@ final class CoreBridge: ObservableObject {
     private var nativeFacadeStorage: VortxNativeCoreFacade?
     private var nativeCredentialCapture: CredentialScopeRegistry.Capture?
     private var nativeInstallGeneration = UUID()
+    // Callback delivery belongs to the facade installation, not a profile operation. Profile
+    // switches rotate nativeInstallGeneration to retire old playback/edit targets while the
+    // same facade keeps fetching and publishing the newly selected profile's resources.
+    private var nativeCallbackGeneration = UUID()
     private var nativeProfileBaseline: [UserProfile] = []
     private var nativeAccountEditRequests: [UUID: (CredentialScopeRegistry.Capture, VortxNativeProfiles.AccountRebindRequest)] = [:]
     private var nativePublishedCredentialSlot: String?
@@ -841,7 +845,10 @@ final class CoreBridge: ObservableObject {
                               initialProfileID: UUID? = nil,
                               initialProfileSource: (any VortxMutationAuthority)? = nil) async throws {
         let installGeneration = UUID()
-        nativeFacadeLock.withLock { nativeInstallGeneration = installGeneration }
+        nativeFacadeLock.withLock {
+            nativeInstallGeneration = installGeneration
+            nativeCallbackGeneration = installGeneration
+        }
         NotificationCenter.default.post(name: Self.xperienceContextChangedNote, object: nil)
         guard CredentialScopeRegistry.shared.isCurrent(capture), session.scope.account == capture.namespace else {
             session.revoke(); throw VortxNativeError.invalidSnapshot
@@ -850,7 +857,7 @@ final class CoreBridge: ObservableObject {
             Task { @MainActor in
                 guard let self, CredentialScopeRegistry.shared.isCurrent(capture),
                       self.nativeFacadeLock.withLock({
-                          self.nativeInstallGeneration == installGeneration && self.nativeCredentialCapture == capture
+                          self.nativeCallbackGeneration == installGeneration && self.nativeCredentialCapture == capture
                             && self.nativeFacadeStorage?.ownsSession(session) == true
                       }) else { return }
                 VortXSyncManager.shared.nativeMutationDidCommit(credentialCapture: capture)
@@ -859,7 +866,7 @@ final class CoreBridge: ObservableObject {
             Task { @MainActor in
                 guard let self, CredentialScopeRegistry.shared.isCurrent(capture),
                       self.nativeFacadeLock.withLock({
-                          self.nativeInstallGeneration == installGeneration && self.nativeCredentialCapture == capture
+                          self.nativeCallbackGeneration == installGeneration && self.nativeCredentialCapture == capture
                             && self.nativeFacadeStorage?.ownsSession(session) == true
                       }) else { return }
                 VortXSyncManager.shared.nativeMutationDidCommit(credentialCapture: capture, progressOnly: true)
@@ -867,7 +874,7 @@ final class CoreBridge: ObservableObject {
         }) { [weak self] fields in
             guard let self, CredentialScopeRegistry.shared.isCurrent(capture),
                   self.nativeFacadeLock.withLock({
-                      self.nativeInstallGeneration == installGeneration && self.nativeCredentialCapture == capture
+                      self.nativeCallbackGeneration == installGeneration && self.nativeCredentialCapture == capture
                         && self.nativeFacadeStorage?.ownsSession(session) == true
                   }),
                   let data = try? JSONSerialization.data(withJSONObject: ["name": "NewState", "args": fields]) else { return }
@@ -928,6 +935,7 @@ final class CoreBridge: ObservableObject {
         VortxNativeSession.revokeAllForOwnerBoundary()
         let old = nativeFacadeLock.withLock {
             nativeInstallGeneration = UUID()
+            nativeCallbackGeneration = UUID()
             let old = nativeFacadeStorage; nativeFacadeStorage = nil; nativeCredentialCapture = nil; return old
         }
         old?.close()

@@ -19,8 +19,9 @@ class HostedDirectBetaContract(unittest.TestCase):
         self.assertEqual(MODULE.expected_engine("v0.5.6-beta.3"), "a3169f338f3f05da4ad3adb39a1e557c3ddcac33")
         self.assertEqual(MODULE.expected_engine("v0.5.6-beta.4"), "a3169f338f3f05da4ad3adb39a1e557c3ddcac33")
         self.assertEqual(MODULE.expected_engine("v0.5.6-beta.5"), "a3169f338f3f05da4ad3adb39a1e557c3ddcac33")
+        self.assertEqual(MODULE.expected_engine("v0.5.6-beta.6"), "a3169f338f3f05da4ad3adb39a1e557c3ddcac33")
         self.assertEqual(MODULE.expected_engine("v0.5.6-beta.2"), "af29b22e4c45740a1f5b6cb415b81f8430f55b9f")
-        for tag in ("v0.5.6-beta.1", "v0.5.6-beta.6", "v0.5.7-beta.1", "main", "", None):
+        for tag in ("v0.5.6-beta.1", "v0.5.6-beta.7", "v0.5.7-beta.1", "main", "", None):
             with self.subTest(tag=tag), self.assertRaises(ValueError):
                 MODULE.expected_engine(tag)
 
