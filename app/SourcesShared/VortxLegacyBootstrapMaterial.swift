@@ -320,10 +320,9 @@ enum VortxLegacyBootstrapMaterial {
         let scope = try LegacyWatchedBitfieldMigrationEvidence.Scope(accountID: accountID, profileID: profileID,
             verifiedStreamingUID: verifiedUID, ownerProfileID: ownerProfileID)
         try LegacyWatchedBitfieldMigrationEvidence.validateOwnerSource(scope: scope, source: sourceDocument)
-        let frame = try VortxProfileOverlayWitness.decodeObject(json: sourceDocument)
-        guard let encoded = frame["libraryResponseBase64"] as? String,
-              let bytes = Data(base64Encoded: encoded), bytes.base64EncodedString() == encoded,
-              let raw = try VortxProfileOverlayWitness.decodeObject(json: bytes)["result"] as? [Any] else {
+        let projection = try LegacyWatchedBitfieldMigrationEvidence.ownerHistoryLibraryProjection(
+            scope: scope, source: sourceDocument)
+        guard let raw = try VortxProfileOverlayWitness.decodeObject(json: projection)["result"] as? [Any] else {
             throw fail("Malformed owner history source")
         }
         for row in watchedEvidence {

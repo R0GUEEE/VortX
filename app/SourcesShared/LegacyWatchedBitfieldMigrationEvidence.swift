@@ -304,6 +304,56 @@ enum LegacyWatchedBitfieldMigrationEvidence {
         try requireOwnerEnvelope(StrictJSON.value(source), scope: scope)
     }
 
+    /// Temporary input for the EXISTING owner row converter, never source/receipt bytes.
+    /// The original frame and entire raw library are parsed/credential-checked first. Unknown
+    /// siblings remain in that immutable frame; only fields consumed by projectOwnLibraryRow
+    /// enter the legacy binary64 projection codec. In particular, ignored future numeric
+    /// lexemes are not a reason to reject a source or normalize its provenance.
+    static func ownerHistoryLibraryProjection(scope: Scope, source: Data) throws -> Data {
+        guard scope.verifiedStreamingUID != nil else { throw Failure.malformed("Owner source requires verified streaming identity") }
+        let frame = try StrictJSON.value(source)
+        try requireOwnerEnvelope(frame, scope: scope)
+        let library = try StrictJSON.value(try strictEnvelopeBytes(strictObject(frame), "libraryResponseBase64"))
+        // Keep the old whole-input node/Unicode-dictionary bounds without interpreting raw
+        // unknown numbers as Double. Keys count as nodes, just as in the existing witness.
+        func bounded(_ value: StrictJSON.Value, remaining: inout Int) throws {
+            guard remaining > 0 else { throw Failure.malformed("Owner library exceeds node limit") }
+            remaining -= 1
+            switch value {
+            case .object(let object):
+                guard Set(object.members.map(\.key)).count == object.members.count else {
+                    throw Failure.malformed("Ambiguous owner library JSON key")
+                }
+                for member in object.members {
+                    guard remaining > 0 else { throw Failure.malformed("Owner library exceeds node limit") }
+                    remaining -= 1
+                    try bounded(member.value, remaining: &remaining)
+                }
+            case .array(let values): for value in values { try bounded(value, remaining: &remaining) }
+            default: break
+            }
+        }
+        var remaining = 100_000
+        try bounded(library, remaining: &remaining)
+        let response = try strictObject(library)
+        let rows = try strictArray(strictValue(response, "result"))
+        let rowKeys = Set(["_id", "type", "name", "poster", "removed", "temp", "state"].map { Data($0.utf8) })
+        let stateKeys = Set(["timeOffset", "duration", "lastWatched", "video_id", "timesWatched",
+                             "flaggedWatched", "watched"].map { Data($0.utf8) })
+        let projected = rows.map { value -> StrictJSON.Value in
+            guard case .object(let row) = value else { return value }
+            let members = row.members.filter { rowKeys.contains($0.keyBytes) }.map { member -> StrictJSON.Member in
+                guard member.keyBytes == Data("state".utf8), case .object(let state) = member.value else { return member }
+                return .init(key: member.key, keyBytes: member.keyBytes,
+                    value: .object(.init(members: state.members.filter { stateKeys.contains($0.keyBytes) })))
+            }
+            return .object(.init(members: members))
+        }
+        return try StrictJSON.serialize(.object(.init(members: [
+            .init(key: "result", keyBytes: Data("result".utf8), value: .array(projected))
+        ])))
+    }
+
     private static func sharedRow(_ rows: [StrictJSON.Value], index: Int) throws -> SourceRow {
         guard let raw = rows[safe: index] else { throw Failure.malformed("Source row is absent") }
         let row = try strictObject(raw)

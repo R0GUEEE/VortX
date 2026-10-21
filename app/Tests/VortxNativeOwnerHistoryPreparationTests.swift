@@ -36,7 +36,70 @@ private final class OwnerPreparationAuthority: VortxMutationAuthority, @unchecke
             "libraryResponseBase64": library.base64EncodedString(), "addonsResponseBase64": registry.base64EncodedString()
         ]), scope: scope, ownerProfileID: owner, profileID: profile, verifiedUID: uid)
     }
+    /// Raw unknown numbers are evidence, not legacy binary64 projection values.
+    /// Keep the production converter and every original source byte; do not edit the real-ABI
+    /// fixture to make its wide-number provenance disappear.
+    static func rawNumericProjectionTests() async throws {
+        let base = Data(#"{"result":[{"_id":"numeric-source","type":"movie","name":"Numeric","state":{"timeOffset":1234,"duration":9000,"lastWatched":"2024-01-01T00:00:00.000Z","flaggedWatched":0}}]}"#.utf8)
+        let original = Data(#"{"result":[{"_id":"numeric-source","type":"movie","name":"Numeric","future":{"original":1e3,"negativeZero":-0.0,"wide":9007199254740993},"state":{"timeOffset":1234,"duration":9000,"lastWatched":"2024-01-01T00:00:00.000Z","flaggedWatched":0,"futureState":[-0.0,9007199254740993,1e3]}}],"futureTop":{"wide":9007199254740993}}"#.utf8)
+        let registry = Data(#"{"result":{"addons":[]}}"#.utf8)
+        let authority = OwnerPreparationAuthority()
+        func prepared(_ bytes: Data) async throws -> Preparation.Prepared {
+            let input = try frame(library: bytes, registry: registry)
+            guard case .prepared(let value) = try await Preparation.prepare(frame: input, authority: authority,
+                fetchMetadata: { _ in fatalError("movie projection must not fetch metadata") })
+            else { fatalError("safe unknown numeric source became pending") }
+            return value
+        }
+        let expected = try await prepared(base)
+        let actual = try await prepared(original)
+        let expectedEvidence = try object(expected.evidence), actualEvidence = try object(actual.evidence)
+        for key in ["library", "watches", "identityLinks"] {
+            check((try encode(["value": actualEvidence[key]!])) == (try encode(["value": expectedEvidence[key]!])))
+        }
+        check(actual.frame.sourceDocument != expected.frame.sourceDocument)
+        let originalFrame = try object(actual.frame.sourceDocument)
+        check(Data(base64Encoded: originalFrame["libraryResponseBase64"] as! String) == original)
+        let reopened = try Preparation.replay(archive: actual.archive, scope: scope, ownerProfileID: owner,
+            profileID: owner, verifiedUID: uid, authority: authority)
+        check(reopened.archive == actual.archive && reopened.frame.sourceDocument == actual.frame.sourceDocument)
+        check(reopened.evidence == actual.evidence)
+        // The binary64 guard STILL applies to fields the existing typed converter consumes.
+        let invalidOwned = Data(#"{"result":[{"_id":"bad","type":"movie","state":{"timeOffset":9007199254740993}}]}"#.utf8)
+        var rejectedOwned = false
+        do { _ = try await prepared(invalidOwned) } catch { rejectedOwned = true }
+        check(rejectedOwned)
+        // Projection is not a privacy or duplicate-key sanitization escape hatch.
+        for hostile in [
+            #"{"result":[{"_id":"bad","type":"movie","future":{"authKey":"synthetic-private"}}]}"#,
+            #"{"result":[{"_id":"bad","type":"movie","future":{"duplicate":1,"duplicate":2}}]}"#
+        ] {
+            var rejected = false
+            do { _ = try frame(library: Data(hostile.utf8), registry: registry) } catch { rejected = true }
+            check(rejected)
+        }
+        let scopeBinding = try LegacyWatchedBitfieldMigrationEvidence.Scope(accountID: scope,
+            profileID: owner, verifiedStreamingUID: uid, ownerProfileID: owner)
+        let excessive = Data(("{\"result\":[],\"future\":[" + Array(repeating: "0", count: 100_001).joined(separator: ",") + "]}").utf8)
+        for hostile in [
+            Data(#"{"result":[],"future":{"\u00e9":1,"e\u0301":2}}"#.utf8),
+            excessive
+        ] {
+            let envelope = try encode([
+                "schemaVersion": 1, "kind": "vortx.owner-history.source/1", "scope": scope,
+                "ownerProfileId": owner.uuidString, "profileId": owner.uuidString,
+                "verifiedStreamingUid": uid, "libraryResponseBase64": hostile.base64EncodedString(),
+                "addonsResponseBase64": registry.base64EncodedString()
+            ])
+            var rejected = false
+            do { _ = try LegacyWatchedBitfieldMigrationEvidence.ownerHistoryLibraryProjection(
+                scope: scopeBinding, source: envelope) } catch { rejected = true }
+            check(rejected)
+        }
+    }
+
     static func main() async throws {
+        try await rawNumericProjectionTests()
         let captured = try frame()
         let authority = OwnerPreparationAuthority()
         let outcome = try await Preparation.prepare(frame: captured, authority: authority, fetchMetadata: { request in

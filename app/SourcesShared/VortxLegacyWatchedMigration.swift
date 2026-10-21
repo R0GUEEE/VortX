@@ -227,11 +227,11 @@ enum VortxLegacyWatchedMigration {
 
     private static func ownerHistoryCandidates(accountID: String, ownerProfileID: UUID, profileID: UUID,
                                                verifiedUID: String, sourceDocument: Data) throws -> [Candidate] {
-        let root = try VortxProfileOverlayWitness.decodeObject(json: sourceDocument)
-        let library = try VortxProfileOverlayWitness.decodeObject(json: bytes(root, "libraryResponseBase64"))
         let scope = try Evidence.Scope(accountID: accountID, profileID: profileID,
                                        verifiedStreamingUID: verifiedUID, ownerProfileID: ownerProfileID)
         try Evidence.validateOwnerSource(scope: scope, source: sourceDocument)
+        let library = try VortxProfileOverlayWitness.decodeObject(
+            json: Evidence.ownerHistoryLibraryProjection(scope: scope, source: sourceDocument))
         var candidates: [Candidate] = []
         guard let rows = try array(library, "result") else { throw Failure.malformedArchive }
         for (index, raw) in rows.enumerated() {
