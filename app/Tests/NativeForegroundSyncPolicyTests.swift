@@ -181,19 +181,24 @@ enum NativeForegroundSyncPolicyTests {
         var playing = Queue()
         playing.request(progressOnly: true, at: t0)
         precondition(playing.nextUploadDelay(now: t0, failureBackoff: nil) == Queue.progressQuiet)
-        // Continuous reports every 6s keep extending the quiet window but never past the cap.
-        let lastReport = Queue.progressMaxWait - 6
-        for second in stride(from: 6.0, through: lastReport, by: 6.0) {
+        // The player reports every 20s; each report must land inside the quiet window, so continuous playback
+        // coalesces to the cap instead of uploading the whole account after every report.
+        precondition(Queue.progressQuiet > 20 * 2)
+        let lastReport = Queue.progressMaxWait - 20
+        for second in stride(from: 20.0, through: lastReport, by: 20.0) {
+            precondition(playing.nextUploadDelay(now: t0.addingTimeInterval(second), failureBackoff: nil)! > 0,
+                         "a 20s report arrives before the previous one would upload")
             playing.request(progressOnly: true, at: t0.addingTimeInterval(second))
         }
         precondition(playing.nextUploadDelay(now: t0.addingTimeInterval(lastReport), failureBackoff: nil) == Queue.progressMaxWait - lastReport)
         // Pause/exit: no further reports, so the quiet window decides.
         var paused = Queue()
         paused.request(progressOnly: true, at: t0)
-        paused.request(progressOnly: true, at: t0.addingTimeInterval(6))
-        precondition(paused.nextUploadDelay(now: t0.addingTimeInterval(21), failureBackoff: nil) == 0)
+        paused.request(progressOnly: true, at: t0.addingTimeInterval(20))
+        let stopped = t0.addingTimeInterval(20 + Queue.progressQuiet)
+        precondition(paused.nextUploadDelay(now: stopped, failureBackoff: nil) == 0)
         // A failed upload's retry delay is never shortened by a progress window.
-        precondition(paused.nextUploadDelay(now: t0.addingTimeInterval(21), failureBackoff: 10) == 10)
+        precondition(paused.nextUploadDelay(now: stopped, failureBackoff: 10) == 10)
 
         // A real edit during playback uploads at the immediate cadence.
         playing.request(at: t0.addingTimeInterval(55))

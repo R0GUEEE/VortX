@@ -40,7 +40,11 @@ enum NativeForegroundSyncPolicy {
     struct PushQueue: Equatable {
         static let urgentDelay: TimeInterval = 2.5
         static let maxFailureBackoff: TimeInterval = 30
-        static let progressQuiet: TimeInterval = 15
+        /// Longer than the player's 20 s progress cadence (PlayerScreen), with room for a late tick. At 15 s
+        /// every report outlived the quiet window, so continuous playback uploaded the whole account after each
+        /// one (a Mac beta 2 log: 149 uploads for 145 reports). Playing now uploads once per `progressMaxWait`;
+        /// a pause or stop, which ends the reports, uploads this long after the last one.
+        static let progressQuiet: TimeInterval = 45
         static let progressMaxWait: TimeInterval = 300
 
         private(set) var generation: UInt64 = 0
