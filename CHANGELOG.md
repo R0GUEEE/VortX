@@ -4,9 +4,9 @@ All notable changes to VortX, newest first. VortX is Apple TV first, with an iPh
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
-## 0.5.6 beta 3 - Faster start, safer Stremio sync and richer Collections
+## 0.5.6 beta 4 - Faster start, working Top Shelf, safer Stremio sync and richer Collections
 
-Build **277** across Apple and Android. This beta opens your account from this device straight away instead
+Build **277** across Apple and Android. Beta 3 was tagged but not published; this is its corrected build. This beta opens your account from this device straight away instead
 of waiting on a full download first, carries Stremio library and watch history through the native account
 path, adds richer Collections with optional Xperience import, and shows what you are actually playing.
 
