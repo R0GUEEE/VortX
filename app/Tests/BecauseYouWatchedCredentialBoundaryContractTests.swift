@@ -67,9 +67,15 @@ private struct BecauseYouWatchedCredentialBoundaryContractTests {
                 core.contains("self.signedInWithLegacyAuthKey()") &&
                 core.contains("queue: .main"),
               "CoreBridge deduplicates true-to-true boundaries and rebinds on main before history admission")
+        // iOS also refreshes Continue Watching on the next main turn; what matters is that each Home observes
+        // the boundary and rebuilds Top Picks from it.
         for (name, source) in [("tvOS", tv), ("iOS", ios)] {
-            check(source.contains(".onReceive(account.$credentialBoundaryGeneration) { _ in refreshTopPicks() }"),
-                  "\(name) Home observes the same-slot credential generation")
+            let observes: Bool = {
+                guard let start = source.range(of: ".onReceive(account.$credentialBoundaryGeneration) { _ in") else { return false }
+                let body = source[start.upperBound...].prefix(240)
+                return body.contains("refreshTopPicks()")
+            }()
+            check(observes, "\(name) Home observes the same-slot credential generation")
         }
 
         if failures == 0 {
