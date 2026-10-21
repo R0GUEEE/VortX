@@ -40,6 +40,7 @@ diff --git a/libavformat/tls_mbedtls.c b/libavformat/tls_mbedtls.c
      // set own certificate and private key
      if ((ret = mbedtls_ssl_conf_own_cert(&tls_ctx->ssl_config, &tls_ctx->own_cert, &tls_ctx->priv_key)) != 0) {
 diff --git a/libavformat/tls_mbedtls_vortx_distrust.h b/libavformat/tls_mbedtls_vortx_distrust.h
+new file mode 100644
 --- /dev/null
 +++ b/libavformat/tls_mbedtls_vortx_distrust.h
 @@ -0,0 +1,38 @@

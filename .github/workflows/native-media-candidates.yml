@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-media-candidates-${{ github.ref }}
+  group: native-media-candidates-${{ github.ref }}-${{ inputs.apple }}-${{ inputs.android }}
   cancel-in-progress: false
 
 jobs:
@@ -40,7 +40,7 @@ jobs:
       - name: Verify reviewed recipes
         run: |
           set -euo pipefail
-          printf '%s  %s\n' 5b32b2f624d7599d3f3d196116bc67efc2deb88397e01b48810763f40d02c678 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
+          printf '%s  %s\n' 3f02efb5cf610568aa724950859f454af2d4c90fbb8c5c758412a1cdfd0056f4 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
           shasum -a 256 -c scripts/native-media-hosted/inputs.sha256
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -85,7 +85,7 @@ jobs:
       - name: Verify reviewed recipes
         run: |
           set -euo pipefail
-          printf '%s  %s\n' 5b32b2f624d7599d3f3d196116bc67efc2deb88397e01b48810763f40d02c678 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
+          printf '%s  %s\n' 3f02efb5cf610568aa724950859f454af2d4c90fbb8c5c758412a1cdfd0056f4 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
           shasum -a 256 -c scripts/native-media-hosted/inputs.sha256
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

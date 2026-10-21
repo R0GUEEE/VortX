@@ -77,12 +77,20 @@ on:
         description: Build only the reviewed secretless native-media candidates
         type: boolean
         default: false
+      native_media_apple:
+        description: Include Apple in a manual native-media candidate run
+        type: boolean
+        default: true
+      native_media_android:
+        description: Include Android in a manual native-media candidate run
+        type: boolean
+        default: true
 
 # Pure source/HTTP fixtures only: no private engine checkout, signing credentials or publication.
 permissions:
   contents: read
 concurrency:
-  group: source-contracts-${{ github.workflow }}-${{ github.ref }}${{ inputs.native_media_candidates && '-native-media' || '' }}
+  group: source-contracts-${{ github.workflow }}-${{ github.ref }}${{ inputs.native_media_candidates && format('-native-media-{0}-{1}', inputs.native_media_apple, inputs.native_media_android) || '' }}
   cancel-in-progress: ${{ !inputs.native_media_candidates }}
 jobs:
   apple-policies:
@@ -145,5 +153,5 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.native_media_candidates
     uses: ./.github/workflows/native-media-candidates.yml
     with:
-      apple: true
-      android: true
+      apple: ${{ inputs.native_media_apple }}
+      android: ${{ inputs.native_media_android }}
