@@ -10,7 +10,7 @@ plugins {
 val generatedChangelogAssets = layout.buildDirectory.dir("generated/changelogAssets")
 @Suppress("UNCHECKED_CAST")
 val androidAbis = rootProject.extra["vortxAndroidAbis"] as List<String>
-val copyChangelogAsset by tasks.registering(Copy::class) {
+val copyChangelogAsset = tasks.register<Copy>("copyChangelogAsset") {
     from(rootProject.file("../CHANGELOG.md"))
     into(generatedChangelogAssets)
 }
@@ -238,7 +238,7 @@ android {
     }
 
     sourceSets.named("main") {
-        assets.srcDir(generatedChangelogAssets)
+        assets.directories.add(generatedChangelogAssets.get().asFile.path)
     }
 }
 
@@ -342,7 +342,7 @@ dependencies {
     // distribution model. Coordinate resolves from mavenCentral() (already in settings.gradle.kts).
     // Shared root selection: original Maven baseline OR one SHA-pinned component AAR.
     // Local component bytes never impersonate dev.jdtech.mpv:libmpv:1.0.0.
-    "fullImplementation"(rootProject.extra["vortxMpvAarDependency"])
+    "fullImplementation"(checkNotNull(rootProject.extra["vortxMpvAarDependency"]))
 
     // The W1-B terminal seam itself: the source-built fork of the upstream JNI glue that exposes
     // mpv_event_end_file.reason/error to Kotlin (MpvTerminalEvent.fromNative). MIT-licensed glue,
@@ -445,7 +445,7 @@ val jniLibsOutDir = layout.buildDirectory.dir("rustJniLibs/android")
 // minSdk must match the android {} block above; passed to cargo-ndk as the platform level (-p 26).
 val nativeApiLevel = 26
 
-val cargoNdkBuild by tasks.registering(Exec::class) {
+val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
     group = "rust"
     description = "Cross-compile core/ to libstremiox_core.so for Android via cargo-ndk."
     workingDir = coreCrateDir
@@ -511,7 +511,7 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
 android {
     // Package the legacy cargo-ndk output only for an explicit non-native comparison build.
     sourceSets.named("main") {
-        if (!nativeEngineEnabled) jniLibs.srcDir(jniLibsOutDir)
+        if (!nativeEngineEnabled) jniLibs.directories.add(jniLibsOutDir.get().asFile.path)
     }
     // The bounded community-provider host is a separate C library. It deliberately does not share
     // symbols or build output with the Rust engine JNI library above.
@@ -587,7 +587,7 @@ val vortxEngineCoreDir: File? = (
 // parent updates pins, feature sets and required ABI symbols together after review.
 val vortxJniLibsDir = layout.projectDirectory.dir("src/main/jniLibs")
 
-val cargoNdkBuildVortxFfi by tasks.registering(Exec::class) {
+val cargoNdkBuildVortxFfi = tasks.register<Exec>("cargoNdkBuildVortxFfi") {
     group = "rust"
     description = "Cross-compile the engine branch's vortx-ffi (jni,server plus resource-host when selected) to libvortx_ffi.so via cargo-ndk."
     workingDir = vortxEngineCoreDir ?: coreCrateDir // placeholder wd when unset; onlyIf gates the run

@@ -27,7 +27,7 @@ if (mpvComponentSelected) {
     check(Regex("https://github\\.com/VortXTV/VortX/releases/download/vendor-[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\\.aar").matches(mpvComponentUrl)
         && Regex("[0-9a-f]{64}").matches(mpvComponentSha)) { "Both exact mpv component URL and SHA-256 are required" }
     val aar = file(".gradle/vortx-mpv-components/$mpvComponentSha/libmpv.aar")
-    val verifyMpvComponent by tasks.registering {
+    val verifyMpvComponent = tasks.register("verifyMpvComponent") {
         inputs.files(mpvDescriptor, aar)
         // No outputs/up-to-date bypass: re-hash the selected bytes on every consuming build.
         doLast {

@@ -55,7 +55,7 @@ require_literal "resource-host compilation is an explicit Cargo feature" '"jni,s
 require_literal "legacy JNI/server feature remains explicit for non-native builds" '"jni,server"' "$GRADLE_BUILD"
 require_regex "native feature selection uses the shared resource-host decision" 'if \(nativeResourceHostEnabled\) "jni,server,resource-host" else "jni,server"' "$GRADLE_BUILD"
 require_literal "legacy Stremio JNI task is a non-native comparison dependency only" 'if (!nativeEngineEnabled) dependsOn(cargoNdkBuild)' "$GRADLE_BUILD"
-require_literal "native mode excludes the legacy Stremio jniLibs directory" 'if (!nativeEngineEnabled) jniLibs.srcDir(jniLibsOutDir)' "$GRADLE_BUILD"
+require_literal "native mode excludes the legacy Stremio jniLibs directory" 'if (!nativeEngineEnabled) jniLibs.directories.add(jniLibsOutDir.get().asFile.path)' "$GRADLE_BUILD"
 require_literal "native mode excludes stale legacy Stremio JNI packages" 'if (nativeEngineEnabled) excludes += "**/libstremiox_core.so"' "$GRADLE_BUILD"
 if grep -qF 'providers.gradleProperty("vortx.nativeEngine").orNull == "true"' "$GRADLE_BUILD"; then
     fail "BuildConfig still has an independent provider-only native selector"

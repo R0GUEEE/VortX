@@ -78,7 +78,7 @@ dependencies {
 // av_jni_set_android_app_ctx (declared in <libavcodec/jni.h>, defined in this FFmpeg build's
 // libavcodec.so), mirroring upstream's target_link_libraries(player mpv avcodec log).
 // -------------------------------------------------------------------------------------------------
-val mpvLinkAar by configurations.creating {
+val mpvLinkAar = configurations.create("mpvLinkAar") {
     // Resolvable but not consumable: this is a private build-time input of THIS module only (the
     // linker's symbol source), never propagated to consumers. Resolution itself is deferred to the
     // extraction task's execution time.
@@ -89,12 +89,12 @@ val mpvLinkAar by configurations.creating {
 }
 
 dependencies {
-    mpvLinkAar(rootProject.extra["vortxMpvAarDependency"])
+    mpvLinkAar(checkNotNull(rootProject.extra["vortxMpvAarDependency"]))
 }
 
 val mpvAarJniLibsDir = layout.buildDirectory.dir("mpvAarJniLibs")
 
-val extractMpvAarJniLibs by tasks.registering(Sync::class) {
+val extractMpvAarJniLibs = tasks.register<Sync>("extractMpvAarJniLibs") {
     group = "build"
     description = "Extracts per-ABI libmpv.so/libavcodec.so from the root-selected AAR as native link inputs."
     // Preserve the shared file dependency's verification task through zipTree expansion.

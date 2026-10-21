@@ -74,11 +74,11 @@ grep -Fq 'verify-mpvkit-dvfel-apple-tls.sh' "$VERIFY" || fail "artifact gate mus
 # Extract the real fetch step and require the verifier after unzip, before the next workflow step.
 fetch_step="$(awk '/^[[:space:]]+- name: Fetch the MPVKit-DVFEL artifacts/{active=1; next}
   active && /^[[:space:]]+- name:/{exit} active{print}' "$WORKFLOW")"
-grep -Fq 'unzip -q /tmp/mpvkit.zip -d "$DEST"' <<<"$fetch_step" ||
+grep -Fq 'unzip -oq /tmp/mpvkit.zip -d "$DEST"' <<<"$fetch_step" ||
   fail "release fetch step must unpack the pinned artifact"
 grep -Fq 'bash scripts/verify-mpvkit-dvfel-artifacts.sh "$DEST"' <<<"$fetch_step" ||
   fail "release fetch step must run the real MPV artifact verifier"
-unzip_line="$(grep -nF 'unzip -q /tmp/mpvkit.zip -d "$DEST"' <<<"$fetch_step" | cut -d: -f1)"
+unzip_line="$(grep -nF 'unzip -oq /tmp/mpvkit.zip -d "$DEST"' <<<"$fetch_step" | cut -d: -f1)"
 verify_line="$(grep -nF 'bash scripts/verify-mpvkit-dvfel-artifacts.sh "$DEST"' <<<"$fetch_step" | cut -d: -f1)"
 [ "$verify_line" -gt "$unzip_line" ] || fail "artifact verifier must run after unpack"
 
@@ -98,6 +98,26 @@ cleanup_fixture() {
   rmdir "$TEST_BUILD_ROOT" 2>/dev/null || true
 }
 trap cleanup_fixture EXIT
+
+# A verified component ZIP also contains root files such as .gitignore that already
+# exist in the vendor directory. Both real consumers must extract without a stdin
+# prompt; do not mistake an EOF prompt failure for bad native payload contents.
+SHELL_WORKFLOW="$ROOT/.github/workflows/release-packaging-validation.yml"
+grep -Fq 'unzip -oq "$RUNNER_TEMP/mpvkit.zip" -d "$DEST"' "$SHELL_WORKFLOW" ||
+  fail "secretless consumer must noninteractively unpack the verified artifact"
+mkdir -p "$FIXTURE/extract-source/artifacts" "$FIXTURE/extract-destination"
+printf 'verified component root\n' > "$FIXTURE/extract-source/.gitignore"
+printf 'verified payload\n' > "$FIXTURE/extract-source/artifacts/payload"
+printf 'previous vendor root\n' > "$FIXTURE/extract-destination/.gitignore"
+(
+  cd "$FIXTURE/extract-source"
+  zip -q "$FIXTURE/collision.zip" .gitignore artifacts/payload
+)
+unzip -oq "$FIXTURE/collision.zip" -d "$FIXTURE/extract-destination" < /dev/null
+cmp "$FIXTURE/extract-source/.gitignore" "$FIXTURE/extract-destination/.gitignore" ||
+  fail "noninteractive unpack did not replace the known existing component file"
+cmp "$FIXTURE/extract-source/artifacts/payload" "$FIXTURE/extract-destination/artifacts/payload" ||
+  fail "noninteractive unpack lost an artifact entry"
 
 git -C "$SOURCE" init -q
 git -C "$SOURCE" config user.name "MPVKit contract fixture"

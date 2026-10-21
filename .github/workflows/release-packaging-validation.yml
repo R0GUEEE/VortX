@@ -320,7 +320,7 @@ jobs:
             exit 1
           fi
           rm -rf "$DEST/artifacts"
-          unzip -q "$RUNNER_TEMP/mpvkit.zip" -d "$DEST"
+          unzip -oq "$RUNNER_TEMP/mpvkit.zip" -d "$DEST"
           bash scripts/verify-mpvkit-dvfel-artifacts.sh "$DEST"
 
       - name: Generate CI-only stub engine xcframeworks
