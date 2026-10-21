@@ -121,9 +121,9 @@ jobs:
           VORTX_KEY_PASSWORD: vortx-adhoc-ci-store
         run: ./gradlew :app:assembleFullRelease :app:assemblePlayRelease :app:bundlePlayRelease --no-daemon --stacktrace
 
-      # Same bounded current-source recovery filters as CodeQL, also available to manual
-      # secretless validation. JNI-gated cases still skip without the real native runtime.
-      - name: Test Android sync and account recovery
+      # Preserve the bounded recovery filters and exercise the actual shared Media3 metadata
+      # policies. JNI-gated cases still skip without the real private native runtime.
+      - name: Test Android sync, account recovery and active-media metadata
         working-directory: android
         run: >-
           ./gradlew :app:testPlayDebugUnitTest
@@ -132,6 +132,16 @@ jobs:
           --tests com.vortx.android.sync.DurableSessionStateTest
           --tests com.vortx.android.sync.NativeAccountSyncTest
           --tests com.vortx.android.sync.VortXSessionOwnerTransitionContractTest
+          --tests com.vortx.android.player.ExoPlayerEngineStatePolicyTest
+          --tests com.vortx.android.player.PlaybackMetadataTest
+          --no-daemon --stacktrace
+
+      - name: Test Full player native-load metadata identity
+        working-directory: android
+        run: >-
+          ./gradlew :app:testFullDebugUnitTest
+          -Pvortx.nativeEngine=true -Pvortx.nativeResourceHost=true
+          --tests com.vortx.android.player.mpv.MpvMetadataLoadIdentityTest
           --no-daemon --stacktrace
 
       - name: Retain current-source recovery test execution and skips
@@ -139,7 +149,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Android-recovery-unit-results
-          path: android/app/build/test-results/testPlayDebugUnitTest/*.xml
+          path: |
+            android/app/build/test-results/testPlayDebugUnitTest/*.xml
+            android/app/build/test-results/testFullDebugUnitTest/*.xml
           if-no-files-found: error
 
       - name: Require the exact release package set (two universal APKs, one AAB)

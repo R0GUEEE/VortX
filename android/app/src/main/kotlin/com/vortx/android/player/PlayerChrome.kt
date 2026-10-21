@@ -136,9 +136,8 @@ private val LocalPlayerChromeIsTv = staticCompositionLocalOf { false }
 fun PlayerChrome(
     playable: Playable,
     state: PlayerState,
-    dolbyVisionAvailable: Boolean,
-    /// The honest dynamic-range line for the Playback Info sheet ("Dolby Vision" on the DV lane, "HDR10
-    /// (tone-mapped from Dolby Vision)" for a DV source on the libmpv lane). Null omits the row.
+    /// Active input/decoded dynamic range for Playback Info, not a display/output guarantee.
+    /// Null omits the row when the current engine has no unambiguous evidence.
     dynamicRange: String? = null,
     /// The relative-seek step (ms + whole seconds) for the transport +/- buttons, from the viewer's Skip
     /// step setting (Apple `stremiox.seekStep`). Defaults keep the chrome usable in isolation at 10s.
@@ -564,10 +563,9 @@ fun PlayerChrome(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(start = 8.dp, top = 2.dp)) {
                 if (playable.viaStreamingServer) ChromeBadge("SOURCE", emberAccent)
-                // DV badge is GATED on the display actually advertising Dolby Vision. The ExoPlayer engine
-                // still does its own DV codec fallback regardless; this badge is purely about not claiming
-                // DV on a panel that cannot present it.
-                if (dolbyVisionAvailable) ChromeBadge("DOLBY VISION", emberAccent)
+                // Keep this exact badge anchor; active formats, not launch hints/panel capability, supply facts.
+                remember(state.metadata) { state.metadata.pills() }
+                    .forEach { pill -> PlaybackMetadataPillView(pill, emberAccent) }
                 if (speed != 1.0f) ChromeBadge("${trimSpeed(speed)}x", emberAccent)
             }
         }

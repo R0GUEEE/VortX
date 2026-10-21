@@ -115,8 +115,8 @@ import kotlin.math.roundToLong
 ///
 /// Dolby Vision / Atmos: NOT hand-decoded here. The ExoPlayer engine's DefaultRenderersFactory does the
 /// DV -> HEVC/AVC/AV1 codec fallback and its DefaultAudioSink negotiates Atmos passthrough; that is why
-/// the router routes those streams there. The DV badge in the chrome is gated on the display advertising
-/// Dolby Vision (see [displaySupportsDolbyVision]), so it never promises DV on a panel that cannot present it.
+/// the router routes those streams there. Badges describe observed active media, not the filename,
+/// configured engine, or display/output capabilities.
 // Two opt-in annotations, deliberately: kotlin.OptIn satisfies the Kotlin compiler's own experimental-API
 // check; androidx.annotation.OptIn is the separate one Android Lint's UnsafeOptInUsageError looks for
 // (S01 lint-config baseline surfaced this -- ExoPlayerEngine(context) below, inside an inline `remember`
@@ -1930,21 +1930,8 @@ fun PlayerScreen(
                 stallError -> playerState.copy(hasError = true)
                 else -> playerState
             },
-            // DV BADGE HONESTY (Apple: the badge is earned only by the true-DV lane): show DOLBY VISION only
-            // when this is a DV source, the live engine is the DV lane (ExoPlayer), AND the panel presents
-            // DV. On the libmpv lane a DV source is tone-mapped to HDR10, so no DV badge there -- the
-            // Dynamic range row below tells the honest truth instead.
-            dolbyVisionAvailable = currentPlayable.isDolbyVision &&
-                engine is ExoPlayerEngine &&
-                displaySupportsDolbyVision(context),
-            // The honest dynamic-range line for the Playback Info sheet: true DV on the DV lane, else the
-            // "HDR10 tone-mapped from Dolby Vision" truth for a DV source on the libmpv lane. Null (omit the
-            // row) for a non-DV source, whose codec/HDR is already shown by the engine stats.
-            dynamicRange = when {
-                !currentPlayable.isDolbyVision -> null
-                engine is ExoPlayerEngine && displaySupportsDolbyVision(context) -> "Dolby Vision"
-                else -> "HDR10 (tone-mapped from Dolby Vision)"
-            },
+            // Share the same active-media evidence as the badge row; unknown range stays absent.
+            dynamicRange = playerState.metadata.dynamicRange.label,
             seekStepMs = seekStepMs,
             seekStepSeconds = seekStepSeconds,
             playerVolume = playerVolume,
