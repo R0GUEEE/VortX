@@ -4,6 +4,42 @@ All notable changes to VortX, newest first. VortX is Apple TV first, with an iPh
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
+## 0.5.6 beta 3 - Faster start, safer Stremio sync and richer Collections
+
+Build **277** across Apple and Android. This beta opens your account from this device straight away instead
+of waiting on a full download first, carries Stremio library and watch history through the native account
+path, adds richer Collections with optional Xperience import, and shows what you are actually playing.
+
+### Fixed and improved
+
+- **A faster start.** VortX waited to download, decrypt and merge your whole account before opening it, and at launch it did that twice. It now opens from this device's saved copy and catches up with the cloud right after. A first sign-in, or a device without a saved copy, still downloads first.
+- **Stremio library and watch history ([#267](https://github.com/VortXTV/VortX/issues/267)).** Connecting Stremio carries the owner's library and watched history through the native account path, not just add-ons. Import, reconnect and sync keep the account and profile that started them; a late result cannot replace a different account, and a failed save never acknowledges changes it did not keep.
+- **Older accounts carried over without losing saved data ([#262](https://github.com/VortXTV/VortX/issues/262)).** Valid older library titles are no longer mistaken for unsafe data. Unknown fields, pending changes and the original account copy are kept, and unreadable data is never treated as an empty account.
+- **Interests saved to the right profile.** Changing profile while the For You interests picker was open could save one profile's choices into another. The picker now saves only for the profile it opened for, and closes when the profile changes.
+- **Saved Collections kept when storage cannot be read.** Signed-out edits no longer replace unreadable saved Collections with an empty copy.
+- **Top Shelf.** Movies and series that share an ID no longer collide, a long queue is trimmed to fit instead of being rejected, and progress, artwork and queue changes trigger an update. Full still includes Top Shelf in the normal app; there is no separate extension to install. The static Top Shelf seen with some signing services is still being investigated.
+- **Apple TV player controls.** Up reveals the controls before checking Up Next and skip prompts, so less work runs first in the credits window.
+- **TV previews and playback audio.** Silent previews cannot reopen an audio output, and their wake-ups and recovery are bounded.
+- **History updates.** Trakt history reads follow every page before replacing the saved result, cancelled SIMKL reads keep the last complete snapshot, and account changes keep newer local edits.
+- **Android login and sync ([#270](https://github.com/VortXTV/VortX/issues/270)).** A realtime connection that fails to start no longer discards the saved session, and malformed Stremio rows are held without losing their valid neighbours.
+- **Clearer Trakt connection failures ([#271](https://github.com/VortXTV/VortX/issues/271)).** Authentication failures are classified without exposing credentials.
+
+### New
+
+- **Richer Collections ([#269](https://github.com/VortXTV/VortX/issues/269)).** Collections can carry nested groups, ordering, artwork and richer presentation inside the existing Collections editor.
+- **Optional Xperience import and refresh.** Bring in a compatible Xperience collection export and refresh it when you choose; your own edits are protected from an older refresh.
+- **Playback badges** with icons and the selected audio language, from the video and audio actually playing. They clear when a new item starts.
+- **Apple TV Settings categories ([#268](https://github.com/VortXTV/VortX/issues/268)).** Settings is split into focused categories, with search kept.
+
+### Changed
+
+- **Updated player components.** Apple uses the updated custom mpv with FFmpeg 9.0.2. Android's native player includes mpv 0.41 and FFmpeg 8.1.3 with maintenance updates to its subtitle, font and codec libraries, and Media3 1.11.1.
+- **Tighter certificate checks** in the native player and engine.
+
+### What is still being worked on
+
+The main apps are not yet fully migrated to Swift 6, some component upgrades remain, and smoothness, Top Shelf and the open customer reports still need checking on real devices.
+
 ## 0.5.6 beta 2 - Recovery, safer profile changes and less repeated work
 
 Build **276** across Apple and Android. This is an early prerelease of the integrated
