@@ -7,7 +7,7 @@ mkdir -p app/build
 run_dir=$(mktemp -d "$PWD/app/build/private-addon-subtitles.XXXXXX")
 
 cat > "$run_dir/fixture.py" <<'PY'
-import http.server, socketserver, sys, threading, time
+import http.server, os, socketserver, sys, time
 other_port = sys.argv[2]
 hits = 0
 BODY = b"1\n00:00:01,000 --> 00:00:02,000\nhello\n"
@@ -50,17 +50,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 server = Server(("127.0.0.1", 0), Handler)
-open(sys.argv[1], "w").write(str(server.server_address[1]))
+with open(sys.argv[1] + ".tmp", "w") as port_file:
+    port_file.write(str(server.server_address[1]))
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
 server.serve_forever()
 PY
+
+# Wait for a fixture to publish its port; hosted runners can take several seconds to start Python.
+wait_port() {
+  local file=$1 pid=$2
+  for _ in $(seq 300); do
+    [ -s "$file" ] && return 0
+    kill -0 "$pid" 2>/dev/null || { echo "fixture server exited before listening: $file" >&2; return 1; }
+    sleep 0.1
+  done
+  echo "fixture server did not listen within 30 s: $file" >&2
+  return 1
+}
 
 # The add-on fixture redirects to OTHER, so OTHER starts first.
 python3 -I "$run_dir/fixture.py" "$run_dir/other.port" 0 & other_pid=$!
 trap 'kill "$other_pid" ${addon_pid:-} 2>/dev/null || true' EXIT
-for _ in $(seq 50); do [ -s "$run_dir/other.port" ] && break; sleep 0.1; done
+wait_port "$run_dir/other.port" "$other_pid"
 OTHER_PORT=$(cat "$run_dir/other.port")
 python3 -I "$run_dir/fixture.py" "$run_dir/addon.port" "$OTHER_PORT" & addon_pid=$!
-for _ in $(seq 50); do [ -s "$run_dir/addon.port" ] && break; sleep 0.1; done
+wait_port "$run_dir/addon.port" "$addon_pid"
 ADDON_PORT=$(cat "$run_dir/addon.port")
 
 xcrun swiftc -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
