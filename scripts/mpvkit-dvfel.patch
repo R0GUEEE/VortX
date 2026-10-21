@@ -30,7 +30,7 @@ index 9d9b0af..15cedb4 100644
  
          .binaryTarget(
 diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScripts/XCFrameworkBuild/main.swift
-index e5f872c..f147797 100644
+index e5f872c..0e11cb6 100644
 --- a/Sources/BuildScripts/XCFrameworkBuild/main.swift
 +++ b/Sources/BuildScripts/XCFrameworkBuild/main.swift
 @@ -45,12 +45,40 @@ do {
@@ -443,3 +443,31 @@ index e5f872c..f147797 100644
  }
  
  private class BuildOpenSSL: ZipBaseBuild {
+@@ -883,6 +1199,27 @@ private class BuildShaderc: ZipBaseBuild {
+     init() throws {
+         super.init(library: .libshaderc)
+     }
++
++    // libshaderc-build 2026.1.0 ships upstream's shaderc.pc, which links shaderc_shared, a
++    // library the static zip does not contain; its release step meant to install
++    // shaderc_combined.pc in that place. Apply the same swap so libplacebo and FFmpeg link the
++    // combined static library the package ships. A shaderc.pc that is already correct is kept.
++    override func buildALL() throws {
++        try super.buildALL()
++        for platform in BaseBuild.platforms {
++            for arch in architectures(platform) {
++                let pkgConfigDir = thinDir(platform: platform, arch: arch) + ["lib", "pkgconfig"]
++                let shadercPC = pkgConfigDir + ["shaderc.pc"]
++                let combinedPC = pkgConfigDir + ["shaderc_combined.pc"]
++                guard FileManager.default.fileExists(atPath: combinedPC.path),
++                      let data = FileManager.default.contents(atPath: shadercPC.path),
++                      String(decoding: data, as: UTF8.self).contains("-lshaderc_shared")
++                else { continue }
++                try FileManager.default.removeItem(at: shadercPC)
++                try FileManager.default.copyItem(at: combinedPC, to: shadercPC)
++            }
++        }
++    }
+ }
+ 
+ 
