@@ -29,8 +29,8 @@ v_mbedtls_sha=068ff080b369adfac81509f9b57b2afabaf82dc5
 v_libplacebo=7.360.1
 v_dav1d=1.5.4
 v_dav1d_sha=54706fc6bc0cdecab7e9593974a4039cc038fca7
-v_ffmpeg=8.1.3
-v_ffmpeg_sha=1041abdc962f4cc4f394aa8de9dc5236c0c3b9e7
+v_ffmpeg=9.0.2
+v_ffmpeg_sha=946fcce07b6dcd0331c8cc609192aeff5e1924f8
 v_mpv=0.41.0
 
 
