@@ -5,6 +5,9 @@ import UIKit
 #if canImport(MetricKit)
 import MetricKit
 #endif
+#if os(macOS)
+import AppKit
+#endif
 
 /// Runtime I/O half of the termination-evidence lane. Owns the receipt file, heartbeats, memory
 /// warnings, and the launch-time fold into the exportable probe log. All classification lives in
@@ -34,6 +37,24 @@ enum TerminationReceipt {
         receiptLock.unlock()
         startHeartbeat()
         observeMemoryWarnings()
+        observeOrdinaryQuit()
+    }
+
+    #if os(macOS)
+    @MainActor private static var quitObserver: NSObjectProtocol?
+    #endif
+
+    /// macOS has no scene phase for quitting: an ordinary Quit (after the streaming server has stopped)
+    /// posts willTerminate, so record it as an intentional exit. Every Mac quit was otherwise folded on the
+    /// next launch as "terminated while foregrounded". Force Quit and crashes never post it.
+    @MainActor private static func observeOrdinaryQuit() {
+        #if os(macOS)
+        quitObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
+        ) { _ in
+            markTerminating()
+        }
+        #endif
     }
 
     /// Record a phase transition (scenePhase onChange). Cheap: one bounded atomic JSON write.
@@ -94,7 +115,8 @@ enum TerminationReceipt {
     @MainActor private static var heartbeatTimer: Timer?
 
     @MainActor private static func startHeartbeat() {
-        #if canImport(UIKit)
+        // Every platform: on macOS the receipt otherwise kept its start time, so each fold reported
+        // "session ran 0s" however long the app had run.
         heartbeatTimer?.invalidate()
         // Main-runloop timer; 60 s granularity is plenty to separate "died while running" from
         // "device was off" (the policy's stale window is 24 h).
@@ -103,7 +125,6 @@ enum TerminationReceipt {
         }
         RunLoop.main.add(timer, forMode: .common)
         heartbeatTimer = timer
-        #endif
     }
 
     @MainActor private static var memoryWarningObserver: NSObjectProtocol?
