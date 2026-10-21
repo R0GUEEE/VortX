@@ -1508,6 +1508,8 @@ final class VortXSyncManager: ObservableObject {
     }
 
     @discardableResult
+    private static func elapsedMs(since start: Date) -> Int { Int((Date().timeIntervalSince(start) * 1000).rounded()) }
+
     func restoreNativeCheckpoint(credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil,
                                  userInitiated: Bool = false) async -> Bool {
         let capture = suppliedCapture ?? credentialAuthority.capture()
@@ -1568,9 +1570,34 @@ final class VortXSyncManager: ObservableObject {
             }
             self.nativeCheckpointStatus = "restoring"
             DiagnosticsLog.log("native-profiles", "restore result=started")
+            let restoreStarted = Date()
+            // Launch and profile switches open the account from this device's own checkpoint first and catch up
+            // with the cloud right after (owner, 2026-10-21). Waiting for the download, decrypt, admission and
+            // merge first held the splash for ~10 s with nothing new, and launch downloaded and merged the
+            // account twice: syncDown pulls, asks for a session, and this restore pulled and merged again. A
+            // first open, a checkpoint without its 0.4 copy, or an explicit retry still takes the full online
+            // restore below. RemoteConfig `localFirstOpen` switches it off fleet-wide.
+            if !userInitiated, RemoteConfig.snapshot.isFeatureOn("localFirstOpen", default: true) {
+                if await self.restoreOfflineNativeCheckpoint(capture: capture, selectedProfile: selectedProfile,
+                                                             generation: generation) {
+                    self.nativeCheckpointStatus = "mounted"
+                    DiagnosticsLog.log("native-profiles", "restore result=mounted mode=local_first ms=\(Self.elapsedMs(since: restoreStarted))")
+                    // Cloud catch-up. A no-op while the syncDown that asked for this session is still committing
+                    // its own pulled document, which it applies right after this returns.
+                    Task { @MainActor [weak self] in _ = await self?.syncDown(credentialCapture: capture) }
+                    return true
+                }
+                guard self.isCurrent(capture), !Task.isCancelled, self.nativeCheckpointGeneration == generation else {
+                    DiagnosticsLog.log("native-profiles", "restore result=aborted stage=local_first reason=superseded_or_cancelled")
+                    return false
+                }
+                self.nativeCheckpointStatus = "restoring"
+                DiagnosticsLog.log("native-profiles", "restore stage=local_first result=unavailable ms=\(Self.elapsedMs(since: restoreStarted))")
+            }
             // Global ProfileStore is not account-attribution evidence. Pin the owner from this
             // freshly authenticated/decrypted account roster, including historical PIN-bound IDs.
             let pulled = await self.pullDocVersionedResult(credentialCapture: capture)
+            DiagnosticsLog.log("native-profiles", "restore stage=pulled ms=\(Self.elapsedMs(since: restoreStarted))")
             if case .failed(retryable: true) = pulled {
                 let restored = await self.restoreOfflineNativeCheckpoint(capture: capture, selectedProfile: selectedProfile, generation: generation)
                 if !restored {
@@ -1741,7 +1768,7 @@ final class VortXSyncManager: ObservableObject {
                     if didImportLegacy || !websiteEvents.isEmpty || !websiteAddonEvents.isEmpty { self.requestSyncSoon() }
                     self.nativeCheckpointStatus = "mounted"
                     CoreBridge.shared.replayNativeResourceRestore(resourceRestore, target: CoreBridge.shared.captureNativePlaybackTarget())
-                    DiagnosticsLog.log("native-profiles", "restore result=mounted")
+                    DiagnosticsLog.log("native-profiles", "restore result=mounted ms=\(Self.elapsedMs(since: restoreStarted))")
                     return true
                 } catch { await session.close(); throw error }
             } catch {
