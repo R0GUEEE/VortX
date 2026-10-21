@@ -70,37 +70,18 @@ final class AddonHealthStore: ObservableObject {
 
     nonisolated private static func check(_ transportUrl: String) async -> AddonHealth {
         guard let url = URL(string: transportUrl) else { return .down }
-        // SSRF guard, same policy as installAddon/previewAddonManifest (AddonURLGuard). A transportUrl can
-        // arrive from a synced account doc or the web dashboard, not just a user paste, so never let this
-        // auto-firing reachability probe hit an arbitrary private / LAN / link-local / metadata target and
-        // turn the app into a network scanner. The ONE legitimate private target is the app's own loopback
-        // streaming server (the default 127.0.0.1 local add-on); a discard-response GET to loopback has no
-        // attacker feedback channel, so it is exempt while everything else private is refused.
-        if !isLoopbackHost(url.host), await AddonURLGuard.validate(url) != nil { return .down }
-        var req = URLRequest(url: url)
-        req.timeoutInterval = timeout
-        // Some add-on CDNs reject non-browser User-Agents (same lesson as AddonClient + the libmpv fetches).
-        req.setValue("Mozilla/5.0 (Apple TV; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/604.1",
-                     forHTTPHeaderField: "User-Agent")
+        // Installed private add-ons must not be marked down merely because they use LAN/Tailscale.
+        // Reuse bounded manifest transport and its per-hop origin checks, not automatic URLSession redirects.
         let start = Date()
         do {
-            let (_, resp) = try await URLSession.shared.data(for: req)
+            _ = try await AddonURLGuard.fetch(url, context: .manifest, access: .addon(origin: url), timeout: timeout)
             let ms = Int(Date().timeIntervalSince(start) * 1000)
-            guard let http = resp as? HTTPURLResponse, (200..<400).contains(http.statusCode) else { return .down }
             return ms <= okThresholdMs ? .ok(ms: ms) : .slow(ms: ms)
         } catch {
             return .down
         }
     }
 
-    /// True when `host` is on-device loopback (localhost / 127.0.0.0/8 / ::1). Exempt from the probe's SSRF
-    /// guard so the default 127.0.0.1 local-add-on still reports its real status (see check(_:)).
-    nonisolated private static func isLoopbackHost(_ host: String?) -> Bool {
-        guard var h = host, !h.isEmpty else { return false }
-        if h.hasPrefix("[") && h.hasSuffix("]") { h = String(h.dropFirst().dropLast()) }  // unbracket IPv6 literals
-        let lower = h.lowercased()
-        return lower == "localhost" || lower == "::1" || lower.hasPrefix("127.")
-    }
 }
 
 /// Add-ons use the compact settings-card treatment on a phone and the wider Cinema Glass card preset on
