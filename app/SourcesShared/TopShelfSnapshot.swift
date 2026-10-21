@@ -43,9 +43,13 @@ enum TopShelfSnapshot {
     /// Ceiling for the complete UTF-8 JSON cache, including metadata and all eight items. A 256 KiB
     /// budget allows roughly 32 KiB per row for existing titles/URLs without admitting an unbounded file into
     /// the extension. This is a conservative cache policy, not a measured system memory allowance.
-    /// Only reads enforce this limit: producer size budgeting is separate, and writes must not retain
-    /// a previous owner's visible cache just because a new publication is oversized.
+    /// The producer also enforces this limit. An oversized publication becomes a compact display-only
+    /// projection, never a reason to retain the previous owner's visible cache.
     static let maxSnapshotBytes = 256 * 1024
+
+    /// Overflow-only title allowance. Unicode scalars bound encoded bytes even for a pathological
+    /// single grapheme with thousands of combining marks; ordinary publications are not truncated.
+    static let maxOverflowTitleScalars = 512
 
     /// Payload schema version. Bumped when the shape changes so an OLD extension paired with a NEW
     /// app (or the reverse, mid-update) rejects a payload it cannot read instead of mis-rendering it.
@@ -406,14 +410,38 @@ enum TopShelfSnapshot {
 
     static func writeResult(_ items: [Item], to url: URL) -> WriteResult {
         guard url.isFileURL else { return .invalidDestination }
-        let capped = Array(items.prefix(maxItems))
+        var capped = Array(items.prefix(maxItems))
         // Compare CONTENT, not the encoded bytes: `writtenAt` changes on every call, so comparing
         // payloads would always report a change and defeat the point of the check.
         // A failed read is not evidence of an already-empty file: an explicit [] must still clear
         // a malformed/oversized prior publication on sign-out, profile change or feature-off.
-        if let previous = readPayload(from: url), capped == previous.items { return .unchanged }
-        let payload = Payload(version: currentVersion, writtenAt: Date(), items: capped)
-        guard let data = try? encoder.encode(payload) else { return .encodingFailed }
+        let previous = readPayload(from: url)
+        if let previous, capped == previous.items { return .unchanged }
+        let writtenAt = Date()
+        var payload = Payload(version: currentVersion, writtenAt: writtenAt, items: capped)
+        guard var data = try? encoder.encode(payload) else { return .encodingFailed }
+        if data.count > maxSnapshotBytes {
+            // This file is only the system's display cache, never saved history. Keep current titles
+            // actionable where possible instead of writing bytes the extension must reject. Drop art
+            // and bound titles only on overflow; raw action identities and progress are never changed.
+            var compact: [Item] = []
+            for item in capped {
+                let candidate = Item(id: item.id, type: item.type,
+                    title: String(String.UnicodeScalarView(item.title.unicodeScalars.prefix(maxOverflowTitleScalars))),
+                    poster: nil, progress: item.progress)
+                let trial = Payload(version: currentVersion, writtenAt: writtenAt, items: compact + [candidate])
+                guard let bytes = try? encoder.encode(trial) else { return .encodingFailed }
+                guard bytes.count <= maxSnapshotBytes else { continue }
+                compact.append(candidate)
+            }
+            capped = compact
+            if let previous, capped == previous.items { return .unchanged }
+            payload = Payload(version: currentVersion, writtenAt: writtenAt, items: capped)
+            guard let bounded = try? encoder.encode(payload), bounded.count <= maxSnapshotBytes else {
+                return .encodingFailed
+            }
+            data = bounded
+        }
         // Atomic: the extension can be reading this file in another process at any moment, and a
         // torn read would decode to nothing (harmless, but it would blank the shelf for a cycle).
         do { try data.write(to: url, options: .atomic) } catch { return .writeFailed }

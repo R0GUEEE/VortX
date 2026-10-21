@@ -383,9 +383,22 @@ do {
     check(TopShelfSnapshot.write(eight, to: file), "a later valid publication replaces an invalid cache normally")
     let huge = TopShelfSnapshot.Item(id: "large", type: "movie", title: String(repeating: "x", count: TopShelfSnapshot.maxSnapshotBytes + 1), poster: nil, progress: 0.5)
     check(TopShelfSnapshot.write([huge], to: file), "a new oversized publication still replaces the prior owner's cache")
-    check(TopShelfSnapshot.read(from: file).isEmpty, "an oversized current publication degrades to no content at the reader")
+    check(TopShelfSnapshot.read(from: file).first?.id == huge.id, "an oversized title remains a current actionable tile, not an unreadable cache")
     let rawHuge = try decoder.decode(TopShelfSnapshot.Payload.self, from: Data(contentsOf: file))
-    check(rawHuge.items == [huge], "producer payload fields are retained without title or URL truncation")
+    check(rawHuge.items.first?.title.unicodeScalars.count == TopShelfSnapshot.maxOverflowTitleScalars,
+          "overflow compacts only the display title without changing saved history or identity")
+    check(try Data(contentsOf: file).count <= TopShelfSnapshot.maxSnapshotBytes,
+          "the producer never publishes oversized JSON for the bounded reader")
+    let compactBytes = try Data(contentsOf: file)
+    check(!TopShelfSnapshot.write([huge], to: file), "an unchanged compact overflow projection does not churn the cache")
+    check(try Data(contentsOf: file) == compactBytes, "unchanged overflow preserves exact cache bytes")
+    let hugeIdentity = TopShelfSnapshot.Item(id: String(repeating: "i", count: TopShelfSnapshot.maxSnapshotBytes + 1), type: "movie", title: "Identity too large", poster: nil, progress: 0)
+    check(TopShelfSnapshot.write([hugeIdentity, items[1]], to: file), "a huge identity does not prevent a later valid current row from replacing old content")
+    check(TopShelfSnapshot.read(from: file) == [items[1]], "overflow excludes an unrepresentable row without truncating its action identity")
+    check(TopShelfSnapshot.write([hugeIdentity], to: file), "a wholly unrepresentable new owner replaces old content with a valid empty cache")
+    check(TopShelfSnapshot.read(from: file).isEmpty, "an overflow-only clear cannot retain previous-owner rows")
+    check(TopShelfSnapshot.write(eight, to: file), "a normal publication after overflow restores full original metadata")
+    check(TopShelfSnapshot.read(from: file) == eight, "normal titles, artwork and progress are never compacted")
     check(TopShelfSnapshot.write([], to: file), "explicit privacy clear still replaces valid content")
 
     // Diagnostic outcomes must not change the compatibility reader/writer or valid-empty semantics.

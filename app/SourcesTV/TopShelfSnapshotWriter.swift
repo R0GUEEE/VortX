@@ -471,6 +471,8 @@ enum TopShelfSnapshotWriter {
         // Only nudge the system when the content actually moved: this wakes the extension, so firing
         // it on every unchanged Home re-seed would be pure churn.
         TVTopShelfContentProvider.topShelfContentDidChange()
-        DiagnosticsLog.log("topshelf", "published \(items.count) item(s)")
+        // Overflow may compact/drop unrepresentable cache rows. Do not report the input count
+        // as the number actually written, and do not re-read the file just for logging.
+        DiagnosticsLog.log("topshelf", "published snapshot")
     }
 }
