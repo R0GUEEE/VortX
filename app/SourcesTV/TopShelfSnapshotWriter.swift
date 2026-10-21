@@ -187,6 +187,20 @@ enum TopShelfSnapshotWriter {
 
     // MARK: Mapping
 
+    /// Exact bounded shelf content plus its original owner/source epoch. Home already captured
+    /// this selection for rendering; observing this value avoids sorting history again or relying
+    /// on the first title / legacy history receipt to notice native progress and interior changes.
+    /// This is a change key, not publication authority: callbacks still use publishCurrent().
+    struct PublicationKey: Equatable {
+        let intent: HomeContinueWatchingSelection.Intent
+        let items: [TopShelfSnapshot.Item]
+    }
+
+    static func publicationKey(for snapshot: HomeContinueWatchingSelection.Snapshot) -> PublicationKey {
+        .init(intent: snapshot.intent, items: items(from: snapshot.selection.items,
+            source: snapshot.selection.source, displayProgress: snapshot.selection.displayProgress))
+    }
+
     /// Flatten the engine's local Continue Watching into the wire items. Kept as a compatibility overload
     /// for existing call sites and tests; private Trakt rows use the source-aware overload below.
     static func items(from cw: [CoreCWItem]) -> [TopShelfSnapshot.Item] {

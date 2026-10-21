@@ -102,7 +102,7 @@ struct CoreCWItem {
 enum EpisodePlaybackIdentity { static func usesSeriesLifecycle(type: String) -> Bool { type == "series" } }
 enum TopShelfSnapshot {
     static let maxItems = 8
-    struct Item { let id: String; let type: String; let title: String; let poster: String?; let progress: Double }
+    struct Item: Equatable { let id: String; let type: String; let title: String; let poster: String?; let progress: Double }
 }
 struct CoreLibState {
     let timeOffset: Double

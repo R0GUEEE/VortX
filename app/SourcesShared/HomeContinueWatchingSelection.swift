@@ -184,6 +184,21 @@ enum HomeContinueWatchingSelection {
         result.nextEpisodes = TraktHomeNextEpisodeProducer.shared.offers(
             intent: result.intent, paused: selection.items, now: Date())
         guard result.intent.isCurrent(core: core, profiles: profiles) else {
+            // A deliberately unavailable/disconnected service has no action capability, but its
+            // empty diagnostic is still useful presentation. Never grant this exception to rows,
+            // captured service sessions, next-episode offers, or a retired original owner context.
+            let serviceUnavailable: Bool
+            switch selection.source {
+            case .local: serviceUnavailable = false
+            case .trakt: serviceUnavailable = !TraktAuth.isConfigured || TraktAuth.storedSessionID == nil
+            case .simkl: serviceUnavailable = !SIMKLAuth.isConfigured || SIMKLAuth.storedSessionID == nil
+            }
+            if serviceUnavailable, selection.items.isEmpty, selection.status != nil,
+               selection.sessionID == nil, selection.simklSessionID == nil,
+               context.isCurrent(core: core, profiles: profiles) {
+                // Construct only the inert presentation: no actionable offers survive this path.
+                return Snapshot(selection: selection, context: context)
+            }
             return Snapshot(selection: unavailable, context: context)
         }
         return result

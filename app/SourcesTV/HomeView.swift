@@ -226,6 +226,10 @@ struct HomeView: View {
                 TraktNextEpisodeHomeDestination(offer: target.offer)
             }
         }
+        .onChange(of: TopShelfSnapshotWriter.publicationKey(for: renderedContinueWatching)) { _ in
+            // Re-read and validate the CURRENT context; never publish rows captured by an older render.
+            TopShelfSnapshotWriter.publishCurrent()
+        }
     }
 
     // The `.onAppear` plus nine `.onChange` handlers used to hang off `body` as one chain, which

@@ -186,6 +186,10 @@ struct VortXTVApp: App {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { TabBarHealer.heal("foreground+1.5s") }
                 }
                 if phase == .background {
+                    // TV Home does not close the mounted player, so RootTabView's playback-exit
+                    // callback may not run. Publish the latest acknowledged queue before suspension;
+                    // this does not invent a final progress ACK or bypass the writer's owner gates.
+                    TopShelfSnapshotWriter.publishCurrent()
                     #if !VORTX_NO_EMBEDDED_SERVER
                     // Phase 8: stop the flag-gated in-process engine server on background (graceful
                     // rqbit shutdown off-main); .active above restarts it. No-op while the flag is off.

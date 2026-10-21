@@ -28,7 +28,16 @@ const baseline = execFileSync('git', ['-C', root, 'show', `${ref}:app/SourcesSha
 writeFileSync(`${dir}/BaselineServiceSelection.swift`, baseline.replaceAll('HomeContinueWatchingSelection', 'BaselineServiceSelection'));
 const shelf = read('app/SourcesTV/TopShelfSnapshotWriter.swift');
 writeFileSync(`${dir}/FixtureTopShelfMapper.swift`, 'import Foundation\nenum FixtureTopShelfMapper {\n' +
-  ['static func items(\n', 'private static func shelfProgress(', 'private static func shelfPoster('].map(marker => block(shelf, marker)).join('\n') + '\n}\n');
+  ['struct PublicationKey:', 'static func publicationKey(', 'static func items(\n', 'private static func shelfProgress(', 'private static func shelfPoster('].map(marker => block(shelf, marker)).join('\n') + '\n}\n');
+// Source wiring only; the Swift cases below execute the actual key/mapper, not a second policy.
+const home = read('app/SourcesTV/HomeView.swift');
+if (!/\.onChange\(of: TopShelfSnapshotWriter\.publicationKey\(for: renderedContinueWatching\)\)\s*\{\s*_ in[\s\S]*?TopShelfSnapshotWriter\.publishCurrent\(\)/.test(home)) {
+  throw new Error('Home must republish from its exact rendered shelf key');
+}
+const app = read('app/SourcesTV/VortXTVApp.swift');
+if (!block(app, 'if phase == .background').includes('TopShelfSnapshotWriter.publishCurrent()')) {
+  throw new Error('Direct TV Home/background must publish without closing the player');
+}
 writeFileSync(`${dir}/FixtureContinueWatchingFocus.swift`, 'import Foundation\nenum FixtureContinueWatchingFocus {\n' +
   block(read('app/SourcesTV/HomeView.swift'), 'static func permitsHeroEnrichment(') + '\n}\n');
 const profiles = read('app/SourcesShared/Profiles.swift');
