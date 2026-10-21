@@ -765,6 +765,25 @@ private struct PlayerSkipEditorLayout: View {
     }
 }
 
+/// The chrome stays mounted when faded, so its measured height is available before the pointer reveals it.
+private struct PlayerBottomBarHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private enum PlayerSkipChromePolicy {
+    static func showsPrompt(controlsVisible: Bool, sharesChrome: Bool) -> Bool {
+        sharesChrome || !controlsVisible
+    }
+
+    static func bottomPadding(controlsVisible: Bool, sharesChrome: Bool, chromeHeight: Double) -> Double {
+        guard sharesChrome, controlsVisible, chromeHeight.isFinite else { return 40 }
+        return max(40, chromeHeight + 12)
+    }
+}
+
 private struct PlayerBottomBarLayout: View {
     let isLive: Bool
     let live: PlayerLiveIndicator
@@ -788,7 +807,7 @@ private struct PlayerBottomBarLayout: View {
         }
         .padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 12)
         .vortxGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous),
-                    fillAlpha: VortXGlass.barFillAlpha, shadow: .bar)
+                    fillAlpha: 0.28, shadow: .bar, tone: .scrim, materialOpacity: 0.65)
         .padding(.horizontal, 16).padding(.bottom, 16)
         #endif
     }
@@ -1568,6 +1587,7 @@ struct PlayerScreen: View {
     @State private var isHDR = false
     @State private var metadataPills: [PlaybackMetadataPill] = [] // Rebuilt only on media metadata events.
     @State private var controlsVisible = true
+    @State private var bottomChromeHeight: CGFloat = 0
     /// Player Lock: while true the chrome is hidden and non-interactive and a tap on the video only
     /// reveals the small unlock chip, so a pocketed phone / a handed-over device can't seek or pause by
     /// accident. Engaged from the top bar's lock button; per-playback state (never persisted).
@@ -2374,14 +2394,19 @@ struct PlayerScreen: View {
 
             if (buffering || reconnecting) && !loadFailed { bufferingOverlay }
 
-            // Skip pill shows only while watching (controls hidden); suppressed once the Up Next band is up
-            // so the two end-of-episode prompts never stack.
+            // On Mac, pointer movement reveals chrome: keep manual Skip available and lift it above the
+            // measured bar. Automatic countdown eligibility remains separate while the viewer uses controls.
+            // Up Next still replaces this prompt so the two end-of-episode actions never stack.
             // Suppressed while locked: the pill is a tap-to-seek affordance, and the whole point of the
             // lock is that no stray tap can move playback.
             if hasStartedPlaying, let seg = currentSkip,
                !autoSkipCountdown.isSuppressed(for: seg),
-               !controlsVisible, !isLocked, panel == nil, !loadFailed, upNextRemaining == nil {
+               PlayerSkipChromePolicy.showsPrompt(controlsVisible: controlsVisible,
+                                                 sharesChrome: skipSharesChrome),
+               !isLocked, panel == nil, !loadFailed, !stillWatchingPrompt,
+               (!skipSharesChrome || !skipEditActive), upNextRemaining == nil {
                 skipPill(seg)
+                    .zIndex(1)
             }
 
             // Render controls UNCONDITIONALLY (just faded/non-interactive when hidden) so VoiceOver can
@@ -8383,9 +8408,15 @@ struct PlayerScreen: View {
 
     private var controls: some View {
         ZStack {
+            #if os(macOS)
+            LinearGradient(colors: [.black.opacity(0.45), .clear, .black.opacity(0.38)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea().allowsHitTesting(false)
+            #else
             LinearGradient(colors: [.black.opacity(0.55), .clear, .black.opacity(0.75)],
                            startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea().allowsHitTesting(false)
+            #endif
 
             VStack(spacing: 0) {
                 topBar
@@ -8393,8 +8424,15 @@ struct PlayerScreen: View {
                 centerTransport
                 Spacer()
                 bottomBar
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(key: PlayerBottomBarHeightKey.self,
+                                                   value: geometry.size.height)
+                        }
+                    }
             }
         }
+        .onPreferenceChange(PlayerBottomBarHeightKey.self) { bottomChromeHeight = $0 }
     }
 
     /// Cache selected-media labels at the metadata boundary, never in the transport/body clock.
@@ -9372,6 +9410,14 @@ struct PlayerScreen: View {
         upNextSuppressed = true
     }
 
+    private var skipSharesChrome: Bool {
+        #if os(macOS)
+        return true
+        #else
+        return false
+        #endif
+    }
+
     private func skipPill(_ segment: SkipSegment) -> some View {
         let interactionMediaID = autoSkipMediaIdentity
         let interactionEpoch = autoSkipCountdown.epoch
@@ -9430,9 +9476,14 @@ struct PlayerScreen: View {
                         .accessibilityHint("Hides this prompt and will not auto-skip this segment again")
                     }
                 }
-                .padding(.trailing, 28).padding(.bottom, 40)
+                .padding(.trailing, 28)
+                .padding(.bottom, CGFloat(PlayerSkipChromePolicy.bottomPadding(
+                    controlsVisible: controlsVisible, sharesChrome: skipSharesChrome,
+                    chromeHeight: Double(bottomChromeHeight))))
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: controlsVisible)
+        .animation(.easeInOut(duration: 0.2), value: bottomChromeHeight)
         .transition(.opacity)
     }
 
