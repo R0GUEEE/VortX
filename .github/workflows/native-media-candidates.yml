@@ -1,0 +1,118 @@
+name: Manual native media candidates
+
+on:
+  workflow_dispatch:
+    inputs:
+      apple:
+        description: Build Apple FFmpeg maintenance with the retained custom mpv stack
+        type: boolean
+        default: true
+      android:
+        description: Build Android media-stack candidate AAR
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      apple:
+        type: boolean
+        default: true
+      android:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-media-candidates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apple:
+    if: inputs.apple
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify reviewed recipes
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' 5b32b2f624d7599d3f3d196116bc67efc2deb88397e01b48810763f40d02c678 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
+          shasum -a 256 -c scripts/native-media-hosted/inputs.sha256
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: mpvkit/MPVKit
+          ref: 2103893078c5e339073b11737b86f7f22b9c4491
+          path: _native-mpvkit
+          persist-credentials: false
+      - name: Prepare hosted build tools
+        run: |
+          set -euo pipefail
+          brew install meson ninja cmake pkg-config nasm wget jq autoconf automake libtool sdl2
+      - name: Build unpromoted Apple candidate
+        run: |
+          set -euo pipefail
+          mkdir -p _build/native-media/apple
+          bash scripts/native-media-hosted/build.sh apple 2>&1 | tee _build/native-media/apple/build.log
+      - name: Retain candidate and evidence even after failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-media-apple-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            _build/native-media/apple/*.tar*
+            _build/native-media/apple/*.json
+            _build/native-media/apple/*.txt
+            _build/native-media/apple/*.log
+            _build/native-media/apple/*.patch
+            _build/native-media/apple/*.sha256
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: warn
+
+  android:
+    if: inputs.android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify reviewed recipes
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' 5b32b2f624d7599d3f3d196116bc67efc2deb88397e01b48810763f40d02c678 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
+          shasum -a 256 -c scripts/native-media-hosted/inputs.sha256
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: jarnedemeulemeester/libmpv-android
+          ref: fcf6745703dc1265bca88f12fee8fc355ddf251e
+          path: _native-publisher
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Prepare hosted build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake pkgconf libtool ninja-build meson python3-jinja2 gperf nasm cmake
+      - name: Build unpromoted Android candidate
+        run: |
+          set -euo pipefail
+          mkdir -p _build/native-media/android
+          bash scripts/native-media-hosted/build.sh android 2>&1 | tee _build/native-media/android/build.log
+      - name: Retain candidate and evidence even after failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-media-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _build/native-media/android/*
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: warn

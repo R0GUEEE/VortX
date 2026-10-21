@@ -72,15 +72,21 @@ on:
       - "android/**/*.gradle.kts"
       - ".github/workflows/**"
   workflow_dispatch:
+    inputs:
+      native_media_candidates:
+        description: Build only the reviewed secretless native-media candidates
+        type: boolean
+        default: false
 
 # Pure source/HTTP fixtures only: no private engine checkout, signing credentials or publication.
 permissions:
   contents: read
 concurrency:
-  group: source-contracts-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: source-contracts-${{ github.workflow }}-${{ github.ref }}${{ inputs.native_media_candidates && '-native-media' || '' }}
+  cancel-in-progress: ${{ !inputs.native_media_candidates }}
 jobs:
   apple-policies:
+    if: ${{ !inputs.native_media_candidates }}
     # The production SwiftUI views use SDK 26 glass APIs; exercise them on the same
     # runner generation as Apple packaging instead of the older default SDK.
     runs-on: macos-26
@@ -119,6 +125,7 @@ jobs:
       - run: swift app/Tests/MacSettingsShellContractTests.swift
       - run: swiftc -parse-as-library app/SourcesShared/TabBarPrefs.swift app/Tests/CompactNavigationPolicyTests.swift -o /tmp/compact-navigation-test && /tmp/compact-navigation-test
   web:
+    if: ${{ !inputs.native_media_candidates }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -133,3 +140,10 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - working-directory: webapp
         run: npm run typecheck && npm test && npm run build
+
+  native-media-candidates:
+    if: github.event_name == 'workflow_dispatch' && inputs.native_media_candidates
+    uses: ./.github/workflows/native-media-candidates.yml
+    with:
+      apple: true
+      android: true
