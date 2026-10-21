@@ -23,10 +23,22 @@ import Foundation
 }
 private enum VortxNativeError: Error { case closed }
 private enum VortxNativeOwnerAddonImport { struct Incomplete: Error {} }
+// Inert error carrier matching the actual typed outcome; production catch/reload code is extracted unchanged.
+private enum OwnerHistoryLoginPreparation {
+    struct Incomplete: Error {
+        enum Reason: Sendable { case pendingMetadata, importUnavailable }
+        let reason: Reason
+    }
+}
 private enum VortxNativeAccountCredentials { struct OwnerPublicationUncertain: Error {} }
 private enum VortxNativeOwnAccountProducer {
     static func invalidate(slot: String) {}
     static func invalidateContext() {}
+}
+// Watch-epoch locking/notification is outside this control-only fixture. The extracted
+// methods retain their actual call; this inert collaborator performs no session work.
+private enum LegacyWatchOwnership {
+    static func invalidateSession() {}
 }
 @MainActor private enum Keychain {
     static var token: String?
@@ -47,7 +59,8 @@ private struct Log { func info(_ message: String) {} }
         installs += 1
         if let gate { await gate.wait() }
         if let error {
-            if error is VortxNativeOwnerAddonImport.Incomplete || error is VortxNativeAccountCredentials.OwnerPublicationUncertain {
+            if error is VortxNativeOwnerAddonImport.Incomplete || error is VortxNativeAccountCredentials.OwnerPublicationUncertain
+                || error is OwnerHistoryLoginPreparation.Incomplete {
                 Keychain.token = "persisted-fixture-only"
             }
             throw error
@@ -192,7 +205,9 @@ private struct Log { func info(_ message: String) {} }
 
         #if VORTX_NATIVE_DATA_ENGINE
         for error in [VortxNativeError.closed as any Error, VortxNativeOwnerAddonImport.Incomplete(),
-                      VortxNativeAccountCredentials.OwnerPublicationUncertain()] {
+                      VortxNativeAccountCredentials.OwnerPublicationUncertain(),
+                      OwnerHistoryLoginPreparation.Incomplete(reason: .pendingMetadata),
+                      OwnerHistoryLoginPreparation.Incomplete(reason: .importUnavailable)] {
             reset(); CoreBridge.shared.error = error
             let account = StremioAccount(), qr = QRFixture(account)
             qr.run(); await qr.pollTask?.value
@@ -204,6 +219,21 @@ private struct Log { func info(_ message: String) {} }
             } else {
                 check(account.isSignedIn && account.publicationWarnings.last! == account.signInError,
                       "partial saved credential publishes warning before signed-in truth")
+                if let incomplete = error as? OwnerHistoryLoginPreparation.Incomplete {
+                    let expected: String
+                    switch incomplete.reason {
+                    case .pendingMetadata:
+                        expected = "The connection and add-ons were saved. Library and history import is waiting for episode metadata. Refresh and retry the import."
+                    case .importUnavailable:
+                        expected = "The connection and add-ons were saved, but the library and history import could not be confirmed. Refresh and retry the import."
+                    }
+                    check(account.signInError == expected && qr.errorMessage == expected,
+                          "typed incomplete retains exact pending-versus-unconfirmed reason")
+                    check(account.publications == 0 && account.credentialBoundaryGeneration == 0,
+                          "typed incomplete does not fabricate a completed import boundary")
+                    check(CoreBridge.shared.installs == 1 && LinkAuthService.createCount == 1,
+                          "typed incomplete never automatically retries login or the native import")
+                }
                 for fixture in [TVHandoffFixture(account), IOSHandoffFixture(account), CardHandoffFixture(account)] as [HandoffFixture] {
                     let prior = CoreBridge.shared.handoffs
                     fixture.run(true)
@@ -221,6 +251,26 @@ private struct Log { func info(_ message: String) {} }
                           "TV/iOS/card successful retry handoff is exactly once")
                     account.signInError = "fixture partial warning"
                 }
+            }
+        }
+        for reason in [OwnerHistoryLoginPreparation.Incomplete.Reason.pendingMetadata, .importUnavailable] {
+            for retired in ["profileABA", "credentialABA"] {
+                reset(); let gate = Gate(), account = StremioAccount()
+                CoreBridge.shared.gate = gate
+                CoreBridge.shared.error = OwnerHistoryLoginPreparation.Incomplete(reason: reason)
+                let task = Task { await account.signInWithAuthKey("fixture-only") }
+                await drain()
+                if retired == "profileABA" {
+                    let originalID = ProfileStore.shared.active!.id
+                    ProfileStore.shared.active = .init(id: UUID()); account.reloadForActiveProfile()
+                    ProfileStore.shared.active = .init(id: originalID); account.reloadForActiveProfile()
+                } else { CredentialScopeRegistry.shared.generation += 2 }
+                let priorWarnings = account.publicationWarnings.count
+                gate.release()
+                check(await task.value == .superseded,
+                      "typed incomplete from retired original authority is superseded after \(retired)")
+                check(account.signInError == nil && account.publicationWarnings.count == priorWarnings && account.publications == 0,
+                      "stale typed incomplete cannot repaint or republish after \(retired)")
             }
         }
         #endif

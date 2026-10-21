@@ -413,6 +413,21 @@ final class StremioAccount: ObservableObject {
             await loadAddons(for: context)
         } catch {
 #if VORTX_NATIVE_DATA_ENGINE
+            // This typed outcome is emitted only after secure credential selection and
+            // our accepted add-on import. It is not a new authentication failure.
+            if let incomplete = error as? OwnerHistoryLoginPreparation.Incomplete,
+               let nativeTarget, CredentialScopeRegistry.shared.isCurrent(nativeTarget.binding.credential),
+               authOperationGeneration == context.generation, ProfileStore.shared.active?.id == context.profileID {
+                let message: String
+                switch incomplete.reason {
+                case .pendingMetadata:
+                    message = "The connection and add-ons were saved. Library and history import is waiting for episode metadata. Refresh and retry the import."
+                case .importUnavailable:
+                    message = "The connection and add-ons were saved, but the library and history import could not be confirmed. Refresh and retry the import."
+                }
+                reloadForActiveProfile(preservingSignInError: message)
+                return
+            }
             if error is VortxNativeOwnerAddonImport.Incomplete,
                let nativeTarget, CredentialScopeRegistry.shared.isCurrent(nativeTarget.binding.credential),
                authOperationGeneration == context.generation, ProfileStore.shared.active?.id == context.profileID {
@@ -459,6 +474,19 @@ final class StremioAccount: ObservableObject {
                 context = captureAuthOperationContext()
             } else { throw VortxNativeError.closed }
         } catch {
+            if let incomplete = error as? OwnerHistoryLoginPreparation.Incomplete,
+               CredentialScopeRegistry.shared.isCurrent(nativeCapture), authOperationGeneration == context.generation,
+               ProfileStore.shared.active?.id == context.profileID {
+                let message: String
+                switch incomplete.reason {
+                case .pendingMetadata:
+                    message = "The connection and add-ons were saved. Library and history import is waiting for episode metadata. Refresh and retry the import."
+                case .importUnavailable:
+                    message = "The connection and add-ons were saved, but the library and history import could not be confirmed. Refresh and retry the import."
+                }
+                reloadForActiveProfile(preservingSignInError: message)
+                return .failed(message)
+            }
             if error is VortxNativeOwnerAddonImport.Incomplete,
                CredentialScopeRegistry.shared.isCurrent(nativeCapture), authOperationGeneration == context.generation,
                ProfileStore.shared.active?.id == context.profileID {
