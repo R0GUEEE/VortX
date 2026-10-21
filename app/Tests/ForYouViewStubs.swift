@@ -78,6 +78,7 @@ final class ProfileStore: ObservableObject {
 final class VortXSyncManager: ObservableObject {
     static let shared = VortXSyncManager()
     @Published private(set) var isSignedIn = false
+    static let credentialScopeDidChangeNote = Notification.Name("vortx.credentialScopeDidChange")
 }
 
 enum LibraryAutoAdd { static let watchlistChangedNote = Notification.Name("vortx.watchlistChanged") }
@@ -98,6 +99,20 @@ final class CoreBridge: ObservableObject {
     @MainActor func captureNativeWatchlistActionAdmission() -> NativeWatchlistActionAdmission { .init() }
     @MainActor func prepareNativeWatchlistActionTarget(_ admission: NativeWatchlistActionAdmission) async -> NativeWatchlistTarget? { nil }
     @MainActor func setNativeForYouField(_ field: String, value: VortxJSON, target: NativeWatchlistTarget) async throws {}
+    @MainActor func nativeWatchlistActionAdmissionIsCurrent(_ admission: NativeWatchlistActionAdmission) -> Bool { false }
+    // Signature stand-ins for the native curation path (real bodies live in CoreBridge.swift).
+    static let xperienceContextChangedNote = Notification.Name("vortx.xperienceContextChanged")
+    struct NativeXperienceTarget {}
+    struct XperiencePreparedExport {}
+    @MainActor func captureNativeXperienceTarget() throws -> NativeXperienceTarget { throw VortxNativeError.closed }
+    @MainActor func retireNativeXperienceTarget(_ target: NativeXperienceTarget) {}
+    @MainActor func nativeXperienceTargetIsCurrent(_ target: NativeXperienceTarget) -> Bool { false }
+    @MainActor func nativeCurationRegisters(target: NativeXperienceTarget) throws -> [String: VortxJSON] { [:] }
+    @MainActor func prepareNativeXperienceExportBudget(target: NativeXperienceTarget) async throws -> XperiencePreparedExport { .init() }
+    @MainActor func saveNativeCuration(_ edit: CurationNativeEdit, target: NativeXperienceTarget,
+                                      validator: XperiencePreparedExport) async throws -> VortxJSON { .null }
+    @MainActor func saveNativeLegacyCuration(_ edit: VortxNativeHostFieldEdit, target: NativeXperienceTarget,
+                                            validator: XperiencePreparedExport) async throws -> VortxJSON { .null }
 }
 #endif
 

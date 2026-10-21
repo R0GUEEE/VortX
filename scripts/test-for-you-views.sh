@@ -15,11 +15,17 @@ trap 'rm -rf "$dir"' EXIT
   sed -n '/^    static let forYouPrefix = /,/^    }$/p' app/SourcesShared/VortxNativeHostPreferences.swift
   printf '%s\n' '}'
 } > "$dir/support.swift"
+# The collection editors now build on the Xperience/curation UI and are compiled by the app targets;
+# this check covers the store, models, interests picker and the For You Home sections.
 shared=(
   "$dir/support.swift" app/Tests/ForYouViewStubs.swift
   app/SourcesShared/ForYouInterests.swift app/SourcesShared/ForYouDiscover.swift app/SourcesShared/ForYouStore.swift
   app/SourcesShared/ForYouRowsModel.swift app/SourcesShared/FlowLayout.swift
-  app/SourcesShared/ForYouInterestsView.swift app/SourcesShared/SmartCollectionEditor.swift
+  app/SourcesShared/ForYouInterestsView.swift app/SourcesShared/ForYouInterestsEdit.swift
+  app/SourcesShared/ForYouLocalStorageDocument.swift app/SourcesShared/CurationCollection.swift
+  app/SourcesShared/CurationEdit.swift app/SourcesShared/CurationDocument.swift
+  app/SourcesShared/VortxNativeHostFieldMutation.swift app/SourcesShared/CredentialScope.swift
+  app/SourcesShared/VortxNativeBootstrapArchive.swift
 )
 check() {
   local sdk=$1 target=$2
@@ -30,7 +36,7 @@ check() {
 check macosx arm64-apple-macos14.0 "${shared[@]}"
 check macosx arm64-apple-macos14.0 -D VORTX_NATIVE_DATA_ENGINE "${shared[@]}"
 check appletvsimulator arm64-apple-tvos18.0-simulator -D VORTX_NATIVE_DATA_ENGINE "${shared[@]}" \
-  app/SourcesTV/ForYouHomeSection.swift app/SourcesTV/TVSmartCollectionsView.swift
+  app/SourcesTV/ForYouHomeSection.swift
 check iphonesimulator arm64-apple-ios16.0-simulator -D VORTX_NATIVE_DATA_ENGINE "${shared[@]}" \
-  app/SourcesiOS/iOSForYouSection.swift app/SourcesiOS/iOSSmartCollectionsView.swift
+  app/SourcesiOS/iOSForYouSection.swift
 echo "for-you views: type-checked on macOS, tvOS and iOS"
