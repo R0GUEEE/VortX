@@ -45,7 +45,7 @@ begin
     target = spec.fetch('targets').fetch(name)
     settings = target.fetch('settings').fetch('base')
     conditions = settings.fetch('SWIFT_ACTIVE_COMPILATION_CONDITIONS').split
-    %w[VORTX_NATIVE_DATA_ENGINE VORTX_ENGINE_STATE_BRIDGE VORTX_ENGINE_RESOURCE_HOST].each do |flag|
+    %w[VORTX_NATIVE_DATA_ENGINE VORTX_ENGINE_STATE_BRIDGE VORTX_ENGINE_RESOURCE_HOST VORTX_ENGINE_OWNER_HISTORY_BRIDGE VORTX_OWNER_HISTORY_SESSION_ROUTING].each do |flag|
       abort "#{name} omitted #{flag}" unless conditions.include?(flag)
     end
     if %w[VortXiOSNative VortXTV].include?(name)

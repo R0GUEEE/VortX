@@ -52,7 +52,7 @@ native_targets.each do |name|
   end
   settings = target.fetch('settings').fetch('base')
   conditions = settings.fetch('SWIFT_ACTIVE_COMPILATION_CONDITIONS', '$(inherited)').split
-  conditions.concat(%w[VORTX_NATIVE_DATA_ENGINE VORTX_ENGINE_STATE_BRIDGE VORTX_ENGINE_RESOURCE_HOST])
+  conditions.concat(%w[VORTX_NATIVE_DATA_ENGINE VORTX_ENGINE_STATE_BRIDGE VORTX_ENGINE_RESOURCE_HOST VORTX_ENGINE_OWNER_HISTORY_BRIDGE VORTX_OWNER_HISTORY_SESSION_ROUTING])
   conditions << 'VORTX_ENGINE_SERVER' if %w[VortXiOSNative VortXTV].include?(name)
   settings['SWIFT_ACTIVE_COMPILATION_CONDITIONS'] = conditions.uniq.join(' ')
   settings['SWIFT_INCLUDE_PATHS'] = '$(inherited) $(BUILT_PRODUCTS_DIR)/include/vortx'
