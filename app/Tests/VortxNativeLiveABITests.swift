@@ -131,6 +131,7 @@ private final class NativeFieldNotifications: @unchecked Sendable {
 
     static func main() async throws {
         try shortUnwatchedEpisode()
+        try OwnerHistorySwiftLiveABICases.run(checkpointDirectory: URL(fileURLWithPath: CommandLine.arguments[3]))
         let runtime = try VortxNativeRuntime(abi: VortxCABI(), ownerID: "fixture-owner", ownerName: "Fixture")
         let add = try runtime.dispatch(#"{"type":"add_profile","id":"fixture-kid","name":"Kid"}"#, now: 1000)
         check(add.contains("\"ok\":true"))
@@ -533,6 +534,10 @@ private final class NativeFieldNotifications: @unchecked Sendable {
         let sameSlots = try VortxNativeProfiles.activeOwnAccountSlotBaselines(nativeSync: schema6Slots)
         check(sameSlots.count == activeSlotBaselines.count
             && sameSlots[0].sourceBaseline == activeSlotBaselines[0].sourceBaseline)
+        for _ in 0..<8 {
+            let repeated = try VortxNativeProfiles.activeOwnAccountSlotBaselines(nativeSyncData: strictRebindSync)
+            check(repeated == activeSlotBaselines)
+        }
         check(try VortxNativeProfiles.activeOwnAccountSlotBaselines(nativeSync:
             .object(["schemaVersion": .integer(6)])).isEmpty)
         do {

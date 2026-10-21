@@ -198,7 +198,9 @@ enum VortxNativeProfiles {
             _ = try OwnAccountTarget(verifiedStreamingUID: uid, sourceDocumentSHA256: digest,
                                      profileOverlaySHA256: witness, addons: addons, library: library,
                                      watches: watches, identityLinks: identityLinks)
-            return .init(profileID: profile, sourceBaseline: try JSONEncoder().encode(carrier))
+            // This closed typed carrier participates in retained-baseline equality. Dictionary
+            // iteration order must not make the same acknowledged slot appear different.
+            return .init(profileID: profile, sourceBaseline: try VortxNativeHostFieldEvidence.canonicalData(carrier))
         }.sorted { $0.profileID.uuidString < $1.profileID.uuidString }
     }
 

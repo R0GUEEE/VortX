@@ -35,6 +35,7 @@ native_live_inputs=(
     app/SourcesShared/VortxResourceProjection.swift app/SourcesShared/VortxNativeBootstrapArchive.swift app/SourcesShared/VortxNativeHostPreferences.swift "${native_watched_swift_inputs[@]}" app/SourcesShared/VortxNativeSession.swift app/SourcesShared/VortxNativeCoreFacade.swift app/SourcesShared/VortxNativePreviouslyWatched.swift
     "$native_live_dir/UserProfile.swift" "$native_live_dir/Discovery.swift" app/SourcesShared/ProfileAddonPreferences.swift app/SourcesShared/VortxProfileOverlayWitness.swift app/SourcesShared/VortxNativeProfiles.swift app/SourcesShared/VortxNativeProviderCredentials.swift
     app/SourcesShared/VortxNativeProfileEditHost.swift app/Tests/VortxNativeLiveABITests.swift
+    app/Tests/OwnerHistorySwiftLiveABICases.swift
     "${native_owner_history_fixture_swift_inputs[@]}" "$native_live_dir/OwnerHistoryFixtureCarriers.swift"
 )
 # The opt-in real closure overlaps old explicit sources; retain all test entries once.
@@ -52,7 +53,9 @@ for native_live_input in "${native_live_inputs[@]}"; do
 done
 nice -n 15 xcrun swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors \
     -j 1 -num-threads 1 -whole-module-optimization \
-    -D VORTX_ENGINE_STATE_BRIDGE -D VORTX_ENGINE_RESOURCE_HOST -I "$native_live_dir" \
+    -sdk "$(xcrun --sdk macosx --show-sdk-path)" -target "$(uname -m)-apple-macosx14.0" \
+    -module-cache-path "$native_live_dir/module-cache" \
+    -D VORTX_ENGINE_STATE_BRIDGE -D VORTX_ENGINE_RESOURCE_HOST -D VORTX_ENGINE_OWNER_HISTORY_BRIDGE -I "$native_live_dir" \
     "${native_live_inputs[@]}" "$library" -o "$native_live_dir/live-abi"
 DYLD_LIBRARY_PATH="$(dirname "$library"):$(dirname "$library")/deps" \
     nice -n 15 "$native_live_dir/live-abi" test/fixtures/native-resource-contract.json "$(<"$native_live_dir/port")" "$native_live_dir/checkpoints" "$native_live_dir/delay-meta"
