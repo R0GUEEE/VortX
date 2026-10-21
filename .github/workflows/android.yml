@@ -40,6 +40,7 @@ on:
     branches: [main, beta]
     paths:
       - "android/**"
+      - "scripts/acquire-android-mpv-component.py"
       - ".github/workflows/android.yml"
   workflow_dispatch:
 
@@ -73,6 +74,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Acquire reviewed Android mpv component (baseline is a no-op)
+        run: /usr/bin/python3 -I scripts/acquire-android-mpv-component.py
 
       # ---- Private engine fetch (moved out of the public tree in 33ff9b5) --------------------------
       # Native Android artifacts use libvortx_ffi.so only, built with jni,server,resource-host from

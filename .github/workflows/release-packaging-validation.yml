@@ -109,6 +109,9 @@ jobs:
       # VORTX_REQUIRE_ENGINE is NOT set, so both cargo-ndk tasks take the documented dev-machine
       # warn-and-skip path; every other packaging phase (Kotlin/Compose release compilation,
       # manifest merge, resources, libmpv native merge, DEX, AGP signing, AAB) is exercised.
+      - name: Acquire reviewed Android mpv component (public-only; baseline is a no-op)
+        run: /usr/bin/python3 -I scripts/acquire-android-mpv-component.py
+
       - name: Build Full+Play release packages with the ephemeral identity
         working-directory: android
         env:

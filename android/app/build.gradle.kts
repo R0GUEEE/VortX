@@ -340,7 +340,9 @@ dependencies {
     // so this dependency is confined to the `full` (sideload) flavor via `fullImplementation` and is
     // NEVER pulled into the `play` (Play-Store) flavor. This mirrors the Apple sideloaded MPVKit-GPL
     // distribution model. Coordinate resolves from mavenCentral() (already in settings.gradle.kts).
-    "fullImplementation"(libs.mpv.libmpv)
+    // Shared root selection: original Maven baseline OR one SHA-pinned component AAR.
+    // Local component bytes never impersonate dev.jdtech.mpv:libmpv:1.0.0.
+    "fullImplementation"(rootProject.extra["vortxMpvAarDependency"])
 
     // The W1-B terminal seam itself: the source-built fork of the upstream JNI glue that exposes
     // mpv_event_end_file.reason/error to Kotlin (MpvTerminalEvent.fromNative). MIT-licensed glue,

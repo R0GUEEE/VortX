@@ -55,6 +55,9 @@ jobs:
           echo "::error::Android artifacts may only be attached to the draft. The Apple release coordinator validates the complete cross-platform set and publishes last."
           exit 1
 
+      - name: Acquire reviewed Android mpv component from the checked-out release source
+        run: /usr/bin/python3 -I scripts/acquire-android-mpv-component.py
+
       # Private source pins stay in lockstep with android.yml. Native variants package only
       # libvortx_ffi.so; the Stremio checkout pin remains for the explicit non-native comparison path.
       - name: Preflight the engine token (fail closed)

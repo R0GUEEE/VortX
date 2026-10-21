@@ -1,7 +1,7 @@
 // The VortX source-built libmpv JNI seam (:mpv-seam). Forked + patched glue from
 // jarnedemeulemeester/libmpv-android v1.0.0 (MIT; see README.md / LICENSE here). This module owns
 // ONLY the thin JNI bridge: it compiles libvortx_mpv_seam.so from source and links it against the
-// prebuilt libmpv.so / libavcodec.so extracted at build time from the dev.jdtech.mpv:libmpv AAR --
+// prebuilt libmpv.so / libavcodec.so extracted at build time from the root-selected AAR --
 // the SAME artifact the app already consumes for the runtime .so set, so no binary is rebuilt,
 // vendored, or added to any repository by this module.
 plugins {
@@ -68,7 +68,7 @@ dependencies {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Native link inputs: resolve the dev.jdtech.mpv:libmpv AAR (the pinned catalog version) and extract
+// Native link inputs: resolve the single root-selected AAR (Maven baseline or reviewed component) and extract
 // its per-ABI prebuilt libmpv.so + libavcodec.so into build/mpvAarJniLibs/jni/<abi>/ so CMake can link
 // against exactly what the app packages at runtime. NOTHING is copied into the repository and nothing
 // is repackaged: these files are build-time linker inputs only; the runtime copies still come from the
@@ -85,18 +85,23 @@ val mpvLinkAar by configurations.creating {
     isCanBeConsumed = false
     isCanBeResolved = true
     isVisible = false
-    description = "Resolves the dev.jdtech.mpv:libmpv AAR whose prebuilt .so files the seam links against."
+    description = "Resolves the same root-selected AAR consumed by the Full app."
 }
 
 dependencies {
-    mpvLinkAar(libs.mpv.libmpv)
+    mpvLinkAar(rootProject.extra["vortxMpvAarDependency"])
 }
 
 val mpvAarJniLibsDir = layout.buildDirectory.dir("mpvAarJniLibs")
 
 val extractMpvAarJniLibs by tasks.registering(Sync::class) {
     group = "build"
-    description = "Extracts per-ABI libmpv.so/libavcodec.so from the dev.jdtech.mpv:libmpv AAR as native link inputs."
+    description = "Extracts per-ABI libmpv.so/libavcodec.so from the root-selected AAR as native link inputs."
+    // Preserve the shared file dependency's verification task through zipTree expansion.
+    dependsOn(mpvLinkAar)
+    doFirst {
+        check(mpvLinkAar.files.size == 1) { "The app and seam require exactly one selected mpv AAR" }
+    }
     from({ mpvLinkAar.incoming.files.files.map { zipTree(it) } }) {
         include("jni/*/libmpv.so", "jni/*/libavcodec.so")
     }
@@ -106,6 +111,11 @@ val extractMpvAarJniLibs by tasks.registering(Sync::class) {
         val jniRoot = mpvAarJniLibsDir.get().asFile.resolve("jni")
         val abis = jniRoot.listFiles()?.filter { it.isDirectory }.orEmpty()
         check(abis.isNotEmpty()) { "dev.jdtech.mpv:libmpv AAR carried no jni/<abi> libs; cannot link the seam." }
+        if (rootProject.extra["vortxMpvComponentSelected"] == true) {
+            check(abis.map { it.name }.toSet() == androidAbis.toSet()) {
+                "Selected component must contain exactly the app's three native ABIs"
+            }
+        }
         for (abi in abis) {
             for (lib in listOf("libmpv.so", "libavcodec.so")) {
                 val f = abi.resolve(lib)

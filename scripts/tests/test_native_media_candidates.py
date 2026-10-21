@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("native_media_evidence", ROOT / "scripts/native-media-hosted/evidence.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+ACQUIRE_SPEC = importlib.util.spec_from_file_location("android_mpv_acquisition", ROOT / "scripts/acquire-android-mpv-component.py")
+ACQUIRE = importlib.util.module_from_spec(ACQUIRE_SPEC)
+ACQUIRE_SPEC.loader.exec_module(ACQUIRE)
 
 
 class NativeMediaProducer(unittest.TestCase):
@@ -224,6 +227,122 @@ class NativeMediaProducer(unittest.TestCase):
     def test_relative_inspector_path_is_rejected(self):
         with self.assertRaises(ValueError):
             MODULE.android(Path('.'), Path('.'), Path('.'), readelf=Path('llvm-readelf'))
+
+
+class AndroidMpvComponentBinding(unittest.TestCase):
+    # Synthetic ZIP contents only: this checks acquisition policy, never native compatibility.
+    URL = "https://github.com/VortXTV/VortX/releases/download/vendor-fixture/libmpv.aar"
+
+    @staticmethod
+    def fixture(path, *, min_sdk="26", missing=None, extra_abi=False, duplicate=False):
+        entries = {
+            "classes.jar": b"synthetic classes, not executable",
+            "AndroidManifest.xml": (
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="dev.jdtech.mpv"><uses-sdk android:minSdkVersion="' + min_sdk + '"/></manifest>'
+            ).encode(),
+        }
+        for abi in ("arm64-v8a", "armeabi-v7a", "x86_64"):
+            for name in ("libmpv.so", "libplayer.so", "libc++_shared.so", "libavcodec.so",
+                         "libavformat.so", "libavutil.so", "libavfilter.so", "libavdevice.so",
+                         "libswresample.so", "libswscale.so"):
+                if f"jni/{abi}/{name}" != missing:
+                    entries[f"jni/{abi}/{name}"] = b"synthetic, not an ELF"
+        if extra_abi:
+            entries["jni/mips/libmpv.so"] = b"unadmitted"
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, data in entries.items():
+                archive.writestr(name, data)
+            if duplicate:
+                archive.writestr("classes.jar", b"duplicate")
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_empty_selection_has_no_network_and_both_consumers_share_full_only_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "android").mkdir()
+            (root / "android/mpv-component.properties").write_text("url=\nsha256=\n")
+            with patch.object(ACQUIRE, "build_opener", side_effect=AssertionError("unexpected network")), patch("builtins.print"):
+                self.assertIsNone(ACQUIRE.acquire(root))
+            self.assertFalse((root / "android/.gradle").exists())
+        # Source contracts only; real Gradle resolution/package-content gates remain separate.
+        app = (ROOT / "android/app/build.gradle.kts").read_text()
+        seam = (ROOT / "android/mpv-seam/build.gradle.kts").read_text()
+        root_build = (ROOT / "android/build.gradle.kts").read_text()
+        self.assertEqual(app.count('"fullImplementation"(rootProject.extra["vortxMpvAarDependency"])'), 1)
+        self.assertIn('"fullImplementation"(project(":mpv-seam"))', app)
+        self.assertEqual(seam.count('mpvLinkAar(rootProject.extra["vortxMpvAarDependency"])'), 1)
+        self.assertIn("dependsOn(mpvLinkAar)", seam)
+        self.assertIn('extra["vortxMpvAarDependency"] = files(aar).builtBy(verifyMpvComponent)', root_build)
+        self.assertIn('extra["vortxMpvAarDependency"] = libs.mpv.libmpv', root_build)
+        self.assertNotIn('"playImplementation"(rootProject.extra["vortxMpvAarDependency"])', app)
+        self.assertNotIn('"playImplementation"(project(":mpv-seam"))', app)
+
+    def test_selection_and_redirects_refuse_unapproved_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            descriptor = Path(directory) / "component.properties"
+            for text in (
+                f"url={self.URL}\nsha256=\n", "url=\nsha256=" + "a" * 64 + "\n",
+                "url=https://example.com/private.aar\nsha256=" + "a" * 64 + "\n",
+                f"url={self.URL}?token=not-a-credential\nsha256=" + "a" * 64 + "\n",
+                f"url={self.URL}\nsha256=" + "a" * 64 + "\nurl=\n",
+            ):
+                with self.subTest(descriptor=text):
+                    descriptor.write_text(text)
+                    with self.assertRaises(ValueError):
+                        ACQUIRE.selection(descriptor)
+        handler = ACQUIRE.ReleaseRedirects()
+        request = ACQUIRE.Request(self.URL)
+        for url in ("http://github.com/payload", "https://example.com/payload",
+                    "https://user@github.com/payload", "https://github.com:444/payload"):
+            with self.subTest(redirect=url), self.assertRaises(ValueError):
+                handler.redirect_request(request, None, 302, "Found", {}, url)
+        allowed = handler.redirect_request(request, None, 302, "Found", {},
+                                           "https://release-assets.githubusercontent.com/payload?signature=synthetic")
+        self.assertEqual(allowed.host, "release-assets.githubusercontent.com")
+
+    def test_cached_bytes_are_reused_and_bad_or_linked_cache_never_falls_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "android").mkdir()
+            source = root / "fixture.aar"
+            checksum = self.fixture(source)
+            (root / "android/mpv-component.properties").write_text(f"url={self.URL}\nsha256={checksum}\n")
+            target = root / "android/.gradle/vortx-mpv-components" / checksum / "libmpv.aar"
+            target.parent.mkdir(parents=True)
+            original = source.read_bytes()
+            target.write_bytes(original)
+            inode = target.stat().st_ino
+            with patch.object(ACQUIRE, "build_opener", side_effect=AssertionError("unexpected network")), patch("builtins.print"):
+                ACQUIRE.acquire(root)
+                self.assertEqual(target.read_bytes(), original)
+                self.assertEqual(target.stat().st_ino, inode)
+                target.write_bytes(b"corrupt existing cache")
+                with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                    ACQUIRE.acquire(root)
+                self.assertEqual(target.read_bytes(), b"corrupt existing cache")
+                target.unlink()  # fixture-owned path only; production never removes a bad cache
+                target.symlink_to(source)
+                with self.assertRaisesRegex(ValueError, "linked"):
+                    ACQUIRE.acquire(root)
+                self.assertTrue(target.is_symlink())
+                self.assertEqual(source.read_bytes(), original)
+
+    def test_actual_aar_content_gate_accepts_exact_shape_and_rejects_wrong_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "fixture.aar"
+            checksum = self.fixture(target)
+            ACQUIRE.verify_aar(target, checksum)
+            for options in ({"min_sdk": "25"}, {"extra_abi": True},
+                            {"missing": "jni/arm64-v8a/libavcodec.so"}):
+                with self.subTest(options=options):
+                    checksum = self.fixture(target, **options)
+                    with self.assertRaises(ValueError):
+                        ACQUIRE.verify_aar(target, checksum)
+            with self.assertWarns(UserWarning):
+                checksum = self.fixture(target, duplicate=True)
+            with self.assertRaisesRegex(ValueError, "membership"):
+                ACQUIRE.verify_aar(target, checksum)
 
 
 if __name__ == "__main__":
