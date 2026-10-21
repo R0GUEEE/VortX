@@ -336,8 +336,8 @@ struct HomeView: View {
         .onChange(of: presenter.request == nil) { _ in offerInterestsIfNeeded() }
         .onChange(of: profiles.needsPicker) { _ in offerInterestsIfNeeded() }
         .fullScreenCover(item: $interestsPresentation) { presentation in
-            ForYouInterestsView(initial: forYou.interests, firstRun: presentation.firstRun) {
-                interestsPresentation = nil
+            ForYouInterestsView(session: presentation.session, firstRun: presentation.firstRun) {
+                if interestsPresentation?.id == presentation.id { interestsPresentation = nil }
             }
             .environmentObject(theme)
         }
@@ -362,9 +362,15 @@ struct HomeView: View {
         // before that the store reads nil interests, which looks undecided for every profile.
         guard isActive, interestsPresentation == nil, presenter.request == nil, forYouEnabled, !profiles.needsPicker,
               let profile = profiles.activeID, forYou.ready, forYou.profileID == profile,
-              forYou.interests?.decided != true, !interestsOffered.contains(profile) else { return }
+              forYou.interests?.decided != true, !interestsOffered.contains(profile),
+              let session = try? forYou.captureInterestsEdit() else { return }
         interestsOffered.insert(profile)
-        interestsPresentation = ForYouInterestsPresentation(firstRun: true)
+        interestsPresentation = ForYouInterestsPresentation(firstRun: true, session: session)
+    }
+
+    private func tuneInterests() {
+        guard let session = try? forYou.captureInterestsEdit() else { return }
+        interestsPresentation = ForYouInterestsPresentation(firstRun: false, session: session)
     }
 
     /// Recompute the "Top Picks for you" rail from the profile-aware Continue Watching + library.
@@ -488,7 +494,7 @@ struct HomeView: View {
             if forYouEnabled {
                 ForYouHomeSectionTV(rows: forYouRows.interestRows, showInvite: forYou.interests?.isEmpty ?? true,
                                     focusModel: focusModel,
-                                    onTune: { interestsPresentation = ForYouInterestsPresentation(firstRun: false) })
+                                    onTune: { tuneInterests() })
             }
         case .smartCollections:
             if forYouEnabled {

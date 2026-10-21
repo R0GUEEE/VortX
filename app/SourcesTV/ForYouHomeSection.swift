@@ -3,7 +3,9 @@ import SwiftUI
 /// Which way the interests picker opens: the first-time offer (Done / Skip for now) or Tune (Save / Cancel).
 struct ForYouInterestsPresentation: Identifiable, Equatable {
     let firstRun: Bool
-    var id: Bool { firstRun }
+    /// Captured with the presentation so the draft can only ever save for the profile it opened for.
+    let session: ForYouInterestsEditSession
+    var id: UUID { session.id }
 }
 
 /// The For You section on tvOS Home: a "For you" header with Tune, then each interest row in the same

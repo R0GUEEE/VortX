@@ -526,6 +526,15 @@ final class CoreBridge: ObservableObject {
         return .init(credential: CredentialScopeRegistry.shared.capture(), profileID: ProfileStore.shared.activeID,
                      target: target, sessionGeneration: generation)
     }
+    /// Whether an admission captured for a profile action still names this device's credential scope, profile and
+    /// native session, and the same watchlist binding when it captured one.
+    @MainActor func nativeWatchlistActionAdmissionIsCurrent(_ admission: NativeWatchlistActionAdmission) -> Bool {
+        guard CredentialScopeRegistry.shared.isCurrent(admission.credential), ProfileStore.shared.activeID == admission.profileID,
+              admission.sessionGeneration == nil
+                || nativeFacadeLock.withLock({ nativeInstallGeneration == admission.sessionGeneration }) else { return false }
+        if let target = admission.target { return nativeWatchlistTargetIsCurrent(target) }
+        return true
+    }
     @MainActor func prepareNativeWatchlistActionTarget(_ admission: NativeWatchlistActionAdmission) async -> NativeWatchlistTarget? {
         await NativeProfileActionPreparation.target(isCurrent: {
             CredentialScopeRegistry.shared.isCurrent(admission.credential) && ProfileStore.shared.activeID == admission.profileID &&

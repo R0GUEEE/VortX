@@ -1865,8 +1865,8 @@ struct iOSHomeView: View {
         .onChange(of: isActive) { _ in offerInterestsIfNeeded() }
         .onChange(of: profiles.needsPicker) { _ in offerInterestsIfNeeded() }
         .sheet(item: $interestsPresentation) { presentation in
-            ForYouInterestsView(initial: forYou.interests, firstRun: presentation.firstRun) {
-                interestsPresentation = nil
+            ForYouInterestsView(session: presentation.session, firstRun: presentation.firstRun) {
+                if interestsPresentation?.id == presentation.id { interestsPresentation = nil }
             }
             .environmentObject(theme)
         }
@@ -1961,13 +1961,13 @@ struct iOSHomeView: View {
     private var forYouHomeRails: some View {
         if forYouEnabled {
             if !forYouRows.interestRows.isEmpty {
-                iOSForYouHeader(onTune: { interestsPresentation = iOSForYouInterestsPresentation(firstRun: false) })
+                iOSForYouHeader(onTune: { tuneInterests() })
                 ForEach(forYouRows.interestRows) { row in
                     homeRail(PosterRail(title: row.title, eyebrow: row.eyebrow, items: row.items.map(forYouRailItem),
                                         onTap: handleTap, showWatchedBadges: true))
                 }
             } else if forYou.interests?.isEmpty ?? true {
-                iOSForYouInvite(onTune: { interestsPresentation = iOSForYouInterestsPresentation(firstRun: false) })
+                iOSForYouInvite(onTune: { tuneInterests() })
             }
         }
     }
@@ -2006,9 +2006,15 @@ struct iOSHomeView: View {
         // before that the store reads nil interests, which looks undecided for every profile.
         guard isActive, interestsPresentation == nil, player == nil, !showSignIn, !showCustomizeHome, forYouEnabled,
               !profiles.needsPicker, let profile = profiles.activeID, forYou.ready, forYou.profileID == profile,
-              forYou.interests?.decided != true, !interestsOffered.contains(profile) else { return }
+              forYou.interests?.decided != true, !interestsOffered.contains(profile),
+              let session = try? forYou.captureInterestsEdit() else { return }
         interestsOffered.insert(profile)
-        interestsPresentation = iOSForYouInterestsPresentation(firstRun: true)
+        interestsPresentation = iOSForYouInterestsPresentation(firstRun: true, session: session)
+    }
+
+    private func tuneInterests() {
+        guard let session = try? forYou.captureInterestsEdit() else { return }
+        interestsPresentation = iOSForYouInterestsPresentation(firstRun: false, session: session)
     }
 
     @ViewBuilder

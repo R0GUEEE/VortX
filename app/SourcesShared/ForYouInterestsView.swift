@@ -7,6 +7,8 @@ import SwiftUI
 /// select and scale exactly like every other chip. `firstRun` offers Done / Skip for now; both record a
 /// decision so no device asks again. Editing (from Tune) offers Save / Cancel instead.
 struct ForYouInterestsView: View {
+    /// The store-owned session captured with this picker; only it may save the draft.
+    let session: ForYouInterestsEditSession
     let firstRun: Bool
     let onFinish: () -> Void
 
@@ -15,10 +17,11 @@ struct ForYouInterestsView: View {
     @State private var saving = false
     @State private var errorMessage: String?
 
-    init(initial: ForYouInterests?, firstRun: Bool, onFinish: @escaping () -> Void) {
+    init(session: ForYouInterestsEditSession, firstRun: Bool, onFinish: @escaping () -> Void) {
+        self.session = session
         self.firstRun = firstRun
         self.onFinish = onFinish
-        _draft = State(initialValue: initial ?? ForYouInterests())
+        _draft = State(initialValue: session.initial ?? ForYouInterests())
     }
 
     var body: some View {
@@ -65,6 +68,10 @@ struct ForYouInterestsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Theme.Palette.canvas.ignoresSafeArea())
+        // A profile, sign-in or credential change retires the session: close rather than keep another
+        // profile's draft on screen.
+        .onReceive(ForYouStore.shared.$interestsEditID) { id in if id != session.id { onFinish() } }
+        .onDisappear { ForYouStore.shared.retireInterestsEdit(session) }
     }
 
     private var peopleSection: some View {
@@ -99,8 +106,10 @@ struct ForYouInterestsView: View {
         Task { @MainActor in
             defer { saving = false }
             do {
-                try await ForYouStore.shared.save(value)
+                try await ForYouStore.shared.saveInterests(value, session: session)
                 onFinish()
+            } catch CurationFailure.staleContext {
+                onFinish()   // the profile changed underneath; the draft belongs to no one now
             } catch {
                 errorMessage = String(localized: "Couldn't save your interests. Check your connection and try again.")
             }

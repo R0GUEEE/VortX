@@ -20,6 +20,17 @@ final class ForYouStore: ObservableObject {
     @Published private(set) var richCollections: [CurationCollection] = []
     private var richEditSession: CurationEditSession?
     private var legacyEditSession: CurationLegacyEditSession?
+    /// The live interests picker's session id; the picker closes itself once this stops naming it.
+    @Published private(set) var interestsEditID: UUID?
+    private var interestsLedger = ForYouInterestsEditLedger()
+    private var interestsEdit: InterestsEditAuthority?
+    private struct InterestsEditAuthority {
+        let session: ForYouInterestsEditSession
+        let credential: CredentialScopeRegistry.Capture
+        #if VORTX_NATIVE_DATA_ENGINE
+        let admission: CoreBridge.NativeWatchlistActionAdmission?
+        #endif
+    }
     private var richCredentialCapture = CredentialScopeRegistry.shared.capture()
     #if VORTX_NATIVE_DATA_ENGINE
     private var richPresentationTarget: CoreBridge.NativeXperienceTarget?
@@ -81,8 +92,70 @@ final class ForYouStore: ObservableObject {
         #endif
     }
 
-    func save(_ interests: ForYouInterests) async throws {
-        try await write(ForYouInterests.field, value: ForYouSync.value(interests))
+    /// Opens the interests picker for the active profile under the authority of this moment. The picker's draft
+    /// starts from `initial`, so the draft and the authority that may save it are captured together.
+    func captureInterestsEdit() throws -> ForYouInterestsEditSession {
+        retireInterestsEdits()
+        guard let profile = ProfileStore.shared.activeID, ready, profile == profileID else { throw CurationFailure.unavailable }
+        let signedIn = VortXSyncManager.shared.isSignedIn
+        let session = ForYouInterestsEditSession(profileID: profile, initial: interests, signedIn: signedIn)
+        #if VORTX_NATIVE_DATA_ENGINE
+        let admission = signedIn ? CoreBridge.shared.captureNativeWatchlistActionAdmission() : nil
+        interestsEdit = InterestsEditAuthority(session: session, credential: CredentialScopeRegistry.shared.capture(),
+                                               admission: admission)
+        #else
+        interestsEdit = InterestsEditAuthority(session: session, credential: CredentialScopeRegistry.shared.capture())
+        #endif
+        interestsLedger.open(session)
+        interestsEditID = session.id
+        return session
+    }
+
+    func retireInterestsEdit(_ session: ForYouInterestsEditSession) {
+        guard interestsEdit?.session.id == session.id else { return }
+        retireInterestsEdits()
+    }
+
+    private func retireInterestsEdits() {
+        interestsLedger.retireAll()
+        interestsEdit = nil
+        if interestsEditID != nil { interestsEditID = nil }
+    }
+
+    func isCurrentInterestsEdit(_ session: ForYouInterestsEditSession) -> Bool {
+        guard let edit = interestsEdit, edit.session.id == session.id,
+              interestsLedger.admits(session, activeProfile: ProfileStore.shared.activeID,
+                                     signedIn: VortXSyncManager.shared.isSignedIn,
+                                     authorityCurrent: CredentialScopeRegistry.shared.isCurrent(edit.credential)) else { return false }
+        #if VORTX_NATIVE_DATA_ENGINE
+        if let admission = edit.admission { return CoreBridge.shared.nativeWatchlistActionAdmissionIsCurrent(admission) }
+        #endif
+        return true
+    }
+
+    /// Saves the picker's draft for the profile it opened for, never the one active when the save starts.
+    func saveInterests(_ interests: ForYouInterests, session: ForYouInterestsEditSession) async throws {
+        try Task.checkCancellation()
+        guard isCurrentInterestsEdit(session), let edit = interestsEdit else { throw CurationFailure.staleContext }
+        let value = try ForYouSync.value(interests)
+        try ForYouSync.validate(ForYouInterests.field, value: value)
+        #if VORTX_NATIVE_DATA_ENGINE
+        if let admission = edit.admission {
+            let core = CoreBridge.shared
+            guard let target = await core.prepareNativeWatchlistActionTarget(admission) else { throw CurationFailure.staleContext }
+            try Task.checkCancellation()
+            guard isCurrentInterestsEdit(session) else { throw CurationFailure.staleContext }
+            // The write is fenced by the original target before and after; its own change note only reloads.
+            try await core.setNativeForYouField(ForYouInterests.field, value: value, target: target)
+            retireInterestsEdit(session)
+            reload()
+            return
+        }
+        #endif
+        // Signed out: the original profile's local copy, validated and written with no suspension in between.
+        try ForYouLocalStore.write(field: ForYouInterests.field, value: value, profileID: session.profileID)
+        retireInterestsEdit(session)
+        NotificationCenter.default.post(name: Self.changedNote, object: nil)
     }
 
     func save(_ collection: SmartCollection) async throws {
@@ -214,6 +287,7 @@ final class ForYouStore: ObservableObject {
     private func invalidateCurationContext() {
         invalidateRichEdit()
         if let session = legacyEditSession { retireLegacyEdit(session) }
+        retireInterestsEdits()
         #if VORTX_NATIVE_DATA_ENGINE
         if let target = richPresentationTarget { CoreBridge.shared.retireNativeXperienceTarget(target) }
         richPresentationTarget = nil
@@ -230,6 +304,7 @@ final class ForYouStore: ObservableObject {
         if let target = richEditSession?.target, !core.nativeXperienceTargetIsCurrent(target) { changed = true }
         if let target = legacyEditSession?.target, !core.nativeXperienceTargetIsCurrent(target) { changed = true }
         #endif
+        if let edit = interestsEdit, !isCurrentInterestsEdit(edit.session) { changed = true }
         if changed {
             invalidateCurationContext()
             // Do not recapture an old facade while install/revoke is in progress.
