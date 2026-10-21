@@ -1,9 +1,8 @@
 diff --git a/Package.swift b/Package.swift
-index 9d9b0af..b19bd8e 100644
+index 9d9b0af..15cedb4 100644
 --- a/Package.swift
 +++ b/Package.swift
-@@ -77,7 +77,8 @@ let package = Package(
-             linkerSettings: [
+@@ -78,6 +78,7 @@ let package = Package(
                  .linkedFramework("AudioToolbox"),
                  .linkedFramework("CoreVideo"),
                  .linkedFramework("CoreFoundation"),
@@ -11,8 +10,27 @@ index 9d9b0af..b19bd8e 100644
                  .linkedFramework("CoreMedia"),
                  .linkedFramework("Metal"),
                  .linkedFramework("VideoToolbox"),
+@@ -229,14 +230,14 @@ let package = Package(
+ 
+         .binaryTarget(
+             name: "Libshaderc_combined",
+-            url: "https://github.com/mpvkit/libshaderc-build/releases/download/2025.5.0/Libshaderc_combined.xcframework.zip",
+-            checksum: "758047b615708575b580eb960a2d083f760a29dc462d6eaa360416c946ce433b"
++            url: "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip",
++            checksum: "77a3d355993cf53843a394bf58262dab99cdd93f9e6fe31d5ca6e55b03866ce1"
+         ),
+ 
+         .binaryTarget(
+             name: "lcms2",
+-            url: "https://github.com/mpvkit/lcms2-build/releases/download/2.17.0/lcms2.xcframework.zip",
+-            checksum: "dc0dce0606f6ab6841a8ec5a6bd4448e2f3ef00661a050460f806c9393dc6982"
++            url: "https://github.com/mpvkit/lcms2-build/releases/download/2.18.0/lcms2.xcframework.zip",
++            checksum: "945a6fa36ad8b39cfb75603a84f375249bc382adde4eb8e9cfc70b8cb942312d"
+         ),
+ 
+         .binaryTarget(
 diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScripts/XCFrameworkBuild/main.swift
-index e5f872c..dcaca5b 100644
+index e5f872c..f147797 100644
 --- a/Sources/BuildScripts/XCFrameworkBuild/main.swift
 +++ b/Sources/BuildScripts/XCFrameworkBuild/main.swift
 @@ -45,12 +45,40 @@ do {
@@ -58,9 +76,12 @@ index e5f872c..dcaca5b 100644
          case .openssl:
              return "3.3.5"
          case .gnutls:
-@@ -76,7 +104,10 @@ enum Library: String, CaseIterable {
+@@ -74,15 +102,18 @@ enum Library: String, CaseIterable {
+         case .libdav1d:    // AV1 decoding
+             return "1.5.3"
          case .lcms2:
-             return "2.17.0"
+-            return "2.17.0"
++            return "2.18.0"
          case .libplacebo:
 -            return "7.360.1"
 +            // SPIKE: built FROM SOURCE off libplacebo master (PL_API_VER 371) instead of the
@@ -70,6 +91,13 @@ index e5f872c..dcaca5b 100644
          case .libdovi:
              return "3.3.2"
          case .vulkan:
+             return "1.4.2"
+         case .libshaderc:  // compiling GLSL (OpenGL Shading Language) shaders into SPIR-V (Standard Portable Intermediate Representation - Vulkan) code
+-            return "2025.5.0"
++            return "2026.1.0"
+         case .libuchardet:
+             return "0.0.8"
+         case .libbluray:
 @@ -123,7 +154,8 @@ enum Library: String, CaseIterable {
          case .lcms2:
              return "https://github.com/mpvkit/lcms2-build/releases/download/\(self.version)/lcms2-all.zip"

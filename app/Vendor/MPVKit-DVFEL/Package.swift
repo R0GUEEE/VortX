@@ -222,14 +222,14 @@ let package = Package(
 
         .binaryTarget(
             name: "Libshaderc_combined",
-            url: "https://github.com/mpvkit/libshaderc-build/releases/download/2025.5.0/Libshaderc_combined.xcframework.zip",
-            checksum: "758047b615708575b580eb960a2d083f760a29dc462d6eaa360416c946ce433b"
+            url: "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip",
+            checksum: "77a3d355993cf53843a394bf58262dab99cdd93f9e6fe31d5ca6e55b03866ce1"
         ),
 
         .binaryTarget(
             name: "lcms2",
-            url: "https://github.com/mpvkit/lcms2-build/releases/download/2.17.0/lcms2.xcframework.zip",
-            checksum: "dc0dce0606f6ab6841a8ec5a6bd4448e2f3ef00661a050460f806c9393dc6982"
+            url: "https://github.com/mpvkit/lcms2-build/releases/download/2.18.0/lcms2.xcframework.zip",
+            checksum: "945a6fa36ad8b39cfb75603a84f375249bc382adde4eb8e9cfc70b8cb942312d"
         ),
 
         .binaryTarget(
