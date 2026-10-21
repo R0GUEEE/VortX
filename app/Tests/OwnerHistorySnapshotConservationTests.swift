@@ -95,6 +95,35 @@ final class OwnerHistoryExactJSONAuthoredTests: XCTestCase {
         return try root.encoded()
     }
 
+    func testColdPeerNormalizationRetainsOmittedUnknownNativeBytes() throws {
+        let source = bytes(#"{ "proof" : [-0.0,18446744073709551615] }"#)
+        let unknown = bytes(#"{ "future" : [18446744073709551615,-0.0] }"#)
+        var original = try conservationNative(source: source)
+        original.set("futureNative", unknown)
+        let normalized = try conservationNative(source: source)
+        let state = try Exact.Snapshot.conservingColdNativeState(originalNative: original.encoded(),
+            normalizedState: conservationCold(normalized), witnessID: "3", fence: bytes(parent))
+        let retained = try Exact.Object(state.nativeSyncBytes)
+        XCTAssertEqual(retained["futureNative"], unknown)
+        XCTAssertEqual(retained["ownerHistory"], source)
+        XCTAssertEqual(retained["schemaVersion"], normalized["schemaVersion"])
+    }
+
+    func testColdPeerNormalizationRejectsKnownSourceAndReturnedUnknownChanges() throws {
+        var original = try conservationNative(source: bytes(#"{"proof":-0.0}"#))
+        original.set("futureNative", bytes(#"{"wide":18446744073709551615}"#))
+        for key in ["schemaVersion", "ownerHistory", "futureNative"] {
+            var changed = original
+            changed.set(key, key == "schemaVersion" ? bytes("5") : bytes("{}"))
+            XCTAssertThrowsError(try Exact.Snapshot.conservingColdNativeState(originalNative: original.encoded(),
+                normalizedState: conservationCold(changed), witnessID: "3", fence: bytes(parent)), key)
+        }
+        var missing = original; missing.remove("ownerHistory")
+        XCTAssertThrowsError(try Exact.Snapshot.requireColdNativeConservation(original: original.encoded(), candidate: missing.encoded()))
+        var added = original; added.set("inventedNative", bytes("true"))
+        XCTAssertThrowsError(try Exact.Snapshot.requireColdNativeConservation(original: original.encoded(), candidate: added.encoded()))
+    }
+
     func testOmittedUnknownNativeSiblingsRetainOriginalRawTokensAndSource() throws {
         let source = bytes(#"{ "sources" : [-0.0,9007199254740993,1e999], "unknown" : {"deleted":null} }"#)
         let unknown = bytes(#"{ "raw" : [-0.0,0.0,9007199254740993,1e+999], "order" : [3,1,2] }"#)

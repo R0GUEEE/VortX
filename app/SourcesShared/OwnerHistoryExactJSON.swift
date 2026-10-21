@@ -87,6 +87,38 @@ enum OwnerHistoryExactJSON {
             "schemaVersion", "scope", "ownerProfileId", "profiles", "addons", "libraries", "watches"
         ]
 
+        /// Native normalization may omit unknown siblings, not alter admitted known data or
+        /// source proof. Returned unknown upserts are not authority to rewrite a peer field.
+        static func requireColdNativeConservation(original: Data, candidate: Data) throws {
+            let before = try Object(original), after = try Object(candidate)
+            let known = nativeSerdeOwned.union(["ownerHistory"])
+            for key in known {
+                switch (before[key], after[key]) {
+                case (nil, nil): break
+                case let (.some(a), .some(b)):
+                    guard try canonical(a) == canonical(b) else { throw Failure.contradictory }
+                default: throw Failure.contradictory
+                }
+            }
+            for (key, value) in after.fields where !known.contains(key) {
+                guard let original = before[key], try canonical(original) == canonical(value) else {
+                    throw Failure.contradictory
+                }
+            }
+        }
+
+        /// First peer mount preserves the original native unknown bytes before composing
+        /// normalized engine output. It does not validate a source or mint native authority.
+        static func conservingColdNativeState(originalNative: Data, normalizedState: Data,
+                                              witnessID: String, fence: Data) throws -> Self {
+            var original = try Object(normalizedState)
+            try requireColdNativeConservation(original: originalNative,
+                candidate: original.required("nativeSync"))
+            original.set("nativeSync", originalNative)
+            let base = try Self(bytes: original.encoded(), witnessID: witnessID, fence: fence)
+            return try base.replacingNativeState(normalizedState, witnessID: witnessID, fence: fence)
+        }
+
         init(bytes: Data, witnessID: String, fence: Data) throws {
             let root = try Object(bytes)
             let roster = try Object(root.required("roster"))

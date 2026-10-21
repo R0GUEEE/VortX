@@ -299,11 +299,11 @@ final class OwnerHistorySessionCoordinator {
         do {
             let fence = try capture(runtime, target: target, verifier: verifier)
             guard let full = verifier.normalized else { throw VortxNativeError.invalidSnapshot }
-            let snapshot = try Exact.Snapshot(bytes: full,
+            let snapshot = try Exact.Snapshot.conservingColdNativeState(originalNative: nativeDocument, normalizedState: full,
                 witnessID: Exact.Object(fence).text("sourceSetWitnessId"), fence: fence)
             let localBytes = try local.encoded()
             let host = try OwnerHistoryAccountExport.hostProjection(hostPreferences, scope: scope)
-            var checkpoint = Checkpoint(snapshot: full, hostPreferences: hostPreferences,
+            var checkpoint = Checkpoint(snapshot: snapshot.bytes, hostPreferences: hostPreferences,
                 ownerHistoryLocal: localBytes, scope: scope, nativeSync: try snapshot.nativeSyncBytes,
                 hostProjection: host, ownerHistorySources: try OwnerHistoryAccountExport.sourceCarrier(local: localBytes, scope: scope, readOwnerUID: preservedOwnerUID),
                 preservedOwnerUID: preservedOwnerUID)
@@ -1107,9 +1107,7 @@ final class OwnerHistorySessionCoordinator {
                 let candidate = try check.required("candidateState")
                 if let openingNative {
                     let native = try Exact.Object(candidate).required("nativeSync")
-                    guard try OwnerHistorySessionCoordinator.equal(native, openingNative) else {
-                        throw VortxNativeError.invalidSnapshot
-                    }
+                    try Exact.Snapshot.requireColdNativeConservation(original: openingNative, candidate: native)
                 }
                 try validation.validate(snapshot: candidate, journal: journal, scope: scope, authority: authority)
                 lock.withLock { full = candidate; fullCount += 1 }

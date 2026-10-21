@@ -14,6 +14,8 @@ import Darwin
             "testAbsentNativeDeltaPreservesCompleteNativeDocument",
             "testForeignWitnessParentAndInjectedOwnerHistoryReject",
             "testColdNativeCheckpointCannotEraseUnrelatedHostFields",
+            "testColdPeerNormalizationRetainsOmittedUnknownNativeBytes",
+            "testColdPeerNormalizationRejectsKnownSourceAndReturnedUnknownChanges",
             "testOmittedUnknownNativeSiblingsRetainOriginalRawTokensAndSource",
             "testKnownSerdeOptionalsClearOnOmissionAndDoNotResurrect",
             "testExplicitRawUnknownNativeUpsertRetainsOtherUnknownFields",
@@ -33,6 +35,6 @@ import Darwin
               run.skipCount == 0, run.totalFailureCount == 0 else {
             print("FAIL Snapshot XCTest execution or assertion"); exit(1)
         }
-        print("PASS actual raw Snapshot XCTest cases: 15 (7 original + 8 conservation)")
+        print("PASS actual raw Snapshot XCTest cases: 17 (7 original + 10 conservation)")
     }
 }
