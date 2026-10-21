@@ -19,6 +19,15 @@ ROOTS = {"dav1d", "ffmpeg", "fontconfig", "freetype", "fribidi", "harfbuzz", "li
          "libplacebo", "libunibreak", "libxml2", "lua", "mbedtls", "mpv"}
 LICENSE_REQUIRED = {"deps/ffmpeg/COPYING.GPLv3", "deps/mpv/LICENSE.GPL", "deps/mbedtls/LICENSE",
                     "deps/lua/src/lua.h", "deps/libunibreak/src/linebreak.h"}
+ARTIFACT_MEMBERS = {"android-corresponding-sources.tar.gz", "artifact-sha256.json", "build.log",
+                    "ffmpeg-applied.patch", "libmpv-release-candidate.aar", "original-upstream-source.tar.gz",
+                    "python-toolchain.json", "result.json", "reviewed-inputs.sha256",
+                    "tls_mbedtls_vortx_distrust.h", "toolchain.txt"} | {f"source-{n}.patch" for n in range(12)}
+# A producer that passed its own artifact checker also retains that checker's evidence and the
+# generated FFmpeg configs; a failed producer stopped before writing either.
+CI_EVIDENCE_MEMBERS = {"android-artifact-evidence.json", "android-build-configs.tar.gz"}
+PRODUCER_VALIDATOR = "scripts/native-media-hosted/evidence.py"
+LINEAGES = {"reinspected-failure", "ci-evidence"}
 
 
 def require(ok, message):
@@ -117,6 +126,76 @@ def package(args):
     checked(args.source_notes, config["sourceNotesSHA256"])
     checked(args.release_notes, config["releaseNotesSHA256"])
     checked(args.artifact_zip, config["artifactSHA256"], config["artifactBytes"])
+    lineage = config.get("producerLineage", "reinspected-failure")
+    require(lineage in LINEAGES, "Unknown producer lineage")
+    ci = lineage == "ci-evidence"
+    stamp = config.get("sourceDateEpoch", STAMP)
+    require(isinstance(stamp, int) and stamp > 0, "Source date")
+    local = (args.evidence, args.reinspection, args.validator)
+    if ci:
+        # The producer's own checker passed; its hash-covered evidence and the reviewed validator
+        # come from the artifact and producer commit, never from a local reinspection.
+        require(all(path is None for path in local), "CI-evidence lineage takes no local reinspection inputs")
+        inspection = None
+    else:
+        require(all(path is not None for path in local), "Reinspected lineage requires evidence, receipt and validator")
+        inspection = reinspected(args, config)
+    payload = {}
+    with zipfile.ZipFile(args.artifact_zip) as archive:
+        names = archive.namelist()
+        expected = ARTIFACT_MEMBERS | (CI_EVIDENCE_MEMBERS if ci else set())
+        require(len(names) == len(expected) and set(names) == expected, "Original artifact membership")
+        manifest_bytes = archive.read("artifact-sha256.json")
+        require(hashlib.sha256(manifest_bytes).hexdigest() == config["originalManifestSHA256"], "Original manifest")
+        manifest = json.loads(manifest_bytes)
+        require(set(manifest) == expected - {"artifact-sha256.json", "build.log"}, "Original hash coverage")
+        for name, expected_hash in manifest.items():
+            with archive.open(name) as stream:
+                require(stream_hash(stream) == expected_hash, "Original member mismatch: " + name)
+        require(manifest["android-corresponding-sources.tar.gz"] == config["dependencySourcesSHA256"] and
+                manifest["original-upstream-source.tar.gz"] == config["publisherSourcesSHA256"] and
+                manifest["libmpv-release-candidate.aar"] == config["aarSHA256"], "Source/AAR pin mismatch")
+        original = json.loads(archive.read("result.json"))
+        require(original["appSourceCommit"] == config["producerCommit"] and
+                original["runId"] == config["producerRun"] and original["attempt"] == config["producerAttempt"] and
+                original["buildExit"] == (0 if ci else 1) and original["lane"] == "android" and
+                original["sources"][0]["commit"] == config["publisherCommit"] and
+                original["promotionEligible"] is False and original["runtimeSecurityTested"] is False, "Original producer receipt")
+        reviewed = archive.read("reviewed-inputs.sha256")
+        require(hashlib.sha256(reviewed).hexdigest() == config["originalInputManifestSHA256"], "Original reviewed inputs")
+        inputs = {}
+        for line in reviewed.decode().splitlines():
+            checksum, path = line.split("  ", 1)
+            require(path not in inputs and re.fullmatch(r"[0-9a-f]{64}", checksum), "Duplicate/invalid producer pin")
+            inputs[path] = checksum
+        require(len(inputs) == 18, "Original producer requires exactly eighteen input files")
+        inputs["scripts/native-media-hosted/inputs.sha256"] = config["originalInputManifestSHA256"]
+        inputs.update(config["producerWorkflows"])
+        for path, checksum in inputs.items():
+            payload["producer/" + path] = git_blob(args.repo, config["producerCommit"], path, checksum)
+        if ci:
+            require(PRODUCER_VALIDATOR in inputs, "Producer validator is not a reviewed input")
+            validator = payload["producer/" + PRODUCER_VALIDATOR][0]
+            inspection = producer_checked(json.loads(archive.read("android-artifact-evidence.json")), config,
+                                          hashlib.sha256(validator).hexdigest(),
+                                          manifest["android-artifact-evidence.json"])
+        else:
+            validator = args.validator.read_bytes()
+        payload["license-index.json"] = (encoded(source_index(archive)), 0o644)
+        for name in ("result.json", "artifact-sha256.json", "reviewed-inputs.sha256"):
+            payload["producer-evidence/" + name] = (archive.read(name), 0o644)
+        require(archive.getinfo("libmpv-release-candidate.aar").file_size == config["aarBytes"], "AAR size")
+        # Reserve a fresh output. Failures leave evidence for root; no cleanup/reuse/replacement.
+        out = args.out.absolute()
+        require(out.parent.is_dir() and out.parent.resolve() == out.parent, "Output parent must be real")
+        out.mkdir(mode=0o700, exist_ok=False)
+        aar = out / config["assets"]["aar"]
+        with archive.open("libmpv-release-candidate.aar") as incoming, aar.open("xb") as outgoing:
+            shutil.copyfileobj(incoming, outgoing, CHUNK)
+    write_kit(args, config, out, aar, payload, inspection, validator, original, stamp, lineage, notices)
+
+
+def reinspected(args, config):
     checked(args.evidence, config["reinspectionEvidenceSHA256"])
     checked(args.reinspection, config["reinspectionProvenanceSHA256"])
     checked(args.validator, config["validatorSHA256"])
@@ -140,56 +219,32 @@ def package(args):
                   "originalProvenanceSHA256": config["reinspectionProvenanceSHA256"],
                   "rawLocalPathsOmitted": True, "runtimeSecurityTested": False,
                   "appAndSeamBindingChanged": False, "promotionEligible": False}
-    payload = {}
-    with zipfile.ZipFile(args.artifact_zip) as archive:
-        names = archive.namelist()
-        expected = {"android-corresponding-sources.tar.gz", "artifact-sha256.json", "build.log",
-                    "ffmpeg-applied.patch", "libmpv-release-candidate.aar", "original-upstream-source.tar.gz",
-                    "python-toolchain.json", "result.json", "reviewed-inputs.sha256",
-                    "tls_mbedtls_vortx_distrust.h", "toolchain.txt"} | {f"source-{n}.patch" for n in range(12)}
-        require(len(names) == 23 and set(names) == expected, "Original artifact membership")
-        manifest_bytes = archive.read("artifact-sha256.json")
-        require(hashlib.sha256(manifest_bytes).hexdigest() == config["originalManifestSHA256"], "Original manifest")
-        manifest = json.loads(manifest_bytes)
-        require(set(manifest) == expected - {"artifact-sha256.json", "build.log"}, "Original hash coverage")
-        for name, expected_hash in manifest.items():
-            with archive.open(name) as stream:
-                require(stream_hash(stream) == expected_hash, "Original member mismatch: " + name)
-        require(manifest["android-corresponding-sources.tar.gz"] == config["dependencySourcesSHA256"] and
-                manifest["original-upstream-source.tar.gz"] == config["publisherSourcesSHA256"] and
-                manifest["libmpv-release-candidate.aar"] == config["aarSHA256"], "Source/AAR pin mismatch")
-        original = json.loads(archive.read("result.json"))
-        require(original["appSourceCommit"] == config["producerCommit"] and
-                original["runId"] == config["producerRun"] and original["attempt"] == config["producerAttempt"] and
-                original["buildExit"] == 1 and original["lane"] == "android" and
-                original["sources"][0]["commit"] == config["publisherCommit"] and
-                original["promotionEligible"] is False and original["runtimeSecurityTested"] is False, "Original failed producer receipt")
-        reviewed = archive.read("reviewed-inputs.sha256")
-        require(hashlib.sha256(reviewed).hexdigest() == config["originalInputManifestSHA256"], "Original reviewed inputs")
-        inputs = {}
-        for line in reviewed.decode().splitlines():
-            checksum, path = line.split("  ", 1)
-            require(path not in inputs and re.fullmatch(r"[0-9a-f]{64}", checksum), "Duplicate/invalid producer pin")
-            inputs[path] = checksum
-        require(len(inputs) == 18, "Original producer requires exactly eighteen input files")
-        inputs["scripts/native-media-hosted/inputs.sha256"] = config["originalInputManifestSHA256"]
-        inputs.update(config["producerWorkflows"])
-        for path, checksum in inputs.items():
-            payload["producer/" + path] = git_blob(args.repo, config["producerCommit"], path, checksum)
-        payload["license-index.json"] = (encoded(source_index(archive)), 0o644)
-        for name in ("result.json", "artifact-sha256.json", "reviewed-inputs.sha256"):
-            payload["producer-evidence/" + name] = (archive.read(name), 0o644)
-        require(archive.getinfo("libmpv-release-candidate.aar").file_size == config["aarBytes"], "AAR size")
-        # Reserve a fresh output. Failures leave evidence for root; no cleanup/reuse/replacement.
-        out = args.out.absolute()
-        require(out.parent.is_dir() and out.parent.resolve() == out.parent, "Output parent must be real")
-        out.mkdir(mode=0o700, exist_ok=False)
-        aar = out / config["assets"]["aar"]
-        with archive.open("libmpv-release-candidate.aar") as incoming, aar.open("xb") as outgoing:
-            shutil.copyfileobj(incoming, outgoing, CHUNK)
+    return inspection
+
+
+def producer_checked(evidence, config, validator_sha, evidence_sha):
+    # The producer's checker already passed in CI; keep its per-library ELF checks as the public
+    # projection and bind them to the reviewed validator bytes from the producer commit.
+    require(evidence["aarSHA256"] == config["aarSHA256"] and len(evidence["libraries"]) == 30,
+            "Producer evidence does not describe this AAR")
+    require(all(evidence[key] is False for key in ("promotionEligible", "runtimeSecurityTested", "appAndSeamBindingChanged")),
+            "Producer evidence must not grant app/runtime/publication acceptance")
+    # The validator checks 16 KiB load alignment on 64-bit ABIs only; 32-bit ABIs are exempt.
+    require(all(row.get("elfIdentityChecked") is True and
+                row.get("page16KiBChecked") is (row["entry"].split("/")[1] in {"arm64-v8a", "x86_64"})
+                for row in evidence["libraries"]), "Producer evidence skipped a library check")
+    return {"aarSHA256": config["aarSHA256"], "inspectedBy": "producer CI artifact checker",
+            "producerNDK": config["producerNDK"], "validatorSHA256": validator_sha,
+            "producerEvidenceSHA256": evidence_sha, "libraries": evidence["libraries"],
+            "runtimeSecurityTested": False, "appAndSeamBindingChanged": False, "promotionEligible": False}
+
+
+def write_kit(args, config, out, aar, payload, inspection, validator, original, stamp, lineage, notices):
+    ci = lineage == "ci-evidence"
     checked(aar, config["aarSHA256"], config["aarBytes"])
-    payload["inspection/public-reinspection.json"] = (encoded(inspection), 0o644)
-    payload["inspection/evidence.py"] = (args.validator.read_bytes(), 0o644)
+    projection = "inspection/producer-ci-evidence.json" if ci else "inspection/public-reinspection.json"
+    payload[projection] = (encoded(inspection), 0o644)
+    payload["inspection/evidence.py"] = (validator, 0o644)
     payload["packaging/package-native-android-component.py"] = (Path(__file__).read_bytes(), 0o644)
     payload["packaging/android-component-inputs.json"] = (args.manifest.read_bytes(), 0o644)
     payload["SOURCE-RECONSTRUCTION.md"] = (args.source_notes.read_bytes(), 0o644)
@@ -198,17 +253,17 @@ def package(args):
         payload["toolchain-notices/ndk-" + config["producerNDK"] + "/" + name] = ((args.ndk_notices / name).read_bytes(), 0o644)
     source_tar = out / config["assets"]["sources"]
     content = {}
-    with source_tar.open("xb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=STAMP, compresslevel=1) as compressed:
+    with source_tar.open("xb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=stamp, compresslevel=1) as compressed:
         with tarfile.open(fileobj=compressed, mode="w|") as target:
             for name, (data, mode) in sorted(payload.items()):
                 member = tarfile.TarInfo(name)
-                member.size, member.mode, member.mtime = len(data), mode, STAMP
+                member.size, member.mode, member.mtime = len(data), mode, stamp
                 target.addfile(member, io.BytesIO(data))
                 content[name] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "mode": oct(mode)}
-            # The unchanged ZIP is the permanent source/evidence carrier: all 23 original files.
-            name = "original-ci-artifact12338601965.zip"
+            # The unchanged ZIP is the permanent source/evidence carrier: every original file.
+            name = "original-ci-artifact" + str(config["artifactId"]) + ".zip"
             member = tarfile.TarInfo(name)
-            member.size, member.mode, member.mtime = args.artifact_zip.stat().st_size, 0o644, STAMP
+            member.size, member.mode, member.mtime = args.artifact_zip.stat().st_size, 0o644, stamp
             with args.artifact_zip.open("rb") as incoming:
                 target.addfile(member, incoming)
             content[name] = {"bytes": member.size, "sha256": config["artifactSHA256"], "mode": "0o644"}
@@ -224,12 +279,12 @@ def package(args):
         require(seen == set(content), "Incomplete packaged source kit")
     provenance = {"schema": 1, "component": "Android Full libmpv", "releaseTag": config["tag"],
                   "releaseTargetCommit": config["producerCommit"], "prerelease": True, "makeLatest": False,
-                  "producer": original, "producerNDK": config["producerNDK"],
+                  "producer": original, "producerNDK": config["producerNDK"], "producerLineage": lineage,
                   "originalArtifactId": config["artifactId"], "originalArchiveSHA256": config["artifactSHA256"],
-                  "originalBuildExit": 1, "originalCIReclassified": False, "inspection": inspection,
+                  "originalBuildExit": original["buildExit"], "originalCIReclassified": False, "inspection": inspection,
                   "sourceKitContent": content, "aar": {"name": aar.name, "bytes": aar.stat().st_size, "sha256": file_hash(aar)},
                   "sourceKit": {"name": source_tar.name, "bytes": source_tar.stat().st_size, "sha256": file_hash(source_tar)},
-                  "producerNDKNotices": notices, "generatedFFmpegConfigsRetained": False, "nativeRebuilt": False, "appAndSeamBindingChanged": False,
+                  "producerNDKNotices": notices, "generatedFFmpegConfigsRetained": ci, "nativeRebuilt": False, "appAndSeamBindingChanged": False,
                   "runtimeSecurityTested": False, "publicationApproved": False, "promotionEligible": False}
     (out / config["assets"]["provenance"]).write_bytes(encoded(provenance))
     rows = [file_hash(out / name) + "  " + name for key, name in config["assets"].items() if key != "checksums"]
@@ -241,6 +296,9 @@ def package(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("artifact-zip", "repo", "manifest", "evidence", "reinspection", "validator", "source-notes", "release-notes", "ndk-notices", "out"):
+    for name in ("artifact-zip", "repo", "manifest", "source-notes", "release-notes", "ndk-notices", "out"):
         parser.add_argument("--" + name, type=Path, required=True)
+    # Only the reinspected-failure lineage takes these; the manifest decides which applies.
+    for name in ("evidence", "reinspection", "validator"):
+        parser.add_argument("--" + name, type=Path)
     package(parser.parse_args())
