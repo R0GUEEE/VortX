@@ -613,6 +613,13 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     private var audioGroup: AVMediaSelectionGroup?
     private var subGroup: AVMediaSelectionGroup?
     private var audioTracks: [MPVTrack] = []
+    private weak var badgeMetadataItem: AVPlayerItem?
+    private var badgeMetadataSelection: AVMediaSelectionOption?
+    private var badgeMetadataTask: Task<Void, Never>?
+    private var badgeMetadataAttempted = false
+    private var badgeMetadataRevision: UInt64 = 0
+    private var badgeVideoRange: PlaybackMetadataFacts.DynamicRange = .unknown
+    private var badgeNativeAudioChannels = 0
     private var subTracks: [MPVTrack] = []
     /// Source-container audio identities published by the active remux. Unlike AVMediaSelection options these
     /// IDs survive replacement mounts and include every deliverable track without spawning parallel muxers.
@@ -3882,6 +3889,140 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
             audioChannels: selectedAudioChannels())
     }
 
+    /// Source/decoded format facts, not a launch filename or the display's supported modes.
+    func playbackMetadataFacts() -> PlaybackMetadataFacts {
+        guard let currentItem = player.currentItem, item === currentItem,
+              activeLoadToken != nil else { return PlaybackMetadataFacts() }
+        let selected = tracks(ofType: "audio").first { $0.selected && $0.isSelectable }
+        let currentSelection = audioGroup.flatMap {
+            currentItem.currentMediaSelection.selectedMediaOption(in: $0)
+        }
+        let sourceBacked = !remuxSourceAudioTracks.isEmpty
+        let audioIDBefore = sourceBacked ? selectedRemuxAudioSourceIndex : currentSelection.flatMap { option in
+            audioGroup?.options.firstIndex(of: option)
+        }
+        let summary = mediaSummary()
+        let finalSelection = audioGroup.flatMap {
+            currentItem.currentMediaSelection.selectedMediaOption(in: $0)
+        }
+        let audioIDAfter = sourceBacked ? selectedRemuxAudioSourceIndex : finalSelection.flatMap { option in
+            audioGroup?.options.firstIndex(of: option)
+        }
+        let audioCurrent = PlaybackMetadataFacts.audioSelectionMatches(
+            selectedRowID: selected?.id, beforeID: audioIDBefore, afterID: audioIDAfter)
+        let owned = badgeMetadataItem === currentItem && badgeMetadataSelection === currentSelection
+        let audioCacheOwned = owned && currentSelection === finalSelection
+        return PlaybackMetadataFacts(
+            width: summary.width, height: summary.height,
+            dynamicRange: owned ? badgeVideoRange : .unknown,
+            audioSelected: audioCurrent, audioLanguage: audioCurrent ? (selected?.lang ?? "") : "",
+            audioCodec: audioCurrent ? summary.audioCodec : "",
+            audioChannels: !audioCurrent ? 0 : (summary.audioChannels > 0
+                ? summary.audioChannels : (audioCacheOwned ? badgeNativeAudioChannels : 0)))
+    }
+
+    private func retireBadgeMetadata() {
+        badgeMetadataTask?.cancel(); badgeMetadataTask = nil
+        if badgeMetadataRevision < UInt64.max { badgeMetadataRevision += 1 }
+        badgeMetadataAttempted = false; badgeMetadataItem = nil; badgeMetadataSelection = nil
+        badgeVideoRange = .unknown; badgeNativeAudioChannels = 0
+    }
+
+    /// Owned KVO events invalidate both successful and unavailable samples. No self-published retry loop.
+    private func badgeMetadataDidChange(_ item: AVPlayerItem, loadToken: PlayerLoadToken) {
+        guard owns(item, loadToken: loadToken) else { return }
+        retireBadgeMetadata()
+        publishTrackListIfTopologyReady()
+    }
+
+    /// One metadata attempt per actual item/selection/revision. No timer or transport-clock polling.
+    private func refreshBadgeMetadataIfNeeded(_ item: AVPlayerItem) {
+        guard player.currentItem === item, let loadToken = activeLoadToken,
+              badgeMetadataRevision < UInt64.max else { return }
+        let selection = audioGroup.flatMap { item.currentMediaSelection.selectedMediaOption(in: $0) }
+        if badgeMetadataItem === item, badgeMetadataSelection === selection,
+           badgeMetadataAttempted || badgeMetadataTask != nil { return }
+        retireBadgeMetadata()
+        guard badgeMetadataRevision < UInt64.max else { return }
+        let revision = badgeMetadataRevision
+        let sourceAudioIndex = selectedRemuxAudioSourceIndex
+        badgeMetadataItem = item; badgeMetadataSelection = selection
+        badgeMetadataAttempted = true
+        // These remux fields come from the admitted parsed stream/signaling, not contentIsDolbyVision.
+        if isRemuxMounted {
+            let range = DVPlaybackPolicy.remuxDisplayRange(
+                dolbyVision: remuxHLSServer?.signaling?.dolbyVision
+                    ?? remuxRemoteMount?.carriesDolbyVision ?? false,
+                hdrFallback: usingHDRFallbackItem,
+                videoRange: remuxHLSServer?.signaling?.videoRange ?? remuxRemoteMount?.videoRange)
+            switch range {
+            case .dolbyVision: badgeVideoRange = .dolbyVision
+            case .hdr10: badgeVideoRange = .pq
+            case .hlg: badgeVideoRange = .hlg
+            case .sdr: badgeVideoRange = .sdr
+            }
+        }
+        badgeMetadataTask = Task { @MainActor [weak self, weak item] in
+            guard let self, let item else { return }
+            func current() -> Bool {
+                !Task.isCancelled && self.player.currentItem === item
+                    && self.activeLoadToken == loadToken
+                    && self.badgeMetadataRevision == revision
+                    && self.badgeMetadataItem === item
+                    && self.badgeMetadataSelection === selection
+                    && self.audioGroup.flatMap({ item.currentMediaSelection.selectedMediaOption(in: $0) }) === selection
+                    && self.selectedRemuxAudioSourceIndex == sourceAudioIndex
+            }
+            var range = self.badgeVideoRange
+            let enabledVideo = item.tracks.filter {
+                $0.isEnabled && $0.assetTrack?.mediaType == .video
+            }.compactMap { $0.assetTrack }
+            // Multiple enabled alternate video tracks are ambiguous; never badge the first asset track.
+            let video = enabledVideo.count == 1 ? enabledVideo : []
+            guard current() else { return }
+            for track in video {
+                let formats = (try? await track.load(.formatDescriptions)) ?? []
+                guard current() else { return }
+                let ranges = Set(formats.map { format -> String in
+                    let codec = CMFormatDescriptionGetMediaSubType(format)
+                    if codec == 0x64766831 || codec == 0x64766865 {
+                        return PlaybackMetadataFacts.DynamicRange.dolbyVision.rawValue
+                    }
+                    let transfer = CMFormatDescriptionGetExtension(
+                        format, extensionKey: kCMFormatDescriptionExtension_TransferFunction) as? String
+                    if transfer == (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String) {
+                        return PlaybackMetadataFacts.DynamicRange.pq.rawValue
+                    }
+                    if transfer == (kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG as String) {
+                        return PlaybackMetadataFacts.DynamicRange.hlg.rawValue
+                    }
+                    return PlaybackMetadataFacts.DynamicRange.unknown.rawValue
+                })
+                if ranges.count == 1, let observed = ranges.first {
+                    range = PlaybackMetadataFacts.DynamicRange(rawValue: observed) ?? .unknown
+                } else if !formats.isEmpty {
+                    range = .unknown // Mixed format descriptions are not proof of a currently selected range.
+                }
+                break // Do not turn an unselected alternate video track into the active badge.
+            }
+            // An enabled, single audio item track is an actual selection. Ambiguity stays unknown.
+            let audio = item.tracks.filter { $0.isEnabled && $0.assetTrack?.mediaType == .audio }
+            var channels = 0
+            if audio.count == 1, let track = audio.first?.assetTrack {
+                let formats = (try? await track.load(.formatDescriptions)) ?? []
+                guard current() else { return }
+                let counts = Set(formats.map {
+                    CMAudioFormatDescriptionGetStreamBasicDescription($0).map { Int($0.pointee.mChannelsPerFrame) } ?? 0
+                })
+                if counts.count == 1, let count = counts.first, (1...64).contains(count) { channels = count }
+            }
+            guard current() else { return }
+            self.badgeVideoRange = range; self.badgeNativeAudioChannels = channels
+            self.badgeMetadataTask = nil
+            self.emit(MPVProperty.trackList, nil, loadToken: loadToken)
+        }
+    }
+
     /// Video frame rate for the community-subtitle release fingerprint (Gap 8). The libmpv engine reads the
     /// container-declared fps; AVFoundation surfaces the same via the video track's `nominalFrameRate`, loaded
     /// asynchronously at readyToPlay (see `loadContainerFrameRate`) and cached here. 0 until it resolves (and
@@ -4198,6 +4339,12 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         nativeStartupClock.reset(generation: observedGeneration)
         observations.append(item.observe(\.status, options: [.initial, .new]) { [weak self] observedItem, _ in
             Task { @MainActor in self?.handleStatus(observedItem, loadToken: loadToken) }
+        })
+        observations.append(item.observe(\.tracks, options: [.new]) { [weak self] observedItem, _ in
+            Task { @MainActor [weak self] in self?.badgeMetadataDidChange(observedItem, loadToken: loadToken) }
+        })
+        observations.append(item.observe(\.presentationSize, options: [.new]) { [weak self] observedItem, _ in
+            Task { @MainActor [weak self] in self?.badgeMetadataDidChange(observedItem, loadToken: loadToken) }
         })
         observations.append(item.observe(\.isPlaybackBufferEmpty, options: [.new]) { [weak self] observedItem, _ in
             Task { @MainActor in
@@ -4526,7 +4673,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
             emit(MPVProperty.seekable, seekable, loadToken: loadToken)
             refreshRemuxSourceAudioTracks()
             loadChapters()                     // async; re-emits track-list if the asset has chapter markers
-            emitDynamicRange(item)             // Gap 7: light the chrome's HDR chip for DV / HDR10 / HLG content
+            emitDynamicRange(item)             // Existing playback/capture behavior remains unchanged.
+            refreshBadgeMetadataIfNeeded(item)
             loadContainerFrameRate(item)       // Gap 8: cache the video track fps for the subtitle fingerprint
             if let target = pendingSeek, seekable {
                 pendingSeek = nil
@@ -5450,6 +5598,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
 
     private func publishTrackListIfTopologyReady() {
         guard selectionTopologyGeneration == itemGeneration else { return }
+        if let item = player.currentItem { refreshBadgeMetadataIfNeeded(item) }
         emit(MPVProperty.trackList, nil)
     }
 
@@ -5479,7 +5628,13 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     @objc private func mediaSelectionDidChange(_ note: Notification) {
         guard let changedItem = note.object as? AVPlayerItem,
               changedItem === player.currentItem,
-              selectionTopologyGeneration == itemGeneration else { return }
+              selectionTopologyGeneration == itemGeneration,
+              let loadToken = activeLoadToken,
+              owns(changedItem, loadToken: loadToken) else { return }
+        retireBadgeMetadata()
+        defer {
+            if owns(changedItem, loadToken: loadToken) { publishTrackListIfTopologyReady() }
+        }
         if let group = subGroup,
            externalSubtitleSettlement.consumeIfNativeDeselected(
                 generation: itemGeneration,
@@ -5505,6 +5660,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     }
 
     private func teardownObservers() {
+        retireBadgeMetadata()
         nativeStartupClock.reset(generation: nil)
         externalSubtitleSettlement.clear()
         invalidateNativeSubtitleOverlay()

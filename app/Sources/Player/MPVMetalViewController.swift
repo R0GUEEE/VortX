@@ -4120,6 +4120,25 @@ final class MPVMetalViewController: PlatformViewController {
                 getString("audio-codec-name") ?? "", 0)
     }
 
+    /// Sampled only by existing track/gamma events, never by the transport/frame clock.
+    func playbackMetadataFacts() -> PlaybackMetadataFacts {
+        guard mpv != nil else { return PlaybackMetadataFacts() }
+        let width = getInt("video-params/w"), height = getInt("video-params/h")
+        let range = PlaybackMetadataFacts.mpvRange(
+            getString("video-out-params/gamma") ?? getString(MPVProperty.videoParamsGamma) ?? "")
+        let audioIDBefore = getString(MPVProperty.aid).flatMap(Int.init)
+        let selected = tracks(ofType: "audio").first { $0.selected && $0.isSelectable }
+        let codec = selected == nil ? "" : (getString("audio-codec-name") ?? "")
+        let channels = selected == nil ? 0 : getInt("audio-params/channel-count")
+        let audioIDAfter = getString(MPVProperty.aid).flatMap(Int.init)
+        let audioCurrent = PlaybackMetadataFacts.audioSelectionMatches(
+            selectedRowID: selected?.id, beforeID: audioIDBefore, afterID: audioIDAfter)
+        return PlaybackMetadataFacts(
+            width: width, height: height, dynamicRange: range,
+            audioSelected: audioCurrent, audioLanguage: audioCurrent ? (selected?.lang ?? "") : "",
+            audioCodec: audioCurrent ? codec : "", audioChannels: audioCurrent ? channels : 0)
+    }
+
     /// Persisted video-size mode, read at startup so the first frame already uses it.
     private(set) var videoSizeMode = UserDefaults.standard.string(forKey: "stremiox.videoSize") ?? MPVMetalViewController.defaultVideoSizeMode
 
@@ -4934,6 +4953,9 @@ final class MPVMetalViewController: PlatformViewController {
                                         callbackToken: loadToken, activeToken: self.activeLoadToken
                                       ) else { return }
                                 self.reapplyDynamicRange()
+                                self.playDelegate?.propertyChange(
+                                    propertyName: MPVProperty.videoParamsGamma, data: nil, loadToken: loadToken
+                                )
                             }
                         #if os(tvOS)
                         case MPVProperty.frameDropCount:

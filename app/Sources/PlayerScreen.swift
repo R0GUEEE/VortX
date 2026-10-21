@@ -1123,7 +1123,7 @@ private struct PlayerTouchOptionsButton: View {
 
 private struct PlayerTouchHeader: View {
     let title: String
-    let metadata: String
+    let metadataPills: [PlaybackMetadataPill]
     let close: PlayerTouchIconButton
     let pictureInPicture: () -> AnyView
     let aspect: PlayerTouchAspectButton
@@ -1143,8 +1143,9 @@ private struct PlayerTouchHeader: View {
             if !title.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title).font(.headline.weight(.semibold)).lineLimit(1)
-                    if !metadata.isEmpty {
-                        Text(metadata).font(.caption).foregroundStyle(.white.opacity(0.65)).lineLimit(1)
+                    if !metadataPills.isEmpty {
+                        PlaybackMetadataPills(pills: metadataPills)
+                            .font(.caption).foregroundStyle(.white.opacity(0.65))
                     }
                 }
                 .foregroundStyle(.white)
@@ -1565,7 +1566,7 @@ struct PlayerScreen: View {
     @State private var audioCodec = ""
     @State private var audioChannels = 0
     @State private var isHDR = false
-    @State private var metadataLine = ""        // "4K · HDR · EAC3"-style line shown under the title
+    @State private var metadataPills: [PlaybackMetadataPill] = [] // Rebuilt only on media metadata events.
     @State private var controlsVisible = true
     /// Player Lock: while true the chrome is hidden and non-interactive and a tap on the video only
     /// reveals the small unlock chip, so a pocketed phone / a handed-over device can't seek or pause by
@@ -3162,7 +3163,9 @@ struct PlayerScreen: View {
                 buffering = b
             }
         case MPVProperty.videoParamsSigPeak:
-            if let p = data as? Double { isHDR = p > 1.0; metadataLine = computeMetadataLine() }
+            if let p = data as? Double { isHDR = p > 1.0 }
+        case MPVProperty.videoParamsGamma:
+            refreshMetadataFacts(loadToken: loadToken)
         case MPVProperty.timePos:
             if let event = data as? PlayerTimePositionEvent,
                PlayerLoadProvenanceState.accepts(
@@ -3564,7 +3567,7 @@ struct PlayerScreen: View {
             let summary = coordinator.player?.mediaSummary()
             videoWidth = summary?.width ?? 0; videoHeight = summary?.height ?? 0; audioCodec = summary?.audioCodec ?? ""
             audioChannels = summary?.audioChannels ?? 0
-            metadataLine = computeMetadataLine()
+            refreshMetadataFacts(loadToken: loadToken)
             // Gap A (#76): on AVPlayer, chapters() is [] at readyToPlay (loadChapters is async) and the engine
             // re-emits trackList precisely once they resolve, so re-pull skip candidates + chapter marks here.
             // On libmpv chapters() is already synchronous at duration, so this is a cheap no-op re-run there.
@@ -8394,27 +8397,11 @@ struct PlayerScreen: View {
         }
     }
 
-    /// "4K · HDR · EAC3"-style line from the current video height + HDR + audio codec (tvOS parity #20),
-    /// shown under the title so the user can tell what they actually got. Recomputed on track/HDR change.
-    private func computeMetadataLine() -> String {
-        var parts: [String] = []
-        // Resolution is defined by WIDTH (4K is ~3840 wide at ANY aspect), so a 2.40:1 4K film (3840x1600)
-        // is NOT mislabeled "1440p" off its 1600 height. Width when known, else a 16:9 height estimate.
-        let res = videoWidth > 0 ? videoWidth : Int(Double(videoHeight) * 16.0 / 9.0)
-        switch res {
-        case 3000...:     parts.append("4K")
-        case 2200..<3000: parts.append("1440p")
-        case 1500..<2200: parts.append("1080p")
-        case 1000..<1500: parts.append("720p")
-        case 1..<1000:    if videoHeight > 0 { parts.append("\(videoHeight)p") }
-        default:          break
-        }
-        if isHDR { parts.append("HDR") }
-        if !audioCodec.isEmpty {
-            let channelSuffix = audioChannels > 0 ? " \(audioChannels)ch" : ""
-            parts.append("\(audioLabel(audioCodec))\(channelSuffix)")
-        }
-        return parts.joined(separator: "  ·  ")
+    /// Cache selected-media labels at the metadata boundary, never in the transport/body clock.
+    private func refreshMetadataFacts(loadToken: PlayerLoadToken?) {
+        guard let loadToken, loadToken == coordinator.player?.activeLoadToken,
+              callbackBelongsToCommittedMedia(loadToken) else { return }
+        metadataPills = (coordinator.player?.playbackMetadataFacts() ?? PlaybackMetadataFacts()).pills
     }
 
     /// Clear produced AVPlayer audio facts at every physical-load boundary. A following track-list event
@@ -8425,21 +8412,7 @@ struct PlayerScreen: View {
         chapterInventoryCount = 0
         audioCodec = ""
         audioChannels = 0
-        metadataLine = computeMetadataLine()
-    }
-
-    private func audioLabel(_ c: String) -> String {
-        switch c.lowercased() {
-        case "eac3":                 return "EAC3"
-        case "ac3":                  return "AC3"
-        case "truehd":               return "TrueHD"
-        case "dts", "dts-hd", "dca": return "DTS"
-        case "aac":                  return "AAC"
-        case "flac":                 return "FLAC"
-        case "opus":                 return "Opus"
-        case "mp3":                  return "MP3"
-        default:                     return c.uppercased()
-        }
+        metadataPills = []
     }
 
     private var topBar: some View {
@@ -8453,7 +8426,7 @@ struct PlayerScreen: View {
     #if os(iOS)
     private var touchHeader: PlayerTouchHeader {
         PlayerTouchHeader(
-            title: curTitle, metadata: metadataLine,
+            title: curTitle, metadataPills: metadataPills,
             close: PlayerTouchIconButton(icon: "chevron.down", label: "Close player") { leavePlayback() },
             pictureInPicture: {
                 if let controller = coordinator.player as? AVPlayerEngineController {
@@ -8583,9 +8556,9 @@ struct PlayerScreen: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(curTitle).font(.headline.weight(.semibold)).foregroundStyle(.white)
                         .lineLimit(1).shadow(radius: 3)
-                    if !metadataLine.isEmpty {
-                        Text(metadataLine).font(.caption.weight(.medium))
-                            .foregroundStyle(.white.opacity(0.75)).lineLimit(1).shadow(radius: 2)
+                    if !metadataPills.isEmpty {
+                        PlaybackMetadataPills(pills: metadataPills).font(.caption.weight(.medium))
+                            .foregroundStyle(.white.opacity(0.75)).shadow(radius: 2)
                     }
                 }
             }

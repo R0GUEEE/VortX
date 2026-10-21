@@ -533,9 +533,9 @@ struct TVPlayerView: View {
     @State private var skipEditLastDir = 0   // last adjust direction; a reversal resets the ramp so it does not overshoot
     // Cached so the player body does not rebuild a string and rescan skip spans on
     // every playhead tick (audit #1): updated only when their inputs change.
-    @State private var metadataLine = ""
+    @State private var metadataPills: [PlaybackMetadataPill] = []
     @State private var currentSkip: SkipSegment?
-    // Same caching contract as metadataLine above, for the three control-bar gates that were the most
+    // Same caching contract as metadataPills above, for the three control-bar gates that were the most
     // expensive thing in the player's body: two full walks of every loaded stream (URL parse per stream,
     // 3315 of them in the field log) and a synchronous mpv chapter fetch, all re-run on every pass.
     @State private var altSourceCount = 0        // playable streams loaded for this title / episode
@@ -2372,7 +2372,9 @@ struct TVPlayerView: View {
             guard let loadToken, loadToken == coordinator.player?.activeLoadToken else { return }
             if let value = data as? Bool { isSeekable = value }
         case MPVProperty.videoParamsSigPeak:
-            if let p = data as? Double { isHDR = p > 1.0; metadataLine = computeMetadataLine() }
+            if let p = data as? Double { isHDR = p > 1.0 }
+        case MPVProperty.videoParamsGamma:
+            refreshMetadataFacts(loadToken: loadToken)
         case MPVProperty.duration:
             if let d = data as? Double {
                 if d != duration || !d.isFinite || d <= 0 { watchedDwell.reset() }
@@ -2412,7 +2414,7 @@ struct TVPlayerView: View {
             let summary = coordinator.player?.mediaSummary()
             videoWidth = summary?.width ?? 0; videoHeight = summary?.height ?? 0; audioCodec = summary?.audioCodec ?? ""
             audioChannels = summary?.audioChannels ?? 0
-            metadataLine = computeMetadataLine()
+            refreshMetadataFacts(loadToken: loadToken)
             // Gap A (#76): on AVPlayer, chapters() is [] at readyToPlay (loadChapters is async) and the engine
             // re-emits trackList once they resolve, so re-pull skip candidates + scrubber chapter marks here.
             // On libmpv chapters() is already synchronous at duration, so this is a cheap no-op re-run there.
@@ -3049,26 +3051,10 @@ struct TVPlayerView: View {
     // MARK: - Control bar
 
     /// Resolution / HDR / audio summary under the title, read live from mpv.
-    private func computeMetadataLine() -> String {
-        var parts: [String] = []
-        // Resolution is defined by WIDTH (4K is ~3840 wide at ANY aspect), so a 2.40:1 4K film (3840x1600)
-        // is NOT mislabeled "1440p" off its 1600 height. Width when known, else a 16:9 height estimate while
-        // the first frame is still loading.
-        let res = videoWidth > 0 ? videoWidth : Int(Double(videoHeight) * 16.0 / 9.0)
-        switch res {
-        case 3000...:     parts.append("4K")
-        case 2200..<3000: parts.append("1440p")
-        case 1500..<2200: parts.append("1080p")
-        case 1000..<1500: parts.append("720p")
-        case 1..<1000:    if videoHeight > 0 { parts.append("\(videoHeight)p") }
-        default:          break
-        }
-        if isHDR { parts.append("HDR") }
-        if !audioCodec.isEmpty {
-            let channelSuffix = audioChannels > 0 ? " \(audioChannels)ch" : ""
-            parts.append("\(audioLabel(audioCodec))\(channelSuffix)")
-        }
-        return parts.joined(separator: "  ·  ")
+    private func refreshMetadataFacts(loadToken: PlayerLoadToken?) {
+        guard let loadToken, loadToken == coordinator.player?.activeLoadToken,
+              callbackBelongsToCommittedMedia(loadToken) else { return }
+        metadataPills = (coordinator.player?.playbackMetadataFacts() ?? PlaybackMetadataFacts()).pills
     }
 
     /// Clear produced AVPlayer audio facts at every physical-load boundary. A following track-list event
@@ -3077,21 +3063,7 @@ struct TVPlayerView: View {
     private func clearCachedAudioOutputTruth() {
         audioCodec = ""
         audioChannels = 0
-        metadataLine = computeMetadataLine()
-    }
-
-    private func audioLabel(_ c: String) -> String {
-        switch c.lowercased() {
-        case "eac3":               return "EAC3"
-        case "ac3":                return "AC3"
-        case "truehd":             return "TrueHD"
-        case "dts", "dts-hd", "dca": return "DTS"
-        case "aac":                return "AAC"
-        case "flac":               return "FLAC"
-        case "opus":               return "Opus"
-        case "mp3":                return "MP3"
-        default:                   return c.uppercased()
-        }
+        metadataPills = []
     }
 
     private var controlBar: some View {
@@ -3104,8 +3076,8 @@ struct TVPlayerView: View {
                         Text(displayTitle).font(Theme.Typography.sectionTitle)
                             .foregroundStyle(Theme.Palette.textPrimary).lineLimit(1)
                     }
-                    if !metadataLine.isEmpty {
-                        Text(metadataLine).font(Theme.Typography.label)
+                    if !metadataPills.isEmpty {
+                        PlaybackMetadataPills(pills: metadataPills).font(Theme.Typography.label)
                             .foregroundStyle(Theme.Palette.textSecondary)
                     }
                 }
@@ -3876,7 +3848,7 @@ struct TVPlayerView: View {
 
     /// Recompute the two source-derived button gates. Called only where the answer can actually change: play
     /// start, a stream-set change published by the engine, opening a panel, activating a row, and the panel's
-    /// existing revision-gated 1 Hz loop. Mirrors this file's metadataLine / currentSkip caching (:241-244).
+    /// existing revision-gated 1 Hz loop. Mirrors this file's metadataPills / currentSkip caching.
     private func refreshSourceOptionCounts() {
         let groups = currentSourceGroups
         altSourceCount = groups.reduce(0) { $0 + $1.streams.filter { playableURL(for: $0) != nil }.count }
