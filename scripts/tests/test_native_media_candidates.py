@@ -145,6 +145,86 @@ class NativeMediaProducer(unittest.TestCase):
         with patch.object(MODULE, "run", side_effect=unaligned), self.assertRaises(ValueError):
             self.run_fixture()
 
+    # Actual arm64 libavcodec program-header geometry from artifact 12338601965.
+    # These are metadata fixtures, not execution of that library or a device-security test.
+    @staticmethod
+    def isolated_relro_headers():
+        return [
+            'LOAD 0x000000 0x000000 0x000000 0xb3c840 0xb3c840 R E 0x4000',
+            'LOAD 0xb3c840 0xb40840 0xb40840 0x045228 0x0457c0 RW 0x4000',
+            'LOAD 0xb81a68 0xb89a68 0xb89a68 0x001020 0x5ae498 RW 0x4000',
+            'GNU_RELRO 0xb3c840 0xb40840 0xb40840 0x045228 0x0457c0 R 0x1',
+        ]
+
+    def test_isolated_relro_layout_reaches_existing_full_artifact_gate(self):
+        def isolated(*args):
+            if '-h' in args:
+                return self.readelf(*args)
+            return '\n'.join(self.isolated_relro_headers()) + '\n'
+        with patch.object(MODULE, 'run', side_effect=isolated):
+            self.run_fixture()
+
+    def test_relro_shared_writable_tail_is_not_exempt(self):
+        rows = [line.split() for line in self.isolated_relro_headers()]
+        rows[1][5] = '0x0467c0'  # containing LOAD extends past RELRO into mutable data
+        self.assertFalse(MODULE.relro_16k_safe(rows[-1], rows[:-1]))
+
+    def test_relro_next_load_overlapping_rounded_padding_rejects(self):
+        rows = [line.split() for line in self.isolated_relro_headers()]
+        rows[2][2] = '0xb87000'  # after RELRO end, but inside rounded protection end 0xb88000
+        self.assertFalse(MODULE.relro_16k_safe(rows[-1], rows[:-1]))
+
+    def test_relro_previous_load_overlapping_rounded_start_rejects(self):
+        rows = [line.split() for line in self.isolated_relro_headers()]
+        rows[0][5] = '0xb40500'  # before RELRO start, but inside rounded protection start 0xb40000
+        self.assertFalse(MODULE.relro_16k_safe(rows[-1], rows[:-1]))
+
+    def test_relro_next_load_at_exact_next_page_is_safe(self):
+        rows = [line.split() for line in self.isolated_relro_headers()]
+        rows[2][2] = '0xb88000'
+        self.assertTrue(MODULE.relro_16k_safe(rows[-1], rows[:-1]))
+
+    def test_relro_ambiguous_or_wrong_file_mapping_rejects(self):
+        rows = [line.split() for line in self.isolated_relro_headers()]
+        self.assertFalse(MODULE.relro_16k_safe(rows[-1], rows[:-1] + [rows[1]]))
+        rows[1][1] = '0xb3c841'
+        self.assertFalse(MODULE.relro_16k_safe(rows[-1], rows[:-1]))
+
+    def test_isolated_relro_does_not_excuse_bad_load_alignment(self):
+        def unaligned(*args):
+            if '-h' in args:
+                return self.readelf(*args)
+            return '\n'.join(self.isolated_relro_headers()).replace('E 0x4000', 'E 0x1000')
+        with patch.object(MODULE, 'run', side_effect=unaligned), self.assertRaises(ValueError):
+            self.run_fixture()
+
+    def test_explicit_inspector_is_used_and_separately_identified(self):
+        def reader_output(*args):
+            return 'LLVM synthetic inspection fixture' if '--version' in args else self.readelf(*args)
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            self.fixture(out)
+            binary = out / 'llvm-readobj'
+            binary.write_bytes(b'fixture only, not executable LLVM')
+            reader = out / 'llvm-readelf'
+            reader.symlink_to(binary.name)
+            with patch.object(MODULE, 'run', side_effect=reader_output) as calls:
+                MODULE.android(out, out, out, readelf=reader)
+            import json
+            result = json.loads((out / 'android-artifact-evidence.json').read_text())
+            self.assertEqual(len(result['libraries']), 30)
+            self.assertEqual(result['inspection']['resolvedReader'], str(reader.resolve()))
+            self.assertEqual(result['inspection']['readerSHA256'], hashlib.sha256(reader.read_bytes()).hexdigest())
+            self.assertEqual(result['inspection']['validatorSHA256'], hashlib.sha256(Path(MODULE.__file__).read_bytes()).hexdigest())
+            self.assertTrue(all(call.args[0] == str(reader) for call in calls.call_args_list))
+            self.assertFalse(result['promotionEligible'])
+            self.assertFalse(result['runtimeSecurityTested'])
+            self.assertFalse(result['appAndSeamBindingChanged'])
+
+    def test_relative_inspector_path_is_rejected(self):
+        with self.assertRaises(ValueError):
+            MODULE.android(Path('.'), Path('.'), Path('.'), readelf=Path('llvm-readelf'))
+
 
 if __name__ == "__main__":
     unittest.main()

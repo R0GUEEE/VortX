@@ -27,8 +27,54 @@ def save(path, data):
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
 
 
-def android(out, upstream, sdk):
-    readelf = sdk / 'ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf'
+def relro_16k_safe(row, loads):
+    # Android also permits an unaligned RELRO end when it occupies its entire LOAD,
+    # with no other LOAD data inside the page-rounded protection range. Do not
+    # mistake NDK/LLD's isolated RELRO layout for writable data sharing that page.
+    # https://developer.android.com/guide/practices/page-sizes (Check the RELRO security flag)
+    offset, start, file_size, memory_size = (int(row[i], 16) for i in (1, 2, 4, 5))
+    end = start + memory_size
+    if end % 16384 == 0:
+        return True
+    if memory_size <= 0:
+        return False
+    owners = [index for index, load in enumerate(loads)
+              if tuple(int(load[i], 16) for i in (1, 2, 4, 5)) ==
+              (offset, start, file_size, memory_size)]
+    if len(owners) != 1:
+        return False
+    protected_start = start // 16384 * 16384
+    protected_end = (end + 16383) // 16384 * 16384
+    for index, load in enumerate(loads):
+        if index == owners[0]:
+            continue
+        other_start, other_size = int(load[2], 16), int(load[5], 16)
+        if other_size and other_start < protected_end and other_start + other_size > protected_start:
+            return False
+    return True
+
+
+def android(out, upstream, sdk, *, readelf=None):
+    inspection = None
+    if readelf is None:
+        # The original hosted producer toolchain remains unchanged.
+        readelf = sdk / 'ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf'
+    else:
+        if not readelf.is_absolute():
+            raise ValueError('explicit inspection reader must be an absolute path')
+        requested_reader = readelf
+        resolved_reader = readelf.resolve(strict=True)
+        if not resolved_reader.is_file():
+            raise ValueError('explicit inspection reader is not a regular executable file')
+        # Keep the llvm-readelf invocation name: LLVM's llvm-readobj symlink target
+        # selects a different output style when invoked directly by its real basename.
+        version = run(str(readelf), '--version').strip()
+        if not version or len(version) > 4096:
+            raise ValueError('unexpected inspection reader version output')
+        inspection = {'mode': 'explicit-read-only-inspector',
+                      'requestedReader': str(requested_reader), 'resolvedReader': str(resolved_reader),
+                      'readerSHA256': digest(resolved_reader), 'readerVersion': version,
+                      'validatorSHA256': digest(Path(__file__))}
     aar = out / 'libmpv-release-candidate.aar'
     machines = {'arm64-v8a': ('ELF64', 'AArch64'), 'armeabi-v7a': ('ELF32', 'ARM'),
                 'x86_64': ('ELF64', 'Advanced Micro Devices X86-64')}
@@ -67,7 +113,7 @@ def android(out, upstream, sdk):
                 relro = [line.split() for line in segments if line.strip().startswith('GNU_RELRO ')]
                 if not loads or (elf_class == 'ELF64' and (not relro or any(
                         int(row[-1], 16) < 16384 or (int(row[2], 16) - int(row[1], 16)) % 16384
-                        for row in loads) or any((int(row[2], 16) + int(row[5], 16)) % 16384 for row in relro))):
+                        for row in loads) or any(not relro_16k_safe(row, loads) for row in relro))):
                     raise ValueError(f'not 16 KiB compatible: {name}')
                 if name.endswith('/libavformat.so'):
                     if any(flag not in data for flag in (b'--enable-mbedtls', b'--enable-gpl', b'--enable-version3')):
@@ -78,9 +124,13 @@ def android(out, upstream, sdk):
                                 'bytes': len(data), 'elfIdentityChecked': True,
                                 'loadAlignments': [int(row[-1], 16) for row in loads],
                                 'page16KiBChecked': elf_class == 'ELF64'})
-    save(out / 'android-artifact-evidence.json', {
+    evidence = {
         'aarSHA256': digest(aar), 'libraries': records, 'runtimeSecurityTested': False,
-        'appAndSeamBindingChanged': False, 'promotionEligible': False})
+        'appAndSeamBindingChanged': False, 'promotionEligible': False}
+    if inspection is not None:
+        # This describes only the inspection host/tool, never the original producer's NDK.
+        evidence['inspection'] = inspection
+    save(out / 'android-artifact-evidence.json', evidence)
 
 
 def receipt(lane, out, upstream, exit_code):
@@ -106,7 +156,10 @@ def receipt(lane, out, upstream, exit_code):
 
 if __name__ == '__main__':
     if sys.argv[1] == 'android':
-        android(*(Path(value) for value in sys.argv[2:5]))
+        if len(sys.argv) not in (5, 7) or (len(sys.argv) == 7 and sys.argv[5] != '--readelf'):
+            raise SystemExit('android OUT UPSTREAM SDK [--readelf /absolute/path/to/llvm-readelf]')
+        android(*(Path(value) for value in sys.argv[2:5]),
+                readelf=Path(sys.argv[6]) if len(sys.argv) == 7 else None)
     elif sys.argv[1] == 'receipt':
         receipt(sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), int(sys.argv[5]))
     else:
