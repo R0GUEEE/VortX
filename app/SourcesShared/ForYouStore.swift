@@ -107,7 +107,7 @@ final class ForYouStore: ObservableObject {
             return
         }
         #endif
-        ForYouLocalStore.write(field: field, value: value, profileID: profile)
+        try ForYouLocalStore.write(field: field, value: value, profileID: profile)
         NotificationCenter.default.post(name: Self.changedNote, object: nil)
     }
 
@@ -370,20 +370,22 @@ enum ForYouLocalStore {
         return ForYouSync.read(host: host, profileID: profileID)
     }
 
-    static func write(field: String, value: VortxJSON, profileID: UUID) {
-        var stored = all()
+    static func write(field: String, value: VortxJSON, profileID: UUID) throws {
+        var stored = try mutationRecords()
         var fields = stored[profileID.uuidString] ?? [:]
         if value == .null { fields.removeValue(forKey: field) } else { fields[field] = value }
         stored[profileID.uuidString] = fields
-        if let data = try? JSONEncoder().encode(stored) { UserDefaults.standard.set(data, forKey: key) }
+        let data = try JSONEncoder().encode(stored)
+        UserDefaults.standard.set(data, forKey: key)
     }
 
     static func registers(profileID: UUID?) -> [String: VortxJSON] {
         guard let profileID else { return [:] }
-        return (all()[profileID.uuidString] ?? [:]).mapValues { .object(["value": $0]) }
+        return registerValues(all(), profileID: profileID)
     }
     @MainActor static func writeRich(_ edit: CurationNativeEdit, profileID: UUID) throws {
-        let current = registers(profileID: profileID)
+        var stored = try mutationRecords()
+        let current = registerValues(stored, profileID: profileID)
         guard edit.nativeEdit.baselineMatches(current[edit.document.field]) else {
             throw VortxNativeHostFieldMutationError.staleRegister
         }
@@ -393,7 +395,6 @@ enum ForYouLocalStore {
         let archived = try VortxNativeBootstrapArchive.encode(document: bytes)
         let parsed = try JSONDecoder().decode(VortxJSON.self, from: archived)
         guard parsed["excludedCredentialPaths"] == .array([]) else { throw CurationFailure.invalidEdit }
-        var stored = all()
         var fields = stored[profileID.uuidString] ?? [:]
         fields[edit.document.field] = edit.document.raw
         stored[profileID.uuidString] = fields
@@ -403,8 +404,11 @@ enum ForYouLocalStore {
     }
 
     @MainActor static func writeLegacy(_ edit: VortxNativeHostFieldEdit, profileID: UUID) throws {
-        guard ForYouSync.isCollectionField(edit.field),
-              edit.baselineMatches(registers(profileID: profileID)[edit.field]) else {
+        guard ForYouSync.isCollectionField(edit.field) else {
+            throw VortxNativeHostFieldMutationError.staleRegister
+        }
+        var stored = try mutationRecords()
+        guard edit.baselineMatches(registerValues(stored, profileID: profileID)[edit.field]) else {
             throw VortxNativeHostFieldMutationError.staleRegister
         }
         try ForYouSync.validate(edit.field, value: edit.value)
@@ -412,7 +416,6 @@ enum ForYouLocalStore {
         let archive = try VortxNativeBootstrapArchive.encode(document: bytes)
         let parsed = try JSONDecoder().decode(VortxJSON.self, from: archive)
         guard parsed["excludedCredentialPaths"] == .array([]) else { throw CurationFailure.invalidEdit }
-        var stored = all()
         var fields = stored[profileID.uuidString] ?? [:]
         // Retain the deletion locally too, so a stale create cannot mistake it for absence.
         fields[edit.field] = edit.value
@@ -420,6 +423,15 @@ enum ForYouLocalStore {
         let encoded = try JSONEncoder().encode(stored)
         UserDefaults.standard.set(encoded, forKey: key)
         guard UserDefaults.standard.data(forKey: key) == encoded else { throw CurationFailure.unavailable }
+    }
+
+    private static func registerValues(_ stored: [String: [String: VortxJSON]], profileID: UUID) -> [String: VortxJSON] {
+        (stored[profileID.uuidString] ?? [:]).mapValues { .object(["value": $0]) }
+    }
+
+    private static func mutationRecords() throws -> [String: [String: VortxJSON]] {
+        try ForYouLocalStorageDocument.decodeForMutation(
+            UserDefaults.standard.object(forKey: key), as: [String: [String: VortxJSON]].self, empty: [:])
     }
 
     private static func all() -> [String: [String: VortxJSON]] {
