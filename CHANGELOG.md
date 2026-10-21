@@ -4,6 +4,15 @@ All notable changes to VortX, newest first. VortX is Apple TV first, with an iPh
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
+## 0.5.6 beta 5 - Lighter syncing while you watch
+
+Build **278** across Apple and Android. Beta 5 builds on beta 4 with less background work during playback.
+
+### Fixed and improved
+
+- **Much less uploading while you watch.** Your place was saved every 20 seconds, and each save uploaded your whole account, about every 25 seconds of playback. Saves now batch: while you keep watching the account uploads once every five minutes, and a pause or stop uploads it within a minute so your other devices pick up where you left off.
+- **Mac quits reported as crashes.** Every Mac launch recorded the previous session as ending unexpectedly after 0 seconds. Normal quits are now recorded as normal, and the session length is tracked, so diagnostics only flag real problems.
+
 ## 0.5.6 beta 4 - Faster start, working Top Shelf, safer Stremio sync and richer Collections
 
 Build **277** across Apple and Android. Beta 3 was tagged but not published; this is its corrected build. This beta opens your account from this device straight away instead
