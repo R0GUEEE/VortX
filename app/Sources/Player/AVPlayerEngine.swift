@@ -405,6 +405,19 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// selection then moves into `pendingMediaSelectionIntent` so an unavailable AVAsset group cannot hold
     /// transport or a remux-seek transaction hostage.
     private var pendingPlaybackIntent: PlaybackIntentPolicy.Intent?
+    private var replacementReadyDeadlineTask: Task<Void, Never>?
+
+    /// Only the currently bound replacement may pin the old source clock or reuse a mount's ready edge.
+    private var pendingReplacementSourceSeconds: Double? {
+        guard let intent = pendingPlaybackIntent, !intent.consumed,
+              intent.ownerGeneration == itemGeneration,
+              intent.mountIdentity == playbackMountIdentity else { return nil }
+        return intent.sourceSeconds
+    }
+
+    private var recoveryPinnedSourceSeconds: Double? {
+        pendingReplacementSourceSeconds ?? recoverySeekSettlement.target(ownership: seekDestinationOwnership)
+    }
     /// Selection-only continuation of a consumed playback intent.  It is deliberately writable while the
     /// asset's media-selection groups are loading, but it never owns a seek or defers play/pause.
     private var pendingMediaSelectionIntent: PlaybackIntentPolicy.Intent?
@@ -450,7 +463,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         .init(requiresVideoFrame: contentIsDolbyVision || isRemuxMounted,
               renderedVideoFrame: hasProducedPlayableVideoFrame,
               settledNativeClockAdvanced: nativeStartupClock.hasAdvanced(generation: itemGeneration),
-              positionSettled: !seekEndBoundary.isPending
+              positionSettled: recoveryPinnedSourceSeconds == nil && !seekEndBoundary.isPending
                   && !nativeStartupClock.isSeekPending(generation: itemGeneration))
     }
 
@@ -954,6 +967,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     // MARK: Loading + transport
 
     func invalidateLoadToken() {
+        replacementReadyDeadlineTask?.cancel()
+        replacementReadyDeadlineTask = nil
         cancelColdLocalRemuxPreparation()
         nativePreflightState.retire()
         #if os(tvOS)
@@ -2164,6 +2179,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         #endif
 
         player.replaceCurrentItem(with: freshItem)
+        armReplacementReadyDeadline(for: freshItem, loadToken: loadToken)
         observe(freshItem, loadToken: loadToken)
         if freshItem.status != .unknown { handleStatus(freshItem, loadToken: loadToken) }
         return true
@@ -2199,6 +2215,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
               let playlistURL = (currentItem.asset as? AVURLAsset)?.url,
               let loadToken = activeLoadToken else { return false }
 
+        if remountPendingSeekIfOutsideWindow() { return true }
         pendingPlaybackIntent = beginPlaybackRemountIntent(from: currentItem)
         if claimsPublishedTailRetry { publishedTailRecoveryBudget.claim() }
         DiagnosticsLog.log(
@@ -2250,6 +2267,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         freshItem.add(output)
         videoOutput = output
         player.replaceCurrentItem(with: freshItem)
+        armReplacementReadyDeadline(for: freshItem, loadToken: loadToken)
         observe(freshItem, loadToken: loadToken)
         if freshItem.status != .unknown { handleStatus(freshItem, loadToken: loadToken) }
         return true
@@ -2541,7 +2559,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// completes, a target outside that mount's produced window must start a replacement remux rather than be
     /// clamped onto the old edge by the fresh HDR-only item.
     private func remountPendingSeekIfOutsideWindow() -> Bool {
-        guard let target = pendingSeek, isRemuxMounted else { return false }
+        guard isRemuxMounted else { return false }
+        let target = pendingSeek ?? pendingRequestedSourcePositionSeconds ?? playbackPositionSeconds
         let sourceDuration = remuxHLSServer?.sourceDurationSeconds
             ?? remuxRemoteMount?.sourceDurationSeconds ?? remuxLoader?.sourceDurationSeconds
         let mountedWindow = mountedPlayerWindowBounds
@@ -3002,9 +3021,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// Live playback position in SOURCE seconds. A resumed remux adds its achieved timeline origin; an
     /// unreadable pre-first-sample clock reports that origin instead of zero, protecting stored progress.
     var playbackPositionSeconds: Double {
-        if remuxSeekRemountTarget != nil, let pendingPlaybackIntent {
-            return pendingPlaybackIntent.sourceSeconds
-        }
+        if let source = recoveryPinnedSourceSeconds { return source }
         return RemuxResumePolicy.presented(
             playerSeconds: player.currentTime().seconds,
             origin: remuxTimelineOrigin)
@@ -4445,10 +4462,11 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
                       self.owns(item, loadToken: loadToken) else { return }
                 // Cheap, every tick: the play head (scrubber smoothness) and the subtitle overlay clock. These
                 // must stay at the full 0.25s cadence or the progress bar and external subs visibly lag.
-                let position = RemuxResumePolicy.presented(
+                let pinnedPosition = self.recoveryPinnedSourceSeconds
+                let position = pinnedPosition ?? RemuxResumePolicy.presented(
                     playerSeconds: time.seconds,
                     origin: self.remuxTimelineOrigin)
-                let positionSettled = !self.seekEndBoundary.isPending
+                let positionSettled = pinnedPosition == nil && !self.seekEndBoundary.isPending
                     && !self.nativeStartupClock.isSeekPending(generation: observedGeneration)
                 self.nativeStartupClock.observe(
                     generation: observedGeneration, playerSeconds: time.seconds,
@@ -4461,6 +4479,9 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
                     loadToken: loadToken, seekRequestID: self.seekRequestGeneration
                 )
                 self.updateSubtitleOverlay(atClock: position)   // sync external-sub overlay to source time
+                // The new item's temporary clock is not watched/startup/recovery progress. Do not feed it
+                // into budget rearming, stall evidence or the producer's retained-window accounting.
+                guard pinnedPosition == nil else { return }
                 let clock = ProcessInfo.processInfo.systemUptime
                 // Proven-progress stall-episode end (root-cause report section 2): the raw AVPlayer clock, in
                 // the SAME seconds space the KVO handler above baselined the episode against. `.paused`/
@@ -4604,7 +4625,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     }
 
     private func handleStatus(_ item: AVPlayerItem, loadToken: PlayerLoadToken) {
-        guard owns(item, loadToken: loadToken) else { return }
+        guard owns(item, loadToken: loadToken), !fatalErrorEmitted else { return }
         switch item.status {
         case .readyToPlay:
             let readyContinuation = AVPlayerRecoverySettlementPolicy.ReadyContinuationOwnership(
@@ -4618,10 +4639,12 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
                 if !DVPlaybackPolicy.acceptsRemuxReady(
                     transitionAccepted: accepted,
                     mountAlreadyReady: server.hasMarkedEngineReady,
-                    recoveryItem: usingHDRFallbackItem) {
+                    recoveryItem: usingHDRFallbackItem || pendingReplacementSourceSeconds != nil) {
                     return
                 }
             }
+            replacementReadyDeadlineTask?.cancel()
+            replacementReadyDeadlineTask = nil
             isReady = true
             // Clear the seek-remount spinner (see remountForSeek). The replacement is playable, so whatever
             // wait it advertised is over; an item that is still genuinely starved re-raises this from its own
@@ -5659,7 +5682,30 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         refreshSelectionTracks(for: changedItem)
     }
 
+    /// A replacement cannot wait forever on a mount whose one-time startup deadline already completed.
+    /// Preserve its source intent for outer fallback; timeout is an error, never EOF/episode completion.
+    private func armReplacementReadyDeadline(for replacement: AVPlayerItem, loadToken: PlayerLoadToken) {
+        replacementReadyDeadlineTask?.cancel()
+        let generation = itemGeneration
+        let mountIdentity = playbackMountIdentity
+        replacementReadyDeadlineTask = Task { @MainActor [weak self, weak replacement] in
+            do { try await Task.sleep(nanoseconds: 30_000_000_000) }
+            catch { return }
+            guard let self, let replacement, !Task.isCancelled,
+                  self.itemGeneration == generation,
+                  self.playbackMountIdentity == mountIdentity,
+                  self.owns(replacement, loadToken: loadToken),
+                  !self.isReady, !self.fatalErrorEmitted,
+                  self.pendingReplacementSourceSeconds != nil else { return }
+            self.replacementReadyDeadlineTask = nil
+            self.deliverTerminal(.error("Playback could not resume. Please retry this source."),
+                                 loadToken: loadToken, generation: generation)
+        }
+    }
+
     private func teardownObservers() {
+        replacementReadyDeadlineTask?.cancel()
+        replacementReadyDeadlineTask = nil
         retireBadgeMetadata()
         nativeStartupClock.reset(generation: nil)
         externalSubtitleSettlement.clear()
@@ -5680,7 +5726,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     private func installPlayheadReceiptObserver() {
         if let playheadObserver { player.removeTimeObserver(playheadObserver) }
         playheadObserver = nil
-        guard timeObserver != nil, let server = remuxHLSServer else { return }
+        guard timeObserver != nil, recoveryPinnedSourceSeconds == nil,
+              let server = remuxHLSServer else { return }
         let epoch = server.playbackReceiptEpoch
         playheadObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: playheadQueue
@@ -5691,6 +5738,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
 
     deinit {
         // stop() is the normal teardown; this is a safety net if the engine is released without it.
+        replacementReadyDeadlineTask?.cancel()
         coldLocalRemuxPreparation?.cancel()
         coldLocalRemuxMountTask?.cancel()
         remuxSubtitleInventoryRefreshTask?.cancel()

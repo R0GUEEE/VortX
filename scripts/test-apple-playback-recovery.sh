@@ -4,8 +4,8 @@ cd "$(dirname "$0")/.."
 mkdir -p app/build
 recovery_test_dir=$(mktemp -d app/build/apple-recovery-tests.XXXXXX)
 # These are generated dependency-free slices of production declarations, not alternate implementations.
-sed -n '/^struct AVPlayerRemuxStartupSignal:/,/^\/\/ MARK: - PiP state machine/p' \
-  app/Sources/Player/AVPlayerEngine.swift | sed '$d' > "$recovery_test_dir/remux-signal.swift"
+sed -n '/^struct AVPlayerRemuxStartupSignal:/,/^}/p' \
+  app/Sources/Player/AVPlayerEngine.swift > "$recovery_test_dir/remux-signal.swift"
 {
   printf '%s\n' 'import Foundation'
   sed -n '/^enum NodeListenerRebindPolicy {/,/^\/\/ END Node listener rebind policy$/p' \

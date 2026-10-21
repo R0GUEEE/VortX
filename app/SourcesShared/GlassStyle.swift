@@ -842,7 +842,8 @@ extension View {
         fillAlpha: Double = VortXGlass.barFillAlpha,
         highlight: Double = 0.14,
         shadow: VortXGlass.Shadow = .bar,
-        tone: VortXGlass.Tone = .lift
+        tone: VortXGlass.Tone = .lift,
+        materialOpacity: Double = 1
     ) -> some View {
         // On tvOS, on-art badges (the only `vortxGlass` callers at `badgeFillAlpha`) drop to a cheap OPAQUE
         // warm capsule: over poster art a live glass badge sampled + desaturated the artwork under it, and
@@ -858,7 +859,10 @@ extension View {
         let opaqueTVFill: Color? = (fillAlpha == VortXGlass.badgeFillAlpha)
             ? VortXGlass.fill(1.0, tone: .scrim) : nil
         return modifier(VortXGlassModifier(shape: shape, fillAlpha: fillAlpha, highlightTop: highlight,
-                                           shadow: shadow, opaqueTVFill: opaqueTVFill, tone: tone))
+                                           shadow: shadow,
+                                           materialOpacity: VisualEffects.glassEnabled ? materialOpacity : 1,
+                                           opaqueTVFill: opaqueTVFill,
+                                           tone: tone))
     }
 
     /// The ember active / selected overlay for a nav item / chip: fills `shape` with the soft `tint` (accent

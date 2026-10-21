@@ -61,7 +61,8 @@ class NativeLegacyMaterialTest {
         assertTrue(ownerWatches.any { it.getString("metaId") == "tt-kept" && it.getLong("positionMs") == 12_000L })
         assertTrue(ownerWatches.none { it.getString("metaId") in setOf("tt-series", "tt-noclock", "yt-channel", "iptv-one") })
         val addons = result.getJSONObject("addons").getJSONObject(owner.id).getJSONArray("items")
-        assertEquals(listOf("https://example.com/manifest.json"), (0 until addons.length()).map { addons.getJSONObject(it).getString("transportUrl") })
+        assertEquals(listOf("https://example.com/manifest.json", "http://192.168.1.20:7000/manifest.json"),
+            (0 until addons.length()).map { addons.getJSONObject(it).getString("transportUrl") })
         assertTrue(watchRows(result, child.id).any { it.optString("videoId") == "tt-child:1:1" })
         val reasons = holds.map { "${it.kind}:${it.reason}" }
         for (expected in listOf("library_row:Unsupported catalog content type", "library_progress:Series progress requires an exact video identity",
@@ -70,7 +71,8 @@ class NativeLegacyMaterialTest {
                 "profile_overlay:Watch carrier references an unknown profile"))
             assertTrue("Expected hold $expected; got $reasons", reasons.any { it.startsWith(expected) })
         assertEquals(2, reasons.count { it.startsWith("library_row:Unsupported catalog content type") })
-        assertEquals("A fragment URL and a private address each hold alone", 2, reasons.count { it.startsWith("addon:Unsupported add-on transport URL") })
+        assertEquals("Only the fragment URL holds; the private add-on is retained", 1,
+            reasons.count { it.startsWith("addon:Unsupported add-on transport URL") })
         val summary = nativeLegacyHeldSummary(holds)
         assertFalse(summary, summary.contains("tt-") || summary.contains(stray) || summary.contains("example.com"))
         assertEquals("malformed_clock_x", scrubbedLegacyReason("Malformed clock tt123:1:2"))

@@ -3947,14 +3947,15 @@ final class MPVMetalViewController: PlatformViewController {
 
     private static func acceptsExternalSubtitleURL(_ url: URL) -> Bool {
         guard (url.scheme?.lowercased() == "https" || url.scheme?.lowercased() == "http"),
-              let host = url.host?.lowercased(),
+              let host = url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]")),
               url.user == nil, url.password == nil else { return false }
-        // Reject local and private numeric targets before a request is issued.  DNS names remain subject to
-        // the normal platform resolver; this closes direct file/loopback/LAN SSRF from untrusted add-ons.
+        // Early literal rejection only. downloadSubtitle still applies the pinned transport's HTTPS,
+        // resolved-address, TLS, redirect and body-budget gates to every uncached network fetch.
         let forbidden = ["localhost", "::1", "0.0.0.0"]
+        // fc/fd identify unique-local IPv6 only in an IPv6 literal, not a DNS name such as fctv.example.
+        let uniqueLocalIPv6 = host.contains(":") && (host.hasPrefix("fc") || host.hasPrefix("fd"))
         guard !forbidden.contains(host), !host.hasPrefix("127."), !host.hasPrefix("10."),
-              !host.hasPrefix("192.168."), !host.hasPrefix("169.254."), !host.hasPrefix("fc"),
-              !host.hasPrefix("fd") else { return false }
+              !host.hasPrefix("192.168."), !host.hasPrefix("169.254."), !uniqueLocalIPv6 else { return false }
         if host.hasPrefix("172."), let second = host.split(separator: ".").dropFirst().first,
            let octet = Int(second), (16...31).contains(octet) { return false }
         return true

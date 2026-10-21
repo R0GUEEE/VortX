@@ -1,21 +1,10 @@
 import Foundation
 
-/// SSRF / private-address guard for add-on manifests, selected catalogs and supplied static artwork.
-///
-/// An add-on install URL is pasted (or relayed via the Install-by-QR pairing flow) and then FETCHED by the
-/// app. Without a guard, a hostile or careless URL could point the fetch at a private / loopback / internal
-/// address (`127.0.0.1`, `10.x`, `192.168.x`, `169.254.x`, a `.local` LAN service, a cloud metadata endpoint),
-/// turning the install into a server-side-request-forgery probe of the device's own network. This validates
-/// BOTH the pasted URL's host AND every address that host RESOLVES to, and re-checks each redirect hop, so a
-/// public URL that 3xx-redirects to a private one is refused too.
-///
-/// It is FAIL-CLOSED for private targets: a host that resolves to any blocked address is rejected. It does not
-/// break normal public manifests: a public host with only public resolved addresses passes. A DNS failure is
-/// reported as unreachable (the install then surfaces the usual "could not reach" error), never silently
-/// allowed.
-///
-/// Used by both `CoreBridge.installAddon` and `CoreBridge.previewAddonManifest` (the QR confirm resolves the
-/// name via preview), so the exact same policy gates every manifest fetch.
+/// Bounded client transport for add-ons and public catalog/artwork resources.
+/// Installing an add-on selects its endpoint: LAN, loopback and Tailscale hosts are legitimate destinations.
+/// Only that selected origin may resolve privately; a redirect to a different private origin is not part of
+/// that choice. Public catalog/artwork URLs retain the strict public-address policy. Link-local and
+/// unspecified destinations stay blocked even for an add-on. TLS verification is never disabled.
 ///
 /// RESIDUAL RISK (accepted, resolve-then-connect): `validate` resolves the host and `fetch` then issues a
 /// SEPARATE `URLSession` request that re-resolves DNS independently, so the connected IP is not pinned to the
@@ -26,6 +15,20 @@ import Foundation
 /// and responses are bounded before JSON or local static-image decoding), so this stays a known,
 /// accepted limitation rather than an implied guarantee.
 enum AddonURLGuard {
+    enum AccessScope: Sendable {
+        case publicNetwork
+        case addon(origin: URL)
+
+        func allowsPrivateAddress(for url: URL) -> Bool {
+            guard case .addon(let origin) = self else { return false }
+            func port(_ value: URL) -> Int? {
+                value.port ?? (value.scheme?.lowercased() == "https" ? 443 : 80)
+            }
+            return url.scheme?.lowercased() == origin.scheme?.lowercased()
+                && url.host?.lowercased() == origin.host?.lowercased()
+                && port(url) == port(origin)
+        }
+    }
     /// Why a manifest URL was refused. `message` is the user-facing string the install/preview surfaces.
     enum Rejection: Error {
         case invalidScheme
@@ -38,7 +41,7 @@ enum AddonURLGuard {
             case .invalidScheme:
                 return "Enter a valid add-on URL (http:// or https://…/manifest.json)."
             case .privateAddress:
-                return "This add-on URL points to a private address and can't be installed."
+                return "That URL uses an unsupported network address or redirects to a different private server."
             case .unresolvable:
                 return "Could not reach that add-on. Check the URL and your connection."
             case .tooManyRedirects:
@@ -99,23 +102,23 @@ enum AddonURLGuard {
 
     // MARK: - Public validation
 
-    /// Validate a URL's SCHEME + HOST before any fetch: require HTTP(S), reject a literal-IP host in a
-    /// blocked range, and a hostname that RESOLVES to any blocked address. This is the synchronous pre-fetch
-    /// gate; `fetch(...)` additionally re-checks every redirect target.
-    static func validate(_ url: URL) async -> Rejection? {
+    /// Require HTTP(S) and validate literal/resolved destinations. Public resources reject private ranges;
+    /// a selected add-on can use ordinary private addresses only at its selected origin.
+    static func validate(_ url: URL, access: AccessScope = .publicNetwork) async -> Rejection? {
         guard let scheme = url.scheme?.lowercased(),
               let host = url.host, !host.isEmpty,
               url.user == nil,
               url.password == nil,
               url.fragment == nil else { return .invalidScheme }
 
-        // A bracketed/literal IP host is checked directly (no DNS), so a raw `http://127.0.0.1/…` or
-        // `http://[::1]/…` is refused without a lookup.
+        // Literal hosts are checked directly without DNS, including private and mapped addresses.
         let bareHost = host.hasPrefix("[") && host.hasSuffix("]")
             ? String(host.dropFirst().dropLast())   // IPv6 literals arrive bracketed from URL.host
             : host
         if let literal = IPAddress(parsing: bareHost) {
-            if literal.isBlocked { return .privateAddress }
+            if literal.isBlocked && !(access.allowsPrivateAddress(for: url) && literal.isSelfHostedAddress) {
+                return .privateAddress
+            }
             // WHY (viewer regression after b215): Comet/StreamFusion manifests commonly live on plain
             // http:// or redirect through it; the HTTPS-only rule from 0d6f360e locked them out while
             // well-hosted addons kept working. Public hosts may use http again - every private-address
@@ -135,7 +138,9 @@ enum AddonURLGuard {
         // Otherwise resolve the hostname and check EVERY address it maps to. Any blocked address fails closed.
         let resolved = resolve(host: bareHost)
         guard !resolved.isEmpty else { return .unresolvable }
-        if resolved.contains(where: { $0.isBlocked }) { return .privateAddress }
+        if resolved.contains(where: {
+            $0.isBlocked && !(access.allowsPrivateAddress(for: url) && $0.isSelfHostedAddress)
+        }) { return .privateAddress }
         return nil
     }
 
@@ -143,7 +148,7 @@ enum AddonURLGuard {
     /// the throwing overload so cancellation remains distinct from an unreachable provider.
     static func fetch(_ url: URL) async -> Result<(data: Data, finalURL: URL), Rejection> {
         do {
-            let response = try await fetch(url, context: .manifest)
+            let response = try await fetch(url, context: .manifest, access: .addon(origin: url))
             return .success((response.data, response.finalURL))
         } catch let rejection as Rejection {
             return .failure(rejection)
@@ -152,26 +157,35 @@ enum AddonURLGuard {
         }
     }
 
-    /// Shared transport with manual redirects, DNS checks at every hop, bounded streamed bytes and
-    /// explicit cancellation. Context affects only the cap and Accept header, never address policy.
-    static func fetch(_ url: URL, context: ResponseContext) async throws -> Response {
+    /// Shared transport with manual redirects, DNS checks, bounded bytes and cancellation.
+    /// Resource purpose never grants private access; only the selected add-on origin does.
+    static func fetch(_ url: URL, context: ResponseContext,
+                      access: AccessScope = .publicNetwork,
+                      timeout: TimeInterval = 15) async throws -> Response {
+        let deadline = Date().addingTimeInterval(timeout)
         var current = url
         for _ in 0...maxRedirects {
             try Task.checkCancellation()
-            let validationFailure = await validate(current)
+            let validationFailure = await validate(current, access: access)
             try Task.checkCancellation()
             if let validationFailure { throw validationFailure }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { throw Rejection.unresolvable }
 
             var request = URLRequest(url: current)
-            request.timeoutInterval = 15
+            request.timeoutInterval = remaining
             request.cachePolicy = .reloadIgnoringLocalCacheData
             request.httpShouldHandleCookies = false
             request.setValue(context.accept, forHTTPHeaderField: "Accept")
+            // Keep the browser-compatible health-probe UA: some add-on CDNs refuse URLSession's default.
+            request.setValue("Mozilla/5.0 (Apple TV; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/604.1",
+                             forHTTPHeaderField: "User-Agent")
             let configuration = URLSessionConfiguration.ephemeral
             configuration.httpCookieStorage = nil
             configuration.httpShouldSetCookies = false
             configuration.urlCredentialStorage = nil
             configuration.urlCache = nil
+            configuration.timeoutIntervalForResource = remaining
             let delegate = NoRedirectDelegate()
             let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
             defer { session.invalidateAndCancel() }
@@ -193,7 +207,10 @@ enum AddonURLGuard {
                 var data = Data()
                 data.reserveCapacity(min(context.maximumBytes, 64 * 1024))
                 for try await byte in byteStream {
-                    if (data.count & 4095) == 0 { try Task.checkCancellation() }
+                    if (data.count & 4095) == 0 {
+                        try Task.checkCancellation()
+                        guard deadline.timeIntervalSinceNow > 0 else { throw Rejection.unresolvable }
+                    }
                     guard canAcceptBody(currentBytes: data.count, incomingBytes: 1, context: context) else {
                         throw Rejection.unresolvable
                     }
@@ -203,7 +220,7 @@ enum AddonURLGuard {
                 // This is a second resolution check, not connection IP pinning. The accepted
                 // resolve-then-connect rebinding limitation above still applies.
                 let finalURL = http.url ?? current
-                if let rejection = await validate(finalURL) { throw rejection }
+                if let rejection = await validate(finalURL, access: access) { throw rejection }
                 try Task.checkCancellation()
                 return Response(data: data, finalURL: finalURL, mimeType: http.mimeType)
             } catch is CancellationError {
@@ -249,8 +266,7 @@ enum AddonURLGuard {
     }
 }
 
-/// A resolved or literal IP address, reduced to the bytes we test against the blocked ranges. Kept private to
-/// the guard; the only question it answers is `isBlocked`.
+/// Address classification shared by the strict public policy and the selected self-hosted endpoint policy.
 private struct IPAddress {
     enum Kind { case v4([UInt8]), v6([UInt8]) }
     let kind: Kind
@@ -281,6 +297,34 @@ private struct IPAddress {
             self.init(v6: v6); return
         }
         return nil
+    }
+
+    /// Local services and tailnets are usable add-on endpoints, not an invitation to metadata/link-local URLs.
+    var isSelfHostedAddress: Bool {
+        switch kind {
+        case .v4(let b):
+            return Self.isSelfHostedV4(b)
+        case .v6(let b):
+            if b.prefix(10).allSatisfy({ $0 == 0 }), b[10] == 0xff, b[11] == 0xff {
+                return Self.isSelfHostedV4(Array(b[12...]))
+            }
+            if b[0] == 0x00, b[1] == 0x64, b[2] == 0xff, b[3] == 0x9b,
+               b[4...11].allSatisfy({ $0 == 0 }) {
+                return Self.isSelfHostedV4(Array(b[12...]))
+            }
+            return (b[0] & 0xFE) == 0xFC
+                ? b != [0xfd, 0x00, 0x0e, 0xc2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x54]
+                : (b[0...14].allSatisfy({ $0 == 0 }) && b[15] == 1)
+        }
+    }
+
+    private static func isSelfHostedV4(_ b: [UInt8]) -> Bool {
+        guard b.count == 4 else { return false }
+        if b == [100, 100, 100, 200] { return false } // Cloud instance metadata, not an add-on endpoint.
+        return b[0] == 10 || b[0] == 127
+            || (b[0] == 100 && (b[1] & 0xC0) == 0x40)
+            || (b[0] == 172 && (b[1] & 0xF0) == 0x10)
+            || (b[0] == 192 && b[1] == 168)
     }
 
     /// True when this address is loopback / private / link-local / CGNAT / ULA / unspecified, anything that

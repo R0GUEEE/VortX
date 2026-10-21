@@ -377,7 +377,7 @@ private class LegacyMaterialAdapter(
                 val uri = runCatching { URI(url) }.getOrNull()
                 requireMaterial(uri != null && uri.scheme?.lowercase() in setOf("http", "https") && !uri.host.isNullOrBlank() && uri.rawUserInfo == null && uri.rawFragment == null,
                     "Unsupported add-on transport URL")
-                requirePublicAddonHost(uri!!.host)
+                requireAddonHost(uri!!.host)
                 val manifest = objectField(row, "manifest") ?: fail("URL-only add-on requires manifest reconciliation")
                 string(manifest, "id"); string(manifest, "name")
                 // Checked per descriptor so one credential-bearing manifest holds only itself.
@@ -391,7 +391,7 @@ private class LegacyMaterialAdapter(
             val uri = runCatching { URI(normalized) }.getOrNull()
             requireMaterial(uri != null && uri.scheme?.lowercase() in setOf("http", "https") && !uri.host.isNullOrBlank() &&
                 uri.rawUserInfo == null && uri.rawFragment == null, "Unsupported add-on transport URL")
-            requirePublicAddonHost(uri!!.host)
+            requireAddonHost(uri!!.host)
             // Old tombstone writers lowercased the entire URL. Match only a UNIQUE actual descriptor;
             // never lowercase configured paths or percent-encoded secrets in the native identity.
             val matches = descriptors.keys.filter { it.lowercase() == normalized.lowercase() }
@@ -857,9 +857,9 @@ private class LegacyMaterialAdapter(
 }
 
 private fun fail(message: String): Nothing = throw LegacyReconciliationRequired(message)
-/** A non-public literal add-on host is unrepresentable here, so it is held like any other bad URL. */
-private fun requirePublicAddonHost(host: String) {
-    try { PublicAddressPolicy.requireLiteralPublicOrHostname(host) }
+/** Saved private add-ons are representable; malformed and special endpoints still hold only their own row. */
+private fun requireAddonHost(host: String) {
+    try { PublicAddressPolicy.requireAddonLiteralOrHostname(host.removeSurrounding("[", "]")) }
     catch (_: java.net.UnknownHostException) { fail("Unsupported add-on transport URL") }
 }
 private fun requireMaterial(condition: Boolean, message: String) { if (!condition) fail(message) }

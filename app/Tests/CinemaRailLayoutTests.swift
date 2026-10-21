@@ -32,7 +32,8 @@ enum CinemaRailLayoutTests {
         precondition(mac.components(separatedBy: "ScrollView {").count == 2, "One vertical scrolling region")
         precondition(mac.range(of: "ScrollView {")!.lowerBound < mac.range(of: "heroBanner(")!.lowerBound,
                      "Hero scrolls away so a full episode card can be seen")
-        precondition(detail.contains("episodeList(viewportWidth: geo.size.width)"))
+        precondition(detail.contains("episodeList(viewportWidth: geo.size.width, pageProxy: proxy)"),
+                     "Episode rail retains the live viewport and its parent scroll proxy")
         precondition(detail.contains("ScrollView(.horizontal, showsIndicators: true)"))
         precondition(detail.contains(".id(\"episode-rail-\\(season)\")"),
                      "Each season gets its own rail, so a season switch never inherits the old scroll offset")

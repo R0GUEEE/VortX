@@ -326,13 +326,13 @@ object VortXSyncDoc {
     /** Parse one safely-installable descriptor without rejecting compatible shallow records elsewhere in a doc. */
     internal fun addonDescriptor(raw: JSONObject): AddonDescriptor? {
         // Do not coerce arbitrary JSON values to strings: this object is dispatched directly to the native
-        // engine during account hydration, so it has the same public-network admission as a pasted install.
+        // engine during account hydration, so use the same endpoint admission as a pasted install.
         val url = (raw.opt("transportUrl") as? String)?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         val uri = runCatching { URI(url) }.getOrNull() ?: return null
         if (
             uri.scheme?.lowercase() !in setOf("http", "https") ||
-            uri.host.isNullOrBlank() || uri.rawUserInfo != null ||
-            runCatching { PublicAddressPolicy.requireLiteralPublicOrHostname(uri.host) }.isFailure
+            uri.host.isNullOrBlank() || uri.rawUserInfo != null || uri.rawFragment != null ||
+            runCatching { PublicAddressPolicy.requireAddonLiteralOrHostname(uri.host.removeSurrounding("[", "]")) }.isFailure
         ) return null
         val manifest = raw.optJSONObject("manifest") ?: return null
         // Native's manifest serde needs real string values; `optString` would turn numbers/objects into
