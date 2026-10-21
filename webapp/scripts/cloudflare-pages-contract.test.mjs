@@ -5,8 +5,8 @@ import { join } from "node:path";
 const root = join(import.meta.dirname, "..");
 const read = (path) => readFileSync(join(root, path), "utf8");
 
-const npmVersion = "11.17.0";
-const nodeVersion = "22.18.0";
+const npmVersion = "12.2.0";
+const nodeVersion = "22.23.3";
 const rootDirectory = "webapp";
 const buildCommand = "corepack install && corepack npm ci && corepack npm run build";
 const buildOutput = "dist";
@@ -20,7 +20,7 @@ const wrangler = read("wrangler.toml");
 assert.match(
   packageJson.packageManager,
   new RegExp(`^npm@${npmVersion.replaceAll(".", "\\.")}\\+sha512\\.`),
-  "packageManager must pin npm 11.17.0 with an integrity hash",
+  "packageManager must pin npm 12.2.0 with an integrity hash",
 );
 assert.equal(packageJson.engines.node, `>=${nodeVersion}`);
 assert.equal(packageJson.engines.npm, npmVersion);

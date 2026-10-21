@@ -59,7 +59,7 @@ check_contract() {
   local security_workflow="${root}/.github/workflows/security.yml"
   local fetch_script="${root}/desktop/scripts/fetch-server-deps.sh"
 
-  require_literal "${desktop_workflow}" 'node-version: "22.18.0"'
+  require_literal "${desktop_workflow}" 'node-version: "22.23.3"'
   require_literal "${desktop_workflow}" 'toolchain: 1.97.1'
   require_literal "${security_workflow}" 'toolchain: 1.97.1'
 
@@ -434,7 +434,7 @@ test_server_curl_failure_cleans_temp_file() {
 
 check_contract "${PROJECT_ROOT}"
 
-assert_mutation_rejected '.github/workflows/desktop.yml' 'node-version: "22.18.0"'
+assert_mutation_rejected '.github/workflows/desktop.yml' 'node-version: "22.23.3"'
 assert_mutation_rejected '.github/workflows/desktop.yml' 'toolchain: 1.97.1'
 assert_mutation_rejected '.github/workflows/security.yml' 'toolchain: 1.97.1'
 assert_mutation_rejected '.github/workflows/desktop.yml' \

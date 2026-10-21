@@ -57,7 +57,7 @@ corepack npm run build      # tsc && vite build -> dist/
 corepack npm run preview    # serve the production build locally
 ```
 
-Requirements: Node 22.18+ with Corepack. `package.json` pins npm 11.17.0, and the project
+Requirements: Node 22.23.3+ with Corepack. `package.json` pins npm 12.2.0, and the project
 rejects installs and scripts run with a different Node or npm version.
 
 ## Deploy (Cloudflare Pages -> web.vortx.tv)
