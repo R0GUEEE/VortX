@@ -486,8 +486,8 @@ private enum TVAVStartWatchdogPolicyTests {
             engineSource.contains("requiresVideoFrame: contentIsDolbyVision || isRemuxMounted")
                 && engineSource.contains("renderedVideoFrame: hasProducedPlayableVideoFrame")
                 && engineSource.contains("nativeStartupClock.hasAdvanced(generation: itemGeneration)"))
-        check("AV startup: queued settled events also require live native settlement",
-            engineSource.contains("positionSettled: !seekEndBoundary.isPending")
+        check("AV startup: queued settled events require released recovery pin and live native settlement",
+            engineSource.contains("positionSettled: recoveryPinnedSourceSeconds == nil && !seekEndBoundary.isPending")
                 && engineSource.contains("!nativeStartupClock.isSeekPending(generation: itemGeneration)"))
         check("AV startup: exact observed generation owns native-clock progress",
             engineSource.contains("let observedGeneration = itemGeneration")
@@ -498,7 +498,7 @@ private enum TVAVStartWatchdogPolicyTests {
         check("AV seek: optimistic and completed positions have distinct settlement",
             engineSource.contains("publishSeekPosition(playerSeconds: clamped, positionSettled: false)")
                 && engineSource.contains("publishSeekPosition(playerSeconds: landing, positionSettled: true)")
-                && engineSource.contains("let positionSettled = !self.seekEndBoundary.isPending"))
+                && engineSource.contains("let positionSettled = pinnedPosition == nil && !self.seekEndBoundary.isPending"))
         check("AV seek: completion and queued position delivery retain exact item and seek ownership",
             engineSource.contains("self.itemGeneration == seekGeneration")
                 && engineSource.contains("self.item === seekItem")
