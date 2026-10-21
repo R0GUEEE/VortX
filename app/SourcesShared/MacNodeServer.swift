@@ -784,7 +784,7 @@ enum NodeServer {
         //   VORTX_LAN_IP       the advertised /settings baseUrl host while sharing
         // It binds 11470 DETERMINISTICALLY (bounded retry, then exit nonzero; never drifts to
         // 11471+), so lanURL's fixed :11470 and StremioServer.embedded stay correct.
-        var env = ProcessInfo.processInfo.environment
+        var env = NativeTransportPolicy.nativeServerEnvironment(from: ProcessInfo.processInfo.environment)
         env["VORTX_SERVER_HOME"] = serverData
         retireNativePortReceipt()
         nativePortReceipt = (home as NSString).appendingPathComponent("native-server-\(UUID().uuidString).port")
