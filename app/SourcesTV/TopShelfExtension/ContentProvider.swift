@@ -48,9 +48,9 @@ final class ContentProvider: TVTopShelfContentProvider {
 
     /// One Continue Watching entry as a Top Shelf tile.
     private func sectionedItem(_ item: TopShelfSnapshot.Item) -> TVTopShelfSectionedItem {
-        // The engine library id is unique within the snapshot, which is exactly the uniqueness
-        // TVTopShelfItem.identifier requires.
-        let shelf = TVTopShelfSectionedItem(identifier: item.id)
+        // Home's identity is (type, provider id), not provider id alone. In particular a movie
+        // and series from different catalogs may share an id without sharing a shelf identifier.
+        let shelf = TVTopShelfSectionedItem(identifier: item.shelfIdentifier)
         shelf.title = item.title
         shelf.imageShape = .poster   // 2:3, matching the portrait art the snapshot carries
         shelf.playbackProgress = item.progress   // draws the resume stripe the rail shows in-app

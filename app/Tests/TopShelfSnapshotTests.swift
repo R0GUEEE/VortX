@@ -114,6 +114,22 @@ let items = [
 ]
 let payload = TopShelfSnapshot.Payload(version: TopShelfSnapshot.currentVersion, writtenAt: Date(), items: items)
 
+section("system shelf identity retains the content type")
+let sharedMovie = TopShelfSnapshot.Item(id: "shared:id", type: "movie", title: "Movie", poster: nil, progress: 0)
+let sharedSeries = TopShelfSnapshot.Item(id: "shared:id", type: "series", title: "Series", poster: nil, progress: 0)
+check(sharedMovie.shelfIdentifier != sharedSeries.shelfIdentifier,
+      "movie and series sharing a provider id have distinct system identifiers")
+let sharedMovieRefresh = TopShelfSnapshot.Item(id: "shared:id", type: "movie", title: "Updated title", poster: "https://img/new.jpg", progress: 0.9)
+check(sharedMovie.shelfIdentifier == sharedMovieRefresh.shelfIdentifier,
+      "system identity is stable when title, artwork and progress change")
+check(sharedMovie.id == sharedSeries.id, "system identity does not rewrite provider ids")
+check(TopShelfSnapshot.parse(TopShelfSnapshot.openURL(type: sharedSeries.type, id: sharedSeries.id)!) == .open(type: "series", id: "shared:id"),
+      "namespaced system identity leaves detail actions on the original provider id")
+let delimiterType = TopShelfSnapshot.Item(id: "c", type: "a:b", title: "One", poster: nil, progress: 0)
+let delimiterID = TopShelfSnapshot.Item(id: "b:c", type: "a", title: "Two", poster: nil, progress: 0)
+check(delimiterType.shelfIdentifier != delimiterID.shelfIdentifier,
+      "length-prefixing prevents type/id delimiter ambiguity")
+
 let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
 let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
 

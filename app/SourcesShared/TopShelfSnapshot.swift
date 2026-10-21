@@ -69,6 +69,11 @@ enum TopShelfSnapshot {
         let poster: String?
         /// 0…1 watch progress, matching `TVTopShelfSectionedItem.playbackProgress`'s required range.
         let progress: Double
+
+        /// Home distinguishes a movie and series with the same provider id. The system shelf
+        /// needs that same distinction, while actions must keep the original provider id.
+        /// Length-prefix the type so even delimiter-bearing future types cannot collide.
+        var shelfIdentifier: String { "\(type.utf8.count):\(type):\(id)" }
     }
 
     struct Payload: Codable, Equatable, Sendable {
