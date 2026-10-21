@@ -20,12 +20,13 @@ internal object NativeHostDocument {
     fun archive(document: JSONObject): JSONObject = Sanitizer().archive(document)
 
     /** Validation only: never silently sanitize retained import input or rewrite an old checkpoint. */
-    fun requireCredentialFree(document: JSONObject) {
-        requireArchive(archive(document).getJSONArray("excludedCredentialPaths").length() == 0,
+    fun requireCredentialFree(document: JSONObject, maximumNodes: Int = 100_000) {
+        require(maximumNodes >= 100_000)
+        requireArchive(Sanitizer(maximumNodes).archive(document).getJSONArray("excludedCredentialPaths").length() == 0,
             "Credential-bearing retained native host material requires reconciliation")
     }
 
-    private class Sanitizer {
+    private class Sanitizer(private val maximumNodes: Int = 100_000) {
         private val excluded = sortedSetOf<String>()
         private var nodes = 0
         private var inspectedBytes = 0L
@@ -37,7 +38,7 @@ internal object NativeHostDocument {
         }
 
         private fun budget(depth: Int) {
-            requireArchive(depth <= 64 && ++nodes <= 100_000, "Host document exceeds inspection limits")
+            requireArchive(depth <= 64 && ++nodes <= maximumNodes, "Host document exceeds inspection limits")
         }
 
         private fun excluded(key: String, path: String): Boolean {

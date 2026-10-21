@@ -79,4 +79,13 @@ object VortxCore {
     external fun nativeCancelNew(): Long
     external fun nativeCancelCancel(cancel: Long)
     external fun nativeCancelFree(cancel: Long)
+
+    // Additive byte-oriented owner-history ABI. These handles are opaque registry IDs, NOT
+    // nativeInitRuntime Engine* values. No automatic activation or fallback to the old ABI.
+    // The verifier is borrowed synchronously for ONE call; exceptions reject it.
+    external fun nativeOwnerHistoryCanonicalize(evidence: ByteArray): ByteArray?
+    external fun nativeOwnerHistoryOpen(snapshot: ByteArray, verifier: NativeOwnerHistoryVerifier): Long
+    external fun nativeOwnerHistoryFork(handle: Long, fence: ByteArray, verifier: NativeOwnerHistoryVerifier): Long
+    external fun nativeOwnerHistoryRequest(handle: Long, json: ByteArray, now: Long, verifier: NativeOwnerHistoryVerifier): ByteArray?
+    external fun nativeOwnerHistoryClose(handle: Long): Boolean
 }

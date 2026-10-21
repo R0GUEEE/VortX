@@ -6,7 +6,17 @@ import java.math.BigDecimal
 
 /** Only compare accepted, account-joined wire carriers, never UI projections or local actor clocks. */
 internal object NativeSyncPublicationPolicy {
-    fun needsRepublish(remote: JSONObject, joined: NativeAccountExport): Boolean {
+    fun needsRepublish(remote: JSONObject, joined: NativeAccountExport, remoteRaw: ByteArray? = null): Boolean {
+        joined.rawAccount?.let { accepted ->
+            // Full admitted wire carriers, not the small native UI projection. Otherwise every
+            // schema6 receive looks different and needlessly rearms a full account upload.
+            val original = com.vortx.android.engine.NativeOwnerHistoryAccount(requireNotNull(remoteRaw))
+            val next = com.vortx.android.engine.NativeOwnerHistoryAccount(accepted)
+            return listOf("nativeSync", "nativeHostPreferences", "profileEditResults", "nativeOwnerHistorySources").any { key ->
+                val a = original.raw(key); val b = next.raw(key)
+                if (a == null || b == null) a != null || b != null else !com.vortx.android.engine.OHJson.equal(a, b)
+            }
+        }
         val incoming = remote.optJSONObject("nativeSync")
         if (incoming == null) return !remote.has("nativeSync") &&
             joined.nativeSync.optString("scope").isNotBlank() && joined.nativeSync.optJSONObject("legacyImport") != null

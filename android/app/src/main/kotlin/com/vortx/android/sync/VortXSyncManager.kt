@@ -1833,7 +1833,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     private class BackupReadWitness(val lease: SyncSessionLease, val baseRevision: Long?)
 
     private sealed interface SyncDocPull {
-        data class Doc(val doc: JSONObject, val witness: BackupReadWitness) : SyncDocPull {
+        data class Doc(val doc: JSONObject, val witness: BackupReadWitness, val raw: ByteArray) : SyncDocPull {
             val version: Long get() = requireNotNull(witness.baseRevision)
         }
         data class Unchanged(val version: Long) : SyncDocPull
@@ -1897,7 +1897,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
             if (!publishIfSyncLeaseCurrent(lease) { remembered = syncState.markNativeBackupSeen(lease.accountId) } || !remembered) return SyncDocPull.Failed
         }
         return if (isSyncLeaseCurrent(lease)) {
-            SyncDocPull.Doc(obj, BackupReadWitness(lease, pulledVersion))
+            SyncDocPull.Doc(obj, BackupReadWitness(lease, pulledVersion), plaintext.copyOf())
         } else {
             SyncDocPull.Failed
         }
@@ -1979,14 +1979,16 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
 
     private fun deriveBackup(lease: SyncSessionLease, document: JSONObject, pull: SyncDocPull,
         gateway: NativeAccountGateway?,
-        mount: NativeAccountMountToken? = gateway?.currentMountToken(SessionOwnerSnapshot.Account(lease.accountId, lease.ownerEpoch))): DerivedBackup? {
+        mount: NativeAccountMountToken? = gateway?.currentMountToken(SessionOwnerSnapshot.Account(lease.accountId, lease.ownerEpoch)),
+        rawAccount: ByteArray? = null): DerivedBackup? {
         val witness = when (pull) {
             is SyncDocPull.Doc -> pull.witness
             is SyncDocPull.Empty -> pull.witness
             else -> return null
         }
         if (witness.lease !== lease || !isSyncLeaseCurrent(lease)) return null
-        return DerivedBackup(document.toString(), witness, gateway, mount).takeIf { candidateIsCurrent(lease, it) }
+        val plaintext = rawAccount?.let { com.vortx.android.engine.OHJson.utf8(it) } ?: document.toString()
+        return DerivedBackup(plaintext, witness, gateway, mount).takeIf { candidateIsCurrent(lease, it) }
     }
 
     private fun candidateIsCurrent(lease: SyncSessionLease, candidate: DerivedBackup): Boolean {
@@ -2114,12 +2116,12 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         if (reopened && !force && !routineReceive && syncState.hasLastVersion(lease.accountId) && pull.version == lastSyncedVersion(lease)) {
             val exported = gateway.exportDocument(account) ?: return false
             val providers = mergeNativeProviders(lease, account, pull.doc) ?: return false
-            if (NativeSyncPublicationPolicy.needsRepublish(pull.doc, exported) ||
+            if (NativeSyncPublicationPolicy.needsRepublish(pull.doc, exported, pull.raw) ||
                 NativeSyncPublicationPolicy.needsProviderRepublish(pull.doc, providers)) armPendingSync(lease, recordEdit = true)
             return isSyncLeaseCurrent(lease)
         }
         val initialMount = gateway.currentMountToken(account)
-        val applied = try { gateway.applyDocument(account, pull.doc) { isSyncLeaseCurrent(lease) } }
+        val applied = try { gateway.applyRawDocument(account, pull.raw) { isSyncLeaseCurrent(lease) } }
             catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
             catch (_: Exception) { false }
         if (!applied) return false
@@ -2135,7 +2137,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         // A higher envelope revision from an old client can carry an older causal document. The
         // authenticated native join retains our facts; publish only if that joined wire carrier
         // actually contributes facts missing from the server (never a projection or wall clock).
-        if (NativeSyncPublicationPolicy.needsRepublish(pull.doc, exported) ||
+        if (NativeSyncPublicationPolicy.needsRepublish(pull.doc, exported, pull.raw) ||
             NativeSyncPublicationPolicy.needsProviderRepublish(pull.doc, providers)) armPendingSync(lease, recordEdit = true)
         if (isSyncLeaseCurrent(lease) && !retryPendingPushBeforePull(lease)) {
             if (initialMount != null && appliedMount != null && gateway.currentMountToken(account) == appliedMount) {
@@ -2222,7 +2224,8 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
                 pushedProviders = null
                 return deriveBackup(lease, document, pulled, gateway, seedMount)
             }
-            if (!gateway.applyDocument(account, document) { isSyncLeaseCurrent(lease) }) return null
+            val originalRaw = (pulled as? SyncDocPull.Doc)?.raw ?: return null
+            if (!gateway.applyRawDocument(account, originalRaw) { isSyncLeaseCurrent(lease) }) return null
             if (globals.length() > 0 && !gateway.recordGlobalPreferences(account, globals)) return null
             val exportMount = gateway.currentMountToken(account)
             val exported = gateway.exportDocument(account) ?: return null
@@ -2239,7 +2242,21 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
             if (!publishIfSyncLeaseCurrent(lease) { providerCandidate = com.vortx.android.integrations.NativeProviderAccess.merge(account, merged) }) return null
             val withProviders = providerCandidate ?: return null
             pushedProviders = withProviders.getJSONObject("nativeProviderCredentials")
-            return deriveBackup(lease, withProviders, pulled, gateway, exportMount)
+            // Replace only owned wire fields. Unknown raw siblings and numeric spelling survive
+            // both a normal upload and every optimistic retry's fresh authenticated GET.
+            val exactBase = com.vortx.android.engine.NativeOwnerHistoryAccount(exported.rawAccount ?: originalRaw)
+            val replacements = linkedMapOf("nativeSync" to exported.nativeSync.toString().toByteArray(Charsets.UTF_8),
+                "nativeProviderCredentials" to withProviders.getJSONObject("nativeProviderCredentials").toString().toByteArray(Charsets.UTF_8))
+            exported.hostPreferences?.let { replacements["nativeHostPreferences"] = it.toString().toByteArray(Charsets.UTF_8) }
+            withProviders.optJSONObject("apiKeys")?.let { replacements["apiKeys"] = it.toString().toByteArray(Charsets.UTF_8) }
+            // A typed checkpoint already carries exact native/source slices: never replace that
+            // native object with its presentation projection merely to add provider registers.
+            if (exported.rawAccount != null) {
+                replacements.remove("nativeSync")
+                replacements.remove("nativeHostPreferences")
+            }
+            val rawCandidate = exactBase.replacingOwned(replacements).validateBudget(writeV2 = true)
+            return deriveBackup(lease, withProviders, pulled, gateway, exportMount, rawCandidate)
         }
         val first = derived() ?: return false
         val pushed = if (first.baseVersion == null) {
