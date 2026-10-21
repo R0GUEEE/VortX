@@ -287,8 +287,30 @@ enum TopShelfSnapshot {
     /// unreadable bytes, or a version we do not understand. Never throws, never traps. The extension
     /// turns [] into nil content, which is the system's cue to show the static Top Shelf image.
     static func read() -> [Item] {
-        guard let url = fileURL else { return [] }
-        return read(from: url)
+        readResult().items
+    }
+
+    /// Fixed diagnostic vocabulary only: no paths, payload values or underlying error text.
+    enum ReadStatus: String, Sendable {
+        case noContainer, invalidFile, unavailableFile, oversized, rejectedBytes
+        case invalidPayload, unsupportedVersion, empty, ready
+    }
+
+    struct ReadResult: Sendable {
+        let status: ReadStatus
+        let items: [Item]
+    }
+
+    /// The same single bounded read used by read(); not an additional diagnostic probe.
+    static func readResult() -> ReadResult {
+        readResult(from: fileURL)
+    }
+
+    /// nil models an unavailable group without probing any real container in fixtures.
+    static func readResult(from url: URL?) -> ReadResult {
+        guard let url else { return .init(status: .noContainer, items: []) }
+        let result = inspectPayload(from: url)
+        return .init(status: result.status, items: result.payload?.items ?? [])
     }
 
     /// An explicit file seam keeps fixtures out of the real App Group. Invalid input is read-only:
@@ -298,19 +320,30 @@ enum TopShelfSnapshot {
     }
 
     private static func readPayload(from url: URL) -> Payload? {
-        guard url.isFileURL else { return nil }
+        inspectPayload(from: url).payload
+    }
+
+    private static func inspectPayload(from url: URL) -> (payload: Payload?, status: ReadStatus) {
+        guard url.isFileURL else { return (nil, .invalidFile) }
         do {
             let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
-            guard values.isRegularFile == true, values.isSymbolicLink != true else { return nil }
-            if let size = values.fileSize, size > maxSnapshotBytes { return nil }
+            guard values.isRegularFile == true, values.isSymbolicLink != true else { return (nil, .invalidFile) }
+            if let size = values.fileSize, size > maxSnapshotBytes { return (nil, .oversized) }
             let handle = try FileHandle(forReadingFrom: url)
             defer { try? handle.close() }
-            guard let data = boundedSnapshotData(readChunk: { try handle.read(upToCount: $0) }),
-                  let payload = try? decoder.decode(Payload.self, from: data),
-                  payload.version == currentVersion else { return nil }
-            return payload
+            // The existing collector deliberately conflates empty/I-O/sentinel failures. Report
+            // that bounded rejection honestly; do not retry or perform a second filesystem read.
+            guard let data = boundedSnapshotData(readChunk: { try handle.read(upToCount: $0) }) else {
+                return (nil, .rejectedBytes)
+            }
+            guard let payload = try? decoder.decode(Payload.self, from: data) else {
+                return (nil, .invalidPayload)
+            }
+            guard payload.version == currentVersion else { return (nil, .unsupportedVersion) }
+            return (payload, payload.items.isEmpty ? .empty : .ready)
         } catch {
-            return nil
+            // Includes missing files, denied metadata/open and other filesystem errors.
+            return (nil, .unavailableFile)
         }
     }
 
@@ -346,26 +379,40 @@ enum TopShelfSnapshot {
     /// notification wakes the extension, so firing it on every unchanged Home refresh would be waste).
     @discardableResult
     static func write(_ items: [Item]) -> Bool {
-        guard let url = fileURL else { return false }
-        return write(items, to: url)
+        writeResult(items) == .written
+    }
+
+    enum WriteResult: String, Hashable, Sendable {
+        case written, unchanged, noContainer, invalidDestination, encodingFailed, writeFailed
+    }
+
+    /// Outcomes come from the actual operation. The compatibility Bool remains true ONLY for
+    /// a changed successful write; unchanged content is not diagnosed as a failure.
+    static func writeResult(_ items: [Item]) -> WriteResult {
+        guard let url = fileURL else { return .noContainer }
+        return writeResult(items, to: url)
     }
 
     /// Explicit destination is for the same cache contract and disposable fixtures, not account data.
     @discardableResult
     static func write(_ items: [Item], to url: URL) -> Bool {
-        guard url.isFileURL else { return false }
+        writeResult(items, to: url) == .written
+    }
+
+    static func writeResult(_ items: [Item], to url: URL) -> WriteResult {
+        guard url.isFileURL else { return .invalidDestination }
         let capped = Array(items.prefix(maxItems))
         // Compare CONTENT, not the encoded bytes: `writtenAt` changes on every call, so comparing
         // payloads would always report a change and defeat the point of the check.
         // A failed read is not evidence of an already-empty file: an explicit [] must still clear
         // a malformed/oversized prior publication on sign-out, profile change or feature-off.
-        if let previous = readPayload(from: url), capped == previous.items { return false }
+        if let previous = readPayload(from: url), capped == previous.items { return .unchanged }
         let payload = Payload(version: currentVersion, writtenAt: Date(), items: capped)
-        guard let data = try? encoder.encode(payload) else { return false }
+        guard let data = try? encoder.encode(payload) else { return .encodingFailed }
         // Atomic: the extension can be reading this file in another process at any moment, and a
         // torn read would decode to nothing (harmless, but it would blank the shelf for a cycle).
-        do { try data.write(to: url, options: .atomic) } catch { return false }
-        return true
+        do { try data.write(to: url, options: .atomic) } catch { return .writeFailed }
+        return .written
     }
 
     // MARK: Deep links

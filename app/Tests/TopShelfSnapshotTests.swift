@@ -371,6 +371,55 @@ do {
     let rawHuge = try decoder.decode(TopShelfSnapshot.Payload.self, from: Data(contentsOf: file))
     check(rawHuge.items == [huge], "producer payload fields are retained without title or URL truncation")
     check(TopShelfSnapshot.write([], to: file), "explicit privacy clear still replaces valid content")
+
+    // Diagnostic outcomes must not change the compatibility reader/writer or valid-empty semantics.
+    let diagnosticFile = directory.appendingPathComponent("diagnostic.json")
+    check(TopShelfSnapshot.readResult(from: nil).status == .noContainer,
+          "an unavailable supplied container is distinguished without a real group lookup")
+    check(TopShelfSnapshot.readResult(from: missing).status == .unavailableFile,
+          "missing fixture bytes are unavailable, not a valid empty snapshot")
+    check(TopShelfSnapshot.readResult(from: directory).status == .invalidFile,
+          "directory rejection has a fixed diagnostic status")
+    check(TopShelfSnapshot.writeResult(eight, to: diagnosticFile) == .written,
+          "a changed successful write is distinguished from unchanged content")
+    let ready = TopShelfSnapshot.readResult(from: diagnosticFile)
+    check(ready.status == .ready && ready.items == eight,
+          "a ready result carries exactly the same bounded rows")
+    let diagnosticOriginal = try Data(contentsOf: diagnosticFile)
+    check(TopShelfSnapshot.writeResult(eight, to: diagnosticFile) == .unchanged,
+          "unchanged is a successful no-op, not a write failure")
+    let repeatedWrite = TopShelfSnapshot.write(eight, to: diagnosticFile)
+    let afterRepeatedWrite = try Data(contentsOf: diagnosticFile)
+    check(!repeatedWrite && afterRepeatedWrite == diagnosticOriginal,
+          "the Bool wrapper still returns false and preserves bytes for unchanged content")
+    let unencodable = TopShelfSnapshot.Item(id: "fixture", type: "movie", title: "Fixture", poster: nil, progress: .nan)
+    check(TopShelfSnapshot.writeResult([unencodable], to: diagnosticFile) == .encodingFailed,
+          "encoding rejection has a distinct fixed outcome")
+    check(try Data(contentsOf: diagnosticFile) == diagnosticOriginal,
+          "encoding rejection preserves the previous file")
+    check(TopShelfSnapshot.writeResult(eight, to: directory.appendingPathComponent("absent-parent/diagnostic.json")) == .writeFailed,
+          "an atomic-write failure is not mislabeled unchanged")
+    check(TopShelfSnapshot.writeResult(eight, to: URL(string: "https://fixture.invalid/diagnostic")!) == .invalidDestination,
+          "a non-file destination fails without network I/O")
+    try Data("{}".utf8).write(to: diagnosticFile)
+    check(TopShelfSnapshot.readResult(from: diagnosticFile).status == .invalidPayload,
+          "malformed payload is distinct from valid empty content")
+    try foreign.write(to: diagnosticFile)
+    check(TopShelfSnapshot.readResult(from: diagnosticFile).status == .unsupportedVersion,
+          "a complete foreign version retains its diagnostic and rejection")
+    try oversized.write(to: diagnosticFile)
+    // Use a never-inspected URL for the metadata branch; the reused URL may cache resource values.
+    let diagnosticOversizedFile = directory.appendingPathComponent("diagnostic-oversized.json")
+    try oversized.write(to: diagnosticOversizedFile)
+    check(TopShelfSnapshot.readResult(from: diagnosticOversizedFile).status == .oversized,
+          "metadata-confirmed oversize is distinguished without decoding")
+    check(TopShelfSnapshot.writeResult([], to: diagnosticFile) == .written,
+          "explicit empty still clears a rejected prior publication")
+    let emptyResult = TopShelfSnapshot.readResult(from: diagnosticFile)
+    check(emptyResult.status == .empty && emptyResult.items.isEmpty,
+          "valid empty is explicitly empty, never invalid or unavailable")
+    check(TopShelfSnapshot.writeResult([], to: diagnosticFile) == .unchanged && !TopShelfSnapshot.write([], to: diagnosticFile),
+          "repeated explicit empty preserves the original no-change Bool")
 } catch {
     check(false, "disposable snapshot fixture failed: \(error)")
 }

@@ -33,6 +33,8 @@ enum TopShelfSnapshotWriter {
     @MainActor private static var lastPrivateArtworkInputs: [WarmCandidate]?
     @MainActor private static var lastPrivatePublished: [TopShelfSnapshot.Item]?
     @MainActor private static var lastPublishedSelectionSource: TraktPlaybackShadow.ContinueWatchingSource?
+    // At most five added lines per app process. Existing successful-publication logging remains.
+    @MainActor private static var reportedWriteResults: Set<TopShelfSnapshot.WriteResult> = []
 
     /// Redirects are admitted only while every hop remains an exact first-party Trakt image URL. The
     /// initial URL is validated before the request starts; this delegate closes the privacy gap where a
@@ -460,10 +462,12 @@ enum TopShelfSnapshotWriter {
 
     @MainActor
     private static func publish(_ items: [TopShelfSnapshot.Item]) {
-        // No container => unsigned build / no App Group / Lite. Nothing to do, nothing to log loudly.
-        guard TopShelfSnapshot.containerURL != nil else { return }
-        let changed = TopShelfSnapshot.write(items)
-        guard changed else { return }
+        let result = TopShelfSnapshot.writeResult(items)
+        if result != .written, reportedWriteResults.insert(result).inserted {
+            // Fixed first-seen status, not an error string or a claim about the signer.
+            DiagnosticsLog.log("topshelf", "write=\(result.rawValue)")
+        }
+        guard result == .written else { return }
         // Only nudge the system when the content actually moved: this wakes the extension, so firing
         // it on every unchanged Home re-seed would be pure churn.
         TVTopShelfContentProvider.topShelfContentDidChange()

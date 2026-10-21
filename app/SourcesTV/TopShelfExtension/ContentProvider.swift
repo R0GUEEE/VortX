@@ -1,4 +1,5 @@
 import TVServices
+import os
 
 /// The `VortXTopShelf` extension's principal class: renders VortX's Continue Watching onto the tvOS
 /// Home screen's Top Shelf when VortX is the focused app.
@@ -12,6 +13,7 @@ import TVServices
 ///
 /// This target compiles exactly two files: this one and `SourcesShared/TopShelfSnapshot.swift`.
 final class ContentProvider: TVTopShelfContentProvider {
+    private static let log = Logger(subsystem: "com.stremiox.app", category: "topshelf-provider")
 
     /// Implement the SDK's original completion-handler entry point.
     ///
@@ -21,7 +23,12 @@ final class ContentProvider: TVTopShelfContentProvider {
     /// capture it. The completion-handler form does not make the snapshot read or decoding nonblocking.
     /// Both normal paths invoke the callback exactly once.
     override func loadTopShelfContent(completionHandler: @escaping ((any TVTopShelfContent)?) -> Void) {
-        let items = TopShelfSnapshot.read()
+        let result = TopShelfSnapshot.readResult()
+        let items = result.items
+        let output = items.isEmpty ? "static" : "dynamic"
+        // One bounded line per invocation; only closed enums and an already-bounded row count.
+        // Unified-log evidence is separate from the host app's exported diagnostic file.
+        Self.log.info("read=\(result.status.rawValue, privacy: .public) rows=\(items.count, privacy: .public) output=\(output, privacy: .public)")
 
         // No snapshot, no App Group container (an unsigned / sideloaded build whose profile carries no
         // group), or the user turned the row off: deliver nil, which is the system's documented cue to
