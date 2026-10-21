@@ -4036,7 +4036,10 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
             guard current() else { return }
             self.badgeVideoRange = range; self.badgeNativeAudioChannels = channels
             self.badgeMetadataTask = nil
-            self.emit(MPVProperty.trackList, nil, loadToken: loadToken)
+            // Through the topology gate: readyToPlay starts this load before the audio and subtitle groups
+            // exist, and no track list may publish until both have loaded. A load that finishes first is
+            // carried by the gate's own publication once the groups are in (its refresh returns early).
+            self.publishTrackListIfTopologyReady()
         }
     }
 

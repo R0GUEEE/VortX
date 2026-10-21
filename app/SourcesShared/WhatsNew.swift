@@ -5,14 +5,14 @@ import Foundation
 /// The in-app "What's New" screen (Settings > What's New) renders the full bundled CHANGELOG.md and only falls
 /// back to these highlights when that resource is absent. Pure logic so it compiles on every target.
 enum WhatsNew {
-    static let version = "0.5.5"
+    static let version = "0.5.6"
     static let highlights: [String] = [
-        "Smooth for real. 0.5.4 still converted your 0.4 data again on every sync, every few seconds, which made the app lag and taps slow. It now converts once and stays quiet, and the splash screen is shorter.",
-        "Hero trailers start again on Home and title pages.",
-        "On Mac and iPad, opening a series takes you to your episode instead of episode 1.",
-        "Watched episodes are dimmer and no longer look smeared.",
-        "Less background syncing. Changes from your other devices still arrive the moment they happen.",
-        "On Mac, the Home billboard is bigger."
+        "A faster start: VortX opens your account from this device straight away and catches up with the cloud right after.",
+        "Much less background uploading while you watch, and Top Shelf that follows Continue Watching after re-signing.",
+        "Mac playback resumes properly after a pause, Skip Intro and Skip Credits stay visible above the controls, and the controls are translucent.",
+        "Self-hosted add-ons on your home network or Tailscale install normally.",
+        "Stremio library and watch history carry over, and Collections gain nested groups, artwork and optional Xperience import.",
+        "Playback badges show what is actually playing, including the selected audio language."
     ]
 
     // Kept as release-history fallback text for older bundled changelogs. The current screen uses

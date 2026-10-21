@@ -4,12 +4,20 @@ All notable changes to VortX, newest first. VortX is Apple TV first, with an iPh
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
-## 0.5.6 beta 5 - Lighter syncing while you watch
+## 0.5.6 beta 5 - Mac playback fixes, self-hosted add-ons and lighter syncing
 
-Build **278** across Apple and Android. Beta 5 builds on beta 4 with less background work during playback.
+Build **278** across Apple and Android. Beta 5 builds on beta 4 with Mac playback and player fixes, self-hosted
+add-ons and less background work while you watch.
 
 ### Fixed and improved
 
+- **Mac playback that would not resume after a pause.** A recovery after pausing could leave Play waiting indefinitely and show the replacement player's temporary position. Recovery now completes, keeps your original position, and Play is no longer held behind it.
+- **Skip Intro and Skip Credits hidden by the controls.** Moving the mouse brought up the controls and removed the Skip button. It now stays visible and sits above the controls as they appear.
+- **Mac player controls** use a lighter translucent glass instead of an opaque grey panel; the solid fallback for Reduce Transparency is kept.
+- **Self-hosted add-ons.** Add-ons on your home network, localhost or Tailscale install normally instead of being refused as private addresses, on Apple and Android, and they are no longer marked unreachable or dropped when restored from sync. Certificate checks and size limits stay in place.
+- **Apple TV keyboard from iPhone.** Typing into Apple TV search from an iPhone keyboard no longer erases what you typed (thanks to the contributor of PR #274).
+- **Subtitles from some public sites** whose names begin with "fc" or "fd" were wrongly refused as private addresses. They download now.
+- **Playback badges** no longer publish a track list before the audio and subtitle choices have loaded.
 - **Much less uploading while you watch.** Your place was saved every 20 seconds, and each save uploaded your whole account, about every 25 seconds of playback. Saves now batch: while you keep watching the account uploads once every five minutes, and a pause or stop uploads it within a minute so your other devices pick up where you left off.
 - **Mac quits reported as crashes.** Every Mac launch recorded the previous session as ending unexpectedly after 0 seconds. Normal quits are now recorded as normal, and the session length is tracked, so diagnostics only flag real problems.
 
