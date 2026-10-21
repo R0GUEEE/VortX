@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "repository": "VortXTV/VortX",
+  "tag": "vendor-libmpv-android-20261021-73d1f580",
+  "producerCommit": "73d1f580b5960489de69f44ea2048268fc024385",
+  "producerRun": "39581203649",
+  "producerAttempt": "1",
+  "producerNDK": "30.0.16248370",
+  "publisherCommit": "fcf6745703dc1265bca88f12fee8fc355ddf251e",
+  "artifactId": 12338601965,
+  "artifactBytes": 127347501,
+  "artifactSHA256": "bc7ac6038051cb0aec4a446b1bf04d50c49e3af25e9f7f085995691473d84c20",
+  "aarBytes": 35555212,
+  "aarSHA256": "6d054d488f10dccc2bd50d37209de6d1faf082384775c6106ffc67c6cf965fbc",
+  "originalManifestSHA256": "26b33bbe95bf263a6a09284fef1559b7dd2fdba769e8fc60c9181f2df27ddccd",
+  "originalInputManifestSHA256": "3498076a0f8ca1d5d114eba608ea1fc9896ce89c99172c26258f89b008493228",
+  "dependencySourcesSHA256": "2149219c9c05c7261dd65aa0f7db03e0aa849d253abc20054af87aefe9886719",
+  "publisherSourcesSHA256": "4db065b6682d8e3b09351e0a737afcd47246c7e107c84af7604f77c67d949aa1",
+  "reinspectionEvidenceSHA256": "828cb90d3a61fe29299d311dc079315bc670f182559944d616da87006faef2e2",
+  "reinspectionProvenanceSHA256": "694836039453118b6b826532c3f9400228c15d9401bfb70fc7882d7d628f6e7b",
+  "validatorSHA256": "450d2ed147e43d60748d7312fcfcadbf2f98534f1225585e19c3318926610dce",
+  "inspectionNDK": "27.2.12479018",
+  "readerSHA256": "0633d089c7be066edd13aa39148d2429dee1ca3e349a71c4d1f8952fce27c38e",
+  "ndkNotices": {
+    "source.properties": "e73b7dc557cea2da9212c09ee1795434957d62e63b7550eef69fd1887a355d94",
+    "NOTICE": "a3c12eee897f63991da71464b690433a15d0d74a508ce0e275436279bdcaff58",
+    "NOTICE.toolchain": "6b8633011d874b75629180e60de13ebfd546a10e56dc7d0380a35f6609f30617"
+  },
+  "sourceNotesSHA256": "55195410ae2fbb8cfadbca108d6f7b228d2994e0f329a4f444e7ae3a56a3ff9d",
+  "releaseNotesSHA256": "f24046b0ea7a497cb819b67665ee8d4c437f54e8b1ba278e4a6b5e8b0df32519",
+  "producerWorkflows": {
+    ".github/workflows/native-media-candidates.yml": "a19594e28d02b4a3996857b39b4231c6df13c36b71b637f9389de123aa0dd124",
+    ".github/workflows/source-contracts.yml": "60300b97ce9591b9da5de99684f93fc10ab03dd4530f6e91c7b6bc35d25dbff7"
+  },
+  "assets": {
+    "aar": "libmpv-android-6d054d488f10.aar",
+    "sources": "libmpv-android-6d054d488f10-source-kit.tar.gz",
+    "provenance": "component-provenance.json",
+    "checksums": "SHA256SUMS"
+  },
+  "ndkNoticeAcquisition": {
+    "officialArchiveURL": "https://dl.google.com/android/repository/android-ndk-r30-linux.zip",
+    "archiveBytes": 738633529,
+    "actualSHA1": "5107f898313790e449e87eee2183d9a20602dee9",
+    "actualSHA256": "753611f410d002cfcd3f3dc2ef49aad532089d3180b436c060a90bf0fcb64df2",
+    "fullArchiveSHA1Verified": true,
+    "installed": false,
+    "upstreamCodeExecuted": false
+  }
+}
