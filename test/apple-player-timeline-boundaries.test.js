@@ -69,15 +69,20 @@ test("executable probe extracts production factories and editor bodies with actu
 
 test("player-glass regression compiles the extracted modifier and renders accessibility and selection states", () => {
     const runner = fs.readFileSync(path.join(__dirname, "../scripts/test-apple-player-accent-controls.sh"), "utf8");
+    const prepare = fs.readFileSync(path.join(__dirname, "../scripts/prepare-player-accent-controls.cjs"), "utf8");
     const harness = fs.readFileSync(path.join(__dirname, "../app/Tests/PlayerAccentControlsReduceTransparencyTests.swift"), "utf8");
+    // The runner hands source extraction to the prepare script, then compiles and runs the probe.
+    for (const step of ["scripts/prepare-player-accent-controls.cjs", "xcrun swiftc", "-parse-as-library"]) {
+        assert(runner.includes(step), `accent probe runner must ${step}`);
+    }
     for (const productionInput of ["PlayerControlReduceTransparencyOverrideKey",
-        "app/Tests/PlayerAccentControlsReduceTransparencyTests.swift", "xcrun swiftc -O -parse-as-library",
+        "app/Tests/PlayerAccentControlsReduceTransparencyTests.swift",
         "private struct PlayerControlSurfaceModifier", "private struct PlayerControlButton:"]) {
-        assert(runner.includes(productionInput), `accent probe must compile ${productionInput}`);
+        assert(prepare.includes(productionInput), `accent probe must compile ${productionInput}`);
     }
     for (const runtimeProbe of ["NSHostingView", "cacheDisplay(in: host.bounds, to: bitmap)",
-        "reducedBright.alpha >= 0.98", "white controls must keep 4.5:1 contrast",
-        "selected settings must retain an accent cue", "disabled controls must dim their white glyph"] ) {
+        "alpha >= 0.98", "white player controls must keep 4.5:1 contrast",
+        "normal off/selected controls must retain an accent cue", "disabled controls must dim their white glyph"] ) {
         assert(harness.includes(runtimeProbe), `accent probe must render ${runtimeProbe}`);
     }
 });
@@ -93,15 +98,20 @@ test("touch seek renders the stored style with a real adjustable 44pt interactio
     }
     const surface = source.slice(source.indexOf("private struct PlayerSeekSliderSurface:"),
         source.indexOf("private struct PlayerChapterMarkers:"));
-    assert(surface.includes("#if os(iOS)\n        PlayerStyledSeekSlider("));
-    assert(surface.includes("#else\n        PlayerClockSlider("), "retain native desktop seek behavior");
+    // iPhone, iPad and Mac share the styled slider; tvOS keeps the native clock slider.
+    assert(surface.includes("#if os(iOS) || os(macOS)\n        PlayerStyledSeekSlider("));
+    assert(surface.includes("#else\n        PlayerClockSlider("), "retain the native tvOS seek behavior");
 });
 
 test("pinch changes the live engine mode and is exclusive with video taps", () => {
     const interaction = source.slice(source.indexOf("private struct PlayerVideoInteractionSurface:"),
         source.indexOf("private struct PlayerSizeModeFeedback:"));
-    assert(interaction.includes(".exclusively(before: TapGesture())"));
-    assert(interaction.includes("if pinchEnabled && !locked { onPinch(scale) }"));
+    // UIKit recognizers run together; per-touch ownership gives each touch to exactly one of tap or pinch.
+    for (const wiring of ["UITapGestureRecognizer", "UIPinchGestureRecognizer",
+        "coordinator.pinch?.isEnabled = pinchEnabled && !locked",
+        "ownership.consumeTap(", "ownership.claimPinch()", "ownership.consumePinch("]) {
+        assert(interaction.includes(wiring), `pinch/tap wiring: ${wiring}`);
+    }
     const enabled = source.slice(source.indexOf("private var touchPinchEnabled:"),
         source.indexOf("private func applyVideoSize("));
     for (const guard of ["!isLocked", "panel == nil", "!touchOptionsVisible", "!showExternalChooser", "!showShare", "!loadFailed", "!scrubbing"]) {
@@ -134,7 +144,7 @@ test("decorative layers preserve order, identities and non-interactive hit testi
     }
 });
 
-test("player controls use neutral clipped glass and reserve profile accent for selected settings", () => {
+test("player controls use clipped profile-tinted glass with an opaque accessibility face", () => {
     const surface = section("private struct PlayerControlSurfaceModifier", "private struct PlayerControlButton:");
     for (const contract of [
         "@Environment(\\.accessibilityReduceTransparency)",
@@ -146,13 +156,12 @@ test("player controls use neutral clipped glass and reserve profile accent for s
         ".contentShape(shape)",
         ".shadow(color: .black.opacity(shadowOpacity)",
         "shape.fill(.ultraThinMaterial)",
-        "if reduceTransparency || contrast == .increased || !isEnabled",
+        "if reduceTransparency",
+        "|| contrast == .increased || !isEnabled",
         "shape.fill(neutral)",
-        "if active && isEnabled",
-        "shape.fill(Theme.Palette.accent.opacity(0.16))",
+        "Theme.Palette.accent.opacity(active ?",
         "Color(.sRGB, white: 0.08, opacity: 1)",
-        "isEnabled ? .white : .white.opacity",
-        "active && isEnabled ? Theme.Palette.accent : .white"
+        "isEnabled ? .white : .white.opacity"
     ]) {
         assert(surface.includes(contract), `player surface contract: ${contract}`);
     }

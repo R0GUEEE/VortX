@@ -19,6 +19,8 @@ if (!outputDirectory) {
 const read = relative => fs.readFileSync(path.join(repoRoot, relative), 'utf8');
 const production = read('app/Sources/PlayerScreen.swift');
 const themeManager = read('app/SourcesShared/ThemeManager.swift');
+// The player glass reads the shared Effects glass choice; VisualEffects is Foundation-only, so compile it as is.
+const visualEffects = read('app/SourcesShared/VisualEffects.swift').replace(/^import Foundation\n/m, '');
 const harness = fs.readFileSync(path.join(repoRoot, 'app/Tests/PlayerAccentControlsReduceTransparencyTests.swift'), 'utf8');
 
 const start = production.indexOf('private enum PlayerControlReduceTransparencyOverrideKey');
@@ -154,6 +156,7 @@ const generated = [
   'import SwiftUI',
   'import AppKit',
   palette,
+  visualEffects,
   modifier,
   harness,
 ].join('\n');
