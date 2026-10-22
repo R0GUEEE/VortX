@@ -78,6 +78,11 @@ assert.ok(csp, "Pages must publish a content security policy");
 const connectSources = csp.split(";").map((entry) => entry.trim()).find((entry) => entry.startsWith("connect-src "))?.split(/\s+/).slice(1) ?? [];
 assert.ok(connectSources.includes("wss://api.vortx.tv"), "live account sync must be allowed to connect to the API WebSocket");
 assert.ok(!connectSources.includes("wss:") && !connectSources.includes("*"), "the WebSocket allowance must stay limited to the VortX API");
+// Plain HTTP is allowed only for the desktop shell: its numeric-loopback streaming server and Tauri's
+// Windows IPC endpoint. Nothing else.
+assert.ok(connectSources.includes("http://127.0.0.1:*"), "the desktop shell must reach its loopback streaming server");
+assert.ok(!connectSources.some((source) => source === "http:" || /^http:\/\/(?!127\.0\.0\.1:\*$|ipc\.localhost$)/.test(source)),
+  "no other plain-HTTP origin may be allowed");
 assert.match(
   read("src/lib/vault.ts"),
   /new URL\("\/v1\/sync\/connect", API\)[\s\S]*?url\.protocol = "wss:"/,

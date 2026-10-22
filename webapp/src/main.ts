@@ -7,6 +7,7 @@ import { actionOf, el } from "./lib/dom";
 import { clearProgress, removeFromLibrary, hideRail, clearHiddenRails, hiddenRailCount, setAccountWatchlist, nativeWatchlistItems } from "./lib/store";
 import { navigate, onRouteChange, parseRoute, type Route } from "./lib/router";
 import { close as closePlayer, isPlayerOpen } from "./lib/player";
+import { isDesktop, primeTorrentServer } from "./lib/desktop";
 import { icon } from "./lib/icons";
 import { initCardMenu } from "./lib/cardmenu";
 import { disposeFeatured, loadBoard, renderBoardShell } from "./views/board";
@@ -394,8 +395,12 @@ async function start(): Promise<void> {
   // user's add-ons, library, and Continue Watching refresh on load - not only on a fresh sign-in. Never
   // blocks first paint; applySyncDoc fires vortx:addons-changed to re-render when something merges.
   void ensureValidSession().then(() => startAccountSync(), () => startAccountSync());
+  // Desktop shell: learn the embedded streaming server's address while add-ons load, so torrent sources
+  // are playable on the first render. A browser skips this entirely.
+  const torrentServer = isDesktop() ? primeTorrentServer() : Promise.resolve(false);
   const generation = ++addonReloadGeneration;
   const initialAddons = await loadInstalledAddons();
+  await torrentServer;
   if (generation === addonReloadGeneration) addons = initialAddons;
   // Registering routing immediately emits the current route. A newer sync reload may already
   // have rendered it and started playback while the original boot load was pending.

@@ -25,19 +25,21 @@ and explains the empty state when the only sources found are torrents.
 
 ## How it maps to the rest of the repo
 
-| Concern | Native apps / desktop | This web client |
+| Concern | Native apps | This web client (also the desktop app's UI) |
 | --- | --- | --- |
-| Add-on protocol | embedded `stremio-core` engine (Rust) | `src/lib/addon.ts` - direct `fetch()` |
-| Catalogs / meta | engine `board` / `meta_details` models | Cinemeta + installed add-ons over HTTPS |
-| Stream ranking | `StreamRanking.swift` / `desktop/src/streamRanking.ts` | `src/lib/streamRanking.ts` (ported) |
-| Series / episodes | `desktop/src/engine.ts` helpers | `src/lib/series.ts` (ported) |
-| Player | libmpv (Apple) / libmpv via Tauri (desktop) | HTML5 `<video>` + `hls.js` (`src/lib/player.ts`) |
-| Torrents | in-process streaming server | not supported (no server) |
+| Add-on protocol | the VortX engine (vortx-core) | `src/lib/addon.ts` - direct `fetch()` |
+| Catalogs / meta | the VortX engine's resource host | Cinemeta + installed add-ons over HTTPS |
+| Stream ranking | `StreamRanking.swift` / Android ranking | `src/lib/streamRanking.ts` (ported) |
+| Series / episodes | native series views | `src/lib/series.ts` (ported) |
+| Player | libmpv | HTML5 `<video>` + `hls.js` (`src/lib/player.ts`); native mpv for torrents in the desktop app |
+| Torrents | in-process VortX streaming server | browser: not supported; desktop app: the shell's in-process VortX streaming server |
 
-The ranking, series handling, and detail UX are ports of the desktop frontend
-(`desktop/src/detail.ts`, `streamRanking.ts`, `engine.ts`) so behaviour and look match the apps. The
-transport and player are the parts that differ, because the browser has neither the Rust engine nor a
-streaming server.
+## The desktop app
+
+The VortX desktop app (`desktop/`, Tauri) loads this web client and adds what a browser cannot have: the
+VortX streaming server running in the app process, so torrent sources play, and the native mpv player.
+`src/lib/desktop.ts` is the whole bridge; in a browser it is inert. The shell exposes only its server
+and player commands, and only to the `https://web.vortx.tv` origin.
 
 ## Add-ons
 

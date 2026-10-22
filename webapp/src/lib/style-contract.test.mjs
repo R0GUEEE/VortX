@@ -4,9 +4,8 @@ import test from 'node:test';
 
 // Source contracts for shared chip and semantic text definitions; these do not measure browser
 // rendering, profile tint contrast, glass composition, or device responsiveness.
+// The desktop app runs this same web client, so this one stylesheet is every shell's palette.
 const css = readFileSync(new URL('../styles/app.css', import.meta.url), 'utf8')
-  .replace(/\/\*[\s\S]*?\*\//g, '');
-const desktopCss = readFileSync(new URL('../../../desktop/src/styles.css', import.meta.url), 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '');
 
 function rootColour(source, name) {
@@ -25,17 +24,11 @@ function luminance(hex) {
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
 }
 
-test('desktop and webapp semantic text tokens share the same palette', () => {
-  for (const name of ['--muted', '--muted-2']) {
-    assert.equal(rootColour(desktopCss, name), rootColour(css, name), `${name} diverged between shells`);
-  }
-});
-
-test('desktop semantic text clears 4.5:1 on each declared opaque dark surface', () => {
+test('semantic text clears 4.5:1 on each declared opaque dark surface', () => {
   for (const textName of ['--muted', '--muted-2']) {
-    const text = luminance(rootColour(desktopCss, textName));
+    const text = luminance(rootColour(css, textName));
     for (const backgroundName of ['--bg', '--surface', '--surface-2', '--surface-3']) {
-      const background = luminance(rootColour(desktopCss, backgroundName));
+      const background = luminance(rootColour(css, backgroundName));
       const contrast = (Math.max(text, background) + 0.05) / (Math.min(text, background) + 0.05);
       assert.ok(contrast >= 4.5, `${textName} on ${backgroundName}: ${contrast.toFixed(3)}:1`);
     }

@@ -20,7 +20,9 @@ import { paginateSourceRows, sourceRows } from "../lib/sourcePaging";
 import { defaultSeason, episodesForSeason, isSeries, seasonsOf, sortedVideos } from "../lib/series";
 import { actionOf, escapeHtml, httpUrl, cssImageURL } from "../lib/dom";
 import { icon } from "../lib/icons";
-import { play, setSkipSegments, currentPlayToken } from "../lib/player";
+import { play, setSkipSegments, currentPlayToken, close as closePlayer, isPlayerOpen } from "../lib/player";
+import { isDesktop, nativePlaybackActive } from "../lib/desktop";
+import { playNative, releaseNative } from "../lib/nativePlayer";
 import { cwPosition, cwProgress, cwResumeId, inLibrary, toggleLibrary, hasNativeAccountProjection,
   canEditAccountWatchlist, inAccountWatchlist, setAccountWatchlist } from "../lib/store";
 import { getSettings } from "../lib/settings";
@@ -796,15 +798,38 @@ function closeTrailer(): void {
 
 // ---- Playback wiring ---------------------------------------------------------------------------
 
-/** Play a stream: direct/debrid urls go straight to the player. Torrents are not playable on web. `stream`
- *  is the user's chosen source; the rest of the ranked pool becomes the ordered fallback chain the player
- *  auto-advances through on a decode / silent-audio failure (D6), with browser-decodable audio preferred. */
+/** Play a stream: direct/debrid urls go straight to the player; inside the desktop shell a torrent plays in
+ *  native mpv through the embedded VortX streaming server. `stream` is the user's chosen source; the rest of
+ *  the ranked pool becomes the ordered fallback chain the player auto-advances through on a decode /
+ *  silent-audio failure (D6), with browser-decodable audio preferred. */
 async function playStream(stream: Stream): Promise<void> {
-  if (!stream.url || !/^https?:\/\//i.test(stream.url)) return;
   const episode = state?.openEpisode ?? undefined;
   const title = episode
     ? `${state?.meta?.name ?? ""} · S${episode.season ?? 0}E${episode.episode ?? 0}`
     : state?.meta?.name ?? "VortX";
+  if (isDesktop() && isTorrent(stream)) {
+    // One player at a time: the native session takes over the host from a running in-page player.
+    if (isPlayerOpen()) closePlayer();
+    const native = episode ? nextEpisode(episode) : null;
+    const nativeMeta = state?.meta;
+    await playNative(stream, title, {
+      item: nativeMeta
+        ? {
+            id: nativeMeta.id,
+            type: nativeMeta.type,
+            name: nativeMeta.name,
+            poster: nativeMeta.poster,
+            resumeId: episode?.id ?? nativeMeta.id,
+          }
+        : undefined,
+      onNextEpisode: native ? () => void playEpisodeById(native.id) : undefined,
+    });
+    return;
+  }
+  if (!stream.url || !/^https?:\/\//i.test(stream.url)) return;
+  // One player at a time: an in-page source replaces a running native session (synchronously, so play()
+  // below still starts inside the click's user-activation window).
+  if (nativePlaybackActive()) releaseNative();
 
   // Fallback chain: the chosen url first, then the decodable-audio-preferred pool (deduped). So an
   // undecodable-audio pick still starts where the user asked but can auto-advance to a source with sound.

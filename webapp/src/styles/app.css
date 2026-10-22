@@ -1,7 +1,7 @@
 /* VortX web. Editorial-cinema direction shared with the Apple TV gold standard and the Tauri desktop
    shell: a warm near-black canvas so poster art is the only color on screen, a single ember accent
    that means focus / selection / primary / progress, a serif hero title, and surface cards that
-   brighten on hover. Palette + type mirror app/SourcesShared/Theme.swift and desktop/src/styles.css
+   brighten on hover. Palette + type mirror app/SourcesShared/Theme.swift
    so every surface reads as one product. Motion stays on transform / opacity / shadow only. */
 
 :root {
@@ -2539,4 +2539,23 @@ video::cue {
   line-height: 1.45;
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
   pointer-events: none;
+}
+
+/* ---- Desktop native player transport (mpv draws the video; this row carries the controls) ---- */
+
+.native-transport {
+  position: absolute;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  gap: 0.5rem;
+}
+.native-transport button {
+  padding: 0.55rem 1rem;
+  border-radius: var(--radius-chip);
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  backdrop-filter: blur(8px);
 }
