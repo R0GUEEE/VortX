@@ -34,13 +34,14 @@ chrono = "0.4"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 http = "1"
 tempfile = "3"
-getrandom = "0.3"
-hmac = "0.12"
-sha2 = "0.10"
-# Default (native-tls): SChannel on Windows, SecureTransport on macOS, OpenSSL on Linux. A desktop
-# app should use the OS trust store, and this avoids the aws-lc-rs/NASM toolchain that rustls needs
-# on Windows CI. (The Apple core uses rustls only to stay a self-contained static lib.)
-reqwest = "0.12"
+getrandom = "0.4"
+hmac = "0.13"
+sha2 = "0.11"
+# Native TLS: SChannel on Windows, SecureTransport on macOS, OpenSSL on Linux. A desktop app should use
+# the OS trust store, and this avoids the aws-lc-rs/NASM toolchain that rustls needs on Windows CI.
+# reqwest 0.13 made rustls its default, so the remaining 0.12 defaults are listed with native-tls.
+# (The Apple core uses rustls only to stay a self-contained static lib.)
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "charset", "http2", "system-proxy"] }
 # Native window handle (X11 Window / Win32 HWND / macOS NSView) so the mpv player can embed into the
 # main window via `--wid`. Pinned to the same 0.6 line Tauri 2.11 re-exports, so HasWindowHandle and
 # the RawWindowHandle variants match the handle Tauri hands back (a version skew would make the

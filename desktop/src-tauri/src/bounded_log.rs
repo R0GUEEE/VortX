@@ -322,7 +322,7 @@ mod tests {
             .args([
                 "--ignored",
                 "--exact",
-                "tests::output_fixture",
+                "bounded_log::tests::output_fixture",
                 "--nocapture",
             ])
             .stdout(std::process::Stdio::piped())
