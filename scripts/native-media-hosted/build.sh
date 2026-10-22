@@ -117,6 +117,9 @@ PYTHON_TOOLCHAIN
         mkdir -p "$upstream/$(dirname "$relative")"
         cp "$overlay/$relative" "$upstream/$relative"
     done
+    # The platform-neutral HTTP seek interrupt the Apple player applies to the same mpv commit.
+    mkdir -p "$upstream/buildscripts/patches/mpv"
+    cp "$root/scripts/mpv-http-seek-interrupt.patch" "$upstream/buildscripts/patches/mpv/0001-http-seek-interrupt.patch"
     git -C "$upstream" apply --check "$root/scripts/native-media-hosted/android-assembly.patch"
     git -C "$upstream" apply "$root/scripts/native-media-hosted/android-assembly.patch"
     # Use the hosted SDK; bypass upstream download-sdk.sh's moving gas-preprocessor/master fetch.
