@@ -4,7 +4,7 @@ import os
 import XCTest
 
 // The extractor inserts whole current declarations. The worker below is explicit RAM state,
-// not an app facade, Session, ABI, credential, receipt owner, or checkpoint implementation.
+// not an app facade, Session, ABI, credential, live receipt owner, or checkpoint implementation.
 // PRODUCTION_DECLARATIONS
 
 private final class LockEvents: Sendable {
@@ -41,6 +41,7 @@ private struct LockActiveSource: VortxMutationAuthority {
 private final class FacadePublishWorker: @unchecked Sendable {
     let lock: VortxNativeFacadeLock
     let fifo: VortxNativeFIFOAdmission
+    // PRODUCTION_RECEIPT_SUPPORT
     private var values: [String: VortxJSON] = [:]
     private var generations: [String: UUID] = [:]
     private var closed = false
@@ -50,12 +51,19 @@ private final class FacadePublishWorker: @unchecked Sendable {
     private var externalMetadataReceipts: [Data: (Data, UUID)] = [:]
     private var externalMetadataObservation = UUID()
 
-    init(changed: @escaping @Sendable ([String]) -> Void = { _ in }) {
+    init(ownedChange: (@Sendable (ChangeReceipt) -> Void)? = nil,
+         changed: @escaping @Sendable ([String]) -> Void) {
         let boundary = VortxNativeFacadeLock()
         lock = boundary; fifo = VortxNativeFIFOAdmission(lock: boundary); self.changed = changed
+        self.ownedChange = ownedChange
+        // Explicit RAM acknowledged identity, solely so the REAL receipt builder can run.
+        values["native_state"] = .object(["activeProfileId": .string("fixture-profile")])
     }
     func arm(_ field: String) -> UUID {
-        lock.withLock { let ticket = UUID(); generations[field] = ticket; return ticket }
+        lock.withLock {
+            if resourceSelections[field] == nil { resourceSelections[field] = UUID() }
+            let ticket = UUID(); generations[field] = ticket; return ticket
+        }
     }
     func read(_ field: String) -> VortxJSON? { lock.withLock { values[field] } }
     func closeForFixture() { lock.withLock { closed = true } }
@@ -129,8 +137,12 @@ final class VortxNativeFacadeLockTests: XCTestCase {
     }
 
     func testActualPublishSortsFieldsAndPublishesBeforeCallback() {
-        let events = LockEvents(), box = LockBox<FacadePublishWorker?>(nil)
-        let worker = FacadePublishWorker { fields in
+        let events = LockEvents(), ownedEvents = LockEvents(), box = LockBox<FacadePublishWorker?>(nil)
+        let worker = FacadePublishWorker(ownedChange: { receipt in
+            let held = box.value!
+            ownedEvents.record("owned-\(receipt.fields.joined(separator: ","))-worker-\(LockWorkerProbe.acquire(held.lock))")
+        }) { fields in
+            ownedEvents.record("legacy")
             let held = box.value!
             events.record(fields.joined(separator: ","))
             events.record("visible-\(held.read("a") == .integer(1) && held.read("z") == .integer(2))")
@@ -142,6 +154,8 @@ final class VortxNativeFacadeLockTests: XCTestCase {
         worker.publishForFixture(["z": .integer(2), "a": .integer(1)], field: "board", ticket: ticket)
         events.record("return")
         XCTAssertEqual(events.values, ["a,z", "visible-true", "worker-true", "return"])
+        XCTAssertEqual(ownedEvents.values, ["owned-a,z-worker-true", "legacy"],
+                       "real receipt delivery is synchronous, after F, and before the legacy callback")
     }
 
     func testThrowingNestedTransactionsDrainFIFOAfterUnlock() {

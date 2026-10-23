@@ -1342,7 +1342,8 @@ final class VortXSyncManager: ObservableObject {
                   ProfileStore.shared.activeID == selectedProfile else { throw VortxNativeError.superseded }
             let session = try VortxNativeSession(scope: recovery.scope, ownerName: ownerName, abi: VortxCABI(), store: store,
                                                 transport: VortxCResourceTransport(), hostActor: nativeHostActor(capture: capture),
-                                                diagnostics: { DiagnosticsLog.log("native-profiles", $0) })
+                                                diagnostics: { DiagnosticsLog.log("native-profiles", $0) },
+                                                ownerHistoryLocalCheckpointPreparation: makeOwnerHistoryLocalCheckpointPreparation(capture: capture, scope: recovery.scope))
             do {
                 if state["activeProfileId"] != .string(selectedProfile.uuidString) {
                     let action = VortxJSON.object(["type": .string("switch_profile"), "id": .string(selectedProfile.uuidString)])
@@ -1718,7 +1719,8 @@ final class VortXSyncManager: ObservableObject {
                                                     hostActor: self.nativeHostActor(capture: capture), sourceAuthority: prepared?.authority,
                                                     authenticatedSourceArchive: !hadCheckpoint ? prepared?.sourceArchive : nil,
                                                     initialLegacyMaterial: !hadCheckpoint && remoteNative != nil ? material : nil,
-                                                    diagnostics: { DiagnosticsLog.log("native-profiles", $0) })
+                                                    diagnostics: { DiagnosticsLog.log("native-profiles", $0) },
+                                                    ownerHistoryLocalCheckpointPreparation: self.makeOwnerHistoryLocalCheckpointPreparation(capture: capture, scope: scope))
                 do {
                     stage = "account_merge"
                     let hostRemote = try document["nativeHostPreferences"].map { try JSONDecoder().decode(VortxJSON.self, from: JSONSerialization.data(withJSONObject: $0)) }
@@ -5969,6 +5971,54 @@ extension VortXSyncManager {
 
 // Append in VortXSyncManager.swift alongside the raw-account factory. No network call.
 extension VortXSyncManager {
+    /// Actor-confined weak owner; the injected Sendable closure captures only this adapter.
+    /// Installation never requires fresh login/key material, preserving read-only cold reopen.
+    @MainActor private final class OwnerHistoryLocalCheckpointAdapter {
+        private weak var manager: VortXSyncManager?
+        private let capture: CredentialScopeRegistry.Capture
+        private let scope: VortxAccountScope
+        private let originalAccount: String?
+        init(manager: VortXSyncManager, capture: CredentialScopeRegistry.Capture,
+             scope: VortxAccountScope, originalAccount: String?) {
+            self.manager = manager; self.capture = capture; self.scope = scope
+            self.originalAccount = originalAccount
+        }
+        private func requireOriginal(_ manager: VortXSyncManager, requested: VortxAccountScope) throws {
+            guard requested == scope, manager.isSignedIn, manager.isCurrent(capture),
+                  case .account = capture.scope,
+                  OwnerHistoryExactJSON.sameText(scope.account, capture.namespace),
+                  let originalAccount,
+                  manager.account.map({ OwnerHistoryExactJSON.sameText($0.id, originalAccount) }) == true else {
+                throw VortxNativeError.superseded
+            }
+        }
+        func prepare(base: Data, scope requested: VortxAccountScope,
+                     source: any VortxMutationAuthority) async throws -> OwnerHistoryPreparedExport {
+            guard let manager else { throw VortxNativeError.unavailable }
+            try Task.checkCancellation()
+            try requireOriginal(manager, requested: requested)
+            try source.withActive {}
+            // Keep the genuine factory body and all provider/key/token/commit witnesses intact.
+            let prepared = try await manager.prepareOwnerHistoryLocalCheckpoint(
+                base: base, scope: requested, source: source)
+            try Task.checkCancellation()
+            try source.withActive {}
+            try requireOriginal(manager, requested: requested)
+            return prepared
+        }
+    }
+    @MainActor private func makeOwnerHistoryLocalCheckpointPreparation(
+        capture: CredentialScopeRegistry.Capture, scope: VortxAccountScope)
+        -> VortxNativeSession.OwnerHistoryLocalCheckpointPreparation {
+        // Bind the ORIGINAL opener epoch/account, not a future same-account sign-in.
+        // nil account is retained as nil: a read-only open can succeed, mutation cannot upgrade it.
+        let adapter = OwnerHistoryLocalCheckpointAdapter(manager: self, capture: capture,
+            scope: scope, originalAccount: account?.id)
+        return { base, requested, source in
+            try await adapter.prepare(base: base, scope: requested, source: source)
+        }
+    }
+
     /// The base is privately sourced from the SAME installed encrypted checkpoint, not
     /// a UI DTO, cloud cache, caller budget, or a newly captured rejected pull response.
     /// Own ACKs replace its owned projections atomically; unrelated raw siblings survive.
@@ -6127,7 +6177,8 @@ extension VortXSyncManager {
                 hostActor: nativeHostActor(capture: capture), sourceAuthority: latch,
                 diagnostics: { DiagnosticsLog.log("native-profiles", $0) },
                 ownerHistoryColdTarget: selection.target, ownerHistoryColdCheckpoint: recovery.checkpoint,
-                ownerHistoryReadOnly: selection.readOnly)
+                ownerHistoryReadOnly: selection.readOnly,
+                ownerHistoryLocalCheckpointPreparation: makeOwnerHistoryLocalCheckpointPreparation(capture: capture, scope: recovery.scope))
             do {
                 guard let accountBase = recovery.checkpoint.ownerHistoryAccountBase else {
                     throw VortxNativeError.invalidSnapshot
@@ -6289,7 +6340,8 @@ extension VortXSyncManager {
                 hostActor: actor, sourceAuthority: latch, diagnostics: { DiagnosticsLog.log("native-profiles", $0) },
                 ownerHistoryColdPeer: .init(target: .init(profileID: owner, verifiedUID: uid),
                     preservedOwnerUID: uid, nativeDocument: material.nativeDocument, localArchive: material.localArchive,
-                    hostPreferences: preferences.encoded(), bootstrap: bootstrap, transaction: transaction, readOnly: true))
+                    hostPreferences: preferences.encoded(), bootstrap: bootstrap, transaction: transaction, readOnly: true),
+                ownerHistoryLocalCheckpointPreparation: makeOwnerHistoryLocalCheckpointPreparation(capture: capture, scope: scope))
             do {
                 try await settleOwnerHistoryCheckpointProviders(transaction.completeAccount.encoded(),
                     capture: capture, source: latch)

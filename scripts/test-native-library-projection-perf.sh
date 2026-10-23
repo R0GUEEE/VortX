@@ -68,7 +68,9 @@ const combined = fixture
   .replace('// PRODUCTION_ERROR', member(runtime, 'enum VortxNativeError:'))
   .replace('// PRODUCTION_PREVIOUSLY_WATCHED', member(watched, 'enum VortxNativePreviouslyWatched {'))
   .replace('// BASELINE_PREVIOUSLY_WATCHED', member(oldWatched, 'enum VortxNativePreviouslyWatched {').replaceAll('VortxNativePreviouslyWatched', 'BaselinePreviouslyWatched'))
-  .replace('// PRODUCTION_CURRENT_PUBLICATION', member(current, 'private func stageChanged(') + '\n' + member(current, 'private func publish('))
+  .replace('// PRODUCTION_CHANGE_RECEIPT', member(current, 'struct ChangeReceipt: Sendable {'))
+  .replace('// PRODUCTION_CURRENT_PUBLICATION', [member(current, 'private func makeChangeReceipt('),
+    member(current, 'private func stageChanged('), member(current, 'private func publish(')].join('\n'))
   .replace('// PRODUCTION_CURRENT', markers.map(m => member(current, m)).join('\n'))
   .replace('// PRODUCTION_BASELINE', markers.map(m => member(prior, m)).join('\n').replaceAll('VortxNativePreviouslyWatched', 'BaselinePreviouslyWatched'));
 fs.writeFileSync(out + '/Combined.swift', combined);
