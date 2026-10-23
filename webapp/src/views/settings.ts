@@ -88,6 +88,10 @@ const SOURCE_LABELS: Record<SourceType, { name: string; sub: string }> = {
   direct: { name: "Direct", sub: "Plain HTTP/HTTPS streams from add-ons" },
 };
 
+function isKnownSourceType(value: unknown): value is SourceType {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(SOURCE_LABELS, value);
+}
+
 let host: HTMLElement | null = null;
 let logoutNotice = "";
 
@@ -421,7 +425,7 @@ function segmented(opts: { value: string; label: string; on: boolean }[], action
   const items = opts
     .map(
       (o) =>
-        `<button class="seg${o.on ? " selected" : ""}" data-action="${action}" data-${dataKey}="${o.value}">${o.label}</button>`,
+        `<button class="seg${o.on ? " selected" : ""}" data-action="${escapeHtml(action)}" data-${dataKey}="${escapeHtml(o.value)}">${escapeHtml(o.label)}</button>`,
     )
     .join("");
   return `<div class="segmented" role="group">${items}</div>`;
@@ -466,11 +470,14 @@ function langSelect(id: string, value: string, defaultLabel: string): string {
 
 /** The source-type priority list (highest first), each row with up/down controls. */
 function reorderList(order: SourceType[]): string {
-  return order
+  // A saved backup can contain a newer client's type or malformed data. Ignore unsupported rows in
+  // this presentation only; do not rewrite the saved order or discard future-client preferences.
+  const knownOrder = Array.isArray(order) ? order.filter(isKnownSourceType) : [];
+  return knownOrder
     .map((type, i) => {
       const info = SOURCE_LABELS[type];
-      const up = `<button class="stepper-btn" data-action="source-move" data-type="${type}" data-dir="-1" ${i === 0 ? "disabled" : ""} aria-label="Move ${info.name} up">↑</button>`;
-      const down = `<button class="stepper-btn" data-action="source-move" data-type="${type}" data-dir="1" ${i === order.length - 1 ? "disabled" : ""} aria-label="Move ${info.name} down">↓</button>`;
+      const up = `<button class="stepper-btn" data-action="source-move" data-type="${escapeHtml(type)}" data-dir="-1" ${i === 0 ? "disabled" : ""} aria-label="Move ${info.name} up">↑</button>`;
+      const down = `<button class="stepper-btn" data-action="source-move" data-type="${escapeHtml(type)}" data-dir="1" ${i === knownOrder.length - 1 ? "disabled" : ""} aria-label="Move ${info.name} down">↓</button>`;
       return row(info.name, `<div class="reorder-ctl">${up}${down}</div>`, info.sub);
     })
     .join("");
@@ -602,13 +609,17 @@ function toggleAlerts(): boolean {
 
 /** Reorder a source type within the priority list (immutably). */
 function moveSource(type: SourceType, dir: number): boolean {
-  const order = [...getSettings().sourceOrder];
-  const i = order.indexOf(type);
+  const saved = getSettings().sourceOrder;
+  if (!Array.isArray(saved) || !isKnownSourceType(type) || (dir !== -1 && dir !== 1)) return true;
+  const order = [...saved];
+  // Move between the displayed types, preserving unsupported entries in their original slots.
+  const indices = order.flatMap((candidate, index) => isKnownSourceType(candidate) ? [index] : []);
+  const i = indices.findIndex((index) => order[index] === type);
   const j = i + dir;
-  if (i < 0 || j < 0 || j >= order.length) return true;
-  const swapped = order[j];
-  order[j] = order[i];
-  order[i] = swapped;
+  if (i < 0 || j < 0 || j >= indices.length) return true;
+  const swapped = order[indices[j]];
+  order[indices[j]] = order[indices[i]];
+  order[indices[i]] = swapped;
   updateSettings({ sourceOrder: order });
   rerender();
   return true;
