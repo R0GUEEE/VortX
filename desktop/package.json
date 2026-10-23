@@ -1,21 +1,12 @@
 {
-  "name": "stremiox-desktop",
+  "name": "vortx-desktop",
   "private": true,
-  "version": "0.3.0",
-  "type": "module",
-  "description": "StremioX desktop (Windows, Linux, macOS) on Tauri 2. Native shell over the shared stremio-core engine and libmpv, matching the iOS and Apple TV apps.",
+  "version": "0.5.6",
+  "description": "VortX desktop (Windows, Linux, macOS) on Tauri 2: the VortX web client with the in-process VortX streaming server and mpv.",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
     "tauri": "tauri"
   },
-  "dependencies": {
-    "@tauri-apps/api": "2.12.4"
-  },
   "devDependencies": {
-    "@tauri-apps/cli": "2.12.4",
-    "typescript": "7.0.2",
-    "vite": "8.3.5"
+    "@tauri-apps/cli": "2.12.4"
   }
 }
