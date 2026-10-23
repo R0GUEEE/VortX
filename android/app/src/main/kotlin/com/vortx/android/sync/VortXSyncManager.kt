@@ -14,6 +14,7 @@ import com.vortx.android.security.FailClosedCredentialStore
 import com.vortx.android.security.PersistentCredentialAvailability
 import com.vortx.android.profile.ProfileStore
 import com.vortx.android.profile.DashboardProfileEdits
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -40,6 +41,8 @@ import java.net.URLEncoder
 import java.net.URL
 import java.util.Collections
 import java.util.IdentityHashMap
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.ContinuationInterceptor
 
 /**
  * Publish the app-owned effective add-on removal set and its LWW stamps without replacing any other `vortx`
@@ -793,6 +796,11 @@ internal class DurablePendingSyncState(
 class VortXSyncManager internal constructor(context: Context, private val scope: CoroutineScope) {
     constructor(context: Context) : this(context, CoroutineScope(SupervisorJob() + Dispatchers.IO))
 
+    // Preserve the caller Job while running synchronous native/checkpoint work on the manager worker.
+    // The production worker is IO; injected test scopes keep their deterministic dispatcher.
+    private val nativeWorkDispatcher =
+        scope.coroutineContext[ContinuationInterceptor] as? CoroutineDispatcher ?: Dispatchers.IO
+
     /** The account fields the server returns (mirrors Apple `VortXSyncManager.Account`). */
     data class Account(
         val id: String,
@@ -1351,6 +1359,18 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
 
     // MARK: - Flows
 
+    /** The holder owns the worker result until the caller has resumed without prompt cancellation. */
+    private suspend fun deriveAuthKey(derive: () -> ByteArray): ByteArray {
+        val pending = AtomicReference<ByteArray?>()
+        try {
+            // Return Unit across the dispatcher boundary; a raw key cannot be lost during cancellation.
+            withContext(Dispatchers.Default) { pending.set(derive()) }
+            return checkNotNull(pending.getAndSet(null))
+        } finally {
+            pending.getAndSet(null)?.fill(0)
+        }
+    }
+
     /**
      * Create an account. Generates the kdf salt, derives the master key, mints a random data key + a
      * recovery code, wraps the data key under BOTH the master key and the recovery key, and posts the
@@ -1361,63 +1381,71 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         val operation = beginAuthOperation()
         val kdfSalt = VortXCrypto.randomBytes(16)
         val iters = VortXCrypto.DEFAULT_ITERS
-        val masterKey = VortXCrypto.masterKey(password, kdfSalt, iters)
-        val dataKey = VortXCrypto.randomBytes(32)
-        val recoveryCode = VortXCrypto.makeRecoveryCode()
-        val recoveryKey = VortXCrypto.recoveryKey(recoveryCode, kdfSalt, iters)
-        val wrappedPw = VortXCrypto.seal(masterKey, dataKey)
-        val wrappedRec = VortXCrypto.seal(recoveryKey, dataKey)
-        if (wrappedPw == null || wrappedRec == null) {
-            return RegisterResult(AuthResult.Failed("Could not set up encryption."), null)
-        }
-        val body = JSONObject().apply {
-            put("email", email)
-            put("username", username)
-            put("kdfSalt", VortXCrypto.b64(kdfSalt))
-            put("kdfIters", iters)
-            put("authVerifier", VortXCrypto.authVerifier(masterKey, password))
-            put("wrappedKeyPassword", wrappedPw)
-            put("wrappedKeyRecovery", wrappedRec)
-            put("recVerifier", VortXCrypto.recVerifier(recoveryKey, recoveryCode))
-            // Sent ONLY so the worker can put it in the welcome email; it is never stored server-side (the
-            // worker marks it "NEVER written to the DB"), matching Apple's register body. Without it the
-            // welcome email falls back to a generic "save your code" note.
-            put("recoveryCode", recoveryCode)
-        }
-        if (!operation.isCurrent()) {
-            return RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
-        }
-        val callPermit = operation.acquireCallPermit()
-            ?: return RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
-        val (code, json) = request(
-            "POST",
-            "/v1/auth/register",
-            body,
-            callPermit = callPermit,
-        )
-        if (!operation.isCurrent()) {
-            val created = code == 200 && !json?.optString("token").isNullOrEmpty()
-            return if (created) {
-                RegisterResult.superseded(recoveryCode)
-            } else {
-                RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
+        val masterKey = deriveAuthKey { VortXCrypto.masterKey(password, kdfSalt, iters) }
+        try {
+            val dataKey = VortXCrypto.randomBytes(32)
+            val recoveryCode = VortXCrypto.makeRecoveryCode()
+            val recoveryKey = deriveAuthKey { VortXCrypto.recoveryKey(recoveryCode, kdfSalt, iters) }
+            try {
+                val wrappedPw = VortXCrypto.seal(masterKey, dataKey)
+                val wrappedRec = VortXCrypto.seal(recoveryKey, dataKey)
+                if (wrappedPw == null || wrappedRec == null) {
+                    return RegisterResult(AuthResult.Failed("Could not set up encryption."), null)
+                }
+                val body = JSONObject().apply {
+                    put("email", email)
+                    put("username", username)
+                    put("kdfSalt", VortXCrypto.b64(kdfSalt))
+                    put("kdfIters", iters)
+                    put("authVerifier", VortXCrypto.authVerifier(masterKey, password))
+                    put("wrappedKeyPassword", wrappedPw)
+                    put("wrappedKeyRecovery", wrappedRec)
+                    put("recVerifier", VortXCrypto.recVerifier(recoveryKey, recoveryCode))
+                    // Sent ONLY so the worker can put it in the welcome email; it is never stored server-side (the
+                    // worker marks it "NEVER written to the DB"), matching Apple's register body. Without it the
+                    // welcome email falls back to a generic "save your code" note.
+                    put("recoveryCode", recoveryCode)
+                }
+                if (!operation.isCurrent()) {
+                    return RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
+                }
+                val callPermit = operation.acquireCallPermit()
+                    ?: return RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
+                val (code, json) = request(
+                    "POST",
+                    "/v1/auth/register",
+                    body,
+                    callPermit = callPermit,
+                )
+                if (!operation.isCurrent()) {
+                    val created = code == 200 && !json?.optString("token").isNullOrEmpty()
+                    return if (created) {
+                        RegisterResult.superseded(recoveryCode)
+                    } else {
+                        RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
+                    }
+                }
+                val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
+                val acct = json?.optJSONObject("account")
+                if (code == 200 && token != null && acct != null) {
+                    return when (adopt(operation, token, acct, dataKey)) {
+                        SessionAdoption.ADOPTED -> RegisterResult(AuthResult.Ok, recoveryCode)
+                        SessionAdoption.STALE -> RegisterResult.superseded(recoveryCode)
+                        SessionAdoption.STORAGE_FAILURE -> RegisterResult.secureStorageFailure(recoveryCode)
+                    }
+                }
+                val message = when (json?.optString("error")) {
+                    "email_taken" -> "That email is already registered."
+                    "username_taken" -> "That username is taken."
+                    else -> "Could not create the account."
+                }
+                return RegisterResult(AuthResult.Failed(message), null)
+            } finally {
+                recoveryKey.fill(0)
             }
+        } finally {
+            masterKey.fill(0)
         }
-        val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
-        val acct = json?.optJSONObject("account")
-        if (code == 200 && token != null && acct != null) {
-            return when (adopt(operation, token, acct, dataKey)) {
-                SessionAdoption.ADOPTED -> RegisterResult(AuthResult.Ok, recoveryCode)
-                SessionAdoption.STALE -> RegisterResult.superseded(recoveryCode)
-                SessionAdoption.STORAGE_FAILURE -> RegisterResult.secureStorageFailure(recoveryCode)
-            }
-        }
-        val message = when (json?.optString("error")) {
-            "email_taken" -> "That email is already registered."
-            "username_taken" -> "That username is taken."
-            else -> "Could not create the account."
-        }
-        return RegisterResult(AuthResult.Failed(message), null)
     }
 
     /**
@@ -1442,36 +1470,40 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         // Reject a downgraded work factor from the UNAUTHENTICATED prelogin response before deriving the key.
         if (iters < VortXCrypto.MIN_ITERS) return AuthResult.Failed("Could not verify VortX security parameters. Try again.")
 
-        val masterKey = VortXCrypto.masterKey(password, salt, iters)
-        val body = JSONObject().apply {
-            put("login", login)
-            put("authVerifier", VortXCrypto.authVerifier(masterKey, password))
-            if (!totp.isNullOrEmpty()) put("totp", totp)
-        }
-        if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
-        val loginPermit = operation.acquireCallPermit()
-            ?: return AuthResult.Failed(AUTH_SUPERSEDED)
-        val (code, json) = request(
-            "POST",
-            "/v1/auth/login",
-            body,
-            callPermit = loginPermit,
-        )
-        if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
-        if (code == 401 && json?.optString("error") == "totp_required") return AuthResult.TotpRequired
-
-        val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
-        val acct = json?.optJSONObject("account")
-        val wrappedPw = json?.optString("wrappedKeyPassword").takeUnless { it.isNullOrEmpty() }
-        val dataKey = wrappedPw?.let { VortXCrypto.open(masterKey, it) }
-        if (code == 200 && token != null && acct != null && dataKey != null) {
-            return when (adopt(operation, token, acct, dataKey)) {
-                SessionAdoption.ADOPTED -> AuthResult.Ok
-                SessionAdoption.STALE -> AuthResult.Failed(AUTH_SUPERSEDED)
-                SessionAdoption.STORAGE_FAILURE -> AuthResult.Failed(SESSION_STORAGE_FAILURE)
+        val masterKey = deriveAuthKey { VortXCrypto.masterKey(password, salt, iters) }
+        try {
+            val body = JSONObject().apply {
+                put("login", login)
+                put("authVerifier", VortXCrypto.authVerifier(masterKey, password))
+                if (!totp.isNullOrEmpty()) put("totp", totp)
             }
+            if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
+            val loginPermit = operation.acquireCallPermit()
+                ?: return AuthResult.Failed(AUTH_SUPERSEDED)
+            val (code, json) = request(
+                "POST",
+                "/v1/auth/login",
+                body,
+                callPermit = loginPermit,
+            )
+            if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
+            if (code == 401 && json?.optString("error") == "totp_required") return AuthResult.TotpRequired
+
+            val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
+            val acct = json?.optJSONObject("account")
+            val wrappedPw = json?.optString("wrappedKeyPassword").takeUnless { it.isNullOrEmpty() }
+            val dataKey = wrappedPw?.let { VortXCrypto.open(masterKey, it) }
+            if (code == 200 && token != null && acct != null && dataKey != null) {
+                return when (adopt(operation, token, acct, dataKey)) {
+                    SessionAdoption.ADOPTED -> AuthResult.Ok
+                    SessionAdoption.STALE -> AuthResult.Failed(AUTH_SUPERSEDED)
+                    SessionAdoption.STORAGE_FAILURE -> AuthResult.Failed(SESSION_STORAGE_FAILURE)
+                }
+            }
+            return AuthResult.Failed(if (code == 401) "Wrong login or password." else "Could not sign in.")
+        } finally {
+            masterKey.fill(0)
         }
-        return AuthResult.Failed(if (code == 401) "Wrong login or password." else "Could not sign in.")
     }
 
     /** Start the joiner side of VortX account device pairing. */
@@ -1565,37 +1597,45 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         // Same downgrade guard as signIn: recover-start is unauthenticated too.
         if (iters < VortXCrypto.MIN_ITERS) return AuthResult.Failed("Could not verify VortX security parameters. Try again.")
 
-        val recoveryKey = VortXCrypto.recoveryKey(trimmed, salt, iters)
-        val dataKey = VortXCrypto.open(recoveryKey, wrappedRec) ?: return AuthResult.Failed("That recovery code is not correct.")
-        // Keep the existing kdfSalt (it also derives the recovery key); derive the new master from it.
-        val newMaster = VortXCrypto.masterKey(newPassword, salt, iters)
-        val wrappedPw = VortXCrypto.seal(newMaster, dataKey) ?: return AuthResult.Failed("Could not re-encrypt.")
-        val body = JSONObject().apply {
-            put("email", email)
-            put("recVerifier", VortXCrypto.recVerifier(recoveryKey, trimmed))
-            put("newAuthVerifier", VortXCrypto.authVerifier(newMaster, newPassword))
-            put("newWrappedKeyPassword", wrappedPw)
-        }
-        if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
-        val completePermit = operation.acquireCallPermit()
-            ?: return AuthResult.Failed(AUTH_SUPERSEDED)
-        val (code, json) = request(
-            "POST",
-            "/v1/auth/recover-complete",
-            body,
-            callPermit = completePermit,
-        )
-        if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
-        val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
-        val acct = json?.optJSONObject("account")
-        if (code == 200 && token != null && acct != null) {
-            return when (adopt(operation, token, acct, dataKey)) {
-                SessionAdoption.ADOPTED -> AuthResult.Ok
-                SessionAdoption.STALE -> AuthResult.Failed(AUTH_SUPERSEDED)
-                SessionAdoption.STORAGE_FAILURE -> AuthResult.Failed(SESSION_STORAGE_FAILURE)
+        val recoveryKey = deriveAuthKey { VortXCrypto.recoveryKey(trimmed, salt, iters) }
+        try {
+            val dataKey = VortXCrypto.open(recoveryKey, wrappedRec) ?: return AuthResult.Failed("That recovery code is not correct.")
+            // Keep the existing kdfSalt (it also derives the recovery key); derive the new master from it.
+            val newMaster = deriveAuthKey { VortXCrypto.masterKey(newPassword, salt, iters) }
+            try {
+                val wrappedPw = VortXCrypto.seal(newMaster, dataKey) ?: return AuthResult.Failed("Could not re-encrypt.")
+                val body = JSONObject().apply {
+                    put("email", email)
+                    put("recVerifier", VortXCrypto.recVerifier(recoveryKey, trimmed))
+                    put("newAuthVerifier", VortXCrypto.authVerifier(newMaster, newPassword))
+                    put("newWrappedKeyPassword", wrappedPw)
+                }
+                if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
+                val completePermit = operation.acquireCallPermit()
+                    ?: return AuthResult.Failed(AUTH_SUPERSEDED)
+                val (code, json) = request(
+                    "POST",
+                    "/v1/auth/recover-complete",
+                    body,
+                    callPermit = completePermit,
+                )
+                if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
+                val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
+                val acct = json?.optJSONObject("account")
+                if (code == 200 && token != null && acct != null) {
+                    return when (adopt(operation, token, acct, dataKey)) {
+                        SessionAdoption.ADOPTED -> AuthResult.Ok
+                        SessionAdoption.STALE -> AuthResult.Failed(AUTH_SUPERSEDED)
+                        SessionAdoption.STORAGE_FAILURE -> AuthResult.Failed(SESSION_STORAGE_FAILURE)
+                    }
+                }
+                return AuthResult.Failed("Recovery failed.")
+            } finally {
+                newMaster.fill(0)
             }
+        } finally {
+            recoveryKey.fill(0)
         }
-        return AuthResult.Failed("Recovery failed.")
     }
 
     /** Sign out only after the encrypted session clear succeeds. */
@@ -2060,7 +2100,9 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
 
     private suspend fun syncUp(lease: SyncSessionLease): Boolean {
         if (!isSyncLeaseCurrent(lease) || requiresUpgrade(lease)) return false
-        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { nativeSyncMutex.withLock { nativeSyncUp(lease) } }
+        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { withContext(nativeWorkDispatcher) {
+            nativeSyncMutex.withLock { nativeSyncUp(lease) }
+        } }
             catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
             catch (_: Exception) { false }
         // Stamp snapshot taken when the push BEGINS, before the blob is built: a key re-edited while this
@@ -2624,7 +2666,9 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         onComparisonReceiveCompleted: () -> Unit = {},
     ): Boolean {
         if (!isSyncLeaseCurrent(lease)) return false
-        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { nativeSyncMutex.withLock { nativeSyncDown(lease, force, routineReceive) } }
+        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { withContext(nativeWorkDispatcher) {
+            nativeSyncMutex.withLock { nativeSyncDown(lease, force, routineReceive) }
+        } }
             catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
             catch (_: Exception) { false }
         // PENDING-EDIT GUARD: restore a durable process-death marker and retry its push before any
