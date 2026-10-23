@@ -149,6 +149,8 @@ jobs:
           --tests com.vortx.android.whatsnew.ChangelogParserTest
           --tests com.vortx.android.player.ExoPlayerEngineStatePolicyTest
           --tests com.vortx.android.player.PlaybackMetadataTest
+          --tests com.vortx.android.player.SessionAudioPresetSessionTest
+          --tests com.vortx.android.player.SessionAudioPresetSourceContractTest
           --tests com.vortx.android.foryou.ForYouRowsModelTest
           --tests com.vortx.android.ui.profilepicker.ProfilePickerPresentationTest
           --tests com.vortx.android.ui.profilepicker.ProfilePickerArtworkStartupTest
@@ -165,6 +167,7 @@ jobs:
           ./gradlew :app:testFullDebugUnitTest
           -Pvortx.nativeEngine=true -Pvortx.nativeResourceHost=true
           --tests com.vortx.android.player.mpv.MpvMetadataLoadIdentityTest
+          --tests com.vortx.android.player.mpv.MpvSessionAudioRouteTest
           --no-daemon --stacktrace
 
       - name: Retain current-source recovery test execution and skips

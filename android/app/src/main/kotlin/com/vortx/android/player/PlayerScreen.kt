@@ -2062,6 +2062,11 @@ fun PlayerScreen(
             audioDelaySeconds = audioDelaySeconds,
             audioOutputModeAvailable = engine.audioOutputModeAvailable,
             audioOutputMode = audioOutputMode,
+            sessionAudioPreset = playerState.sessionAudioPreset,
+            onSelectSessionAudioPreset = { preset ->
+                showControls()
+                engine.setSessionAudioPreset(preset)
+            },
             onAdjustAudioDelay = { delta ->
                 showControls()
                 audioDelaySeconds = adjustedPlayerDelay(audioDelaySeconds, delta)
@@ -2069,10 +2074,9 @@ fun PlayerScreen(
             },
             onSelectAudioOutputMode = { mode ->
                 showControls()
-                if (engine.audioOutputModeAvailable) {
+                if (engine.trySetAudioOutputMode(mode)) {
                     audioOutputMode = mode
                     AudioOutputMode.setCurrent(context, mode)
-                    engine.setAudioOutputMode(mode)
                 }
             },
             // Also withheld in PiP: the tiny window gets video only (the system draws the PiP

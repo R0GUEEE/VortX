@@ -11,6 +11,21 @@
 
     <string name="action_retry">Retry</string>
 
+    <!-- Session-only libmpv owned-label DSP. Shared phone/tablet/TV Audio Settings sheet. -->
+    <string name="player_audio_preset_title">Audio preset · this player session</string>
+    <string name="player_audio_preset_normal">Normal</string>
+    <string name="player_audio_preset_dialogue">Dialogue</string>
+    <string name="player_audio_preset_night">Night</string>
+    <string name="player_audio_preset_normal_detail">No added session processing</string>
+    <string name="player_audio_preset_dialogue_detail">Speech-range emphasis, not voice isolation</string>
+    <string name="player_audio_preset_night_detail">Reduces loud peaks without raising quiet audio</string>
+    <string name="player_audio_preset_media3_unavailable">Audio presets aren\'t available on the Media3 player.</string>
+    <string name="player_audio_preset_not_ready">Audio processing isn\'t ready.</string>
+    <string name="player_audio_preset_passthrough">Unavailable while bitstream passthrough is enabled.</string>
+    <string name="player_audio_preset_safety_unavailable">Audio processing can\'t be safely changed on this player.</string>
+    <string name="player_audio_preset_restored">This preset isn\'t supported by this audio path. Previous processing restored.</string>
+    <string name="player_audio_preset_unknown">Audio processing state is unknown. Close and reopen the player.</string>
+
     <!-- In-memory Library / Detail picks. Picking alone never changes watch history. -->
     <string name="random_library_pick_title">Random pick from Library</string>
     <string name="random_library_filter_all">All</string>

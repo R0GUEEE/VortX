@@ -135,6 +135,16 @@ interface PlayerEngine {
     /// runtime force, so its implementation is a documented no-op. Mirrors Apple `setAudioOutputMode`.
     fun setAudioOutputMode(mode: AudioOutputMode) {}
 
+    /** Cleanup/admission receipt only, not proof of AO negotiation. Commit preferences after acceptance. */
+    fun trySetAudioOutputMode(mode: AudioOutputMode): Boolean {
+        if (!audioOutputModeAvailable) return false
+        setAudioOutputMode(mode)
+        return true
+    }
+
+    /** Unsupported engines (including stock Media3) deliberately do not pretend to apply DSP. */
+    fun setSessionAudioPreset(preset: SessionAudioPreset): Boolean = false
+
     /// Live audio volume, 0..100, and mute without losing the level. Both engines override (mpv `volume`/
     /// `mute`; ExoPlayer `player.volume` 0..1). Mirrors Apple `setVolume` / `setMuted`.
     fun setVolume(volume0to100: Double) {}
@@ -252,6 +262,7 @@ data class PlayerState(
     val audioTracks: List<PlayerTrack> = emptyList(),
     val subtitleTracks: List<PlayerTrack> = emptyList(),
     val metadata: PlaybackMetadata = PlaybackMetadata(),
+    val sessionAudioPreset: SessionAudioPresetState = SessionAudioPresetState(),
 )
 
 enum class EngineFallbackReason {

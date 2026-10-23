@@ -164,6 +164,8 @@ fun PlayerChrome(
     audioOutputMode: AudioOutputMode,
     onAdjustAudioDelay: (Double) -> Unit,
     onSelectAudioOutputMode: (AudioOutputMode) -> Unit,
+    sessionAudioPreset: SessionAudioPresetState = SessionAudioPresetState(),
+    onSelectSessionAudioPreset: (SessionAudioPreset) -> Unit = {},
     /// Whether the top scrim + control cluster and the bottom transport bar are drawn. The selection
     /// sheets and the error overlay are NOT gated on it: a sheet the viewer opened must survive an
     /// auto-hide tick, and an error must always be visible. The host owns the show/hide/auto-hide
@@ -924,7 +926,7 @@ fun PlayerChrome(
                     outputMode = audioOutputMode,
                     onAdjust = onAdjustAudioDelay,
                     onSelectOutput = onSelectAudioOutputMode,
-                ),
+                ) + sessionAudioPresetOptions(sessionAudioPreset, onSelectSessionAudioPreset),
                 emberAccent = emberAccent,
                 onDismiss = { openSheet = ControlSheet.NONE },
             )
@@ -1742,6 +1744,44 @@ private fun subtitleSettingsOptions(
                 onPick = { onChangeStyle(style.copy(backgroundId = id)) },
             ),
         )
+    }
+}
+
+@Composable
+private fun sessionAudioPresetOptions(
+    state: SessionAudioPresetState,
+    onSelect: (SessionAudioPreset) -> Unit,
+): List<SheetOption> = buildList {
+    add(SheetOption(stringResource(R.string.player_audio_preset_title), false, enabled = false, isHeader = true))
+    val reason = when (state.availability) {
+        SessionAudioPresetAvailability.UNSUPPORTED -> R.string.player_audio_preset_media3_unavailable
+        SessionAudioPresetAvailability.NOT_READY -> R.string.player_audio_preset_not_ready
+        SessionAudioPresetAvailability.PASSTHROUGH -> R.string.player_audio_preset_passthrough
+        SessionAudioPresetAvailability.SAFETY_UNAVAILABLE -> R.string.player_audio_preset_safety_unavailable
+        SessionAudioPresetAvailability.UNKNOWN -> R.string.player_audio_preset_unknown
+        SessionAudioPresetAvailability.READY -> null
+    }
+    val notice = when (state.notice) {
+        SessionAudioPresetNotice.REJECTED_RESTORED -> R.string.player_audio_preset_restored
+        SessionAudioPresetNotice.UNKNOWN -> R.string.player_audio_preset_unknown
+        SessionAudioPresetNotice.UNAVAILABLE -> reason ?: R.string.player_audio_preset_safety_unavailable
+        SessionAudioPresetNotice.NONE -> reason
+    }
+    if (notice != null) add(SheetOption(stringResource(notice), false, enabled = false, isHeader = true))
+    SessionAudioPreset.entries.forEach { preset ->
+        val label = when (preset) {
+            SessionAudioPreset.NORMAL -> R.string.player_audio_preset_normal
+            SessionAudioPreset.DIALOGUE -> R.string.player_audio_preset_dialogue
+            SessionAudioPreset.NIGHT -> R.string.player_audio_preset_night
+        }
+        val detail = when (preset) {
+            SessionAudioPreset.NORMAL -> R.string.player_audio_preset_normal_detail
+            SessionAudioPreset.DIALOGUE -> R.string.player_audio_preset_dialogue_detail
+            SessionAudioPreset.NIGHT -> R.string.player_audio_preset_night_detail
+        }
+        add(SheetOption(stringResource(label), state.selected == preset,
+            detail = stringResource(detail), enabled = state.canSelect(preset), isChoice = true,
+            dismissOnPick = false, onPick = { onSelect(preset) }))
     }
 }
 

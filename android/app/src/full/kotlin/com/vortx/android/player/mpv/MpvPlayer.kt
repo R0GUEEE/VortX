@@ -26,6 +26,10 @@ import com.vortx.android.player.PlayerChapter
 import com.vortx.android.player.PlayerEngine
 import com.vortx.android.player.PlayerState
 import com.vortx.android.player.PlayerTrack
+import com.vortx.android.player.SessionAudioPreset
+import com.vortx.android.player.SessionAudioPresetAvailability
+import com.vortx.android.player.SessionAudioPresetSession
+import com.vortx.android.player.SessionAudioRouteRequest
 import com.vortx.android.player.SubtitleStyle
 import com.vortx.android.player.VideoScaleMode
 import com.vortx.android.player.normalizedExternalSubtitles
@@ -94,7 +98,8 @@ class MpvPlayer private constructor(
     caBundlePath: String,
 ) : PlayerEngine {
 
-    private val _state = MutableStateFlow(PlayerState())
+    private val sessionAudioPreset = SessionAudioPresetSession()
+    private val _state = MutableStateFlow(PlayerState(sessionAudioPreset = sessionAudioPreset.state))
     override val state: StateFlow<PlayerState> = _state.asStateFlow()
     override val subtitleDelayAvailable: Boolean = true
     override val audioDelayAvailable: Boolean = true
@@ -176,6 +181,9 @@ class MpvPlayer private constructor(
     private val subtitleGenerationGate = Any()
     // Metadata only; all access is under subtitleGenerationGate, not the terminal/audio locks.
     private val metadataLoadIdentity = MpvMetadataLoadIdentity()
+    // Same engine/session across loadfile; publication is null until this exact loaded entry is checked.
+    private var audioPresetReconciledRead: MpvMetadataLoadIdentity.Read? = null
+    private val pendingAudioOutputMode = SessionAudioRouteRequest<AudioOutputMode>()
     private val released = AtomicBoolean(false)
     private val audioHealthLock = Any()
     private var audioHealthJob: Job? = null
@@ -256,7 +264,10 @@ class MpvPlayer private constructor(
         override fun eventTerminal(event: MpvTerminalEvent) {
             synchronized(subtitleGenerationGate) {
                 metadataLoadIdentity.ended()
-                _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata()) }
+                sessionAudioPreset.loading()
+                audioPresetReconciledRead = null
+                _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
+                    sessionAudioPreset = sessionAudioPreset.state) }
             }
             // The gate drops the callback entirely when teardown won the race, when a duplicate
             // arrives after the first terminal, or inside the replacement-suppression window; it
@@ -270,7 +281,10 @@ class MpvPlayer private constructor(
         override fun eventStartFile(entryID: Long) {
             synchronized(subtitleGenerationGate) {
                 metadataLoadIdentity.started(entryID)
-                _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata()) }
+                sessionAudioPreset.loading()
+                audioPresetReconciledRead = null
+                _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
+                    sessionAudioPreset = sessionAudioPreset.state) }
             }
         }
 
@@ -289,7 +303,10 @@ class MpvPlayer private constructor(
                     scheduleAudioOutputHealthCheck()
                 }
                 MPVLib.Event.FILE_LOADED -> {
-                    synchronized(subtitleGenerationGate) { metadataLoadIdentity.loaded() }
+                    synchronized(subtitleGenerationGate) {
+                        metadataLoadIdentity.loaded()
+                        reconcileSessionAudioPresetLocked()
+                    }
                     synchronized(audioHealthLock) {
                         audioFileLoadedGeneration = subtitleLoadGeneration.get()
                         audioTrackListObservedGeneration = 0L
@@ -305,7 +322,10 @@ class MpvPlayer private constructor(
                 }
                 MPVLib.Event.QUEUE_OVERFLOW -> synchronized(subtitleGenerationGate) {
                     metadataLoadIdentity.queueOverflow()
-                    _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata()) }
+                    sessionAudioPreset.loading()
+                    audioPresetReconciledRead = null
+                    _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
+                        sessionAudioPreset = sessionAudioPreset.state) }
                 }
             }
         }
@@ -382,7 +402,10 @@ class MpvPlayer private constructor(
         val loadGeneration = synchronized(subtitleGenerationGate) {
             subtitleLoadGeneration.incrementAndGet().also { generation ->
                 metadataLoadIdentity.begin(generation)
-                _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata()) }
+                sessionAudioPreset.loading()
+                audioPresetReconciledRead = null
+                _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
+                    sessionAudioPreset = sessionAudioPreset.state) }
             }
         }
         // Reset terminal classification and invalidate the previous source's opportunity tokens before
@@ -419,8 +442,11 @@ class MpvPlayer private constructor(
         }
         // The player instance survives `loadfile replace`; pick up a Settings change for the next title and
         // clear the old filter when the toggle moved OFF.
-        for ((name, value) in LoudnessNormalizationSetting.mpvOptions(appContext)) {
-            mpv.setPropertyString(name, value)
+        synchronized(subtitleGenerationGate) {
+            if (released.get() || subtitleLoadGeneration.get() != loadGeneration) return
+            for ((name, value) in LoudnessNormalizationSetting.mpvOptions(appContext)) {
+                mpv.setPropertyString(name, value)
+            }
         }
 
         // Device-scaled forward cache cap, applied per file as a property (the Apple loadFile split).
@@ -472,9 +498,11 @@ class MpvPlayer private constructor(
         }
 
         // loadfile as an argv array so a URL containing mpv's list/escape chars is one argument.
-        val metadataEntryID = mpv.loadFileWithEntryID(playable.url)
         synchronized(subtitleGenerationGate) {
+            if (released.get() || subtitleLoadGeneration.get() != loadGeneration) return
+            val metadataEntryID = mpv.loadFileWithEntryID(playable.url)
             metadataLoadIdentity.commandReturned(loadGeneration, metadataEntryID)
+            reconcileSessionAudioPresetLocked()
         }
         // START/FILE_LOADED can precede command return. Reconcile both arrival orders without
         // republishing tracks, rearming audio health, or issuing another native load command.
@@ -752,8 +780,15 @@ class MpvPlayer private constructor(
         }
         // WHY audit 13: this existing live style refresh is the settings-to-mpv property bridge. Re-read the
         // persisted toggle here so enabling or disabling late-night normalization does not require a restart.
-        for ((name, value) in LoudnessNormalizationSetting.mpvOptions(appContext)) {
-            mpv.setPropertyString(name, value)
+        synchronized(subtitleGenerationGate) {
+            if (released.get()) return
+            sessionAudioPreset.loading()
+            audioPresetReconciledRead = null
+            publishSessionAudioPresetLocked()
+            for ((name, value) in LoudnessNormalizationSetting.mpvOptions(appContext)) {
+                mpv.setPropertyString(name, value)
+            }
+            reconcileSessionAudioPresetLocked()
         }
     }
 
@@ -761,12 +796,90 @@ class MpvPlayer private constructor(
     /// (mpv may only fully honor them on the next AO (re)open); applied as options pre-init for the reliable
     /// path. Mirrors Apple `setAudioOutputMode`.
     override fun setAudioOutputMode(mode: AudioOutputMode) {
-        // Route-aware live properties: a Passthrough pick on a stereo-only route clears spdif and downmixes
-        // instead of wedging the AO, matching the pre-init route-aware options and the Apple silence guard.
-        for ((name, value) in mode.mpvLiveProperties(appContext)) {
-            mpv.setPropertyString(name, value)
+        val accepted = synchronized(subtitleGenerationGate) {
+            if (released.get()) return@synchronized false
+            if (metadataLoadIdentity.capture(subtitleLoadGeneration.get(), currentPlayingEntryID()) == null) {
+                // Init/route callbacks can precede load command return or FILE_LOADED. Keep only
+                // the latest automatic request; recompute the actual route when it can be applied.
+                pendingAudioOutputMode.defer(mode)
+                return@synchronized false
+            }
+            applyAudioOutputModeLocked(mode)
         }
-        scheduleAudioOutputHealthCheck()
+        if (accepted) scheduleAudioOutputHealthCheck()
+    }
+
+    override fun trySetAudioOutputMode(mode: AudioOutputMode): Boolean {
+        val accepted = synchronized(subtitleGenerationGate) {
+            if (released.get()) false else applyAudioOutputModeLocked(mode)
+        }
+        if (accepted) scheduleAudioOutputHealthCheck()
+        return accepted
+    }
+
+    /** Live route properties are sampled here, never captured in a deferred request. */
+    private fun applyAudioOutputModeLocked(mode: AudioOutputMode): Boolean {
+        val properties = mode.mpvLiveProperties(appContext)
+        val bitstream = properties.any { it.first == "audio-spdif" && it.second.isNotEmpty() }
+        // Cleanup is mandatory even for an unknown selection; never persist or arm bitstream first.
+        if (bitstream && !applySessionAudioPresetLocked(SessionAudioPreset.NORMAL)) return false
+        for ((name, value) in properties) mpv.setPropertyString(name, value)
+        // A newer explicit/live submission supersedes an older deferred automatic route, even if
+        // subsequent readback refuses acceptance. Do not replay the old mode after a partial change.
+        pendingAudioOutputMode.clear()
+        audioPresetReconciledRead = null
+        if (!reconcileSessionAudioPresetLocked()) return false
+        if (released.get()) return false
+        return true
+    }
+
+    override fun setSessionAudioPreset(preset: SessionAudioPreset): Boolean = synchronized(subtitleGenerationGate) {
+        if (released.get() || !sessionAudioPreset.state.canSelect(preset)) return@synchronized false
+        applySessionAudioPresetLocked(preset)
+    }
+
+    /** Call only under subtitleGenerationGate; no IO/suspension, no preferences or watched mutations. */
+    private fun applySessionAudioPresetLocked(preset: SessionAudioPreset): Boolean {
+        val generation = subtitleLoadGeneration.get()
+        val read = if (released.get()) null else metadataLoadIdentity.capture(generation, currentPlayingEntryID())
+        if (read == null) {
+            sessionAudioPreset.loading()
+            publishSessionAudioPresetLocked()
+            return false
+        }
+        val spdif = mpv.getPropertyString("audio-spdif")
+        if (preset != SessionAudioPreset.NORMAL && (spdif == null || spdif.isNotEmpty())) {
+            sessionAudioPreset.refuse(if (spdif == null) SessionAudioPresetAvailability.SAFETY_UNAVAILABLE
+                else SessionAudioPresetAvailability.PASSTHROUGH)
+            publishSessionAudioPresetLocked()
+            return false
+        }
+        val receipt = mpv.setSessionAudioPreset(preset.nativeValue, read.entryID)
+        // The native transaction checks INT64 entry identity too; callback/release admission is separate.
+        if (released.get() || !metadataLoadIdentity.accepts(read, subtitleLoadGeneration.get(), currentPlayingEntryID())) {
+            sessionAudioPreset.loading()
+            publishSessionAudioPresetLocked()
+            return false
+        }
+        val accepted = sessionAudioPreset.receive(preset, receipt, !spdif.isNullOrEmpty())
+        publishSessionAudioPresetLocked()
+        return accepted
+    }
+
+    /** Both FILE_LOADED/command-return arrival orders meet here, once per admitted read; no retry loop. */
+    private fun reconcileSessionAudioPresetLocked(): Boolean {
+        if (released.get()) return false
+        val read = metadataLoadIdentity.capture(subtitleLoadGeneration.get(), currentPlayingEntryID()) ?: return false
+        // Only an admitted entry can drain this one-shot request. Both load-event/command-return
+        // orders meet here; take retires it before applying, so a failure cannot create a retry loop.
+        pendingAudioOutputMode.take()?.let { return applyAudioOutputModeLocked(it) }
+        if (audioPresetReconciledRead == read) return false // no fresh receipt; never infer success from state
+        audioPresetReconciledRead = read
+        return applySessionAudioPresetLocked(sessionAudioPreset.wanted)
+    }
+
+    private fun publishSessionAudioPresetLocked() {
+        if (!released.get()) _state.update { it.copy(sessionAudioPreset = sessionAudioPreset.state) }
     }
 
     /// Re-read `stremiox.hdrToneMapMode` and apply the SDR-force (or HDR-passthrough) target-trc/target-prim
@@ -1084,7 +1197,11 @@ class MpvPlayer private constructor(
         synchronized(subtitleGenerationGate) {
             subtitleLoadGeneration.incrementAndGet()
             metadataLoadIdentity.retire()
-            _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata()) }
+            sessionAudioPreset.reset()
+            pendingAudioOutputMode.clear()
+            audioPresetReconciledRead = null
+            _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
+                sessionAudioPreset = sessionAudioPreset.state) }
         }
         // Retire every held terminal/opportunity before cancellation. A cancelled audio-health coroutine
         // runs its `finally` and may complete its old opportunity immediately; after reset that completion
