@@ -67,8 +67,8 @@ private fun successRetainsAllPublicationFencesAndGenericIdentity() {
     var applied = 0
     f.store { value, force ->
         f.assertPublicationLocks()
-        // Represents the existing provider-capture callback's nested read, not a second lock algorithm.
-        synchronized(f.auth) { check(f.access.read() == value) }
+        // Initial provider capture reuses the already fenced value, before any migration mutation.
+        synchronized(f.auth) { check(value == f.original) }
         check(value == f.original && force)
         applied++
     }.publish(f.original, forceSettings = true)
@@ -87,8 +87,10 @@ private fun concurrentWorkerSessionThenAuthCompletesWithoutInversion() {
     val workerFailure = AtomicReference<Throwable?>()
     val uiFailure = AtomicReference<Throwable?>()
     val applied = AtomicInteger()
-    f.runtime.beforeReadLock = {
+    f.sessionProvider = {
+        // withCurrentRead acquires Session before read; announce the UI attempt before that monitor.
         if (Thread.currentThread().name == "projection-fixture-ui") uiAttemptedSession.countDown()
+        f.mounted.get()
     }
     val worker = Thread({
         try {
@@ -133,6 +135,7 @@ private fun staleProjectionRejectsPublication() {
     var applied = 0
     expectThrow<IllegalStateException> { f.store { _, _ -> applied++ }.publish(f.original) }
     check(applied == 0)
+    check(f.runtime.fullReads.get() == 1) { "stale expected projection must reject after one fresh read" }
     f.assertLocksReleased()
     println("PASS stale_projection_never_publishes")
 }
@@ -175,6 +178,64 @@ private fun throwingActionsPreserveIdentityAndReleaseEveryMonitor() {
     }
 }
 
+private fun ordinaryPublicationUsesOneBoundaryReadAndRefreshUsesTwo() {
+    val f = Fixture()
+    f.store { value, _ -> f.assertPublicationLocks(); check(value == f.original) }.publish(f.original)
+    check(f.runtime.fullReads.get() == 1) { "withProjection repeated a full-state read" }
+    val refresh = Fixture()
+    val prepared = refresh.access.read()
+    refresh.store { value, _ -> refresh.assertPublicationLocks(); check(value == prepared) }.publish(prepared)
+    check(refresh.runtime.fullReads.get() == 2) { "initial capture plus boundary must remain two reads" }
+    println("PASS metered_boundary_reads=1 common_refresh_reads=2 synthetic_payload_not_device_latency")
+}
+
+private fun closedRecoveryAndAccountFailuresRejectBeforePublication() {
+    for ((name, invalidate) in listOf<Pair<String, (VortxNativeSession) -> Unit>>(
+        "closed" to { it.closed = true },
+        "recovering" to { it.recovering = true },
+        "account" to { it.accountCurrent = false },
+    )) {
+        val f = Fixture(); var applied = 0; invalidate(f.runtime)
+        expectThrow<IllegalStateException> { f.store { _, _ -> applied++ }.publish(f.original) }
+        check(applied == 0 && f.admissionCalls.get() == 0 && f.runtime.fullReads.get() == 0)
+        f.assertLocksReleased()
+        println("PASS " + name + "_rejects_before_snapshot_or_publication")
+    }
+}
+
+private fun nullableResultAndFreshProjectionArePreserved() {
+    val f = Fixture()
+    check(f.access.withProjection<String?>(f.original) { null } == null)
+    val newer = NativeProfileGateway.Projection(listOf(UserProfile("A"), UserProfile("added")), "A")
+    f.runtime.replaceProjection(newer)
+    check(f.access.read() == newer)
+    expectThrow<IllegalStateException> { f.access.withProjection(f.original) { error("stale action ran") } }
+    check(f.access.withProjection(newer) { newer } === newer)
+    f.assertLocksReleased()
+    println("PASS nullable_result_identity_and_fresh_projection_without_cache")
+}
+
+private fun migrationMutationStillRequiresFreshSaveReadbackAndNestedPublication() {
+    val f = Fixture()
+    val savedValue = NativeProfileGateway.Projection(listOf(UserProfile("A"), UserProfile("added")), "A")
+    var publications = 0
+    lateinit var store: ExtractedProfileStore
+    store = f.store { value, _ ->
+        f.assertPublicationLocks(); publications++
+        if (publications == 1) {
+            check(value == f.original && f.access.read() == value)
+            f.runtime.replaceProjection(savedValue) // Synthetic save collaborator changes actual boundary's payload.
+            val saved = f.access.read()
+            check(saved == savedValue && f.access.read() == saved)
+            store.publish(saved, forceSettings = true)
+        } else check(value == savedValue)
+    }
+    store.publish(f.original)
+    check(publications == 2 && f.runtime.fullReads.get() == 5)
+    f.assertLocksReleased()
+    println("PASS migration_save_readback_and_nested_fresh_publication_remain_live_reads")
+}
+
 fun main() {
     successRetainsAllPublicationFencesAndGenericIdentity()
     concurrentWorkerSessionThenAuthCompletesWithoutInversion()
@@ -183,5 +244,9 @@ fun main() {
     replacedRuntimeRejectsPublication()
     replacedAccountEpochRejectsPublication()
     throwingActionsPreserveIdentityAndReleaseEveryMonitor()
-    println("PASS projection_boundary_packet_complete cases=9")
+    ordinaryPublicationUsesOneBoundaryReadAndRefreshUsesTwo()
+    closedRecoveryAndAccountFailuresRejectBeforePublication()
+    nullableResultAndFreshProjectionArePreserved()
+    migrationMutationStillRequiresFreshSaveReadbackAndNestedPublication()
+    println("PASS projection_boundary_packet_complete cases=15")
 }

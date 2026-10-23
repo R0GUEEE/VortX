@@ -171,7 +171,8 @@ class ProfileStore private constructor(context: Context) {
         val previous = active
         val incoming = value.profiles.firstOrNull { it.id == value.activeID }
         val capturedProvider = com.vortx.android.integrations.NativeProviderAccess.capture(
-            com.vortx.android.integrations.NativeProviderCredentials.GROUPS[0]) { nativeGateway?.read() }
+            // withProjection already validated this value and still holds Session/auth/mount admission.
+            com.vortx.android.integrations.NativeProviderCredentials.GROUPS[0]) { value }
         val providerGuard = capturedProvider?.first?.takeIf { capturedProvider?.second == value }
         val traktEpoch = com.vortx.android.integrations.TraktAuth.currentSessionEpoch
         if (previous != null && (previous.id != value.activeID || acknowledgedNativeAccount != providerGuard?.owner)) {
@@ -666,9 +667,11 @@ class ProfileStore private constructor(context: Context) {
     private fun capturePendingNativeContinueWatchingDiscovery(profile: UserProfile): Boolean {
         if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED && continueWatchingMigration.witness != null) {
             val gateway = checkNotNull(nativeGateway)
-            return gateway.withProjection(gateway.read()) {
+            val current = gateway.read()
+            return gateway.withProjection(current) {
                 val captured = com.vortx.android.integrations.NativeProviderAccess.capture(
-                    com.vortx.android.integrations.NativeProviderCredentials.GROUPS[0]) { nativeGateway?.read() }
+                    // This capture precedes any migration mutation and remains inside the same fenced projection.
+                    com.vortx.android.integrations.NativeProviderCredentials.GROUPS[0]) { current }
                 val guard = captured?.first
                 val projection = captured?.second
                 val epoch = com.vortx.android.integrations.TraktAuth.currentSessionEpoch

@@ -34,10 +34,14 @@ const snippets = {
   withProjection: method(access, '    override fun <T> withProjection('),
   storeBoundary: method(store, '    private fun applyNativeProjection('),
   owned: method(session, '    @Synchronized fun <T> owned('),
+  currentRead: method(session, '    @Synchronized internal fun <T> withCurrentRead('),
 };
 assert.equal(method(accessExtract, '    override fun <T> withProjection('), snippets.withProjection);
 assert.equal(method(storeExtract, '    private fun applyNativeProjection('), snippets.storeBoundary);
 assert.equal(method(sessionFixture, '    @Synchronized fun <T> owned('), snippets.owned);
+assert.equal(method(sessionFixture, '    @Synchronized internal fun <T> withCurrentRead('), snippets.currentRead);
+const accepts = session.match(/^    @Synchronized fun accepts\(owner: VortxNativeOwner\): Boolean = [^\n]+\n/m)?.[0];
+assert(accepts && sessionFixture.includes(accepts), 'Actual accepts owner/account/recovery checks must be retained');
 for (const [name, content] of Object.entries(snippets)) assert.equal(hash(content), manifest.hashes[name], `${name} changed; refresh/review extraction`);
 for (const [name, path] of [['gateway', 'NativeProfileGateway.kt'], ['cwGate', 'ContinueWatchingOwnerGate.kt']]) {
   const actual = read(`profile/${path}`);
@@ -53,9 +57,19 @@ const add = method(store, '    fun add(profile: UserProfile)');
 assert.match(add, /applyNativeProjection\(checkNotNull\(nativeGateway\)\.save\(profile, adding = true\)\)/);
 assert(!add.includes('applyNativeProjectionLocked('));
 const pending = method(store, '    private fun capturePendingNativeContinueWatchingDiscovery(');
-assert.match(pending, /return gateway\.withProjection\(gateway\.read\(\)\) \{\s*val captured = com\.vortx\.android\.integrations\.NativeProviderAccess\.capture\(/);
+assert.match(pending, /val current = gateway\.read\(\)\s*return gateway\.withProjection\(current\) \{\s*val captured = com\.vortx\.android\.integrations\.NativeProviderAccess\.capture\(/);
+assert.match(pending, /GROUPS\[0\]\) \{ current \}/);
+assert.match(pending, /if \(nativeGateway\?\.read\(\) == projection\) checkNotNull\(nativeGateway\)\.save\(edited, adding = false\) else null/);
+assert.match(pending, /readbackIsCurrent = \{ saved -> nativeGateway\?\.read\(\) == saved \}/);
+const reducer = method(store, '    private fun applyNativeProjectionLocked(');
+assert.match(reducer, /GROUPS\[0\]\) \{ value \}/);
+assert.match(reducer, /if \(nativeGateway\?\.read\(\) == value\) checkNotNull\(nativeGateway\)\.save\(edited, adding = false\) else null/);
+assert.match(reducer, /readbackIsCurrent = \{ saved -> nativeGateway\?\.read\(\) == saved \}/);
 assert.match(pending, /applyNativeProjection\(saved, forceSettings = true\)/);
-assert.match(snippets.withProjection, /return runtime\.owned\(owner\) \{[\s\S]*check\(admit\(runtime\) \{[\s\S]*session\(\) === runtime && projection\(runtime\.read\(\)\) == expected[\s\S]*result = runCatching\(action\)/);
+assert.match(snippets.withProjection, /return runtime\.withCurrentRead \{ current ->[\s\S]*check\(admit\(runtime\) \{[\s\S]*session\(\) === runtime && projection\(current\) == expected[\s\S]*result = runCatching\(action\)/);
+assert.equal((snippets.currentRead.match(/action\(read\(\)\)/g) ?? []).length, 1);
+assert.match(snippets.currentRead, /check\(!closed && !requiresRecovery\(\)\)/);
+assert.doesNotMatch(snippets.withProjection, /runtime\.read\(/);
 console.log('PASS_store_cw_before_session_pending_cw_capture_and_native_add_have_no_reducer_bypass');
 
 const app = read('VortXApplication.kt');
