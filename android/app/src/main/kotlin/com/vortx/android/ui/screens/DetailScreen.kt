@@ -93,6 +93,9 @@ import com.vortx.android.catalog.WatchAvailability
 import com.vortx.android.catalog.WatchProvidersClient
 import com.vortx.android.debrid.DebridKeys
 import com.vortx.android.engine.StreamRanking
+import com.vortx.android.sources.SourceQuickFilterIndex
+import com.vortx.android.sources.SourceQuickFilters
+import com.vortx.android.ui.components.SourceQuickFilterControls
 import com.vortx.android.library.WatchlistStore
 import com.vortx.android.model.Episode
 import com.vortx.android.model.MediaType
@@ -204,6 +207,7 @@ fun DetailScreen(
     val pinUi by viewModel.pinUi.collectAsStateWithLifecycle()
     val sourceSort by viewModel.sourceSort.collectAsStateWithLifecycle()
     val sourceAudioLanguageHint by viewModel.sourceAudioLanguageHint.collectAsStateWithLifecycle()
+    val cacheDisplayRevision by DebridKeys.credentialRevision.collectAsStateWithLifecycle()
     val watchlisted by viewModel.watchlisted.collectAsStateWithLifecycle()
     val randomEpisodePick by viewModel.randomEpisodePickState.collectAsStateWithLifecycle()
     // DET meta recovery: a non-`tt` catalog id nothing could resolve shows the terminal "Details
@@ -650,6 +654,8 @@ fun DetailScreen(
                         SurfaceCard(modifier = Modifier.padding(horizontal = VortXTheme.spacing.edge)) {
                             SourcesSection(
                                 state = streamsState,
+                                quickFilterScope = viewModel to selectedEpisodeId,
+                                currentCacheRevision = maxOf(cacheDisplayRevision, DebridKeys.credentialRevision.value),
                                 resolving = resolving,
                                 failure = (playback as? Playback.Failed)?.message,
                                 downloadNotice = downloadNotice,
@@ -2083,6 +2089,8 @@ private val sourceSortOptions: List<Pair<String, String>> = listOf(
 @Composable
 private fun SourcesSection(
     state: UiState<List<StreamGroup>>,
+    quickFilterScope: Any,
+    currentCacheRevision: Long,
     resolving: Boolean,
     failure: String?,
     downloadNotice: String?,
@@ -2111,6 +2119,7 @@ private fun SourcesSection(
     var qualityOpen by remember { mutableStateOf(false) }
     var qualityTier by remember { mutableStateOf<String?>(null) }
     var audioOpen by remember { mutableStateOf(false) }
+    var quickFilters by remember(quickFilterScope) { mutableStateOf(SourceQuickFilters()) }
     val clipboard = LocalClipboardManager.current
     // Compact source rows (SET-10, Apple `vortx.streams.compactLabels`). Read live off SharedPreferences so
     // returning from the Sources settings screen recomposes this and reflects the new density immediately;
@@ -2128,6 +2137,11 @@ private fun SourcesSection(
                 val total = groups.sumOf { it.streams.size }
                 val effectiveSourceFilter = sourceFilter?.takeIf { addon -> groups.any { it.addon == addon } }
                 val filteredGroups = groups.filter { effectiveSourceFilter == null || it.addon == effectiveSourceFilter }
+                val facetIndex = remember(filteredGroups) { SourceQuickFilterIndex(filteredGroups) }
+                val facetGroups = remember(facetIndex, quickFilters, currentCacheRevision) {
+                    facetIndex.matchingGroups(quickFilters, currentCacheRevision)
+                }
+                val facetCount = facetGroups.sumOf { it.streams.size }
                 val sourceAnchors = remember(groups.map { it.addon }) {
                     groups.associate { it.addon to BringIntoViewRequester() }
                 }
@@ -2278,7 +2292,22 @@ private fun SourcesSection(
                                 onClick = { clipboard.setText(AnnotatedString(links.joinToString("\n"))) },
                             )
                         }
+                        SourceQuickFilterControls(
+                            filters = quickFilters,
+                            onChange = {
+                                quickFilters = it
+                                pinMenuFor = null
+                                renderLimit = SOURCE_WINDOW_INITIAL
+                            },
+                            button = { label, selected, click -> Chip(label = label, selected = selected, onClick = click) },
+                        )
                     }
+                    Text(
+                        "List filters · $facetCount of ${filteredGroups.sumOf { it.streams.size }} sources. " +
+                            "Range/codec are provider-reported; cache Unknown means not confirmed. " +
+                            "Quality, Audio and Watch Now stay unchanged.",
+                        style = VortXTheme.type.label.copy(color = VortXTheme.colors.textSecondary),
+                    )
                 }
                 failure?.let {
                     Text(text = it, style = VortXTheme.type.body.copy(color = VortXTheme.colors.danger))
@@ -2290,13 +2319,15 @@ private fun SourcesSection(
                 }
                 if (total == 0) {
                     Text("No sources yet -- your add-ons may still be answering.", style = VortXTheme.type.body)
+                } else if (facetCount == 0) {
+                    Text("No sources match these list filters. Choose All or Reset list filters.", style = VortXTheme.type.body)
                 }
                 // DET-2 grouped, collapsible, windowed list. One tappable header per add-on (name + count +
                 // chevron, remembered collapsed set) with its rows beneath, filtered by the active chip. The
                 // window caps how many rows are built at once (a popular title returns thousands); "Show more"
                 // grows it. Collapsed groups emit a header only and spend no budget (Apple's `windowedPlan`).
                 // Groups + streams are already ranked best-first by the assembly; sort reorders WITHIN a group.
-                val filtered = filteredGroups
+                val filtered = facetGroups
                 var budget = renderLimit
                 var shownRows = 0
                 val anchoredAddons = HashSet<String>()

@@ -151,6 +151,10 @@ jobs:
           --tests com.vortx.android.player.PlaybackMetadataTest
           --tests com.vortx.android.player.SessionAudioPresetSessionTest
           --tests com.vortx.android.player.SessionAudioPresetSourceContractTest
+          --tests com.vortx.android.sources.SourceQuickFiltersTest
+          --tests com.vortx.android.sources.SourceQuickFilterCallerContractTest
+          --tests com.vortx.android.sources.SourceQuickFilterTrustTest
+          --tests com.vortx.android.sources.SourceQuickFilterRankingConservationTest
           --tests com.vortx.android.foryou.ForYouRowsModelTest
           --tests com.vortx.android.ui.profilepicker.ProfilePickerPresentationTest
           --tests com.vortx.android.ui.profilepicker.ProfilePickerArtworkStartupTest

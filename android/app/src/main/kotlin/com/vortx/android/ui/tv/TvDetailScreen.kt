@@ -279,6 +279,7 @@ private fun TvDetailContent(
     val pinUi by viewModel.pinUi.collectAsStateWithLifecycle()
     val sourceSort by viewModel.sourceSort.collectAsStateWithLifecycle()
     val sourceAudioLanguageHint by viewModel.sourceAudioLanguageHint.collectAsStateWithLifecycle()
+    val cacheDisplayRevision by com.vortx.android.debrid.DebridKeys.credentialRevision.collectAsStateWithLifecycle()
     val downloadNotice by viewModel.downloadNotice.collectAsStateWithLifecycle()
 
     // View-local Person overlay + TMDB cast enrichment, mirroring the phone [DetailScreen] (held in the view,
@@ -539,6 +540,8 @@ private fun TvDetailContent(
                 }
                 TvSourceList(
                     streamsState = streamsState,
+                    quickFilterScope = viewModel to selectedEpisodeId,
+                    currentCacheRevision = maxOf(cacheDisplayRevision, com.vortx.android.debrid.DebridKeys.credentialRevision.value),
                     best = viewModel.bestSource(),
                     resolving = playback is Playback.Resolving,
                     failure = (playback as? Playback.Failed)?.message,

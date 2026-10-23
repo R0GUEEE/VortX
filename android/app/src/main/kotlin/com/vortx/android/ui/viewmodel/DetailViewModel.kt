@@ -1347,6 +1347,7 @@ class DetailViewModel(
         if (!debrid.hasAnyResolver && !debrid.hasUsenetResolver) return
         val owner = debridKeys.ownerToken() ?: return
         val credentialRevision = debridKeys.currentCredentialRevision()
+        val cacheDisplayRevision = DebridKeys.credentialRevision.value
         val cacheGeneration = cacheCheckGate.begin()
         cacheCheckJob?.cancel()
         cacheCheckJob = viewModelScope.launch {
@@ -1364,7 +1365,8 @@ class DetailViewModel(
                 !sourceRequestFence.accepts(request, sourceSticky.currentProfileId()) ||
                 !cacheCheckGate.isCurrent(cacheGeneration) ||
                 !debridKeys.isCurrent(owner) ||
-                debridKeys.currentCredentialRevision() != credentialRevision
+                debridKeys.currentCredentialRevision() != credentialRevision ||
+                DebridKeys.credentialRevision.value != cacheDisplayRevision
             ) {
                 return@launch
             }
@@ -1382,14 +1384,17 @@ class DetailViewModel(
                 usenetUrls = cachedUsenetUrls,
             )
             // Badge + rank up any account-cached add-on torrent the add-on itself did not tag.
-            val decorated = decorateCached(raw, torrentServices.keys)
+            val decorated = com.vortx.android.sources.markAccountConfirmedCache(
+                decorateCached(raw, torrentServices.keys), torrentServices.keys, cacheDisplayRevision,
+            )
             if (
                 decorated !== raw &&
                 episodeId == _selectedEpisodeId.value &&
                 sourceRequestFence.accepts(request, sourceSticky.currentProfileId()) &&
                 cacheCheckGate.isCurrent(cacheGeneration) &&
                 debridKeys.isCurrent(owner) &&
-                debridKeys.currentCredentialRevision() == credentialRevision
+                debridKeys.currentCredentialRevision() == credentialRevision &&
+                DebridKeys.credentialRevision.value == cacheDisplayRevision
             ) {
                 sourceModel.setRawGroups(decorated)
             }
