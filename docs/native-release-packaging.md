@@ -11,7 +11,7 @@ independent review, full-build and artifact gates remain required before publica
 The checkout and post-checkout equality assertion in `release-tvos.yml`, `android.yml` and
 `android-release.yml`, plus Desktop's manifest and resolved lock, must select one identical,
 reviewed native source revision. Their current
-source contract is `2322e7feef3ba6c8feeae9bab764d595ff63617a`. Updating this pin does not establish
+source contract is `0c30f4782aee544a2b7e33169ad60d03630d4097`. Updating this pin does not establish
 private CI, fresh cross-platform SDK, app, signing or release acceptance; those gates must pass
 against the final combined public source before shipping. The Stremio comparison engine and Node
 runtime have been removed; native packages must still reject either payload if it reappears.

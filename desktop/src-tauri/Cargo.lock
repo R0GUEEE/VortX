@@ -2256,7 +2256,7 @@ dependencies = [
 [[package]]
 name = "librqbit"
 version = "8.1.1"
-source = "git+https://github.com/VortXTV/vortx-core?rev=2322e7feef3ba6c8feeae9bab764d595ff63617a#2322e7feef3ba6c8feeae9bab764d595ff63617a"
+source = "git+https://github.com/VortXTV/vortx-core?rev=0c30f4782aee544a2b7e33169ad60d03630d4097#0c30f4782aee544a2b7e33169ad60d03630d4097"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5092,7 +5092,7 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 [[package]]
 name = "vortx-archive"
 version = "0.0.1"
-source = "git+https://github.com/VortXTV/vortx-core?rev=2322e7feef3ba6c8feeae9bab764d595ff63617a#2322e7feef3ba6c8feeae9bab764d595ff63617a"
+source = "git+https://github.com/VortXTV/vortx-core?rev=0c30f4782aee544a2b7e33169ad60d03630d4097#0c30f4782aee544a2b7e33169ad60d03630d4097"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5108,7 +5108,7 @@ dependencies = [
 [[package]]
 name = "vortx-nntp"
 version = "0.0.1"
-source = "git+https://github.com/VortXTV/vortx-core?rev=2322e7feef3ba6c8feeae9bab764d595ff63617a#2322e7feef3ba6c8feeae9bab764d595ff63617a"
+source = "git+https://github.com/VortXTV/vortx-core?rev=0c30f4782aee544a2b7e33169ad60d03630d4097#0c30f4782aee544a2b7e33169ad60d03630d4097"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -5128,7 +5128,7 @@ dependencies = [
 [[package]]
 name = "vortx-nzb"
 version = "0.0.1"
-source = "git+https://github.com/VortXTV/vortx-core?rev=2322e7feef3ba6c8feeae9bab764d595ff63617a#2322e7feef3ba6c8feeae9bab764d595ff63617a"
+source = "git+https://github.com/VortXTV/vortx-core?rev=0c30f4782aee544a2b7e33169ad60d03630d4097#0c30f4782aee544a2b7e33169ad60d03630d4097"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -5137,7 +5137,7 @@ dependencies = [
 [[package]]
 name = "vortx-streaming-server"
 version = "0.0.1"
-source = "git+https://github.com/VortXTV/vortx-core?rev=2322e7feef3ba6c8feeae9bab764d595ff63617a#2322e7feef3ba6c8feeae9bab764d595ff63617a"
+source = "git+https://github.com/VortXTV/vortx-core?rev=0c30f4782aee544a2b7e33169ad60d03630d4097#0c30f4782aee544a2b7e33169ad60d03630d4097"
 dependencies = [
  "anyhow",
  "async-trait",

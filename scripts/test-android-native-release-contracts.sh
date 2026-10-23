@@ -11,7 +11,7 @@ readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 readonly GRADLE_BUILD="$REPO_ROOT/android/app/build.gradle.kts"
 readonly ANDROID_CI_WF="$REPO_ROOT/.github/workflows/android.yml"
 readonly ANDROID_RELEASE_WF="$REPO_ROOT/.github/workflows/android-release.yml"
-readonly REVIEWED_NATIVE_SHA='2322e7feef3ba6c8feeae9bab764d595ff63617a'
+readonly REVIEWED_NATIVE_SHA='0c30f4782aee544a2b7e33169ad60d03630d4097'
 readonly APP_SOURCE="$REPO_ROOT/android/app/src/main/kotlin/com/vortx/android/VortXApplication.kt"
 readonly KOTLIN_ROOT="$REPO_ROOT/android/app/src/main/kotlin"
 readonly RESOURCE_BRIDGE="$REPO_ROOT/android/app/src/main/kotlin/com/vortx/android/engine/VortxResourceBridge.kt"
@@ -100,7 +100,7 @@ require_literal "artifact verifier checks the resource-host JNI ABI" 'verify-nat
 require_literal "artifact verifier compares staged and packaged bytes after strip normalization" '"$strip" --strip-debug --strip-unneeded "$normalized_package"' "$REPO_ROOT/scripts/verify-native-android-artifacts.sh"
 require_literal "artifact verifier records normalized packaged hashes with exact source and features" 'native-engine source=%s features=jni,server,resource-host' "$REPO_ROOT/scripts/verify-native-android-artifacts.sh"
 require_literal "resource-host ABI helper requires the native host surface" 'nativeResourceHostAbiVersion' "$REPO_ROOT/scripts/verify-native-engine-abi.sh"
-require_literal "normal Android source selects owner-history ABI" '2322e7feef3ba6c8feeae9bab764d595ff63617a) abi_mode=owner-history ;;' "$REPO_ROOT/scripts/verify-native-android-artifacts.sh"
+require_literal "normal Android source selects owner-history ABI" '0c30f4782aee544a2b7e33169ad60d03630d4097) abi_mode=owner-history ;;' "$REPO_ROOT/scripts/verify-native-android-artifacts.sh"
 require_literal "historical beta2 keeps resource-host ABI" 'af29b22e4c45740a1f5b6cb415b81f8430f55b9f) abi_mode=resource-host ;;' "$REPO_ROOT/scripts/verify-native-android-artifacts.sh"
 require_literal "unadmitted Android source fails closed" 'native-only ABI mode has no admitted source revision' "$REPO_ROOT/scripts/verify-native-android-artifacts.sh"
 require_literal "all shipped ABI checks invoke the source-selected mode" 'android "$file" "$abi_mode"' "$REPO_ROOT/scripts/verify-native-android-artifacts.sh"

@@ -32,7 +32,7 @@ strip="${STRIP:-}"
 # Normal source must prove its added owner-history JNI ABI. Explicit beta2 interpretation
 # retains its real old surface; an arbitrary 40-character string is not an admitted mode.
 case "$source_sha" in
-    2322e7feef3ba6c8feeae9bab764d595ff63617a) abi_mode=owner-history ;;
+    0c30f4782aee544a2b7e33169ad60d03630d4097) abi_mode=owner-history ;;
     a3169f338f3f05da4ad3adb39a1e557c3ddcac33) abi_mode=owner-history ;;
     af29b22e4c45740a1f5b6cb415b81f8430f55b9f) abi_mode=resource-host ;;
     *) echo "native-only ABI mode has no admitted source revision" >&2; exit 1 ;;

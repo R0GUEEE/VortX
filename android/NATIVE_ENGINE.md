@@ -37,7 +37,7 @@ fresh staged bytes after the same pinned strip normalization. There is no two-en
 shipping path. Historical source-to-ABI admissions remain explicit for older packages.
 
 Both Android workflows now pin `VortXTV/vortx-core` to
-`2322e7feef3ba6c8feeae9bab764d595ff63617a`, matching Apple and Desktop's manifest/lock.
+`0c30f4782aee544a2b7e33169ad60d03630d4097`, matching Apple and Desktop's manifest/lock.
 They no longer fetch or build `stremiox-core`. This exact source selection does not prove that the
 latest host's complete native server capability contract is in a freshly built,
 signed Android artifact. Compatible real SDK slices, successful CI/artifact
