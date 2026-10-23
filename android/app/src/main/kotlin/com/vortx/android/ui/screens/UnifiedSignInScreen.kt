@@ -62,6 +62,7 @@ fun UnifiedSignInScreen(
                     "end-to-end encrypted.",
             )
             VortXAccountContent(vortxViewModel)
+            DiagnosticLogAction()
 
             SectionHeader(
                 title = "Stremio",

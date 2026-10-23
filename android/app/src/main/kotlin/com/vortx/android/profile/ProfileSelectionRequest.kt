@@ -9,6 +9,7 @@ class ProfileSelectionRequest internal constructor(
     private val stillSelected: () -> Boolean,
     private val bind: (String?) -> Boolean = { false },
     private val completed: () -> Unit = {},
+    private val diagnosticAdmission: () -> Boolean = { false },
 ) {
     internal var expectedEmail: String? = expectedEmail
         private set
@@ -22,6 +23,8 @@ class ProfileSelectionRequest internal constructor(
         return changed
     }
     internal fun complete() { requireCurrent(); completed() }
+    // Sharing a scrubbed recovery log must not require a healthy native runtime.
+    internal fun allowsDiagnosticExport(): Boolean = diagnosticAdmission()
 
     // Never include SwitchAccount's credential in diagnostics or Compose keys.
     override fun toString(): String = "ProfileSelectionRequest"
@@ -50,5 +53,9 @@ fun captureProfileSelection(
                 generation = store.selectionRevision
                 true
             } else false
-        }, completed = { store.pickedThisLaunch = true; store.selectionPending = false })
+        }, completed = { store.pickedThisLaunch = true; store.selectionPending = false },
+        diagnosticAdmission = { ContinueWatchingOwnerGate.serialized { currentRevision ->
+            currentRevision == revision && store.selectionRevision == generation &&
+                store.profiles === roster && store.activeID == selected.id
+        } })
 }

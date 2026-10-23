@@ -1,8 +1,5 @@
 package com.vortx.android.ui.screens
 
-import android.content.ActivityNotFoundException
-import android.content.Context
-import android.content.Intent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -29,14 +26,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
-import androidx.core.content.FileProvider
 import com.vortx.android.diagnostics.DiagnosticsLog
 import com.vortx.android.ui.theme.VortXIcons
 import com.vortx.android.ui.theme.VortXTheme
-import java.io.File
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /// Settings > Diagnostics: the "Diagnostic logging" toggle (Apple's key) and "Save or share log", the Android
 /// counterpart of the iPhone/iPad diagnostics rows. The shared file is a staged copy every line of which was
@@ -88,9 +81,10 @@ fun DiagnosticsSettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier)
                     enabled = !busy,
                     onClick = {
                         busy = true
+                        status = null
                         scope.launch {
-                            status = shareDiagnosticLog(context)
-                            busy = false
+                            try { status = shareDiagnosticLog(context).message }
+                            finally { busy = false }
                         }
                     },
                 )
@@ -99,28 +93,6 @@ fun DiagnosticsSettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier)
                 Text(message, style = VortXTheme.type.label.copy(color = VortXTheme.colors.textSecondary))
             }
         }
-    }
-}
-
-/// Stage the scrubbed export and open the share sheet; returns a status line when nothing could be shared.
-private suspend fun shareDiagnosticLog(context: Context): String? {
-    val file: File? = withContext(Dispatchers.IO) {
-        if (DiagnosticsLog.hasContent()) DiagnosticsLog.stageExport(context) else null
-    }
-    if (file == null) return "No diagnostic log yet. Turn on Diagnostic logging, reproduce the issue, then share the log."
-    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-    val send = Intent(Intent.ACTION_SEND)
-        .setType("text/plain")
-        .putExtra(Intent.EXTRA_STREAM, uri)
-        .putExtra(Intent.EXTRA_SUBJECT, "VortX diagnostic log")
-        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    return try {
-        context.startActivity(
-            Intent.createChooser(send, "Share diagnostic log").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
-        null
-    } catch (_: ActivityNotFoundException) {
-        "No app on this device can receive the log."
     }
 }
 

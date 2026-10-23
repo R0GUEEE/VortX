@@ -329,6 +329,10 @@ fun WhosWatchingScreen(
                 )
             }
             if (!layout.isPhone) Spacer(Modifier.weight(1f))
+            // Protected rosters keep export behind the existing profile PIN/selection route.
+            if (pinTarget == null && roster.none { it.hasPin }) DiagnosticLogAction(mayShare = {
+                pinTarget == null && store.profiles.none { it.hasPin }
+            })
         }
 
         pinTarget?.let { target ->
