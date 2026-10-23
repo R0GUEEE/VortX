@@ -18,6 +18,16 @@
       "screenshotURLs": [],
       "versions": [
         {
+          "version": "0.5.5",
+          "buildVersion": "274",
+          "date": "2026-10-17",
+          "localizedDescription": "0.5.5: stable legacy-conversion fingerprints, lighter fallback polling with live updates retained, restored hero trailers, and improved episode positioning and watched-card dimming.",
+          "downloadURL": "https://github.com/VortXTV/VortX/releases/download/v0.5.5/VortX-iOS-v0.5.5-ci.ipa",
+          "size": 52081677,
+          "sha256": "251d758ddca153760d1fc1d18e3332318a3a32de3a1435a88c63dfa88b883faf",
+          "minOSVersion": "16.0"
+        },
+        {
           "version": "0.5.0",
           "buildVersion": "260",
           "date": "2026-10-09",
@@ -86,16 +96,6 @@
           "size": 65529125,
           "sha256": "7730fd8489c109e413bad11119f9f5b96ebee7b8bbb13b9f959d44c2b4e0c31d",
           "minOSVersion": "16.0"
-        },
-        {
-          "version": "0.4.0",
-          "buildVersion": "247",
-          "date": "2026-09-11",
-          "localizedDescription": "Apple playback, source controls and episode artwork repairs; Android audio, remote, Discover and title-relation improvements; profile-specific collection visibility.",
-          "downloadURL": "https://github.com/VortXTV/VortX/releases/download/v0.4.0-beta.14/VortX-iOS-v0.4.0-beta.14-ci.ipa",
-          "size": 65500086,
-          "sha256": "bc5d4af376778faea57e8d56983df7a1cd1954c00be0c2ea42af7fe1cc5d760b",
-          "minOSVersion": "16.0"
         }
       ]
     },
@@ -110,6 +110,16 @@
       "category": "entertainment",
       "screenshotURLs": [],
       "versions": [
+        {
+          "version": "0.5.5",
+          "buildVersion": "274",
+          "date": "2026-10-17",
+          "localizedDescription": "0.5.5: stable legacy-conversion fingerprints, lighter fallback polling with live updates retained, restored hero trailers, and improved episode positioning and watched-card dimming.",
+          "downloadURL": "https://github.com/VortXTV/VortX/releases/download/v0.5.5/VortX-tvOS-v0.5.5-ci.ipa",
+          "size": 50690612,
+          "sha256": "7c3a8e37fa5a22d0cf8218afef0a8ea3205d6ced40dfa7aa949dfc463b1edd6b",
+          "minOSVersion": "18.0"
+        },
         {
           "version": "0.5.0",
           "buildVersion": "260",
@@ -178,16 +188,6 @@
           "downloadURL": "https://github.com/VortXTV/VortX/releases/download/v0.4.0-beta.15/VortX-tvOS-v0.4.0-beta.15-ci.ipa",
           "size": 65096502,
           "sha256": "8cd42c3b1f48290c42090e6b771712e30e97017b4374cb8cd6b6beeb7ac57585",
-          "minOSVersion": "18.0"
-        },
-        {
-          "version": "0.4.0",
-          "buildVersion": "247",
-          "date": "2026-09-11",
-          "localizedDescription": "Apple playback, source controls and episode artwork repairs; Android audio, remote, Discover and title-relation improvements; profile-specific collection visibility.",
-          "downloadURL": "https://github.com/VortXTV/VortX/releases/download/v0.4.0-beta.14/VortX-tvOS-v0.4.0-beta.14-ci.ipa",
-          "size": 65060961,
-          "sha256": "bade529bf77d30b5dbf769680769a0c2925e5f9f1679d21fb8a0a9ec1128318c",
           "minOSVersion": "18.0"
         }
       ]

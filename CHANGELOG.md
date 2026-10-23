@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to VortX, newest first. VortX is Apple TV first, with an iPhone and iPad build alongside it. Dates are when each version was published.
+Notable VortX changes, newest first. VortX is Apple TV first, with iPhone/iPad, Mac and Android packages. Dated entries identify publication dates; historical draft entries retain their original candidate status.
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
@@ -59,10 +59,10 @@ The main apps are not yet fully migrated to Swift 6, some component upgrades rem
 
 ## 0.5.6 beta 2 - Recovery, safer profile changes and less repeated work
 
-Build **276** across Apple and Android. This is an early prerelease of the integrated
-audit repairs, not completion of the full audit or the Apple Swift 6 migration.
-Package and publication checks are still required before this candidate is released.
-The earlier beta 1 candidate was not published; saved-data safety checks remain intact.
+Build **276** across Apple and Android. Published as [v0.5.6-beta.2](https://github.com/VortXTV/VortX/releases/tag/v0.5.6-beta.2),
+with four Apple packages, three Android packages, checksums and hosted provenance. It is an
+incremental audit repair, not completion of the full audit or the Apple Swift 6 migration.
+The earlier beta1 candidate was not published; saved-data safety checks remain intact.
 
 ### Fixed and improved
 

@@ -43,9 +43,19 @@ and player commands, and only to the `https://web.vortx.tv` origin.
 
 ## Add-ons
 
-Cinemeta (catalogs + metadata) is installed by default, so Home and Detail work out of the box. To get
-playable streams, open **Add-ons** and install a stream add-on by its `manifest.json` URL. The list is
-stored in the browser (`localStorage`); there is no account on the web client.
+Cinemeta supplies default catalogs/metadata. To get playable streams, open **Add-ons** and install
+a compatible stream add-on by its `manifest.json` URL. Browser storage also retains local state.
+
+## Account and sync
+
+Use the client locally, or sign into a VortX account with its encrypted account vault. Sign-in and
+page load pull supported account add-ons, library, Continue Watching, profiles, settings and metadata
+keys. Supported settings, add-on and active-profile watch-progress changes made here sync back.
+This does not promise continuous realtime updates without a reload, identical native-player
+behavior or synchronization of every device-local field.
+
+Never share browser storage, an account backup or an unredacted network export in a public issue.
+See [Help and diagnostics](../docs/SUPPORT.md).
 
 ## Develop
 

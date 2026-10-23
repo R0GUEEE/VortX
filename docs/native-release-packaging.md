@@ -15,6 +15,9 @@ private CI, fresh cross-platform SDK, app, signing or release acceptance; those 
 against the final combined public source before shipping. The Stremio comparison engine and Node
 runtime have been removed; native packages must still reject either payload if it reappears.
 
+For a downloaded release, read its pin from that exact source tag and immutable handoff rather
+than assuming a moving documentation page describes every older package.
+
 Apple shipping and secretless validation use the same fresh player archive:
 
 - URL: `https://github.com/VortXTV/VortX/releases/download/vendor-mpvkit-dvfel-ffmpeg9-20261021/mpvkit-dvfel-ffmpeg-9.0.2-candidate.zip`
@@ -32,8 +35,10 @@ The tagless `android.yml` candidate supplies Full and Play debug APKs plus, when
 provisioned, a production-signed Full APK and Full AAB. It does not replace `android-release.yml`,
 which binds to an existing release tag and verifies production-signed Full/Play universal APKs,
 the Play AAB, normalized native payloads, signer, version, GPL boundary and retained provenance
-before draft attachment. Android cannot publish; the Apple coordinator retains the cross-platform
-draft/feed/publication gates.
+before draft attachment. The Android lane does not publish on its own. Normal coordinated releases
+retain cross-platform draft/feed/publication gates. Separately reviewed direct-download beta
+workflows bind their own immutable handoffs and final asset set without automatically changing
+stable feeds. See [Release artifacts](RELEASE-ARTIFACTS.md) for the current published layout.
 
 ## Apple
 
@@ -69,8 +74,15 @@ The protected Apple workflow retains `native_only` for dispatch compatibility an
 be true. Push events also use the native selection; explicit false fails before a build. Native
 builds use the pinned reviewed MPV archive and SHA-256; an optional override must supply both and
 still passes the content gate. ABI, aggregate deployment/OSO, simulator launch/dSYM, signing,
-immutable handoff, feed and draft publication gates continue to run. Input, app and final package
-receipts travel in the immutable app handoff. The coordinator retains publication authority.
+immutable handoff and the applicable distribution gates continue to run. Input, app and final package
+receipts travel in the immutable app handoff. Original receipt values, including an empty dispatch
+release-tag value, remain unchanged; a separate final manifest must not relabel that receipt.
+
+For direct-download betas, an accepted build and a successful prepare step are still not publication.
+Review the actual final provenance before attachment, verify the complete draft by content, then
+verify unauthenticated tag-bound public downloads after publication. A historical failed verifier
+or release-event check stays a failure in the record. Do not reuse packages from another source/tag
+or weaken guards to turn it green.
 
 ## Android
 

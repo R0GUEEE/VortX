@@ -34,9 +34,12 @@ added later; until then this manual path is the way to sign.
 - Keep each pull request focused on one thing.
 - Include before and after screenshots for anything visual. The existing pull
   requests set the pattern.
-- Build against the oldest practical SDK. The CI runners lag the newest Xcode,
-  and newer-only APIs have failed CI there before. The CI run on your pull
-  request will tell you if you hit this.
+- Use the SDK/toolchain selected by the relevant workflow and retain the declared
+  minimum OS versions. Newer APIs need availability handling for supported systems.
+- State what you actually checked. A fixture test is not a full app build or a
+  physical-device playback/sync result. Never include credentials or raw private logs.
+- Keep public updates in the project's voice, without tool-brand signatures or
+  generated co-author trailers. Preserve real contributor and third-party credits.
 
 ### Commit messages
 
@@ -67,12 +70,12 @@ colons, periods, or parentheses instead.
 
 ## The Xcode project is generated
 
-`app/project.yml` is the single source of truth for the Xcode project.
-`VortX.xcodeproj` is generated from it and is gitignored, so never edit the
-`.xcodeproj` directly. After changing `project.yml`, regenerate the project:
+`app/project.yml` is the retained project specification. The current native shipping
+path derives `app/.native-project.yml` through `scripts/generate-native-apple-project.rb`
+with explicit engine/player inputs. Generated `.xcodeproj` files are not the place to
+make source changes.
 
-```bash
-cd app && xcodegen generate
-```
-
-Commit the change to `project.yml`, not to the generated project.
+Commit the relevant specification/generator change, not a generated project. Read
+[Build and source boundaries](docs/BUILDING.md) before attempting a full build: the
+shipping engine requires private dependencies, and the old Node/server setup is not
+the current native release recipe.

@@ -1,5 +1,7 @@
 # VortX Audit Remediation Live Log
 
+Historical operational record. Route labels in this display copy are generalized; original wording remains in Git history. Test results, review verdicts, failures and commit identities are unchanged. This is not current release authority.
+
 ## 2026-08-26 - Programme opened
 
 - CEO froze beta publication and ordered a full audit-remediation programme.
@@ -29,27 +31,27 @@
 
 ## 2026-08-26 - Wave 1 staffing correction
 
-- `[W1-STAFFING-01]` The captain initially spawned the five Wave 1 seats as inherited gpt-5.6-sol subagents despite the CEO ordering Ox Alpha. The CEO caught the deviation; active GPT turns were interrupted, and all five Wave 1 seats were restarted under explicit provider/model opencode-go-2/ox-alpha-free.
-- That route exposes no selectable reasoning-effort tier, so its sole/default mode is being used with maximum-rigor briefs in place of an effort dial. On route failure the fallback order is DeepSeek V4 Flash Vision, then DeepSeek V4 Pro, then Qwen or other configured providers.
+- `[W1-STAFFING-01]` The captain initially spawned the five Wave 1 seats as inherited initial-route subagents despite the CEO ordering the primary route. The CEO caught the deviation; active initial-route turns were interrupted, and all five Wave 1 seats were restarted under explicit provider/model primary-review-route.
+- That route exposes no selectable reasoning-effort tier, so its sole/default mode is being used with maximum-rigor briefs in place of an effort dial. On route failure the fallback order is the first fallback route, then the second fallback route, then later fallback routes or other configured providers.
 - Release remains frozen. Nothing has merged.
 
-## 2026-08-26 - Ox Alpha route failure on the Wave 1 mpv lane
+## 2026-08-26 - Primary route failure on the Wave 1 mpv lane
 
-- `[W1-B-ROUTE-FAIL-01]` The Ox Alpha seat mpv-reviewer failed before producing any verdict on the mpv terminal-state review (t2). No code changed and no result was counted from that seat.
-- The captain atomically reassigned t2 to opencode-go-2/deepseek-v4-flash-vision-exp, the first entry in the CEO fallback order, as attempt 2.
-- All other Ox Alpha lanes remain active. Release remains frozen. Nothing has merged.
+- `[W1-B-ROUTE-FAIL-01]` The primary-route seat mpv-reviewer failed before producing any verdict on the mpv terminal-state review (t2). No code changed and no result was counted from that seat.
+- The captain atomically reassigned t2 to fallback-review-route, the first entry in the CEO fallback order, as attempt 2.
+- All other primary-route lanes remain active. Release remains frozen. Nothing has merged.
 
 ## 2026-08-26 - Exo lane route failure and compile OOM
 
-- `[W1-C-ROUTE-FAIL-01]` The Ox Alpha seat exo-reviewer also failed before producing any verdict on the ExoPlayer state-machine review (t3). No code changed and no result was counted from that seat.
-- The captain atomically reassigned t3 to opencode-go-2/deepseek-v4-flash-vision-exp per the CEO fallback order as attempt 2.
+- `[W1-C-ROUTE-FAIL-01]` The primary-route seat exo-reviewer also failed before producing any verdict on the ExoPlayer state-machine review (t3). No code changed and no result was counted from that seat.
+- The captain atomically reassigned t3 to fallback-review-route per the CEO fallback order as attempt 2.
 - `[W1-C-OOM-01]` The captain-run focused Exo policy tests returned BUILD SUCCESSFUL. A separate compile invocation then failed after 1h25m with a Kotlin compiler out-of-memory error in the unrelated LocalizedMetadataStore.request path. This is classified as an environment-capacity failure pending a controlled higher-memory rerun, not a code verdict.
 - `[W1-C-OOM-RCPT-01]` Verification receipt: the captain Exo focused test task passed BUILD SUCCESSFUL; the subsequent standalone compile failed after 1h25m with the exact Kotlin compiler error `Not enough memory to run compilation` in the unrelated LocalizedMetadataStore.request path. Environment-capacity failure pending a controlled higher-memory rerun, not a code verdict.
 - Release remains frozen. Nothing has merged.
 
 ## 2026-08-26 - W1-C approved and integrated
 
-- `[W1-C-APPROVE-01]` The fallback seat exo-reviewer-v4flash (DeepSeek V4 Flash Vision) independently APPROVED W1-C at author HEAD `27de1e64`: the full FullDebug suite of 911 tests ran green and the Play production compile ran green.
+- `[W1-C-APPROVE-01]` The fallback seat fallback-exo-reviewer (the first fallback route) independently APPROVED W1-C at author HEAD `27de1e64`: the full FullDebug suite of 911 tests ran green and the Play production compile ran green.
 - The captain cherry-picked the equivalent patch onto main as `1c7504212`. Integrated FullDebug compile plus focused policy test returned BUILD SUCCESSFUL in 69s, and main was pushed.
 - The clean lane worktree was retired after identical patch-hash verification between author HEAD and the integration commit.
 - `[W1-C-PREDEFECT-01]` A pre-existing Play UNIT-TEST source-set defect surfaced: shared MpvPlayerHttpPropertiesTest references full-only MpvConfig/MpvPlayer. It is byte-identical to parent, so it is not a W1-C regression; it is scheduled for the CI/test wave.
@@ -58,7 +60,7 @@
 
 ## 2026-08-26 - W1-A approved and integrated
 
-- `[W1-A-APPROVE-01]` The Ox Alpha signing-reviewer seat independently APPROVED W1-A at author HEAD `31a08bb4` (lineage `acd7480a5` -> `97bab3925` -> `9cc87db43` -> `31a08bb4`, all authored as Mamaclapper; the diff is confined to REL-01 release-signing ownership: `.github/workflows/android-release.yml`, `android/app/build.gradle.kts`, and the two new signing scripts `scripts/test-android-release-signing.sh` and `scripts/verify-android-release-signing.sh`).
+- `[W1-A-APPROVE-01]` The primary-route signing-reviewer seat independently APPROVED W1-A at author HEAD `31a08bb4` (lineage `acd7480a5` -> `97bab3925` -> `9cc87db43` -> `31a08bb4`, all authored as Mamaclapper; the diff is confined to REL-01 release-signing ownership: `.github/workflows/android-release.yml`, `android/app/build.gradle.kts`, and the two new signing scripts `scripts/test-android-release-signing.sh` and `scripts/verify-android-release-signing.sh`).
 - The captain integrated the equivalent patch as a three-commit series onto main: `bbe1fbba4` (Harden Android release signing), `f1bc51243` (Reject partially unsigned Android bundles), and `5233a55d4` (Require strict AAB verification success), then pushed main.
 - Captain-run gates all pass: the system Bash full signing suite ran 10 consecutive passes; the missing-secret release Gradle invocation fails closed; the secretless debug config passes; the pinned signer SHA-256 fingerprint `90DD...E0006A` matches the recovered production certificate; and the clean lane worktree was retired after the branch series and the main series diff hashes matched.
 - `[W1-A-HOSTILE-TAG-01]` Recorded as a later release-orchestration hardening item, not a Wave 1 defect: `gh` hostile-tag option parsing at the release gate. Backlog placeholder; no lane action required now.
@@ -66,7 +68,7 @@
 
 ## 2026-08-26 - W1-E approved and integrated
 
-- `[W1-E-APPROVE-01]` The Ox Alpha author HEAD for W1-E is `bbdf7c3d4` (parent `26a167998`, `fix(apple): drop extensionless download probes, guard drain reentry`). The independent Ox Alpha apple-download-reviewer seat APPROVED the revised Apple download scheduler (t10).
+- `[W1-E-APPROVE-01]` The primary-route author HEAD for W1-E is `bbdf7c3d4` (parent `26a167998`, `fix(apple): drop extensionless download probes, guard drain reentry`). The independent primary-route apple-download-reviewer seat APPROVED the revised Apple download scheduler (t10).
 - The captain integrated the final safe tree as a single squashed main commit `43ac0bc60` (`fix(apple): serialize download scheduler starts`), so the earlier unmerged intermediate probe commit (`26a167998`, the rejected `W1-E-REJECT-01` author) never appears on main.
 - Contract gates all pass: scheduler, cross-platform, HLS, failure-classifier, and parse contracts.
 - Builds pass on tvOS VortXTV, iOS VortXiOSNative, and macOS VortXMac arm64.
@@ -76,8 +78,8 @@
 
 ## 2026-08-26 - W1-B approved and integrated
 
-- `[W1-B-APPROVE-01]` The initial W1-B heuristic commit was blocked by the DeepSeek review (t2), because the native payload was unreachable at runtime and an eof-reached generation race existed. The final Ox Alpha seat (t14) `:mpv-seam` at author HEAD `bf109f5cf` was source-built, removed the heuristic, and exposed the real `mpv_event_end_file` reason/error.
-- The independent Ox Alpha seat (t17) APPROVED with upstream/source/header/license provenance, a clean four-ABI native rebuild, and JNI descriptor/export/DT_NEEDED/dex/APK proof.
+- `[W1-B-APPROVE-01]` The initial W1-B heuristic commit was blocked by the independent review (t2), because the native payload was unreachable at runtime and an eof-reached generation race existed. The final primary-route seat (t14) `:mpv-seam` at author HEAD `bf109f5cf` was source-built, removed the heuristic, and exposed the real `mpv_event_end_file` reason/error.
+- The independent primary-route seat (t17) APPROVED with upstream/source/header/license provenance, a clean four-ABI native rebuild, and JNI descriptor/export/DT_NEEDED/dex/APK proof.
 - `[W1-B-PROVENANCE-01]` The t18 provenance/NDK follow-up commit `9d8b3d67d` corrected the `v1.0.0` tag target to `fcf6745`, produced a complete delta inventory, and pinned NDK `27.2.12479018`.
 - The t19 review APPROVED.
 - The captain integrated only the final safe tree as a squashed main commit `049fe3a12` (`feat(android): carry native mpv terminal reasons`), avoiding the rejected intermediate commit. The integrated clean native rebuild, focused tests, Full+Play release compile, and Full+Play debug assembly all passed (163 tasks / 12m34s).
@@ -107,7 +109,7 @@
 ## 2026-08-26 - Wave 2 opened
 
 - `[W2-OPEN-01]` The CEO ordered the programme to continue without stopping: the goal was resumed by direct directive immediately after Wave 1 exit, and Wave 2 starts from the pushed exit commit `611dedaa3` (`docs: record W1-D approval and Wave 1 exit`, main in sync with origin/main).
-- `[W2-TEAM-01]` The Wave 2 team `vortx-ox-alpha-wave2` staffs five seats on Ox Alpha Free (opencode-go-2/ox-alpha-free): release-engineer, updater-engineer, backup-engineer, edge-auth-engineer, plus a permanent audit programme log and mistakes secretary.
+- `[W2-TEAM-01]` The Wave 2 team `wave-2-review-team` staffs five seats on the primary route (primary-review-route): release-engineer, updater-engineer, backup-engineer, edge-auth-engineer, plus a permanent audit programme log and mistakes secretary.
 - `[W2-LANES-01]` Four isolated implementation worktrees are registered at exact baseline `611dedaa3`: `audit/w2-release-orchestration`, `audit/w2-updater-trust`, `audit/w2-backup-envelope`, and `audit/w2-edge-auth`.
 - `[W2-FINDINGS-01]` Finding allocation by seat:
   - release-engineer: REL-02 (flavor naming) and REL-03 (secretless pull-request validation lanes).
@@ -121,20 +123,20 @@
 ## 2026-08-26 - Wave 2 release lane seat failure and replacement
 
 - `[W2-SEAT-FAIL-01]` The initial Wave 2 release-engineer seat claimed t1 (Harden release orchestration) but remained idle after the claim and repeated wakes, producing no work and no verdict. No code changed and no result was counted from that seat.
-- `[W2-SEAT-SWAP-01]` The captain removed the idle seat atomically, revoked and requeued the t1 attempt, and the replacement Ox Alpha seat release-engineer-2 (same opencode-go-2/ox-alpha-free route) claimed t1 as attempt 2.
+- `[W2-SEAT-SWAP-01]` The captain removed the idle seat atomically, revoked and requeued the t1 attempt, and the replacement primary-route seat release-engineer-2 (same primary review route) claimed t1 as attempt 2.
 - This is classified as a route/seat execution failure only: nothing about the REL-02/REL-03 findings or any code is implicated, and the release lane restarts clean at exact baseline `611dedaa3`.
 - Release remains frozen. Nothing has merged.
 
 ## 2026-08-26 - Correction: release lane seat removal was a manager misdiagnosis
 
-- `[W2-SEAT-CORRECTION-01]` The `[W2-SEAT-FAIL-01]` classification is corrected: team status showed four other members working while the fifth seat sat idle, so the likely cause of the initial seat's idleness was the live concurrency cap, not an Ox Alpha seat or route failure. The captain removed a healthy queued seat without proving any route failure.
+- `[W2-SEAT-CORRECTION-01]` The `[W2-SEAT-FAIL-01]` classification is corrected: team status showed four other members working while the fifth seat sat idle, so the likely cause of the initial seat's idleness was the live concurrency cap, not a primary-route seat or route failure. The captain removed a healthy queued seat without proving any route failure.
 - The mistake is logged on the manager side as `[MIS-W2-SEAT-MISDIAG-01]`. No code or result was lost: the removed seat had produced nothing, and t1 remains with release-engineer-2 at attempt 2.
 - Release remains frozen. Nothing has merged.
 
 ## 2026-08-26 - Wave 2 scope expansion: Android appcast metadata
 
 - `[W2-APPCAST-01]` While scoping SEC-01 production completeness, the captain verified the live vortx-appcast worker (`a45c52a`, the update-manifest Worker emitting `appcast.json` and `vortx-altstore.json` from GitHub Releases) emits only Apple platform artifacts and no Android size or SHA-256 metadata. SEC-01 requires the signed feed to carry artifact size and SHA-256 for the updater to verify before installation, so without this work the SEC-01 fix would be incomplete in production.
-- `[W2-APPCAST-02]` Wave 2 scope was therefore expanded across repositories: a registered isolated worktree `audit/w2-android-metadata` was cut in the canonical `vortx-appcast` repository at exact baseline `79caab5`, owned by the Ox Alpha seat appcast-engineer running t10 (Publish Android appcast metadata), with independent review by the dedicated Ox Alpha seat appcast-reviewer in t11.
+- `[W2-APPCAST-02]` Wave 2 scope was therefore expanded across repositories: a registered isolated worktree `audit/w2-android-metadata` was cut in the canonical `vortx-appcast` repository at exact baseline `79caab5`, owned by the primary-route seat appcast-engineer running t10 (Publish Android appcast metadata), with independent review by the dedicated primary-route seat appcast-reviewer in t11.
 - `[W2-APPCAST-03]` Boundaries: this lane publishes feed metadata only. There is no deploy and no release, and the VortX release freeze is unchanged.
 - Release remains frozen. Nothing has merged.
 
@@ -154,7 +156,7 @@
 
 ## 2026-08-26 - Wave 2 scope record for t12
 
-- `[W2-T12-SCOPE-01]` Appcast lane: the captain verified the live `vortx-appcast` worker emits only Apple entries and none of the Android install URL, artifact size, or SHA-256 metadata that SEC-01's signed-feed verification consumes. The registered cross-repo worktree `audit/w2-android-metadata` stands at exact baseline `79caab5`, with the Ox Alpha seat appcast-engineer implementing through t10 and independent review by the appcast-reviewer seat in t11. This lane publishes feed metadata only: no deploy and no release. This entry consolidates `[W2-APPCAST-01]` through `[W2-APPCAST-03]` and records the missing-field set in full, including the install URL omitted from the earlier wording.
+- `[W2-T12-SCOPE-01]` Appcast lane: the captain verified the live `vortx-appcast` worker emits only Apple entries and none of the Android install URL, artifact size, or SHA-256 metadata that SEC-01's signed-feed verification consumes. The registered cross-repo worktree `audit/w2-android-metadata` stands at exact baseline `79caab5`, with the primary-route seat appcast-engineer implementing through t10 and independent review by the appcast-reviewer seat in t11. This lane publishes feed metadata only: no deploy and no release. This entry consolidates `[W2-APPCAST-01]` through `[W2-APPCAST-03]` and records the missing-field set in full, including the install URL omitted from the earlier wording.
 - `[W2-T12-SCOPE-02]` SEC-05 server scope: copied edge verifier code exists in `vortx-abuse`, `vortx-sources`, and `vortx-addon-pair`, and inline `VORTX_EDGE_SECRET`/HMAC gates exist in `vortx-watch` and `vortx-oauth-broker`, so closing SEC-05 inside the client app alone is insufficient; see `[W2-SEC05-SERVER-01]` through `[W2-SEC05-SERVER-03]` for the full inventory.
 - Release remains frozen. Nothing has merged.
 
@@ -169,9 +171,9 @@
 
 ## 2026-08-26 - Wave 2 route recovery and scheduler ordering
 
-- `[W2-ROUTE-RECOVERY-01]` After goal continuation, the original Ox Alpha members were idle/idle with dirty preserved worktrees on t3, t14, and t18. Repeated wakes and same-owner retries produced no turns. Fresh Ox replacements then emitted explicit failed-before-finish receipts. The fallback ladder followed: DeepSeek V4 Flash Vision max failed on all three tasks, DeepSeek V4 Pro max failed on all three tasks, and Qwen 3.7 Max successfully joined and is actively continuing preserved work as t3/t14/t18 attempt 10. No dirty code was lost and no stale output was accepted.
+- `[W2-ROUTE-RECOVERY-01]` After goal continuation, the original primary-route members were idle/idle with dirty preserved worktrees on t3, t14, and t18. Repeated wakes and same-owner retries produced no turns. Fresh primary-route replacements then emitted explicit failed-before-finish receipts. The fallback ladder followed: the first fallback route max failed on all three tasks, the second fallback route max failed on all three tasks, and the third fallback route successfully joined and is actively continuing preserved work as t3/t14/t18 attempt 10. No dirty code was lost and no stale output was accepted.
 - `[W2-SCHEDULER-ORDER-01]` The scheduler claimed t9 before t18 during the recovery sequence. The captain parked t9 with assignee=captain until t18 reaches a terminal state, preventing scheduler reversal of the dependency order.
-- `[W2-MEMBER-CAP-01]` The manager attempted five add_member calls at team cap 8; all were rejected atomically with no state change. Only the completed appcast author seat was rotated out to free a slot for the Qwen 3.7 Max replacement.
+- `[W2-MEMBER-CAP-01]` The manager attempted five add_member calls at team cap 8; all were rejected atomically with no state change. Only the completed appcast author seat was rotated out to free a slot for the third fallback route replacement.
 - `[W2-SEC05-BASELINES-01]` SEC-05 server worktrees are registered at exact baselines: oauth d093e72ea, abuse 9fa5e5978 default work/ins-26, sources e12072c45, addon-pair 5139fbb07, watch c2828eb17. No edits and no deploy on any of these trees.
 - `[W2-SEC05-BASELINES-CORR-01]` Captain's first SEC-05 baseline validation incorrectly expanded trusted short commit IDs into guessed full SHA values, causing exit 1 before any successful row. The corrected validation compares each worktree HEAD directly to its exact remote ref and clean branch registration state; all five passed with full hashes:
   - oauth `d093e72ea956eb565db51a2f66b3c76dcecca27d` = origin/main

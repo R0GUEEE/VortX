@@ -1,5 +1,9 @@
 # VortX on TV (LG webOS + Samsung Tizen)
 
+**Development targets, not current native release downloads.** These wrappers are retained in
+source. Packaging requires the relevant SDK/signing setup and physical-TV validation; this page
+does not establish a store release or verified playback on a particular LG/Samsung model.
+
 This folder packages the existing VortX webapp (`../webapp`) as installable **LG webOS** and **Samsung
 Tizen** TV apps. It is **additive**: it reuses the same `npm run build` output the browser target
 (`web.vortx.tv`) ships, wraps that `dist/` with a platform manifest and icons, and turns on a 10-foot
@@ -46,7 +50,7 @@ For desktop testing without a TV: run the webapp and open it with `?tv=1` (e.g.
 ## Build & package
 
 Prereq: the Node/npm versions declared by `../webapp/package.json` (currently Node
-22.18.0+ and npm 11.17.0) and a pinned `npm ci` in `../webapp` (done once). The builder
+22.23.3+ and npm 12.2.0) and a pinned `npm ci` in `../webapp` (done once). The builder
 checks those declared engine requirements before building or replacing a stage.
 
 ```bash
@@ -95,12 +99,11 @@ tizen install -n platforms/tizen/out/*.wgt -t <tv-target>
 
 ## Honest gaps / follow-ups
 
-- **Packaging CLIs are not in this environment.** The manifests are validated (JSON parses, XML is
-  well-formed) and the apps are staged, but the `.ipk` / `.wgt` must be produced on a machine with the
-  webOS SDK CLI / Tizen Studio. No packaged artifact is fabricated here.
-- **No real-hardware test.** D-pad focus, BACK, and playback were exercised in-browser via `?tv=1`; they
-  have not been run on a physical LG or Samsung TV. Remote key codes (461 / 10009), exit behaviour, and
-  codec support per source still need a device pass.
+- **Packaging is a separate gate.** Manifest validation or staged files are not an accepted `.ipk`
+  or `.wgt`. Record actual SDK/signing versions, package identity and content when producing one.
+- **Real hardware needs its own receipt.** An in-browser `?tv=1` test cannot establish remote input,
+  exit behavior or codec support on an LG/Samsung model. Record the exact model/firmware and source
+  when testing; this documentation update makes no new hardware-acceptance claim.
 - **Store assets are minimal.** One icon per platform is generated. Store submission needs the full icon
   set, splash/background art, screenshots, and store metadata.
 - **Tizen signing profile / package id.** `config.xml` uses package id `VortXtv001`; it must match the
