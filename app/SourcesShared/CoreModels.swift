@@ -9,14 +9,16 @@ import Foundation
 /// primary button (mirrors the webapp's `formatTime`). Returns nil for non-positive input so callers
 /// can cleanly omit the badge / suffix when there is nothing to resume.
 func resumeTimecode(_ seconds: Double) -> String? {
-    guard seconds.isFinite, seconds >= 1 else { return nil }
+    // Provider/persisted durations can be finite yet outside Int's range. The upper bound must be
+    // strict because Double(Int.max) rounds up on 64-bit platforms; converting that value traps.
+    guard seconds.isFinite, seconds >= 1, seconds < Double(Int.max) else { return nil }
     let total = Int(seconds)
     let h = total / 3600
     let m = (total % 3600) / 60
     let s = total % 60
     return h > 0
-        ? String(format: "%d:%02d:%02d", h, m, s)
-        : String(format: "%d:%02d", m, s)
+        ? String(format: "%lld:%02lld:%02lld", Int64(h), Int64(m), Int64(s))
+        : String(format: "%lld:%02lld", Int64(m), Int64(s))
 }
 
 // MARK: continue_watching_preview
@@ -926,14 +928,37 @@ extension Array where Element == CoreVideo {
 }
 
 extension ISO8601DateFormatter {
-    /// Shared formatters for parsing `CoreVideo.released`, `static let` so the EPG now/next pass
-    /// reuses one instance per form instead of allocating a formatter per video (they're costly).
-    static let epg = ISO8601DateFormatter()
-    static let epgFractional: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
+    /// Immutable parser handles: no cross-thread formatter sharing, actor hop or per-video allocation.
+    /// Keep the existing `.epg.date(from:)` API for episode, watched and Trakt readers.
+    struct EPGParser: Sendable {
+        private let includingFractionalSeconds: Bool
+
+        init(includingFractionalSeconds: Bool) {
+            self.includingFractionalSeconds = includingFractionalSeconds
+        }
+
+        func date(from value: String) -> Date? {
+            // Preserve the existing formatter's precision and leniency. Each thread owns at most
+            // these two fixed-key instances; no formatter escapes this synchronous parsing call.
+            let key = includingFractionalSeconds ? "tv.vortx.epg.fractional.v1" : "tv.vortx.epg.plain.v1"
+            let storage = Thread.current.threadDictionary
+            let formatter: ISO8601DateFormatter
+            if let cached = storage[key] as? ISO8601DateFormatter {
+                formatter = cached
+            } else {
+                let created = ISO8601DateFormatter()
+                if includingFractionalSeconds {
+                    created.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                }
+                storage[key] = created
+                formatter = created
+            }
+            return formatter.date(from: value)
+        }
+    }
+
+    static let epg = EPGParser(includingFractionalSeconds: false)
+    static let epgFractional = EPGParser(includingFractionalSeconds: true)
 }
 
 /// One addon's stream response for the selected meta/episode (`ResourceLoadable<Vec<Stream>>`).
@@ -1795,6 +1820,33 @@ struct VortXOwnedAddon {
         var d: [String: Any] = ["transportUrl": transportUrl, "manifest": manifest]
         d["flags"] = flags ?? ["official": false, "protected": false]
         return d
+    }
+}
+
+// MARK: - Complete decoded metadata value equivalence
+
+// Same-file synthesis keeps decoder/extraction declarations unchanged. These
+// are value comparisons only: no Sendable or executor claim is introduced.
+extension CoreCWItem: Equatable {}
+extension CoreLibState: Equatable {}
+extension CoreResourcePath: Equatable {}
+extension CoreResourceRequest: Equatable {}
+extension CoreLoadable: Equatable where T: Equatable {}
+extension CoreMetaSelection: Equatable {}
+extension CoreMetaEntry: Equatable {}
+extension CoreMetaItem: Equatable {}
+extension CoreStreamGroup: Equatable {}
+
+extension CoreMetaDetails: Equatable {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.selected == rhs.selected
+            && lhs.metaItems == rhs.metaItems
+            && lhs.streams == rhs.streams
+            && (lhs.metaStreams ?? []) == (rhs.metaStreams ?? [])
+            && lhs.libraryItem == rhs.libraryItem
+            // Watched IDs are membership, not presentation order. Preserve
+            // nil/empty, order and duplicate equivalence used by the old gate.
+            && lhs.watchedIds == rhs.watchedIds
     }
 }
 

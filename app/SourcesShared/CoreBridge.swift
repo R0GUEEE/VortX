@@ -5796,51 +5796,11 @@ final class CoreBridge: ObservableObject {
         details?.appleCWTerminalFullMeta(for: libraryID, streamID: streamID) != nil
     }
 
-    /// True when the newly decoded meta_details differs from the stored one in a way the UI or the
-    /// in-player episode-switch path (which reads `streamGroups(forStreamId:)` off the stored value)
-    /// would observe: the selected request id, metadata resolution, loaded meta id, per-group
-    /// ready-stream signature (so a new episode's streams or newly landed sources always republish),
-    /// or the library/watched bits behind the In-Library button and watched dots. A pure re-emit of
-    /// the identical loaded payload returns false, which drops the redundant source-search republishes.
+    /// Compare the complete decoded projection, not only its preferred Ready item.
+    /// Decoder-equivalent byte counts and unordered watched membership remain quiet;
+    /// provider/request/retained/loading/library changes cannot hide behind one ID.
     private static func metaDetailsNeedsRepublish(current: CoreMetaDetails?, next: CoreMetaDetails?) -> Bool {
-        // Presence flips always republish (spinner -> loaded, or unload).
-        guard let current, let next else { return (current != nil) != (next != nil) }
-        // `meta` is nil while an add-on is loading and after every add-on has failed. Publish both
-        // the selection change and pending-to-unresolved transition so detail recovery sees the
-        // terminal state even when the ready meta and stream signatures remain empty.
-        if current.selectedMetaID != next.selectedMetaID || current.selected?.streamPath?.id != next.selected?.streamPath?.id { return true }
-        if current.metaResolution != next.metaResolution { return true }
-        if current.meta?.id != next.meta?.id { return true }
-        if let currentMeta = current.meta, let nextMeta = next.meta,
-           !currentMeta.hasSamePresentation(as: nextMeta) { return true }
-        if current.libraryItem?.id != next.libraryItem?.id
-            || current.libraryItem?.removed != next.libraryItem?.removed
-            || current.libraryItem?.temp != next.libraryItem?.temp
-            // Playback-state progress MUST re-publish: engineResumeSeconds reads libraryItem.state.timeOffset +
-            // videoId at player open, so without these the resume position latched at the open-time value (~10s)
-            // no matter how long you watched, and only a back-to-Home re-entry re-seeded it (0.3.11 regression).
-            // This only re-publishes the already-decoded value (no extra decode); the ~90s engine library push
-            // cadence keeps it cheap, and during source search timeOffset does not change so the search-churn
-            // suppression this predicate exists for is unaffected.
-            || current.libraryItem?.state.timeOffset != next.libraryItem?.state.timeOffset
-            || current.libraryItem?.state.videoId != next.libraryItem?.state.videoId
-            || current.libraryItem?.state.duration != next.libraryItem?.state.duration
-            // A manual "Mark as Watched" on a movie (or one whose position never advanced, e.g. flagged
-            // watched with no active offset) flips ONLY flaggedWatched/timesWatched: timeOffset, duration,
-            // videoId, libraryItem.id/removed/temp and watchedVideoIds.count all stay exactly as they were.
-            // Without comparing these two fields, that mark landed on the engine (Library tab / Continue
-            // Watching, which decode fresh every event) but `core.metaDetails` never republished, so the
-            // open detail page's own watched checkmark (state.timesWatched > 0) stayed stuck on the stale
-            // value until an unrelated field changed or the page reloaded.
-            || current.libraryItem?.state.flaggedWatched != next.libraryItem?.state.flaggedWatched
-            || current.libraryItem?.state.timesWatched != next.libraryItem?.state.timesWatched
-            || WatchedMembershipPolicy.changed(current.watchedVideoIds, next.watchedVideoIds) {
-            return true
-        }
-        // Signature over BOTH stream surfaces: the meta-embedded groups (metaStreams, the HTTP/HLS
-        // add-on shape, #122) land on the meta republish, and without them in the diff that arrival
-        // looked like "nothing changed" and the source list never rebuilt.
-        return !streamSetsEqual(current.allStreamGroups, next.allStreamGroups)
+        current != next
     }
 
     /// True when a republish changed something the SOURCE LIST derives from: presence, the loaded
@@ -5849,7 +5809,7 @@ final class CoreBridge: ObservableObject {
     /// save while the stream set is unchanged.
     private static func metaDetailsStreamsChanged(current: CoreMetaDetails?, next: CoreMetaDetails?) -> Bool {
         guard let current, let next else { return (current != nil) != (next != nil) }
-        if current.selectedMetaID != next.selectedMetaID || current.selected?.streamPath?.id != next.selected?.streamPath?.id { return true }
+        if current.selected != next.selected { return true }
         if current.meta?.id != next.meta?.id { return true }
         // Both surfaces, matching metaDetailsNeedsRepublish: a metaStreams arrival must bump streamsEpoch.
         return !streamSetsEqual(current.allStreamGroups, next.allStreamGroups)

@@ -32,6 +32,7 @@ on:
       - "scripts/test-home-cw-selection.sh"
       - "scripts/test-cw-worker-currentness.sh"
       - "scripts/test-series-sticky-ownership.sh"
+      - "scripts/test-addon-stream-publication.sh"
       - "scripts/test-binge-language-continuity.sh"
       - "test/mpv-bounded-child.mjs"
       - "test/cw-worker-currentness.mjs"
@@ -95,6 +96,7 @@ on:
       - "scripts/test-home-cw-selection.sh"
       - "scripts/test-cw-worker-currentness.sh"
       - "scripts/test-series-sticky-ownership.sh"
+      - "scripts/test-addon-stream-publication.sh"
       - "scripts/test-binge-language-continuity.sh"
       - "test/mpv-bounded-child.mjs"
       - "test/cw-worker-currentness.mjs"
@@ -199,6 +201,7 @@ jobs:
       - run: bash scripts/test-home-cw-selection.sh
       - run: bash scripts/test-cw-worker-currentness.sh
       - run: bash scripts/test-series-sticky-ownership.sh
+      - run: bash scripts/test-addon-stream-publication.sh
       - run: bash scripts/test-apple-parity-contracts.sh
       - run: node test/native-callback-generation.mjs
       - run: bash scripts/test-apple-player-timeline.sh

@@ -126,8 +126,8 @@ function extractDiscovery() {
 }
 
 function extractTraktNextInputs() {
-    // Same exact session-prefix and formatter-donor policy as the existing watched runner.
-    // No OAuth/Keychain runtime, whole CoreModels graph, formatter rewrite or source stub.
+    // Same exact session-prefix and actual parser policy as the existing watched runner.
+    // The historical fresh-instance donor is retained separately, never compiled instead of production.
     const policy = captured.get('app/SourcesShared/TraktScrobbleProgressPolicy.swift').toString('utf8');
     const marker = '/// FIFO for Trakt';
     const end = policy.indexOf(marker);
@@ -139,12 +139,12 @@ function extractTraktNextInputs() {
         'extension ISO8601DateFormatter {') + '\n';
     const donor = extractDeclaration(captured.get('app/Tests/TraktOAuthBrokerContractTests.swift').toString('utf8'),
         'extension ISO8601DateFormatter {') + '\n';
-    const formatter = 'import Foundation\n\n' + donor;
+    const formatter = 'import Foundation\n\n' + actual;
     const recipe = captured.get('scripts/test-trakt-watched-snapshot.sh').toString('utf8');
     const expected = [
-        ['CoreModelsEPGFormatter.actual.swift', actual, '5002dda6ea34769312bc0d85566f13a28595e9f011c818aa380987277d540a93'],
+        ['CoreModelsEPGFormatter.actual.swift', actual, 'b620fb48849415ca6bd2d888e7bc33ceea7fc03d1e141855c9976b791f48126e'],
         ['TraktEPGFormatter.donor.swift', donor, '6de164e822df8c8feebf9ac67d2d2ceeb6f6fceac414401ed8fb735afbe5d38a'],
-        ['TraktEPGFormatter.swift', formatter, 'ee82aaf6c2f5758e3efa73ad1141ba85eeb57feb3179b95c54a6a7dd706506bb']
+        ['TraktEPGFormatter.swift', formatter, '5a2b08a30e624f9bd1fabe438141113c930e7400840d7e906c77e8a19fcca9e3']
     ];
     for (const [name, bytes, sha256] of expected) {
         if (digest(Buffer.from(bytes)) !== sha256 || !recipe.includes(sha256)) throw new Error('Original Trakt formatter policy changed: ' + name);
@@ -157,7 +157,7 @@ function extractTraktNextInputs() {
         formatterPolicyOwner: 'scripts/test-trakt-watched-snapshot.sh',
         formatterPolicySHA256: digest(captured.get('scripts/test-trakt-watched-snapshot.sh')),
         formatterArtifacts: expected.map(([name, , sha256]) => ({ name, sha256 })),
-        declarationTransformations: [], excludes: ['OAuth/transport/persistence', 'CoreModels shared-formatter cache concurrency', 'Home/SwiftUI/native adapter']
+        declarationTransformations: [], excludes: ['OAuth/transport/persistence', 'Full application/thread-pool lifetime', 'Home/SwiftUI/native adapter']
     }, null, 2) + '\n');
     return [write('generated/TraktSessionBoundary.swift', boundary),
         path.join(directory, 'generated/TraktEPGFormatter.swift')];

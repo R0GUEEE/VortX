@@ -483,8 +483,9 @@ private struct EpisodePlaybackIdentityTests {
         expect(!blankAnime.hasSamePresentation(as: metadata(["videos": []])), "changed episode inventory republishes")
         expect(!blankAnime.hasSamePresentation(as: metadata(["trailerStreams": [["ytId": "abcdefghijk"]]])),
                "late trailer stream republishes")
-        expect(source("SourcesShared/CoreBridge.swift").contains("!currentMeta.hasSamePresentation(as: nextMeta)"),
-               "bridge consumes production metadata presentation comparison")
+        expect(source("SourcesShared/CoreBridge.swift").contains("current != next")
+               && source("SourcesShared/CoreModels.swift").contains("extension CoreMetaDetails: Equatable"),
+               "bridge consumes complete decoded metadata value comparison")
 
         let hash = "0123456789abcdef0123456789abcdef01234567"
         let e2 = stream(hash: hash, fileIdx: 1)
