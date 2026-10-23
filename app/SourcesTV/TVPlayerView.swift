@@ -3324,6 +3324,29 @@ struct TVPlayerView: View {
     /// and falls back to itself when no translation exists.
     private static func l10n(_ key: String) -> String { String(localized: LocalizedStringResource(stringLiteral: key)) }
 
+    private var audioPresetRows: [OptionRow] {
+        let engine = coordinator.player as? MPVMetalViewController
+        var rows = [OptionRow(accessibilityID: "audio.preset.header",
+                              label: String(localized: "Audio preset · this session"), isHeader: true)]
+        for preset in PlayerSessionAudioPreset.allCases {
+            let unavailable = engine?.sessionAudioPresetUnavailableReason(for: preset)
+                ?? (engine == nil ? PlayerSessionAudioPresetState.avPlayerUnavailable : nil)
+            rows.append(OptionRow(
+                accessibilityID: "audio.preset.\(preset.rawValue)",
+                label: Self.l10n(preset.label),
+                detail: Self.l10n(unavailable ?? preset.detail),
+                isSelected: engine?.sessionAudioPreset.selected == preset,
+                isEnabled: unavailable == nil
+            ) {
+                (coordinator.player as? MPVMetalViewController)?.setSessionAudioPreset(preset)
+            })
+        }
+        if let message = engine?.sessionAudioPreset.message {
+            rows.append(OptionRow(accessibilityID: "audio.preset.status",
+                                  label: Self.l10n(message), isEnabled: false))
+        }
+        return rows
+    }
     /// Rows for the currently-open panel only, never mixed. Tracks are grouped by language; a "Settings"
     /// row drills into a dedicated sub-panel (sync / size / colour for subtitles, sync for audio).
     private var optionRows: [OptionRow] {
@@ -3336,17 +3359,14 @@ struct TVPlayerView: View {
                     rememberSeriesAudio(track.lang, explicit: true)
                 }
             }
-            // Audio Sync is libmpv-only (setAudioDelay is a no-op on AVPlayer, which offers no track offset), so
-            // hide the drill-in when the AVFoundation engine is active (#76). Track selection itself works on both.
-            if !isAVPlayerActive {
-                rows.append(OptionRow(label: String(localized: "Audio Settings"), detail: "›") { openPanel(.audioSettings) })
-            }
+            // Keep the drill-in reachable on AVPlayer so its unsupported session presets are explicit.
+            // Track selection itself remains unchanged on both engines.
+            rows.append(OptionRow(label: String(localized: "Audio Settings"), detail: "›") { openPanel(.audioSettings) })
             return rows
         case .audioSettings:
-            // Reached only on libmpv (the drill-in above is hidden on AVPlayer); guard anyway so a stale
-            // navigation never shows inert controls.
+            // AVPlayer exposes no equivalent preset DSP or manual sync/output route.
             if isAVPlayerActive {
-                return [OptionRow(label: String(localized: "Audio sync isn't available on the Dolby Vision player"), isHeader: true)]
+                return [OptionRow(label: String(localized: "Audio sync isn't available on the Dolby Vision player"), isHeader: true)] + audioPresetRows
             }
             let now = String(format: "%+.1fs", audioDelay)
             var rows = [OptionRow(label: String(localized: "Sync"), isHeader: true),
@@ -3362,6 +3382,7 @@ struct TVPlayerView: View {
                     coordinator.player?.setAudioOutputMode(m)
                 })
             }
+            rows.append(contentsOf: audioPresetRows)
             return rows
         case .subtitles:
             // Settings FIRST (the user's primary in-session action), then Off, then one row per language.

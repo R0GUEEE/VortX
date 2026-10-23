@@ -10254,6 +10254,29 @@ struct PlayerScreen: View {
         }
     }
 
+    /// Both Apple player surfaces use the same session policy/recipes; no track/volume/sync writes.
+    private var audioPresetRows: [Row] {
+        let engine = coordinator.player as? MPVMetalViewController
+        var rows = [Row(label: String(localized: "Audio preset · this session"), isHeader: true)]
+        for preset in PlayerSessionAudioPreset.allCases {
+            let unavailable = engine?.sessionAudioPresetUnavailableReason(for: preset)
+                ?? (engine == nil ? PlayerSessionAudioPresetState.avPlayerUnavailable : nil)
+            rows.append(Row(
+                label: Self.l10n(preset.label),
+                detail: Self.l10n(unavailable ?? preset.detail),
+                selected: engine?.sessionAudioPreset.selected == preset,
+                isEnabled: unavailable == nil,
+                accessibilityHint: String(localized: "Applies only to this player session")
+            ) {
+                // Resolve the current controller at activation, not the engine captured by an old row.
+                (coordinator.player as? MPVMetalViewController)?.setSessionAudioPreset(preset)
+            })
+        }
+        if let message = engine?.sessionAudioPreset.message {
+            rows.append(Row(label: Self.l10n(message), wraps: true, isEnabled: false))
+        }
+        return rows
+    }
     private func rows(for p: Panel) -> [Row] {
         switch p {
         case .video:
@@ -10489,10 +10512,10 @@ struct PlayerScreen: View {
             rs.append(Row(label: String(localized: "Audio Settings"), detail: "›") { openPanel(.audioSettings) })
             return rs
         case .audioSettings:
-            // AVPlayer manages audio delay + output routing itself: setAudioDelay / setAudioOutputMode are
-            // no-ops on that engine, so hide the inert controls rather than show rows that do nothing (#76).
+            // AVPlayer retains system-managed delay/output. Show the explicit DSP limitation, not
+            // inert controls or an AVPlayer volume change pretending to be a processing preset.
             if isAVPlayerActive {
-                return [Row(label: String(localized: "Audio sync isn't available on the Dolby Vision player"), isHeader: true)]
+                return [Row(label: String(localized: "Audio sync isn't available on the Dolby Vision player"), isHeader: true)] + audioPresetRows
             }
             let now = String(format: "%+.1fs", audioDelay)
             var rs = [Row(label: String(localized: "Sync"), isHeader: true),
@@ -10508,6 +10531,7 @@ struct PlayerScreen: View {
                     coordinator.player?.setAudioOutputMode(m)
                 })
             }
+            rs.append(contentsOf: audioPresetRows)
             return rs
         case .quality:
             // Best stream per resolution (4K / 1080p / 720p / …); picking one hot-swaps the source at the

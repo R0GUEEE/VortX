@@ -220,6 +220,8 @@ final class MPVMetalViewController: PlatformViewController {
     private let loadTokenLock = NSLock()
     private var loadProvenance = PlayerLoadProvenanceState()
     private var initializationFailure = MPVInitializationFailureState<PlayerLoadToken>()
+    /// UI/main-actor-owned and intentionally not persisted; ordinary loadfile/source changes retain it.
+    private(set) var sessionAudioPreset = PlayerSessionAudioPresetState()
     // Protected by loadTokenLock: load admission, raw event reads, and explicit UI seeks all
     // participate. An origin is one-shot configuration for the next load, never inherited.
     private var requestedFreshOrigin: Double?
@@ -933,6 +935,7 @@ final class MPVMetalViewController: PlatformViewController {
     }
 
     func setupMpv() {
+        sessionAudioPreset = PlayerSessionAudioPresetState()
         // The in-hero trailer preview (#44) is silent, so it must NOT claim the `.playback` audio
         // session: doing so would interrupt other audio and fight the main player's session. Only the
         // real player configures the route-aware audio policy.
@@ -1497,6 +1500,7 @@ final class MPVMetalViewController: PlatformViewController {
     /// prevents it from firing into a deallocated controller (the crash on close), and
     /// destruction is serialized onto the event queue so it can't race `readEvents`.
     func stop() {
+        sessionAudioPreset = PlayerSessionAudioPresetState()
         seekEOFTerminalPark.reset()
         loadTokenLock.lock()
         initializationFailure.stop()
@@ -4246,12 +4250,76 @@ final class MPVMetalViewController: PlatformViewController {
         )
     }
 
+    /// Presets are session-only and concrete-MPV-only; AVPlayer exposes no equivalent DSP path.
+    /// Re-evaluated on every menu/action so route/output changes cannot use a cached eligibility claim.
+    func sessionAudioPresetUnavailableReason(for preset: PlayerSessionAudioPreset) -> String? {
+        guard mpv != nil, !startMuted else { return "Audio processing isn't ready" }
+        if preset == .normal { return nil } // recovery/bitstream cleanup must remain possible
+        guard sessionAudioPreset.selected != nil else { return PlayerSessionAudioPresetState.unknownState }
+        guard callbackLoadToken(requiresLoadedFile: true) != nil else { return "Audio processing isn't ready" }
+        // Configured bitstream intent is conservative: it may fall back to PCM, but DSP must not
+        // silently force that fallback. nil is unknown/unsupported, never evidence of decoded PCM.
+        guard let spdif = getString("audio-spdif") else { return "Audio processing availability is unknown" }
+        return spdif.isEmpty ? nil : "Unavailable while bitstream passthrough is enabled"
+    }
+
+    @discardableResult
+    func setSessionAudioPreset(_ preset: PlayerSessionAudioPreset) -> Bool {
+        var next = sessionAudioPreset
+        let unavailable = sessionAudioPresetUnavailableReason(for: preset)
+        guard let handle = mpv, !startMuted else {
+            let accepted = next.refuse(unavailable ?? "Audio processing isn't ready")
+            sessionAudioPreset = next
+            return accepted
+        }
+        if preset != .normal, let unavailable {
+            let accepted = next.refuse(unavailable)
+            sessionAudioPreset = next
+            return accepted
+        }
+        if next.selected == preset {
+            let accepted = next.apply(preset, unavailableReason: unavailable,
+                                      command: { _ in -1 }, restore: { -1 })
+            sessionAudioPreset = next
+            return accepted
+        }
+        // Typed af snapshot is the existing lossless native-option transaction helper. Rollback
+        // restores custom filter ordering/options exactly; string serialization is not a backup.
+        guard let snapshot = MPVPlaybackProfileOption(handle: handle, name: "af") else {
+            let accepted = next.refuse("Audio processing can't be safely changed on this player")
+            sessionAudioPreset = next
+            return accepted
+        }
+        let accepted = next.apply(preset, unavailableReason: unavailable, command: { args in
+            var status: Int32 = -1 // command() on an absent handle must never imply acceptance
+            command("af", args: args.map { Optional($0) }, checkForErrors: false) { status = $0 }
+            return status
+        }, restore: {
+            snapshot.restore(handle: handle, name: "af")
+        })
+        sessionAudioPreset = next
+        return accepted
+    }
     /// Switch the audio output policy (Auto / Stereo / Surround / Passthrough) on the playing file.
     /// Persists the choice, then re-applies the channel layout and the spdif bitstream list live so it
     /// takes effect without a reload; mpv re-opens the audio output when these properties change.
     /// `channelPolicy` reads `AudioOutputMode.current`, so persisting first makes it reflect `mode`.
     /// Setting `audio-spdif` to "" (when leaving Passthrough) tells mpv to decode to PCM again.
     func setAudioOutputMode(_ mode: AudioOutputMode) {
+        // Determine effective bitstream intent first, preserving tvOS's decoded-PCM safety fallback.
+        #if os(tvOS)
+        let spdif: String? = nil
+        #elseif canImport(UIKit)
+        // Match setup-time policy: AirPods must never receive raw spdif either.
+        let spdif = routeIsStereoOnly || routeIsAirPods ? nil : mode.spdifCodecs
+        #else
+        let spdif = mode.spdifCodecs
+        #endif
+        // An explicit output choice may disable our own session DSP, but must never silently force
+        // PCM to make a preset work. Failed cleanup leaves the saved/output mode unchanged.
+        if !(spdif ?? "").isEmpty, sessionAudioPreset.selected != .normal {
+            guard setSessionAudioPreset(.normal) else { return }
+        }
         UserDefaults.standard.set(mode.rawValue, forKey: AudioOutputMode.key)
         #if canImport(UIKit)
         // Refresh AVAudioSession before mpv reopens its audio output. This makes an explicit Stereo
@@ -4264,18 +4332,8 @@ final class MPVMetalViewController: PlatformViewController {
         #else
         setString("audio-channels", channelPolicy)
         #endif
-        // Never arm spdif on a stereo-only route (TV built-in / AirPlay): passthrough there freezes
-        // the AO (#78). channelPolicy already forces a stereo downmix for those routes; keep spdif off
-        // so a runtime switch to Passthrough on the built-in speakers degrades to decoded stereo PCM.
-        #if os(tvOS)
-        // tvOS: never arm raw spdif - it wedges the AO and freezes the player (#78/#101). Decode to PCM; the
-        // avfoundation AO + the audio session let the system pass Atmos/multichannel through to the receiver.
-        let spdif: String? = nil
-        #elseif canImport(UIKit)
-        let spdif = routeIsStereoOnly ? nil : mode.spdifCodecs
-        #else
-        let spdif = mode.spdifCodecs
-        #endif
+        // Never arm spdif on a stereo-only route (TV built-in / AirPlay) or AirPods. tvOS never
+        // arms raw spdif here (#78/#101); its existing system-managed multichannel PCM remains intact.
         setString("audio-spdif", spdif ?? "")
     }
 
