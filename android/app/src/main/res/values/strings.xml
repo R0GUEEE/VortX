@@ -11,6 +11,10 @@
 
     <string name="action_retry">Retry</string>
 
+    <!-- Static artwork/status copy shown only while a current player attempt awaits startup evidence. -->
+    <string name="player_startup_title">Starting playback</string>
+    <string name="player_startup_loading">Starting playback…</string>
+
     <!-- Session-only libmpv owned-label DSP. Shared phone/tablet/TV Audio Settings sheet. -->
     <string name="player_audio_preset_title">Audio preset · this player session</string>
     <string name="player_audio_preset_normal">Normal</string>

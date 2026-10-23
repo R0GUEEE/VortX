@@ -121,6 +121,12 @@ jobs:
           VORTX_KEY_PASSWORD: vortx-adhoc-ci-store
         run: ./gradlew :app:assembleFullRelease :app:assemblePlayRelease :app:bundlePlayRelease --no-daemon --stacktrace
 
+      - name: Check player startup caller contracts
+        run: |
+          mkdir -p android/app/build/first-frame-focused
+          receipt_dir="$(mktemp -d "$PWD/android/app/build/first-frame-focused/receipt.XXXXXX")"
+          node scripts/tests/android-first-frame-presentation/source-contracts.mjs "$PWD" "$receipt_dir"
+
       # Preserve the bounded recovery filters and exercise the actual shared Media3 metadata
       # policies. JNI-gated cases still skip without the real private native runtime.
       - name: Test Android sync, account recovery and active-media metadata
@@ -149,6 +155,8 @@ jobs:
           --tests com.vortx.android.whatsnew.ChangelogParserTest
           --tests com.vortx.android.player.ExoPlayerEngineStatePolicyTest
           --tests com.vortx.android.player.PlaybackMetadataTest
+          --tests com.vortx.android.player.PlaybackStartupPresentationTest
+          --tests com.vortx.android.player.ExoStartupAdmissionTest
           --tests com.vortx.android.player.SessionAudioPresetSessionTest
           --tests com.vortx.android.player.SessionAudioPresetSourceContractTest
           --tests com.vortx.android.sources.SourceQuickFiltersTest

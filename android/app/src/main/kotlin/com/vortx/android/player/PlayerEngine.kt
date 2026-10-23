@@ -263,6 +263,8 @@ data class PlayerState(
     val subtitleTracks: List<PlayerTrack> = emptyList(),
     val metadata: PlaybackMetadata = PlaybackMetadata(),
     val sessionAudioPreset: SessionAudioPresetState = SessionAudioPresetState(),
+    /** Load-owned evidence; UNAVAILABLE is fail-open for unsupported/fake engines, never a first frame. */
+    val startupEvidence: PlaybackStartupEvidence = PlaybackStartupEvidence.UNAVAILABLE,
 )
 
 enum class EngineFallbackReason {

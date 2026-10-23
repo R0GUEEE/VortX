@@ -35,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -620,13 +621,24 @@ fun PlayerScreen(
     // wraps this screen). Deliberately AFTER the orientation/immersive effect so the connecting frame is
     // already landscape + edge-to-edge.
     val engine = builtEngine
+    // One deadline per physical attempt, spanning null -> built publication. Key collection by the
+    // actual engine so a replacement cannot consume a retained settled value from its predecessor.
+    val startupWindow = remember(engineHolder, subtitleProfileRevision) { StartupCoverWindow(SystemClock.elapsedRealtime()) }
+    val playerState = key(engine) {
+        if (engine == null) PlayerState(startupEvidence = PlaybackStartupEvidence.AWAITING)
+        else engine.state.collectAsStateWithLifecycle().value
+    }
     if (engine == null) {
+        val showStartup = rememberStartupCoverWindow(startupWindow, subtitleProfileRevision,
+            PlaybackStartupEvidence.AWAITING, allowed = !playerExitRequested && hostActivity?.isInPictureInPictureMode != true)
+        val startupArtwork = playerStartupPlaceholder(currentPlayable)
         Box(
             modifier = modifier
                 .fillMaxSize()
                 .background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
+            if (showStartup) PlayerStartupCover(startupArtwork)
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -731,7 +743,6 @@ fun PlayerScreen(
         onDispose { controller?.stop(); afrHolder.set(null) }
     }
 
-    val playerState by engine.state.collectAsStateWithLifecycle()
     val latestState by rememberUpdatedState(playerState)
 
     // Automatic skip is a position-driven, media-scoped state machine. The state is keyed by the
@@ -1143,6 +1154,10 @@ fun PlayerScreen(
         isPaused = playerState.isPaused,
         durationKnown = playerState.durationMs > 0L,
     )
+    val showStartupCover = rememberStartupCoverWindow(startupWindow, subtitleProfileRevision,
+        playerState.startupEvidence, allowed = !effectiveError && !playerExitRequested && !playerState.hasEnded && !pip.isInPip)
+    val startupArtwork = rememberPlayerStartupArtwork(currentPlayable, startupWindow, subtitleProfileRevision,
+        enabled = showStartupCover)
     // Crossing the PiP boundary: entering drops the chrome + any live gesture HUD (dead pixels in
     // the small window); expanding back restores the controls so the viewer lands oriented.
     var gestureHud by remember(playbackSessionKey) { mutableStateOf<PlayerGestureHud?>(null) }
@@ -1948,6 +1963,7 @@ fun PlayerScreen(
             .focusable(),
     ) {
         engine.VideoSurface(modifier = Modifier.fillMaxSize(), emberArgb = emberAccent.toArgb(), scaleMode = scaleMode)
+        if (showStartupCover) PlayerStartupCover(startupArtwork)
 
         // Tap layer: single tap toggles the chrome; double-tap seeks (right half = +10s, left half =
         // -10s, the standard mobile-player gesture) and re-shows the chrome so the seek is visible.

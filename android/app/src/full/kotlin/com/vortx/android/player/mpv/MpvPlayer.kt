@@ -3,6 +3,7 @@ package com.vortx.android.player.mpv
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.SystemClock
 import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -26,6 +27,12 @@ import com.vortx.android.player.PlayerChapter
 import com.vortx.android.player.PlayerEngine
 import com.vortx.android.player.PlayerState
 import com.vortx.android.player.PlayerTrack
+import com.vortx.android.player.PlaybackStartupEvidence
+import com.vortx.android.player.MpvStartupSample
+import com.vortx.android.player.StartupSampleBudget
+import com.vortx.android.player.mpvStartupEvidence
+import com.vortx.android.player.settledStartupEvidence
+import com.vortx.android.player.withAdmittedStartupRead
 import com.vortx.android.player.SessionAudioPreset
 import com.vortx.android.player.SessionAudioPresetAvailability
 import com.vortx.android.player.SessionAudioPresetSession
@@ -78,6 +85,8 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONArray
+import org.json.JSONException
 
 /// The libmpv [PlayerEngine] (PRIMARY player, `full` flavor only). Owns one [MPVLib] for its lifetime,
 /// renders into an Android [SurfaceView] (the Android analogue of Apple's Metal `wid` layer), applies
@@ -181,6 +190,8 @@ class MpvPlayer private constructor(
     private val subtitleGenerationGate = Any()
     // Metadata only; all access is under subtitleGenerationGate, not the terminal/audio locks.
     private val metadataLoadIdentity = MpvMetadataLoadIdentity()
+    private var startupSampleBudget = StartupSampleBudget(0L)
+    private var startupSample: Pair<MpvMetadataLoadIdentity.Read, MpvStartupSample>? = null
     // Same engine/session across loadfile; publication is null until this exact loaded entry is checked.
     private var audioPresetReconciledRead: MpvMetadataLoadIdentity.Read? = null
     private val pendingAudioOutputMode = SessionAudioRouteRequest<AudioOutputMode>()
@@ -224,6 +235,7 @@ class MpvPlayer private constructor(
                         consumePendingResumeSeek()
                     }
                     _state.update { it.copy(positionMs = (value * 1000).toLong().coerceAtLeast(0L)) }
+                    sampleStartupPresentation() // Read fresh native facts; never trust this unowned event value.
                 }
                 PROP_DURATION -> _state.update { it.copy(durationMs = (value * 1000).toLong().coerceAtLeast(0L)) }
                 // `demuxer-cache-time` is the ABSOLUTE timestamp (seconds) of the end of the forward cache,
@@ -264,6 +276,7 @@ class MpvPlayer private constructor(
         override fun eventTerminal(event: MpvTerminalEvent) {
             synchronized(subtitleGenerationGate) {
                 metadataLoadIdentity.ended()
+                startupSample = null
                 sessionAudioPreset.loading()
                 audioPresetReconciledRead = null
                 _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
@@ -281,6 +294,7 @@ class MpvPlayer private constructor(
         override fun eventStartFile(entryID: Long) {
             synchronized(subtitleGenerationGate) {
                 metadataLoadIdentity.started(entryID)
+                startupSample = null
                 sessionAudioPreset.loading()
                 audioPresetReconciledRead = null
                 _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
@@ -300,6 +314,8 @@ class MpvPlayer private constructor(
                     // first apply (idempotent) and for a non-resume load. Mirrors Apple's first-frame apply.
                     consumePendingResumeSeek()
                     _state.update { it.copy(isBuffering = false) }
+                    // PLAYBACK_RESTART is reinitialization, not first pixels. It only requests a fresh sample.
+                    sampleStartupPresentation()
                     scheduleAudioOutputHealthCheck()
                 }
                 MPVLib.Event.FILE_LOADED -> {
@@ -322,6 +338,7 @@ class MpvPlayer private constructor(
                 }
                 MPVLib.Event.QUEUE_OVERFLOW -> synchronized(subtitleGenerationGate) {
                     metadataLoadIdentity.queueOverflow()
+                    startupSample = null
                     sessionAudioPreset.loading()
                     audioPresetReconciledRead = null
                     _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
@@ -400,12 +417,15 @@ class MpvPlayer private constructor(
     override fun load(playable: Playable) {
         if (released.get()) return
         val loadGeneration = synchronized(subtitleGenerationGate) {
+            if (released.get()) return
             subtitleLoadGeneration.incrementAndGet().also { generation ->
                 metadataLoadIdentity.begin(generation)
+                startupSampleBudget = StartupSampleBudget(SystemClock.elapsedRealtime())
+                startupSample = null
                 sessionAudioPreset.loading()
                 audioPresetReconciledRead = null
                 _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
-                    sessionAudioPreset = sessionAudioPreset.state) }
+                    sessionAudioPreset = sessionAudioPreset.state, startupEvidence = PlaybackStartupEvidence.AWAITING) }
             }
         }
         // Reset terminal classification and invalidate the previous source's opportunity tokens before
@@ -1193,15 +1213,18 @@ class MpvPlayer private constructor(
     }
 
     override fun release() {
-        if (!released.compareAndSet(false, true)) return
         synchronized(subtitleGenerationGate) {
+            // Retirement and load-owned publication share one monitor. A callback cannot pass a final
+            // released check then publish after a concurrent release has claimed this instance.
+            if (!released.compareAndSet(false, true)) return
             subtitleLoadGeneration.incrementAndGet()
             metadataLoadIdentity.retire()
+            startupSample = null
             sessionAudioPreset.reset()
             pendingAudioOutputMode.clear()
             audioPresetReconciledRead = null
             _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
-                sessionAudioPreset = sessionAudioPreset.state) }
+                sessionAudioPreset = sessionAudioPreset.state, startupEvidence = PlaybackStartupEvidence.UNAVAILABLE) }
         }
         // Retire every held terminal/opportunity before cancellation. A cancelled audio-health coroutine
         // runs its `finally` and may complete its old opportunity immediately; after reset that completion
@@ -1272,6 +1295,77 @@ class MpvPlayer private constructor(
             }
             if (!metadataOnly) trackListUpdated(snapshot.audio.isNotEmpty(), rearmHealth)
         }
+    }
+
+    /** Bounded and callback-triggered. Configured output plus advancing clock is not a pixel receipt. */
+    private fun sampleStartupPresentation() = synchronized(subtitleGenerationGate) {
+        if (released.get() || _state.value.startupEvidence != PlaybackStartupEvidence.AWAITING ||
+            !startupSampleBudget.take(SystemClock.elapsedRealtime())) return@synchronized
+        val generation = subtitleLoadGeneration.get()
+        val read = metadataLoadIdentity.capture(generation, currentPlayingEntryID())
+        val sample = withAdmittedStartupRead(read,
+            accepts = { !released.get() && metadataLoadIdentity.accepts(it, subtitleLoadGeneration.get(), currentPlayingEntryID()) },
+            sample = ::readStartupSample) ?: run { startupSample = null; return@synchronized }
+        if (released.get()) { startupSample = null; return@synchronized }
+        val previous = startupSample?.takeIf { it.first == read }?.second
+        startupSample = requireNotNull(read) to sample
+        val evidence = mpvStartupEvidence(previous, sample) ?: return@synchronized
+        _state.update {
+            if (released.get() || !metadataLoadIdentity.accepts(read, subtitleLoadGeneration.get(), currentPlayingEntryID())) it
+            else it.copy(startupEvidence = settledStartupEvidence(it.startupEvidence, evidence))
+        }
+    }
+
+    /** Unlike the Chrome parser, unknown types/IDs/selection cannot become an authoritative no-video list. */
+    private fun readStartupSample(): MpvStartupSample? {
+        val aid = mpv.getPropertyString("aid") ?: return null
+        val vid = mpv.getPropertyString("vid") ?: return null
+        val audioID = aid.toIntOrNull()
+        val videoID = vid.toIntOrNull()
+        var hasVideo = false
+        var selectedVideo = false
+        var selectedAudio = false
+        try {
+            val raw = mpv.getPropertyString(PROP_TRACK_LIST) ?: return null
+            if (raw.length > 256 * 1024) return null
+            val tracks = JSONArray(raw)
+            if (tracks.length() > 1024) return null
+            for (index in 0 until tracks.length()) {
+                val track = tracks.getJSONObject(index)
+                val type = track.opt("type") as? String ?: return null
+                if (type != "audio" && type != "video" && type != "sub") return null
+                val rawID = track.opt("id") as? Number ?: return null
+                val id = rawID.toLong()
+                if (id !in 0..Int.MAX_VALUE.toLong() || rawID.toDouble() != id.toDouble()) return null
+                val selected = when (val raw = track.opt("selected")) {
+                    null -> false
+                    is Boolean -> raw
+                    else -> return null
+                }
+                if (type == "video") {
+                    hasVideo = true
+                    if (selected && id != videoID?.toLong()) return null
+                    selectedVideo = selectedVideo || selected
+                }
+                if (type == "audio" && selected) {
+                    if (id != audioID?.toLong()) return null
+                    selectedAudio = true
+                }
+            }
+        } catch (_: JSONException) { return null }
+        fun flag(name: String): Boolean? = when (mpv.getPropertyString(name)) {
+            "yes" -> true
+            "no" -> false
+            else -> null
+        }
+        val clock = mpv.getPropertyDouble(PROP_TIME_POS) ?: return null
+        val audioClock = mpv.getPropertyDouble("audio-pts")
+        val seeking = flag("seeking") ?: return null
+        val cache = flag(PROP_PAUSED_FOR_CACHE) ?: return null
+        val width = mpv.getPropertyInt("video-out-params/w") ?: 0
+        val height = mpv.getPropertyInt("video-out-params/h") ?: 0
+        if (aid != mpv.getPropertyString("aid") || vid != mpv.getPropertyString("vid")) return null
+        return MpvStartupSample(clock, audioClock, hasVideo, selectedVideo, selectedAudio, width, height, seeking, cache)
     }
 
     /** Keep INT64 identity intact; getPropertyInt narrows through JNI jint. No path/URL inference. */
