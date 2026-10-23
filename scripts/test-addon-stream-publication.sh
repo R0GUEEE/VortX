@@ -141,15 +141,64 @@ fs.writeFileSync(`${out}/ProductionResourceValues.swift`, 'import Foundation\n'
   + resourceMarkers.map(marker => block(bridge, marker)).join('\n'));
 const hasLibraryMerge = core.includes('private static func libraryMetaDetailsUpdate(');
 if (!hasLibraryMerge && ref === 'working-tree') throw new Error('Missing current library overlay merge');
+const hasStatusProjection = core.includes('private static func streamAddonStatusProjection(');
+if (!hasStatusProjection && ref === 'working-tree') throw new Error('Missing current accepted error sidecar');
 const predicates = ['private static func metaDetailsNeedsRepublish(', 'private static func metaDetailsStreamsChanged(',
   'private static func currentReadyStreamCount('];
 if (hasLibraryMerge) predicates.push('private static func libraryMetaDetailsUpdate(');
+if (hasStatusProjection) predicates.push('private static func streamAddonStatusProjection(',
+  'private static func describeResourceError(', 'private func beginStreamAddonStatusAdmission(',
+  'private func acceptStreamAddonStatus(');
 predicates.push(core.includes('private static func streamSetsEqual(')
   ? 'private static func streamSetsEqual(' : 'private static func streamSetSignature(');
-declarations.push(`@MainActor final class AddonPublicationProbe {
+let statusFixture = '';
+if (hasStatusProjection) {
+  const signalDeclaration = '@Published private var streamAddonStatusSignal = UUID()';
+  const generationDeclaration = 'private var streamAddonStatusAdmissionGeneration = UUID()';
+  const payloadDeclaration = 'private var acceptedStreamAddonStatus: StreamAddonStatusProjection?';
+  for (const declaration of [signalDeclaration, generationDeclaration, payloadDeclaration]) {
+    if (!core.includes(declaration)) throw new Error(`Missing actual status declaration ${declaration}`);
+  }
+  const acceptance = block(core, 'private func acceptStreamAddonStatus(');
+  const postFence = 'guard streamAddonStatusAdmissionGeneration == originalGeneration else { return }';
+  if (acceptance.split(postFence).length !== 2) throw new Error('Expected exactly one post-signal original fence');
+  // Explicit negative control only: rename the actual helper and remove exactly that one guard.
+  // All other production statements are retained; runtime tests must expose the counterexample.
+  const unfenced = acceptance.replace('private func acceptStreamAddonStatus(',
+    'private func acceptStreamAddonStatusWithoutPostFence(').replace(postFence,
+    '// Negative control: post-signal original-generation fence intentionally removed.');
+  const dataAcceptance = (name, acceptName) => `func ${name}(_ data: Data) throws {
+    let details = try JSONDecoder().decode(CoreMetaDetails?.self, from: data)
+    let streamAddonStatus = try Self.streamAddonStatusProjection(data: data, details: details)
+    let statusGeneration = self.beginStreamAddonStatusAdmission()
+    ${block(core, 'if Self.metaDetailsNeedsRepublish(current: self.metaDetails, next: details) {')}
+    self.${acceptName}(streamAddonStatus, originalGeneration: statusGeneration)
+  }`;
+  statusFixture = `${block(core, 'struct StreamAddonState:')}
+  ${block(core, 'private struct StreamAddonStatusRow:')}
+  ${block(core, 'private struct StreamAddonStatusProjection:')}
+  ${payloadDeclaration}
+  ${generationDeclaration}
+  ${signalDeclaration}
+  var statusPublications = 0
+  private var publicationSubscriptions: Set<AnyCancellable> = []
+  init() {
+    $metaDetails.dropFirst().sink { [weak self] _ in self?.metadataPublications += 1 }
+      .store(in: &publicationSubscriptions)
+    $streamAddonStatusSignal.dropFirst().sink { [weak self] _ in self?.statusPublications += 1 }
+      .store(in: &publicationSubscriptions)
+  }
+  ${block(core, 'func streamAddonStates(')}
+  ${dataAcceptance('acceptData', 'acceptStreamAddonStatus')}
+  ${unfenced}
+  ${dataAcceptance('acceptDataWithoutPostFence', 'acceptStreamAddonStatusWithoutPostFence')}`;
+}
+declarations.push(`@MainActor final class AddonPublicationProbe: ObservableObject {
   var metadataPublications = 0
-  var metaDetails: CoreMetaDetails? { didSet { metadataPublications += 1 } }
-  var streamsEpoch = 0
+  ${hasStatusProjection ? block(core, '@Published private(set) var metaDetails: CoreMetaDetails?')
+    : 'var metaDetails: CoreMetaDetails? { didSet { metadataPublications += 1 } }'}
+  @Published private(set) var streamsEpoch = 0
+  ${statusFixture}
   var indexerStarts = 0
   var names: [String: String] = [:]
   func addonNamesByBase() -> [String: String] { names }
@@ -169,13 +218,12 @@ declarations.push(`@MainActor final class AddonPublicationProbe {
     guard let metaDetails else { return [] }
     return assembleStreamGroups(metaDetails, streamId: streamID)
   }
-  // Actual coalesced accepted branch only. Account/profile/request fences, the
-  // raw error-sidecar cache are NOT modeled.
+  // Actual coalesced typed branch only. Native account/request/executor ownership is NOT modeled.
   func accept(_ details: CoreMetaDetails?) {
     ${block(core, 'if Self.metaDetailsNeedsRepublish(current: self.metaDetails, next: details) {')}
   }
 }`);
-fs.writeFileSync(`${out}/ProductionPublication.swift`, 'import Foundation\n' + declarations.join('\n'));
+fs.writeFileSync(`${out}/ProductionPublication.swift`, 'import Foundation\nimport CoreFoundation\nimport Combine\n' + declarations.join('\n'));
 if (hasLibraryMerge) {
 const libraryStart = core.indexOf('let requestGeneration = metaLoadTargetLock.withLock { nativeMetaRequestGeneration }');
 if (libraryStart < 0) throw new Error('Missing library request generation capture');
@@ -194,6 +242,55 @@ for (const guard of libraryGuards) {
 fs.writeFileSync(`${out}/library-caller-contract.txt`, 'Actual library overlay caller contract PASS; five guard-removal negatives rejected; not executor/native receipt proof\n');
 } else {
   fs.writeFileSync(`${out}/library-caller-contract.txt`, 'Historical source predates library overlay merge; no new caller contract result claimed\n');
+}
+if (hasStatusProjection) {
+  const coalescer = block(core, 'private func scheduleMetaDetailsRepublish(capturedPublicationToken');
+  const worker = block(coalescer, 'DispatchQueue.global(qos: .userInitiated).async { [weak self] in');
+  const admission = block(worker, 'DispatchQueue.main.async { [weak self] in');
+  const acceptance = block(core, 'private func acceptStreamAddonStatus(');
+  const getter = block(core, 'func streamAddonStates(');
+  const observer = block(core, '@Published private(set) var metaDetails: CoreMetaDetails?');
+  const projection = block(core, 'private static func streamAddonStatusProjection(');
+  const workerNeeds = ['guard let data = self.stateData("meta_details") else { return }',
+    'details = try Self.decoder.decode(CoreMetaDetails?.self, from: data)',
+    'streamAddonStatus = try Self.streamAddonStatusProjection(data: data, details: details)'];
+  const admissionNeeds = ['self.publicationStillCurrent(publicationToken)',
+    'self.appleCWMetaRefreshRequest?.generation == refreshGenerationAtSchedule',
+    'self.refindGeneration == refindGenerationAtSchedule',
+    'let statusGeneration = self.beginStreamAddonStatusAdmission()',
+    'self.acceptStreamAddonStatus(streamAddonStatus, originalGeneration: statusGeneration)'];
+  const typedMarker = 'if Self.metaDetailsNeedsRepublish(current: self.metaDetails, next: details) {';
+  const workerAccepts = source => workerNeeds.every(text => source.includes(text))
+    && source.split('self.stateData("meta_details")').length === 2;
+  const admissionAccepts = source => admissionNeeds.every(text => source.includes(text))
+    && admissionNeeds.slice(0, 3).every(text => source.indexOf(text) < source.indexOf(admissionNeeds[3]))
+    && source.indexOf(admissionNeeds[3]) < source.indexOf(typedMarker)
+    && source.indexOf(typedMarker) < source.indexOf(admissionNeeds[4]);
+  if (!workerAccepts(worker) || !admissionAccepts(admission)) throw new Error('Same-buffer/original status admission contract failed');
+  for (const text of workerNeeds) {
+    if (workerAccepts(worker.replace(text, 'REMOVED_CONTRACT'))) throw new Error('Worker contract removal accepted');
+  }
+  for (const text of admissionNeeds) {
+    if (admissionAccepts(admission.replace(text, 'REMOVED_CONTRACT'))) throw new Error('Admission contract removal accepted');
+  }
+  const signalIndex = acceptance.indexOf('streamAddonStatusSignal = UUID()');
+  const postIndex = acceptance.indexOf('guard streamAddonStatusAdmissionGeneration == originalGeneration else { return }');
+  const commitIndex = acceptance.indexOf('acceptedStreamAddonStatus = projection');
+  if (!getter.includes('projection.selected == details.selected') || getter.includes('stateData(')
+      || getter.includes('streamsEpoch') || getter.includes('addonStatesCache')
+      || projection.includes('stateData(') || projection.includes('streamsEpoch')
+      || !observer.includes('if metaDetails == nil {')
+      || !observer.includes('streamAddonStatusAdmissionGeneration = UUID()')
+      || !observer.includes('acceptedStreamAddonStatus = nil')
+      || core.includes('@Published private var acceptedStreamAddonStatus')
+      || !acceptance.includes('guard streamAddonStatusAdmissionGeneration == originalGeneration,')
+      || acceptance.includes('beginStreamAddonStatusAdmission(')
+      || !(signalIndex >= 0 && signalIndex < postIndex && postIndex < commitIndex)) {
+    throw new Error('Real Published signal/original fence/plain commit/getter/clear source contract failed');
+  }
+  fs.writeFileSync(`${out}/error-sidecar-source-contract.txt`, 'Same-buffer/original status admission source contract PASS; eight worker/admission removals rejected; real Combine properties retained; missing-post-fence RAM counterexamples required at runtime; not native executor or full actor proof\n');
+} else {
+  fs.writeFileSync(`${out}/error-sidecar-source-contract.txt`, 'Historical source predates accepted status projection; no new sidecar/reentry result claimed\n');
 }
 // Models and tests compile directly from input snapshots; no source declaration,
 // date formatter, protocol annotation or test assertion is edited during prepare.

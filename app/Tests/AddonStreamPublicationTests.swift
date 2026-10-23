@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import os
 
 // No app, account, Keychain, provider requests, stream start or native engine is used. The
@@ -178,6 +179,277 @@ import os
         let idleCount = idle.metadataPublications
         idle.acceptLibrary(try decoded(unloaded))
         check(idle.metadataPublications == idleCount, "matching absent selection is not detail ownership")
+    }
+
+    static func errorSidecarCases() throws {
+        // These exercise the extracted actual projection/getter/admission branches. Native
+        // callback, account and request-generation guards remain source contracts, not RAM mocks.
+        func wire(_ content: VortxJSON, id: String = "synthetic-title:1:1",
+                  provider: String = "https://provider.invalid/synthetic-config/manifest.json") -> [String: VortxJSON] {
+            var root = metadataWire()
+            root["streams"] = .array([.object([
+                "request": .object(["base": .string(provider), "path": .object([
+                    "resource": .string("stream"), "type": .string("series"), "id": .string(id)])]),
+                "content": content])])
+            return root
+        }
+        func err(_ code: String, _ status: VortxJSON? = nil) -> VortxJSON {
+            var payload: [String: VortxJSON] = ["code": .string(code)]
+            payload["status"] = status
+            return .object(["type": .string("Err"), "content": .object(payload)])
+        }
+        let probe = AddonPublicationProbe()
+        probe.names = [base: "Synthetic A"]
+        func accept(_ root: [String: VortxJSON]) throws {
+            try probe.acceptData(JSONEncoder().encode(VortxJSON.object(root)))
+        }
+        let timeout = wire(err("timeout")), rateLimited = wire(err("http", .integer(429)))
+        check(try decoded(timeout) == decoded(rateLimited), "error payload-only wire change is typed-equivalent")
+        try accept(timeout)
+        check(probe.streamAddonStates().first?.error == "Add-on request timed out. Try again.", "accepted timeout is visible")
+        let publications = probe.metadataPublications, epoch = probe.streamsEpoch
+        let statusCount = probe.statusPublications, indexerStarts = probe.indexerStarts
+        try accept(rateLimited)
+        check(probe.streamAddonStates().first?.error == "Add-on rate limited (HTTP 429). Try again later.", "HTTP 429 replaces cached timeout")
+        check(probe.statusPublications == statusCount + 1, "error-only change publishes one status value")
+        check(probe.metadataPublications == publications && probe.streamsEpoch == epoch && probe.indexerStarts == indexerStarts,
+              "error-only change leaves typed metadata, sources and indexer untouched")
+        try accept(rateLimited)
+        check(probe.statusPublications == statusCount + 1, "identical status receipt stays quiet")
+        try accept(wire(err("http", .integer(503))))
+        check(probe.streamAddonStates().first?.error == "Add-on returned HTTP 503.", "HTTP status-only transition updates presentation")
+        try accept(wire(err("empty_resource")))
+        check(probe.streamAddonStates().first?.error == nil && probe.streamAddonStates().first?.loading == false,
+              "empty-resource error clears prior failure without looking pending")
+        check(probe.metadataPublications == publications && probe.streamsEpoch == epoch,
+              "error-to-empty message change is not a source rebuild")
+        try accept(wire(err("unknown-one")))
+        let unknownCount = probe.statusPublications
+        var unknown = wire(err("unknown-two")); unknown["unused"] = .string("ignored")
+        try accept(unknown)
+        check(probe.statusPublications == unknownCount && probe.streamAddonStates().first?.error == "Add-on request could not be completed. Try again.",
+              "equivalent normalized unknown errors and unknown fields stay quiet")
+        try accept(wire(err("http")))
+        let invalidStatusCount = probe.statusPublications
+        for invalid in [VortxJSON.bool(true), .number(429.5), .integer(99), .integer(600)] {
+            try accept(wire(err("http", invalid)))
+            check(probe.statusPublications == invalidStatusCount && probe.streamAddonStates().first?.error == "Add-on returned an HTTP error.",
+                  "invalid HTTP status cannot become an HTTP code")
+        }
+        try accept(wire(.object(["type": .string("Err"), "content": .string("Synthetic legacy error")])))
+        check(probe.streamAddonStates().first?.error == "Synthetic legacy error", "legacy bare error rendering is retained")
+        try accept(wire(.object(["type": .string("Err"), "content": .object([
+            "type": .string("Env"), "content": .object(["type": .string("Fetch"), "content": .string("synthetic failure")])])])))
+        check(probe.streamAddonStates().first?.error == "Env: Fetch: synthetic failure", "legacy tagged error rendering is retained")
+        try accept(wire(.object(["type": .string("Err"), "content": .object(["type": .string("EmptyContent")])])))
+        check(probe.streamAddonStates().first?.error == nil, "legacy EmptyContent remains non-error")
+
+        try accept(wire(.object(["type": .string("UnknownState")])))
+        check(probe.streamAddonStates().first?.loading == true, "unknown raw state keeps existing pending presentation")
+        try accept(wire(.object(["type": .string("Ready"), "content": .array([.object(["url": .integer(42)])]) ])))
+        check(probe.streamAddonStates().first?.error == "Unreadable add-on response" && probe.streamAddonStates().first?.loading == false,
+              "malformed Ready is terminal rather than a false successful empty result")
+        try accept(wire(.object(["type": .string("Ready"), "content": .array([])])))
+        check(probe.streamAddonStates().first?.ready == 0 && probe.streamAddonStates().first?.error == nil,
+              "valid empty Ready is not an error")
+        let ready: VortxJSON = .object(["type": .string("Ready"), "content": .array([.object([
+            "url": .string("https://media.invalid/status"), "behaviorHints": .object(["videoSize": .integer(42)])])])])
+        try accept(wire(ready))
+        check(probe.streamAddonStates().first?.ready == 1, "Ready count comes from the same-buffer typed row")
+        let readyCount = probe.statusPublications, readyEpoch = probe.streamsEpoch
+        let stringReady: VortxJSON = .object(["type": .string("Ready"), "content": .array([.object([
+            "url": .string("https://media.invalid/status"), "behaviorHints": .object(["videoSize": .string("42")])])])])
+        try accept(wire(stringReady))
+        check(probe.statusPublications == readyCount && probe.streamsEpoch == readyEpoch,
+              "decoder-equivalent stream values do not churn the sidecar")
+        probe.names = [base: "Renamed A"]
+        check(probe.streamAddonStates().first?.name == "Renamed A" && probe.statusPublications == readyCount,
+              "current add-on names are not trapped in an epoch cache")
+
+        var multiple = timeout
+        let other = wire(err("network"), id: "synthetic-title:1:2", provider: "https://second.invalid/manifest.json")
+        let rows = timeout["streams"]!.array! + other["streams"]!.array!
+        multiple["streams"] = .array(rows)
+        try accept(multiple)
+        check(probe.streamAddonStates().map(\.base) == [base, "https://second.invalid/manifest.json"], "status rows preserve provider order")
+        check(probe.streamAddonStates(forStreamId: "synthetic-title:1:1").count == 1
+              && probe.streamAddonStates(forStreamId: "synthetic-title:1:2").first?.base == "https://second.invalid/manifest.json"
+              && probe.streamAddonStates(forStreamId: "synthetic-title:1:3").isEmpty, "status filtering uses the exact row episode ID")
+        multiple["streams"] = .array(Array(rows.reversed()))
+        try accept(multiple)
+        check(probe.streamAddonStates().first?.base == "https://second.invalid/manifest.json", "provider reorder replaces ordered status projection")
+        var embeddedOnly = multiple
+        embeddedOnly["metaStreams"] = embeddedOnly["streams"]; embeddedOnly["streams"] = .array([])
+        try accept(embeddedOnly)
+        check(probe.streamAddonStates().isEmpty, "status scope remains stream-resource rows, not embedded sources")
+        for field in ["base", "resource", "type", "id"] {
+            try accept(timeout)
+            let previous = probe.statusPublications
+            var changed = timeout, row = fields(timeout["streams"]!.array!.first!), request = fields(row["request"]!)
+            if field == "base" { request[field] = .string("replacement") }
+            else {
+                var requestPath = fields(request["path"]!); requestPath[field] = .string("replacement")
+                request["path"] = .object(requestPath)
+            }
+            row["request"] = .object(request); changed["streams"] = .array([.object(row)])
+            try accept(changed)
+            check(probe.statusPublications == previous + 1, "status projection retains exact request \(field)")
+        }
+
+        try accept(timeout)
+        let beforeFailure = probe.streamAddonStates(), beforeFailureCount = probe.statusPublications
+        do {
+            try probe.acceptData(Data("{".utf8))
+            check(false, "invalid receipt must throw before admission")
+        } catch {
+            check(probe.streamAddonStates() == beforeFailure && probe.statusPublications == beforeFailureCount,
+                  "failed decode preserves the admitted metadata/status pair")
+        }
+        var routeB = timeout, selected = fields(timeout["selected"]!), path = fields(selected["metaPath"]!)
+        path["id"] = .string("replacement-title"); selected["metaPath"] = .object(path); routeB["selected"] = .object(selected)
+        probe.accept(try decoded(routeB))
+        check(probe.streamAddonStates().isEmpty, "accepted A sidecar is not paired with different current route B")
+        probe.accept(nil)
+        probe.accept(try decoded(timeout))
+        check(probe.streamAddonStates().isEmpty, "explicit nil clear retires old sidecar before same-route reopen")
+        try accept(timeout)
+        check(probe.streamAddonStates().first?.error == "Add-on request timed out. Try again.", "fresh same-route receipt installs its own status")
+        try probe.acceptData(Data("null".utf8))
+        check(probe.metaDetails == nil && probe.streamAddonStates().isEmpty, "valid null unload clears metadata and sidecar")
+        let unloadedCount = probe.statusPublications
+        try probe.acceptData(Data("null".utf8))
+        check(probe.statusPublications == unloadedCount, "repeated unloaded receipt stays quiet")
+    }
+
+    static func errorSidecarReentryCases() throws {
+        // The fixture is a real ObservableObject with the actual Published metadata and signal
+        // declarations. Every reentry is a one-shot synchronous Combine callback, never a queue hop.
+        func bytes(_ code: String, status: Int64? = nil, name: String? = nil) throws -> Data {
+            var root = metadataWire()
+            var failure: [String: VortxJSON] = ["code": .string(code)]
+            if let status { failure["status"] = .integer(status) }
+            root["streams"] = .array([.object([
+                "request": .object(["base": .string(base), "path": .object([
+                    "resource": .string("stream"), "type": .string("series"), "id": .string("synthetic-title:1:1")])]),
+                "content": .object(["type": .string("Err"), "content": .object(failure)])])])
+            if let name {
+                var rows = root["metaItems"]!.array!, row = fields(rows[0]), content = fields(row["content"]!)
+                var meta = fields(content["content"]!); meta["name"] = .string(name)
+                content["content"] = .object(meta); row["content"] = .object(content); rows[0] = .object(row)
+                root["metaItems"] = .array(rows)
+            }
+            return try JSONEncoder().encode(VortxJSON.object(root))
+        }
+        let old = try bytes("timeout"), rateLimited = try bytes("http", status: 429)
+        let newer = try bytes("http", status: 503)
+        let oldDetails = try JSONDecoder().decode(CoreMetaDetails.self, from: old)
+        let rateMessage = "Add-on rate limited (HTTP 429). Try again later."
+        let newerMessage = "Add-on returned HTTP 503."
+        do {
+            let probe = AddonPublicationProbe(); try probe.acceptData(old)
+            let publications = probe.metadataPublications, epoch = probe.streamsEpoch
+            var wakes = 0
+            let subscription = probe.objectWillChange.sink { _ in wakes += 1 }
+            try probe.acceptData(rateLimited)
+            subscription.cancel()
+            check(wakes == 1 && probe.streamAddonStates().first?.error == rateMessage,
+                  "real Combine status signal wakes once for typed-equivalent timeout to HTTP 429")
+            check(probe.metadataPublications == publications && probe.streamsEpoch == epoch,
+                  "real status-only Published wake does not republish typed err or rebuild sources")
+        }
+        do {
+            let probe = AddonPublicationProbe(); try probe.acceptData(old)
+            var fired = false
+            let subscription = probe.objectWillChange.sink { _ in
+                guard !fired else { return }; fired = true
+                probe.accept(nil)
+                probe.accept(oldDetails)
+            }
+            try probe.acceptData(rateLimited)
+            subscription.cancel()
+            check(fired && probe.metaDetails?.selected == oldDetails.selected && probe.streamAddonStates().isEmpty,
+                  "status willSet nil-clear and synchronous same-route reopen cannot revive retired payload")
+            try probe.acceptData(newer)
+            check(probe.streamAddonStates().first?.error == newerMessage, "fresh receipt after reentrant clear installs its own status")
+        }
+        do {
+            let probe = AddonPublicationProbe(); try probe.acceptData(old)
+            var fired = false
+            let subscription = probe.objectWillChange.sink { _ in
+                guard !fired else { return }; fired = true
+                probe.accept(nil)
+            }
+            try probe.acceptData(rateLimited)
+            subscription.cancel()
+            probe.accept(oldDetails)
+            check(fired && probe.streamAddonStates().isEmpty, "status willSet clear also stays retired on a later same-route reopen")
+        }
+        do {
+            let probe = AddonPublicationProbe(); try probe.acceptData(old)
+            var fired = false, nestedFailed = false
+            let subscription = probe.objectWillChange.sink { _ in
+                guard !fired else { return }; fired = true
+                do { try probe.acceptData(newer) } catch { nestedFailed = true }
+            }
+            try probe.acceptData(rateLimited)
+            subscription.cancel()
+            check(fired && !nestedFailed && probe.streamAddonStates().first?.error == newerMessage,
+                  "nested newer nonnil status admission wins over outer status willSet")
+        }
+        do {
+            let probe = AddonPublicationProbe()
+            probe.accept(oldDetails) // Metadata exists, but no status payload has ever been stored.
+            var fired = false
+            let subscription = probe.objectWillChange.sink { _ in
+                guard !fired else { return }; fired = true
+                probe.accept(nil); probe.accept(oldDetails)
+            }
+            try probe.acceptData(rateLimited)
+            subscription.cancel()
+            check(fired && probe.streamAddonStates().isEmpty,
+                  "nil clear retires an in-flight first status even when the prior payload was nil")
+            try probe.acceptData(newer)
+            check(probe.streamAddonStates().first?.error == newerMessage,
+                  "a fresh status can commit after the first in-flight publication was retired")
+        }
+        do {
+            let probe = AddonPublicationProbe(); try probe.acceptData(old)
+            var fired = false, nestedFailed = false
+            let subscription = probe.objectWillChange.sink { _ in
+                guard !fired else { return }; fired = true
+                do { try probe.acceptData(newer) } catch { nestedFailed = true }
+            }
+            try probe.acceptData(bytes("http", status: 429, name: "Outer metadata carrier"))
+            subscription.cancel()
+            check(fired && !nestedFailed && probe.streamAddonStates().first?.error == newerMessage,
+                  "original admission token spans typed metadata willSet as well as the status signal")
+            // This intentionally says nothing about the outer typed setter's own writeback; that
+            // broader receipt/actor join is separate. Only the status payload commit is fenced here.
+        }
+        do {
+            let probe = AddonPublicationProbe(); try probe.acceptData(old)
+            var fired = false
+            let subscription = probe.objectWillChange.sink { _ in
+                guard !fired else { return }; fired = true
+                probe.accept(nil); probe.accept(oldDetails)
+            }
+            try probe.acceptDataWithoutPostFence(rateLimited)
+            subscription.cancel()
+            check(fired && probe.streamAddonStates().first?.error == rateMessage,
+                  "negative control: removing only post-signal original fence reproduces same-route resurrection")
+        }
+        do {
+            let probe = AddonPublicationProbe(); try probe.acceptData(old)
+            var fired = false, nestedFailed = false
+            let subscription = probe.objectWillChange.sink { _ in
+                guard !fired else { return }; fired = true
+                do { try probe.acceptData(newer) } catch { nestedFailed = true }
+            }
+            try probe.acceptDataWithoutPostFence(rateLimited)
+            subscription.cancel()
+            check(fired && !nestedFailed && probe.streamAddonStates().first?.error == rateMessage,
+                  "negative control: missing post-signal fence overwrites newer nested status")
+        }
     }
 
     static func metadataValueTransferCases() async throws {
@@ -487,6 +759,8 @@ import os
         check(!probe.needs(stringNumeric) && !probe.streamsChange(stringNumeric), "decoder-equivalent byte counts stay quiet")
         try metadataValueCases()
         try libraryEventCases()
+        try errorSidecarCases()
+        try errorSidecarReentryCases()
         try await metadataValueTransferCases()
         try finiteLargeValueCases()
         finiteResumeTimecodeCases()

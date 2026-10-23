@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import Combine
 import CryptoKit
 #if os(macOS)
 import AppKit
@@ -1000,7 +1001,16 @@ final class CoreBridge: ObservableObject {
     /// Decoded screen state, refreshed on the main queue as the engine emits field changes.
     @Published private(set) var continueWatching: [CoreCWItem] = []
     @Published private(set) var boardRows: [CoreBoardRow] = []
-    @Published private(set) var metaDetails: CoreMetaDetails?
+    @Published private(set) var metaDetails: CoreMetaDetails? {
+        didSet {
+            // Retire even an in-flight first status publication whose prior payload was nil.
+            // Explicit load/close/account-clear paths also assign nil outside the coalescer.
+            if metaDetails == nil {
+                streamAddonStatusAdmissionGeneration = UUID()
+                acceptedStreamAddonStatus = nil
+            }
+        }
+    }
     private let metaLoadTargetLock = NSLock()
     private var requestedMetaLoadTarget: MetaLoadTarget?
     private var nativeMetaRequestAction: Data?
@@ -3103,57 +3113,86 @@ final class CoreBridge: ObservableObject {
         var id: String { base }
     }
 
-    /// Memo for `streamAddonStates`, keyed per stream id on `streamsEpoch`: every fact it surfaces
-    /// (per-group ready count, loading flag, error transition) changes exactly when the ready-stream
-    /// signature changes, which is when `streamsEpoch` bumps. Without this, the three iOS source-list
-    /// call sites pulled the FULL raw meta_details JSON across the FFI and re-parsed it with
-    /// JSONSerialization on EVERY SwiftUI body eval (6-7x/sec during source search on a 1200+ stream
-    /// title), a main-thread saturator of its own alongside the old per-eval assembly.
-    private var addonStatesCache: [String: (epoch: Int, value: [StreamAddonState])] = [:]
+    /// Error payloads are not part of CoreLoadable.err or the source epoch. Keep only normalized
+    /// presentation from the same admitted metadata buffer, never a separate live state read.
+    private struct StreamAddonStatusRow: Equatable, Sendable {
+        let request: CoreResourceRequest
+        let ready: Int
+        let loading: Bool
+        let error: String?
+    }
+    private struct StreamAddonStatusProjection: Equatable, Sendable {
+        let selected: CoreMetaSelection?
+        let rows: [StreamAddonStatusRow]
+    }
+    private var acceptedStreamAddonStatus: StreamAddonStatusProjection?
+    private var streamAddonStatusAdmissionGeneration = UUID()
+    // A wake-up only, never payload or authority: a reentrant setter may overwrite the nonce.
+    @Published private var streamAddonStatusSignal = UUID()
+
+    /// Reserve before either observable setter. Nested admissions and explicit nil clears retire
+    /// this local commit identity; it is not a replacement for native request/account ownership.
+    private func beginStreamAddonStatusAdmission() -> UUID {
+        let originalGeneration = UUID()
+        streamAddonStatusAdmissionGeneration = originalGeneration
+        return originalGeneration
+    }
+
+    private func acceptStreamAddonStatus(_ projection: StreamAddonStatusProjection?, originalGeneration: UUID) {
+        guard streamAddonStatusAdmissionGeneration == originalGeneration,
+              acceptedStreamAddonStatus != projection else { return }
+        streamAddonStatusSignal = UUID()
+        // Published/objectWillChange delivers synchronously before its setter returns. Never
+        // recapture authority after that callback: clear/reopen or a nested admission must win.
+        guard streamAddonStatusAdmissionGeneration == originalGeneration else { return }
+        acceptedStreamAddonStatus = projection
+    }
 
     @MainActor
     func streamAddonStates(forStreamId streamId: String? = nil) -> [StreamAddonState] {
-        let cacheKey = streamId ?? ""
-        if let hit = addonStatesCache[cacheKey], hit.epoch == streamsEpoch { return hit.value }
-        var out: [StreamAddonState] = []
-        if let data = stateData("meta_details"),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let streams = object["streams"] as? [[String: Any]] {
-            let names = addonNamesByBase()
-            for group in streams {
-                let request = group["request"] as? [String: Any]
-                if let streamId,
-                   let path = request?["path"] as? [String: Any],
-                   path["id"] as? String != streamId { continue }
-                let base = request?["base"] as? String ?? ""
-                let name = names[base] ?? "Add-on"
-                let content = group["content"] as? [String: Any]
-                switch content?["type"] as? String {
-                case "Ready":
-                    // Decode this exact current request, not a possibly stale publication for
-                    // another episode. A typed-payload failure is terminal, never a false Ready.
-                    if let count = Self.currentReadyStreamCount(group) {
-                        out.append(.init(base: base, name: name, ready: count, loading: false, error: nil))
-                    } else {
-                        out.append(.init(base: base, name: name, ready: 0, loading: false, error: "Unreadable add-on response"))
-                    }
-                case "Err":
-                    let msg = Self.describeResourceError(content?["content"])
-                    out.append(.init(base: base, name: name, ready: 0, loading: false, error: msg))
-                default:
-                    out.append(.init(base: base, name: name, ready: 0, loading: true, error: nil))
-                }
-            }
+        guard let details = metaDetails, let projection = acceptedStreamAddonStatus,
+              projection.selected == details.selected else { return [] }
+        let names = addonNamesByBase()
+        return projection.rows.compactMap { row in
+            if let streamId, row.request.path.id != streamId { return nil }
+            return StreamAddonState(base: row.request.base, name: names[row.request.base] ?? "Add-on",
+                ready: row.ready, loading: row.loading, error: row.error)
         }
-        // Bounded: a long episode-hopping session accumulates one slot per episode id; reset on overflow
-        // (worst case one extra parse). Failures cache too, so a broken payload cannot re-parse per eval.
-        if addonStatesCache.count > 8 { addonStatesCache.removeAll(keepingCapacity: true) }
-        addonStatesCache[cacheKey] = (streamsEpoch, out)
-        return out
     }
 
-    /// Runs only on the existing epoch-cache miss; no extra engine read or per-body work.
-    private static func currentReadyStreamCount(_ group: [String: Any]) -> Int? {
+    /// Normalize only the stream-resource rows this UI already exposes, preserving order and exact
+    /// request identity. Ready counts reuse the typed decode from the same buffer, not another
+    /// per-stream parse. Unknown fields remain raw-owned and do not invalidate presentation.
+    private static func streamAddonStatusProjection(data: Data, details: CoreMetaDetails?) throws -> StreamAddonStatusProjection? {
+        guard let details else { return nil }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let groups = object["streams"] as? [[String: Any]], groups.count == details.streams.count else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Inconsistent metadata status rows"))
+        }
+        var rows: [StreamAddonStatusRow] = []
+        rows.reserveCapacity(groups.count)
+        for (raw, decoded) in zip(groups, details.streams) {
+            let content = raw["content"] as? [String: Any]
+            let ready: Int, loading: Bool, error: String?
+            switch content?["type"] as? String {
+            case "Ready":
+                let count = Self.currentReadyStreamCount(raw, decoded: decoded)
+                ready = count ?? 0; loading = false
+                error = count == nil ? "Unreadable add-on response" : nil
+            case "Err":
+                ready = 0; loading = false; error = Self.describeResourceError(content?["content"])
+            default:
+                ready = 0; loading = true; error = nil
+            }
+            rows.append(.init(request: decoded.request, ready: ready, loading: loading, error: error))
+        }
+        return .init(selected: details.selected, rows: rows)
+    }
+
+    /// The accepted projection passes its already-decoded exact current row. The raw default
+    /// remains available without borrowing a previous episode's Ready value.
+    private static func currentReadyStreamCount(_ group: [String: Any], decoded: CoreStreamGroup? = nil) -> Int? {
+        if let decoded { return decoded.content?.ready?.count }
         guard let data = try? JSONSerialization.data(withJSONObject: group),
               let current = try? JSONDecoder().decode(CoreStreamGroup.self, from: data),
               let streams = current.content?.ready else { return nil }
@@ -5687,11 +5726,13 @@ final class CoreBridge: ObservableObject {
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     guard let self else { return }
                     let details: CoreMetaDetails?
+                    let streamAddonStatus: StreamAddonStatusProjection?
                     do {
                         guard let data = self.stateData("meta_details") else { return }
                         // A valid JSON null is an unload receipt. A decoding/read failure is not:
                         // preserve the current UI and never use a malformed snapshot to authorize Load.
                         details = try Self.decoder.decode(CoreMetaDetails?.self, from: data)
+                        streamAddonStatus = try Self.streamAddonStatusProjection(data: data, details: details)
                     } catch {
                         VXProbe.log("engine", "metadata receipt decode failed; retaining last valid snapshot")
                         return
@@ -5714,6 +5755,7 @@ final class CoreBridge: ObservableObject {
                               self.refindGeneration == refindGenerationAtSchedule else {
                             return
                         }
+                        let statusGeneration = self.beginStreamAddonStatusAdmission()
                         if Self.metaDetailsNeedsRepublish(current: self.metaDetails, next: details) {
                             // Compute the streams-only diff BEFORE the assignment, then bump the
                             // source-list epoch only when the ready-stream set (or the loaded meta)
@@ -5724,6 +5766,7 @@ final class CoreBridge: ObservableObject {
                             if streamsChanged { self.streamsEpoch &+= 1 }
                             if let details { self.startNZBIndexerSearchIfNeeded(details: details) }
                         }
+                        self.acceptStreamAddonStatus(streamAddonStatus, originalGeneration: statusGeneration)
                         self.replayPendingEpisodeWatched()
                         // Re-find sources: the minimal Unload -> nil -> Load arm, independent of the Apple CW
                         // authoritative refresh. The Unload's nil meta_details receipt is the only thing that
