@@ -30,7 +30,7 @@ final class SIMKLContinueWatchingShadow: @unchecked Sendable {
     @discardableResult
     func refresh(context expected: HomeContinueWatchingSelection.Context, now: Date = Date()) -> Task<Void, Never>? {
         guard expected.preferences.source == .simkl, expected.usesEngineHistory,
-              expected.isCurrent(core: .shared, profiles: .shared), SIMKLAuth.isConfigured,
+              expected.isCurrent(core: .shared), SIMKLAuth.isConfigured,
               let expectedSession = SIMKLAuth.storedSessionID else { return nil }
         lock.lock()
         if context != expected || session != expectedSession {
@@ -49,7 +49,7 @@ final class SIMKLContinueWatchingShadow: @unchecked Sendable {
     }
     private func commit(_ next: SIMKLContinueWatchingReader.Snapshot,
                         context expected: HomeContinueWatchingSelection.Context, session expectedSession: SIMKLSessionID, generation captured: Int) {
-        guard expected.isCurrent(core: .shared, profiles: .shared), SIMKLAuth.storedSessionID == expectedSession else { return }
+        guard expected.isCurrent(core: .shared), SIMKLAuth.storedSessionID == expectedSession else { return }
         lock.lock()
         guard generation == captured, context == expected, session == expectedSession else { lock.unlock(); return }
         state = next; running = false; lock.unlock()

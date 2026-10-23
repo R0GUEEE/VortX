@@ -94,7 +94,7 @@ struct Issue164TraktContractTests {
             [
                 "guard TraktPlaybackSnapshotPolicy.canCommit(",
                 "Self.saveCache(",
-                "guard context.isCurrent(core: .shared, profiles: .shared), TraktPlaybackSnapshotPolicy.canCommit(",
+                "guard context.isCurrent(core: .shared), TraktPlaybackSnapshotPolicy.canCommit(",
                 "lastActivityStamps = activity",
                 "lock.unlock()",
                 "Self.postChanged(context: context)",

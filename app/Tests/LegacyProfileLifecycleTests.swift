@@ -6,10 +6,15 @@ import os
 // The runner splices the actual Profiles.swift observer block here; these are only dependencies
 // and mutation drivers, not a copied implementation of its lifecycle decisions.
 private struct UserProfile {
+    struct Discovery {
+        var continueWatchingSource: String?
+        var continueWatchingWindow: String?
+    }
     let id: UUID
     var name: String
     var isOwner: Bool
     var usesOwnAccount: Bool
+    var discovery: Discovery? = nil
 }
 // This plain-property fixture does not call publishInitial or read the new mirror. It tests
 // legacy observer/ownership behavior only; actual Combine reentrancy and startup are separate gates.

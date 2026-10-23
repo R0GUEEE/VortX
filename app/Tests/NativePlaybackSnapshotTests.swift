@@ -18,7 +18,16 @@ final class CredentialScopeRegistry: @unchecked Sendable {
     func isCurrent(_ capture: Capture) -> Bool { capture == current }
 }
 // Synthetic roster rows supply explicit scalar facts; they are not a credential or playback authority.
-struct FixtureSelectionProfile { let id: UUID; let isOwner: Bool; let usesOwnAccount: Bool }
+struct FixtureSelectionProfile {
+    struct Discovery {
+        var continueWatchingSource: String?
+        var continueWatchingWindow: String?
+    }
+    let id: UUID
+    let isOwner: Bool
+    let usesOwnAccount: Bool
+    var discovery: Discovery? = nil
+}
 final class ProfileStore: @unchecked Sendable {
     static let shared = ProfileStore()
     var profiles: [FixtureSelectionProfile] = [] {

@@ -122,7 +122,9 @@ final class TraktPlaybackShadow {
         // person's session on the family device. The coordinator already refuses to PUSH from an overlay
         // profile for exactly this reason; reading it back without the same gate would leak the owner's
         // viewing in the other direction.
-        guard ProfileStore.shared.activeUsesEngineHistory else { return nil }
+        guard let profileSelection = ProfileSelectionRead.snapshot(),
+              let profile = profileSelection.activeProfile, profileSelection.activeID == profile.id,
+              profile.usesEngineHistory else { return nil }
         // No trustworthy runtime means no honest timecode: /sync/playback gives a percent and nothing else.
         // Showing "Resume from 41:23" off a guessed runtime would be a fabricated number, so we stay silent.
         guard let duration = durationSeconds, duration.isFinite, duration > 0 else { return nil }
@@ -153,7 +155,8 @@ final class TraktPlaybackShadow {
         // device already knows as much or more, so there is nothing to offer. This asymmetry is what keeps
         // one authority: we only ever ADD information the local side does not have.
         if let local = localSeconds, local > 0, seconds <= local + Self.staleLocalThresholdSeconds { return nil }
-        guard TraktAuth.storedSessionID == currentSession else { return nil }
+        guard TraktAuth.storedSessionID == currentSession,
+              ProfileSelectionRead.snapshot() == profileSelection else { return nil }
         return AccountBoundResumeSuggestion(seconds: seconds, sessionID: currentSession)
     }
 
@@ -173,8 +176,15 @@ final class TraktPlaybackShadow {
         fallback localItems: [CoreCWItem],
         libraryItems: [CoreCWItem] = []
     ) -> ContinueWatchingSelection {
-        guard ContinueWatchingPreferences.current().source == .trakt,
-              ProfileStore.shared.activeUsesEngineHistory else {
+        let preferenceEpoch = ContinueWatchingPreferences.selectionEpoch
+        let preferences = ContinueWatchingPreferences.current()
+        let requiresAcknowledgedProjection = CoreBridge.shared.usesNativeProfileState
+        guard let profileSelection = ProfileSelectionRead.snapshot(),
+              let profile = profileSelection.activeProfile, profileSelection.activeID == profile.id,
+              preferences.source == .trakt, profile.usesEngineHistory,
+              (!requiresAcknowledgedProjection || preferences == ContinueWatchingPreferences.value(
+                source: profile.continueWatchingSource,
+                window: profile.continueWatchingWindow)) else {
             return ContinueWatchingSelection(items: localItems, source: .local, sessionID: nil)
         }
         // Identity-join pool: the local CW rail plus any locally cached library rows the caller
@@ -220,7 +230,10 @@ final class TraktPlaybackShadow {
                 )
             )
         }
-        guard TraktAuth.storedSessionID == currentSession else {
+        guard TraktAuth.storedSessionID == currentSession,
+              ProfileSelectionRead.snapshot() == profileSelection,
+              preferences == ContinueWatchingPreferences.current(),
+              preferenceEpoch == ContinueWatchingPreferences.selectionEpoch else {
             return ContinueWatchingSelection(items: localItems, source: .local, sessionID: nil)
         }
         return ContinueWatchingSelection(items: items, source: .trakt, sessionID: currentSession,
@@ -277,8 +290,8 @@ final class TraktPlaybackShadow {
         let continueWatchingOn = ContinueWatchingPreferences.current().source == .trakt
         guard suggestionOn || continueWatchingOn else { return }
         guard let sessionID = TraktAuth.storedSessionID else { return }
-        let context = HomeContinueWatchingSelection.current(core: .shared, profiles: .shared).context
-        guard context.isCurrent(core: .shared, profiles: .shared) else { return }
+        guard let context = HomeContinueWatchingSelection.captureContext(),
+              context.isCurrent(core: .shared) else { return }
         lock.lock()
         // This also handles a boundary that occurred before this singleton registered its observer.
         guard stateSessionID == sessionID else {
@@ -304,7 +317,7 @@ final class TraktPlaybackShadow {
                 signedIn: signedIn,
                 context: context
             )
-            if !context.isCurrent(core: .shared, profiles: .shared) { self.refreshIfStale() }
+            if !context.isCurrent(core: .shared) { self.refreshIfStale() }
         }
     }
 
@@ -338,7 +351,7 @@ final class TraktPlaybackShadow {
         )
         if TraktPlaybackRefreshThrottlePolicy.shouldArm(
             signedIn: signedIn,
-            generationMatches: generationMatches && context.isCurrent(core: .shared, profiles: .shared)
+            generationMatches: generationMatches && context.isCurrent(core: .shared)
         ) {
             lastRefresh = Date()
         }
@@ -373,7 +386,7 @@ final class TraktPlaybackShadow {
         sessionID: TraktSessionID,
         context: HomeContinueWatchingSelection.Context
     ) -> Bool {
-        guard context.isCurrent(core: .shared, profiles: .shared) else { return false }
+        guard context.isCurrent(core: .shared) else { return false }
         lock.lock()
         // A disconnect while this pull was in flight wiped the cache and bumped generation. Writing the
         // pre-reset result back would resurrect the previous account's positions.
@@ -389,7 +402,7 @@ final class TraktPlaybackShadow {
         }
         // Persist before exposing the new snapshot in memory. A write or protection failure leaves the
         // previous same-session state intact, and a newly connected account stays on local fallback.
-        guard context.isCurrent(core: .shared, profiles: .shared), Self.saveCache(
+        guard context.isCurrent(core: .shared), Self.saveCache(
             sessionID: sessionID,
             progress: progress,
             activity: activity,
@@ -401,7 +414,7 @@ final class TraktPlaybackShadow {
         }
         // Auth can change while the atomic file replacement is in progress. Recheck after persistence
         // before exposing memory, and remove the just-written stale file if the boundary won.
-        guard context.isCurrent(core: .shared, profiles: .shared), TraktPlaybackSnapshotPolicy.canCommit(
+        guard context.isCurrent(core: .shared), TraktPlaybackSnapshotPolicy.canCommit(
             capturedSession: sessionID,
             stateSession: stateSessionID,
             currentSession: TraktAuth.storedSessionID,
@@ -679,7 +692,7 @@ final class TraktPlaybackShadow {
     #endif
     private static func postChanged(context: HomeContinueWatchingSelection.Context? = nil) {
         DispatchQueue.main.async {
-            guard context?.isCurrent(core: .shared, profiles: .shared) != false else { return }
+            guard context?.isCurrent(core: .shared) != false else { return }
             NotificationCenter.default.post(name: changedNote, object: nil)
         }
     }

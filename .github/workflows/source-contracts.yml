@@ -30,6 +30,10 @@ on:
       - "test/android-profile-picker-startup.test.mjs"
       - "scripts/test-cw-service-selection.sh"
       - "scripts/test-home-cw-selection.sh"
+      - "scripts/test-cw-worker-currentness.sh"
+      - "test/cw-worker-currentness.mjs"
+      - "test/cw-profile-fixture.cjs"
+      - "test/xperience-harness-inputs.cjs"
       - "scripts/test-episode-source-isolation.sh"
       - "scripts/test-next-preparation-attempt.sh"
       - "test/apple-player-timeline-boundaries.test.js"
@@ -86,6 +90,10 @@ on:
       - "test/android-profile-picker-startup.test.mjs"
       - "scripts/test-cw-service-selection.sh"
       - "scripts/test-home-cw-selection.sh"
+      - "scripts/test-cw-worker-currentness.sh"
+      - "test/cw-worker-currentness.mjs"
+      - "test/cw-profile-fixture.cjs"
+      - "test/xperience-harness-inputs.cjs"
       - "scripts/test-episode-source-isolation.sh"
       - "scripts/test-next-preparation-attempt.sh"
       - "test/apple-player-timeline-boundaries.test.js"
@@ -183,6 +191,7 @@ jobs:
           git fetch --no-tags --depth=1 origin 01a0ec988205781d345d94ec2c30a65d1f1bca8c
       - run: bash scripts/test-cw-service-selection.sh
       - run: bash scripts/test-home-cw-selection.sh
+      - run: bash scripts/test-cw-worker-currentness.sh
       - run: bash scripts/test-apple-parity-contracts.sh
       - run: node test/native-callback-generation.mjs
       - run: bash scripts/test-apple-player-timeline.sh

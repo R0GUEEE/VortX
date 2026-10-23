@@ -5,7 +5,7 @@ import Foundation
 enum HomeContinueWatchingSelection {
     /// PlaybackMutationTarget is an immutable value of UUIDs and credential captures. Its
     /// native identity must survive the detached Top Shelf artwork pass without recapture.
-    struct Context: Hashable, @unchecked Sendable {
+    struct Context: Hashable, Sendable {
         let profileID: UUID?
         let usesNativeProfileState: Bool
         let usesEngineHistory: Bool
@@ -15,23 +15,41 @@ enum HomeContinueWatchingSelection {
         var legacyCredential: CredentialScopeRegistry.Capture? = nil
         var legacyTarget: PlaybackMutationTarget? = nil
 
-        func isCurrent(core: CoreBridge, profiles: ProfileStore) -> Bool {
-            guard profileID != nil, profiles.activeID == profileID,
-                  profiles.activeUsesEngineHistory == usesEngineHistory,
+        /// Worker-safe validation of the ORIGINAL captured owner. The scalar projection is
+        /// eligibility evidence only; it never substitutes a new native/legacy target.
+        func isCurrent(core: CoreBridge) -> Bool {
+            guard let selection = ProfileSelectionRead.snapshot(),
+                  let profile = selection.activeProfile, selection.activeID == profile.id,
+                  profileID == profile.id, profile.usesEngineHistory == usesEngineHistory,
                   core.usesNativeProfileState == usesNativeProfileState else { return false }
             guard preferences == ContinueWatchingPreferences.current() else { return false }
             guard preferenceEpoch == ContinueWatchingPreferences.selectionEpoch, preferences.isSupported else { return false }
-            guard usesNativeProfileState else {
+            let ownsTarget: Bool
+            if usesNativeProfileState {
+                guard let nativeTarget else { return false }
+                // A queued/failed UI choice cannot authorize the new service rail. These
+                // fields belong to the extant selected member's settled stored projection.
+                guard preferences == ContinueWatchingPreferences.value(source: profile.continueWatchingSource,
+                                                                        window: profile.continueWatchingWindow) else { return false }
+                ownsTarget = nativeTarget.stillOwnsCurrentContext(core: core)
+            } else {
                 guard let legacyCredential, let legacyTarget else { return false }
-                return CredentialScopeRegistry.shared.isCurrent(legacyCredential) && legacyTarget.stillOwnsCurrentContext(core: core)
+                ownsTarget = CredentialScopeRegistry.shared.isCurrent(legacyCredential)
+                    && legacyTarget.stillOwnsCurrentContext(core: core)
             }
-            guard let nativeTarget else { return false }
-            // A UI edit can be queued or fail. Service history must not be published through
-            // the new flat choice until that exact profile's durable projection acknowledges it.
-            let stored = profiles.active?.discovery
-            guard preferences == ContinueWatchingPreferences.value(source: stored?.continueWatchingSource,
-                                                                    window: stored?.continueWatchingWindow) else { return false }
-            return nativeTarget.stillOwnsCurrentContext(core: core)
+            // No projection lock spans bridge/credential/defaults access. Re-read after the
+            // target check so a concurrent setter or preference edit cannot supply a torn view.
+            return ownsTarget && ProfileSelectionRead.snapshot() == selection
+                && preferences == ContinueWatchingPreferences.current()
+                && preferenceEpoch == ContinueWatchingPreferences.selectionEpoch
+        }
+
+        /// Existing UI callsites retain their supplied owner. Worker callers use the overload
+        /// above and never construct/access ProfileStore.shared from a provider or cache lock.
+        @MainActor func isCurrent(core: CoreBridge, profiles: ProfileStore) -> Bool {
+            guard let profile = profiles.active, profiles.activeID == profile.id,
+                  profile.id == profileID, profile.usesEngineHistory == usesEngineHistory else { return false }
+            return isCurrent(core: core)
         }
     }
 
@@ -42,7 +60,7 @@ enum HomeContinueWatchingSelection {
         var intent: Intent { Intent(context: context, source: selection.source,
                                     traktSessionID: selection.sessionID, simklSessionID: selection.simklSessionID) }
     }
-    struct Intent: Hashable, @unchecked Sendable {
+    struct Intent: Hashable, Sendable {
         let context: Context
         let source: ContinueWatchingService
         let traktSessionID: TraktSessionID?
@@ -53,23 +71,52 @@ enum HomeContinueWatchingSelection {
         func permitsDetails(id: String, type: String, videoID: String?) -> Bool {
             isCurrent() && unavailableReason(id: id, type: type, videoID: videoID) == nil
         }
-        func isCurrent(core: CoreBridge = .shared, profiles: ProfileStore = .shared) -> Bool {
-            guard context.isCurrent(core: core, profiles: profiles) else { return false }
+        func isCurrent(core: CoreBridge = .shared) -> Bool {
+            guard context.isCurrent(core: core) else { return false }
             switch source {
             case .local: return traktSessionID == nil && simklSessionID == nil
             case .trakt: return traktSessionID != nil && TraktAuth.storedSessionID == traktSessionID
             case .simkl: return simklSessionID != nil && SIMKLAuth.storedSessionID == simklSessionID
             }
         }
+        @MainActor func isCurrent(core: CoreBridge, profiles: ProfileStore) -> Bool {
+            guard let profile = profiles.active, profiles.activeID == profile.id,
+                  profile.id == context.profileID,
+                  profile.usesEngineHistory == context.usesEngineHistory else { return false }
+            return isCurrent(core: core)
+        }
+    }
+
+    /// Capture only immutable admission evidence. Unlike current(...), this does not assemble
+    /// Home rows, visit profile overlays or acquire a provider cache while starting a refresh.
+    /// A selected UUID without a matching roster member is unavailable, not an owner fallback.
+    static func captureContext(core: CoreBridge = .shared) -> Context? {
+        guard let selection = ProfileSelectionRead.snapshot(), let profile = selection.activeProfile,
+              selection.activeID == profile.id else { return nil }
+        let native = core.usesNativeProfileState
+        var context = Context(profileID: profile.id, usesNativeProfileState: native,
+            usesEngineHistory: profile.usesEngineHistory,
+            nativeTarget: native ? .capture(core: core) : nil)
+        if !native {
+            context.legacyCredential = CredentialScopeRegistry.shared.capture()
+            context.legacyTarget = .capture(core: core)
+        }
+        guard ProfileSelectionRead.snapshot() == selection, context.isCurrent(core: core) else { return nil }
+        return context
     }
     /// A captured native intent that went stale only because its account/session generation moved on (each sync
     /// merge republishes the binding) while the same account, profile, settings and service session remain. The
     /// next history publication re-captures it; a presenter may keep this profile's last row until then.
-    static func awaitsRecapture(_ intent: Intent, core: CoreBridge = .shared, profiles: ProfileStore = .shared) -> Bool {
+    @MainActor static func awaitsRecapture(_ intent: Intent, core: CoreBridge = .shared, profiles: ProfileStore? = nil) -> Bool {
+        let profiles = profiles ?? .shared
         let context = intent.context
-        guard context.usesNativeProfileState, core.usesNativeProfileState,
-              let profileID = context.profileID, profiles.activeID == profileID,
-              profiles.activeUsesEngineHistory == context.usesEngineHistory,
+        guard let selection = ProfileSelectionRead.snapshot(), let selected = selection.activeProfile,
+              selection.activeID == selected.id,
+              let active = profiles.active, profiles.activeID == active.id, active.id == selected.id,
+              context.usesNativeProfileState, core.usesNativeProfileState,
+              let profileID = context.profileID, selected.id == profileID,
+              selected.usesEngineHistory == context.usesEngineHistory,
+              active.usesEngineHistory == context.usesEngineHistory,
               context.preferences == ContinueWatchingPreferences.current(),
               context.preferenceEpoch == ContinueWatchingPreferences.selectionEpoch,
               case .native(let binding?) = context.nativeTarget, binding.profileID == profileID,
@@ -80,14 +127,16 @@ enum HomeContinueWatchingSelection {
         case .simkl: return intent.simklSessionID != nil && SIMKLAuth.storedSessionID == intent.simklSessionID
         }
     }
-    static func refreshCurrent(core: CoreBridge = .shared, profiles: ProfileStore = .shared) {
+    @MainActor static func refreshCurrent(core: CoreBridge = .shared, profiles: ProfileStore? = nil) {
+        let profiles = profiles ?? .shared
         let snapshot = current(core: core, profiles: profiles)
         if snapshot.context.preferences.source == .simkl { SIMKLContinueWatchingShadow.shared.refresh(context: snapshot.context) }
         else if snapshot.context.preferences.source == .trakt { TraktPlaybackShadow.shared.refreshIfStale() }
     }
 
     /// Only the visible Home task invokes this lane; ordinary source/settings refreshes do not.
-    static func refreshVisibleTraktNextEpisodes(core: CoreBridge = .shared, profiles: ProfileStore = .shared) {
+    @MainActor static func refreshVisibleTraktNextEpisodes(core: CoreBridge = .shared, profiles: ProfileStore? = nil) {
+        let profiles = profiles ?? .shared
         let snapshot = current(core: core, profiles: profiles)
         guard snapshot.intent.source == .trakt, snapshot.intent.isCurrent(core: core, profiles: profiles) else { return }
         TraktHomeNextEpisodeProducer.shared.requestRefresh(intent: snapshot.intent, core: core)
@@ -95,7 +144,7 @@ enum HomeContinueWatchingSelection {
 
     /// A newly mounted presentation has no accepted producer yet. Keep its body empty
     /// without selecting/sorting history; the source refresh installs a captured intent.
-    static func waitingForPresentation(core: CoreBridge, profiles: ProfileStore) -> Snapshot {
+    @MainActor static func waitingForPresentation(core: CoreBridge, profiles: ProfileStore) -> Snapshot {
         let context = Context(profileID: profiles.activeID,
             usesNativeProfileState: core.usesNativeProfileState,
             usesEngineHistory: profiles.activeUsesEngineHistory, nativeTarget: nil)
@@ -104,7 +153,7 @@ enum HomeContinueWatchingSelection {
         return Snapshot(selection: selection, context: context)
     }
 
-    static func current(
+    @MainActor static func current(
         core: CoreBridge,
         profiles: ProfileStore,
         shadow: TraktPlaybackShadow? = nil,
@@ -206,7 +255,7 @@ enum HomeContinueWatchingSelection {
 
     /// Used at both private-art storage and final publication. A still-connected Trakt
     /// account cannot revive artwork after the native profile/account target retired.
-    static func permitsPrivateArtworkCommit(
+    @MainActor static func permitsPrivateArtworkCommit(
         context: Context,
         sessionID: TraktSessionID,
         core: CoreBridge,

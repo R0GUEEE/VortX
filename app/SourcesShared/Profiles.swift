@@ -184,6 +184,9 @@ enum ProfileSelectionRead {
             let id: UUID
             let isOwner: Bool
             let usesOwnAccount: Bool
+            // The stored profile projection, never the unacknowledged flat Picker choice.
+            let continueWatchingSource: String?
+            let continueWatchingWindow: String?
             var usesEngineHistory: Bool { isOwner || usesOwnAccount }
         }
         let activeID: UUID?
@@ -287,7 +290,9 @@ final class ProfileStore: ObservableObject {
         // Read actual stored fields after assignment, not willSet's proposed value: a synchronous
         // Published subscriber may have nested a roster or selection mutation during publication.
         .init(activeID: activeID, activeProfile: profiles.first(where: { $0.id == activeID }).map {
-            .init(id: $0.id, isOwner: $0.isOwner, usesOwnAccount: $0.usesOwnAccount)
+            .init(id: $0.id, isOwner: $0.isOwner, usesOwnAccount: $0.usesOwnAccount,
+                  continueWatchingSource: $0.discovery?.continueWatchingSource,
+                  continueWatchingWindow: $0.discovery?.continueWatchingWindow)
         })
     }
     private static func legacyWatchBinding(in roster: [UserProfile], activeID: UUID?) -> LegacyWatchOwnership.ProfileBinding? {

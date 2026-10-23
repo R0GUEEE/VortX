@@ -45,6 +45,12 @@ assert.ok(from >= 0 && to > from && profiles.indexOf(begin, from + 1) < 0);
 const observers = profiles.slice(profiles.indexOf('\n', from) + 1, to);
 const finish = 'defer { ProfileSelectionRead.publishInitial(selectionReadSnapshot()) }';
 assert.ok(full(profiles, 'private init()').includes(finish));
+const scalar = full(profiles, 'enum ProfileSelectionRead {');
+const projector = full(profiles, 'private func selectionReadSnapshot()');
+for (const field of ['continueWatchingSource', 'continueWatchingWindow']) {
+  assert.ok(scalar.includes('let ' + field + ': String?'), 'checked stored discovery field: ' + field);
+  assert.ok(projector.includes('$0.discovery?.' + field), 'real stored roster projection: ' + field);
+}
 const template = fs.readFileSync('app/Tests/ProfileSelectionReadTests.swift', 'utf8');
 fs.writeFileSync(out + '/Combined.swift', template
   .replace('// PRODUCTION_PROFILE_SELECTION_READ', full(profiles, 'enum ProfileSelectionRead {'))

@@ -7,10 +7,15 @@ import os
 // PRODUCTION_PROFILE_SELECTION_READ
 
 private struct UserProfile: Sendable {
+    struct Discovery: Sendable {
+        var continueWatchingSource: String?
+        var continueWatchingWindow: String?
+    }
     let id: UUID
     var name: String
     var isOwner: Bool
     var usesOwnAccount: Bool
+    var discovery: Discovery? = nil
 }
 
 @MainActor private final class SelectionHarness: ObservableObject {
@@ -71,6 +76,15 @@ private struct UserProfile: Sendable {
         check(LegacyWatchOwnership.session() == oldLegacyEpoch, "cosmetic edit preserves existing legacy authority")
         check(ProfileSelectionRead.snapshot() == harness.storedSnapshot(), "cosmetic edit republishes stored scalar values")
         rosterObserver.cancel()
+
+        cosmetic.discovery = .init(continueWatchingSource: "trakt", continueWatchingWindow: "40")
+        harness.update(cosmetic)
+        check(ProfileSelectionRead.snapshot()?.activeProfile?.continueWatchingSource == "trakt",
+              "stored source edit publishes acknowledged value, not a flat preference")
+        check(ProfileSelectionRead.snapshot()?.activeProfile?.continueWatchingWindow == "40",
+              "stored window edit publishes acknowledged value")
+        check(LegacyWatchOwnership.session() == oldLegacyEpoch,
+              "source/window-only edit does not retire unchanged legacy identity")
 
         var nestedSelection = false
         let crossObserver = harness.$profiles.dropFirst().sink { _ in
