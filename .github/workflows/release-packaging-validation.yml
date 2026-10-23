@@ -23,7 +23,7 @@ name: Release packaging validation
 #     consume them. Signed archives and notarization stay in the thin protected release stage.
 #
 # Documented limits of what CAN be validated secretlessly (do not silently widen):
-#   - libstremiox_core.so / libvortx_ffi.so come from PRIVATE repos, so the Android APKs built
+#   - libvortx_ffi.so comes from a PRIVATE repository, so the Android APKs built
 #     here carry no engine .so files (the gradle tasks warn-skip exactly as on dev machines).
 #     Engine-linked packaging stays validated by the privileged push/release lanes only.
 #   - No Apple code-signing identity or notarization is exercised here (requires paid accounts).
@@ -106,7 +106,7 @@ jobs:
       # Same task set as the privileged release build (android-release.yml), same fail-closed
       # signing-config path in app/build.gradle.kts (the four VORTX_* inputs are all provided,
       # pointing at the ephemeral keystore). Engines are intentionally NOT fetched and
-      # VORTX_REQUIRE_ENGINE is NOT set, so both cargo-ndk tasks take the documented dev-machine
+      # VORTX_REQUIRE_ENGINE is NOT set, so the native Cargo task takes the documented dev-machine
       # warn-and-skip path; every other packaging phase (Kotlin/Compose release compilation,
       # manifest merge, resources, libmpv native merge, DEX, AGP signing, AAB) is exercised.
       - name: Acquire reviewed Android mpv component (public-only; baseline is a no-op)
@@ -135,6 +135,10 @@ jobs:
           --tests com.vortx.android.diagnostics.DiagnosticShareOperationTest
           --tests com.vortx.android.engine.NativeRetirementDispatchTest
           --tests com.vortx.android.sync.NativeAccountAttemptTest
+          --tests com.vortx.android.engine.NativeWatchedMigrationProducerTest
+          --tests com.vortx.android.sync.VortXSyncManagerStaleAddonEnvelopeTest
+          --tests com.vortx.android.ui.viewmodel.PlaybackResolveFenceTest
+          --tests com.vortx.android.whatsnew.ChangelogParserTest
           --tests com.vortx.android.player.ExoPlayerEngineStatePolicyTest
           --tests com.vortx.android.player.PlaybackMetadataTest
           --tests 'com.vortx.android.engine.NativeOwnAccountSourcesTest.malformed own row is held without losing valid siblings or raw source bytes'

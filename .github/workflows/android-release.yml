@@ -141,6 +141,143 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --version "=3.5.4" --locked
 
+      # Same protected job, same authenticated private pin, no extra credentials. Host JNI is
+      # disposable and separate from target-andx/jniLibs; it must never enter an APK or handoff.
+      - name: Build exact host JNI for native sync release tests
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          test "$VORTX_ENGINE_SOURCE_SHA" = a3169f338f3f05da4ad3adb39a1e557c3ddcac33
+          test "$(git rev-parse HEAD^{commit})" = "$SOURCE_COMMIT"
+          target="$(mktemp -d "$RUNNER_TEMP/native-sync-host.XXXXXXXX")"
+          proof="$GITHUB_WORKSPACE/android/app/build/reports/native-sync-host"
+          mkdir -p "$proof"
+          source_manifest="$target/source-inputs.sha256"
+          find vortx-core \( -path vortx-core/target -o -path vortx-core/target-andx \) -prune -o \
+            -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > "$source_manifest"
+          test -s "$source_manifest"
+          nice -n 15 cargo +nightly-2026-07-19 build --locked \
+            --manifest-path vortx-core/Cargo.toml -p vortx-ffi --no-default-features \
+            --features jni,server,resource-host --release --target x86_64-unknown-linux-gnu \
+            --target-dir "$target" --jobs 1
+          find vortx-core \( -path vortx-core/target -o -path vortx-core/target-andx \) -prune -o \
+            -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > "$target/source-inputs.after.sha256"
+          cmp --silent "$source_manifest" "$target/source-inputs.after.sha256"
+          library="$target/x86_64-unknown-linux-gnu/release/libvortx_ffi.so"
+          test -s "$library" && test ! -L "$library"
+          # Host architecture + the production JNI call surface, without printing private inputs.
+          readelf -h "$library" | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64'
+          READELF=readelf bash scripts/verify-native-engine-abi.sh android "$library" owner-history
+          library_sha="$(sha256sum "$library" | cut -d' ' -f1)"
+          source_sha="$(sha256sum "$source_manifest" | cut -d' ' -f1)"
+          jq -n --arg app "$SOURCE_COMMIT" --arg source "$VORTX_ENGINE_SOURCE_SHA" \
+            --arg path "$library" --arg sha "$library_sha" --arg inputs "$source_sha" \
+            '{schema:1,appSource:$app,engineSource:$source,features:"jni,server,resource-host",
+              toolchain:"nightly-2026-07-19",hostTarget:"x86_64-unknown-linux-gnu",
+              libraryPath:$path,librarySha256:$sha,sourceInputsSha256:$inputs}' > "$proof/host-jni.json"
+          echo "VORTX_JNI_LIBRARY=$library" >> "$GITHUB_ENV"
+          echo "VORTX_JNI_EXPECTED_SHA256=$library_sha" >> "$GITHUB_ENV"
+          echo "VORTX_JNI_RECEIPT=$proof/host-jni.json" >> "$GITHUB_ENV"
+          echo "VORTX_JNI_SOURCE_MANIFEST=$source_manifest" >> "$GITHUB_ENV"
+
+      - name: Require real native sync revision and account tests before packaging
+        timeout-minutes: 30
+        working-directory: android
+        env:
+          JAVA_TOOL_OPTIONS: "-XX:ActiveProcessorCount=1"
+          VORTX_JNI_SYNC: "1"
+        run: |
+          set -euo pipefail
+          verify_inputs() {
+            (cd "$GITHUB_WORKSPACE" &&
+              find vortx-core \( -path vortx-core/target -o -path vortx-core/target-andx \) -prune -o \
+                -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > "$VORTX_JNI_SOURCE_MANIFEST.current") || return 1
+            cmp --silent "$VORTX_JNI_SOURCE_MANIFEST" "$VORTX_JNI_SOURCE_MANIFEST.current" || return 1
+            test "$(sha256sum "$VORTX_JNI_LIBRARY" | cut -d' ' -f1)" = "$VORTX_JNI_EXPECTED_SHA256"
+          }
+          finish() {
+            result=$?
+            trap - EXIT
+            if ! verify_inputs; then exit 1; fi
+            exit "$result"
+          }
+          trap finish EXIT
+          verify_inputs
+          test ! -e app/build/test-results/testPlayDebugUnitTest
+          nice -n 15 ./gradlew :app:testPlayDebugUnitTest \
+            -Pkotlin.compiler.execution.strategy=in-process \
+            --init-script native-sync-hosted.init.gradle \
+            --tests com.vortx.android.sync.VortXSyncManagerBackupRevisionTest \
+            --tests com.vortx.android.sync.NativeAccountSyncTest \
+            --no-daemon --max-workers=1 --no-parallel --no-build-cache --no-configuration-cache --stacktrace
+          # Independently prove the retained XML contains all 22 current tests and no assumptions.
+          python3 - <<'PY'
+          import pathlib, xml.etree.ElementTree as ET
+          root = pathlib.Path("app/build/test-results/testPlayDebugUnitTest")
+          expected = {
+              "com.vortx.android.sync.VortXSyncManagerBackupRevisionTest": {
+                  "stale prepared peer cannot overwrite winner and fresh merged base survives cold reopen",
+                  "rejected winner echo cannot relabel a candidate derived from a different fresh base",
+                  "stale GET retries never promote stale payload and retain pending until fresh merge",
+                  "failed rebuild keeps pending intent and never blindly resends stale candidate",
+                  "invalid pull revisions cannot apply upload or acknowledge local intent",
+                  "largest safe base is readable but cannot overflow into a push or pending ACK",
+                  "account replacement during recovery cannot send or acknowledge under new lease",
+                  "native authenticated absence creates at zero with null witness",
+                  "native absent row race remerges the winning seed before next proposal",
+                  "lost accepted native response preserves intent and fresh retry merges intervening winner",
+                  "native upgrade required stops retries without acknowledging or stamping success",
+                  "same account reauthentication while PUT waits cannot acknowledge retired lease",
+                  "retired native installation cannot acknowledge a candidate accepted during remount",
+                  "ACKed provider-only rollback arms durable repair and restores cold peer without native differences",
+              },
+              "com.vortx.android.sync.NativeAccountSyncTest": {
+                  "missing failed malformed and undecryptable account pulls never seed or upload native state",
+                  "native push preserves adjacent authenticated fields and excludes device selection",
+                  "native pull preflights exact overlay number tokens before org json rounding",
+                  "unsupported host settings remain dirty while native push may read its merge base",
+                  "real native library checkpoint retries past retained theme dirty stamp and receives peer after cold restart",
+                  "real JNI native and host fields sync separately with failed push cold persistence and exact event acknowledgement",
+                  "real JNI first backup uses zero and collisions or unknown outcomes require authenticated repull",
+                  "native provider clear is uploaded and acknowledged but edit during PUT remains pending",
+              },
+          }
+          files = sorted(root.glob("TEST-*.xml"))
+          assert {p.name for p in files} == {f"TEST-{name}.xml" for name in expected}, "Unexpected/missing JUnit classes"
+          for path in files:
+              suite = ET.parse(path).getroot()
+              name = suite.attrib["name"]
+              count = len(expected[name])
+              cases = suite.findall("testcase")
+              assert suite.tag == "testsuite" and int(suite.attrib["tests"]) == count == len(cases)
+              assert all(int(suite.attrib[key]) == 0 for key in ("failures", "errors", "skipped"))
+              assert int(suite.attrib.get("disabled", "0")) == 0
+              assert {case.attrib["name"] for case in cases} == expected[name]
+              assert all(case.attrib["classname"] == name and case.attrib.get("status", "run") == "run" for case in cases)
+              assert not any(element.tag in ("failure", "error", "skipped", "disabled") for element in suite.iter())
+          print("Verified retained real JNI results: BackupRevision14 + NativeAccountSync8; zero skips/failures/errors")
+          PY
+          verify_inputs
+          jq --arg after "$(sha256sum "$VORTX_JNI_LIBRARY" | cut -d' ' -f1)" \
+            --arg inputs "$(sha256sum "$VORTX_JNI_SOURCE_MANIFEST.current" | cut -d' ' -f1)" \
+            '. + {postRuntimeLibrarySha256:$after,postRuntimeSourceInputsSha256:$inputs,
+              testClasses:{"com.vortx.android.sync.VortXSyncManagerBackupRevisionTest":14,
+                "com.vortx.android.sync.NativeAccountSyncTest":8},
+              executed:22,realJniCases:17,skipped:0,failures:0,errors:0}' \
+            "$VORTX_JNI_RECEIPT" > app/build/reports/native-sync-host/host-jni-accepted.json
+
+      - name: Retain native sync release JUnit and bounded provenance
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VortX-Android-native-sync-host-tests
+          path: |
+            android/app/build/test-results/testPlayDebugUnitTest/*.xml
+            android/app/build/reports/native-sync-host/host-jni.json
+            android/app/build/reports/native-sync-host/host-jni-accepted.json
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Build release APKs and Play bundle
         working-directory: android
         env:

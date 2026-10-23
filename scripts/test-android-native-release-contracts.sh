@@ -128,4 +128,11 @@ for workflow in "$ANDROID_CI_WF" "$ANDROID_RELEASE_WF"; do
     printf 'pin: %s vortx-core=%s (parent approval owns replacement)\n' "$(basename "$workflow")" "$vortx_pin"
 done
 
+require_literal "release runs actual sync tests against the real host JNI" '--init-script native-sync-hosted.init.gradle' "$ANDROID_RELEASE_WF"
+require_literal "release admits all native sync JNI cases" 'VORTX_JNI_SYNC: "1"' "$ANDROID_RELEASE_WF"
+require_literal "release requires actual backup revision JNI tests" '--tests com.vortx.android.sync.VortXSyncManagerBackupRevisionTest' "$ANDROID_RELEASE_WF"
+require_literal "release requires all native account tests" '--tests com.vortx.android.sync.NativeAccountSyncTest' "$ANDROID_RELEASE_WF"
+require_literal "release retains post-runtime library proof" 'postRuntimeLibrarySha256:$after' "$ANDROID_RELEASE_WF"
+require_literal "release does not accept native sync skips" 'Require real native BackupRevision14 plus NativeAccountSync8, zero skips/failures' "$REPO_ROOT/android/native-sync-hosted.init.gradle"
+
 printf 'PASS: Android VortX engine release selection/package contract\n'

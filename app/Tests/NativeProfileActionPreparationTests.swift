@@ -103,7 +103,11 @@ enum NativeProfileActionPreparationTests {
         precondition(resume.contains("core.hasCertifiedNativeSession(capture: capture, profileID: store.activeID)"))
         precondition(resume.contains("pick(profile)"), "Deferred open rechecks the fresh roster PIN through pick")
         precondition(picker.contains("if profilesArePreparing { return nil }"), "In-progress restore must not display terminal error")
-        let startup = bridge.components(separatedBy: "func start()")[1].components(separatedBy: "#else")[0]
+        guard let startupStart = bridge.range(of: "    func start() {"),
+              let startupEnd = bridge.range(of: "    private func seedInitialState()", range: startupStart.upperBound..<bridge.endIndex) else {
+            preconditionFailure("CoreBridge startup extraction boundary changed")
+        }
+        let startup = String(bridge[startupStart.lowerBound..<startupEnd.lowerBound])
         precondition(startup.contains("await VortXSyncManager.shared.hydrateEngineFromOwnedAddons()"))
         precondition(!startup.contains("restoreNativeCheckpoint()"), "Delayed startup must retain a certified resident session")
         let sync = try String(contentsOfFile: "app/SourcesShared/VortXSyncManager.swift", encoding: .utf8)
