@@ -27,7 +27,7 @@ struct CoreCWPreview: Decodable {
     let items: [CoreCWItem]
 }
 
-struct CoreCWItem: Decodable, Identifiable {
+struct CoreCWItem: Decodable, Identifiable, Sendable {
     let id: String
     let type: String
     let name: String
@@ -95,7 +95,7 @@ struct CoreCWItem: Decodable, Identifiable {
     var isWatched: Bool { state.timesWatched > 0 }
 }
 
-struct CoreLibState: Decodable {
+struct CoreLibState: Decodable, Sendable {
     let timeOffset: Double
     let duration: Double
     let videoId: String?
@@ -252,12 +252,12 @@ struct CoreCatalogPage: Decodable {
     let content: CoreLoadable<[CoreMeta]>?
 }
 
-struct CoreResourceRequest: Decodable {
+struct CoreResourceRequest: Decodable, Sendable {
     let base: String
     let path: CoreResourcePath
 }
 
-struct CoreResourcePath: Decodable {
+struct CoreResourcePath: Decodable, Sendable {
     let resource: String
     let type: String
     let id: String
@@ -301,6 +301,8 @@ enum CoreLoadable<T: Decodable>: Decodable {
     var ready: T? { if case let .ready(value) = self { return value } else { return nil } }
     var isLoading: Bool { if case .loading = self { return true } else { return false } }
 }
+
+extension CoreLoadable: Sendable where T: Sendable {}
 
 struct CoreMeta: Decodable, Identifiable, Sendable {
     let id: String
@@ -518,13 +520,13 @@ enum LiveTypes {
 /// The engine selection that owns the current `metaItems` payload. A detail page must fence terminal
 /// empty/error state to this ID, just as it already fences ready metadata, or title A can trigger
 /// title B's fallback while the shared bridge slot is changing pages.
-struct CoreMetaSelection: Decodable {
+struct CoreMetaSelection: Decodable, Sendable {
     let metaPath: CoreResourcePath
     /// The exact episode stream request selected by the engine. Optional for movie/meta-only loads.
     let streamPath: CoreResourcePath?
 }
 
-struct CoreMetaDetails: Decodable {
+struct CoreMetaDetails: Decodable, Sendable {
     let selected: CoreMetaSelection?
     let metaItems: [CoreMetaEntry]
     let streams: [CoreStreamGroup]
@@ -664,14 +666,14 @@ struct CoreMetaDetails: Decodable {
 }
 
 /// `ResourceLoadable<MetaItem>`, one addon's meta response ({request, content}).
-struct CoreMetaEntry: Decodable {
+struct CoreMetaEntry: Decodable, Sendable {
     let request: CoreResourceRequest
     let content: CoreLoadable<CoreMetaItem>?
     /// Same-owner display continuity only. `content` retains the actual request's freshness state.
     let retainedWhileLoading: CoreLoadable<CoreMetaItem>?
 }
 
-struct CoreMetaItem: Decodable {
+struct CoreMetaItem: Decodable, Sendable {
     let id: String
     let type: String
     let name: String
@@ -835,7 +837,7 @@ struct CoreMetaItem: Decodable {
 /// Meta-level `behaviorHints` (NOT the per-stream `CoreStreamBehaviorHints`). All fields optional so
 /// sparse add-ons decode. `hasScheduledVideos` marks a live channel whose `videos[]` is a now/next
 /// EPG schedule; `featuredVideoId` (when present) names the currently-airing program directly.
-struct CoreMetaBehaviorHints: Decodable, Equatable {
+struct CoreMetaBehaviorHints: Decodable, Equatable, Sendable {
     let hasScheduledVideos: Bool?
     let featuredVideoId: String?
     /// The canonical video id for a single-video title (a movie). For a title from a TMDB/Kitsu catalog
@@ -881,7 +883,7 @@ struct CoreLink: Decodable, Equatable, Sendable {
     }
 }
 
-struct CoreVideo: Decodable, Identifiable, Equatable {
+struct CoreVideo: Decodable, Identifiable, Equatable, Sendable {
     let id: String
     let title: String?
     let released: String?
@@ -962,7 +964,7 @@ extension ISO8601DateFormatter {
 }
 
 /// One addon's stream response for the selected meta/episode (`ResourceLoadable<Vec<Stream>>`).
-struct CoreStreamGroup: Decodable {
+struct CoreStreamGroup: Decodable, Sendable {
     let request: CoreResourceRequest
     let content: CoreLoadable<[CoreStream]>?
 }

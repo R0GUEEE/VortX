@@ -179,6 +179,49 @@ import os
         idle.acceptLibrary(try decoded(unloaded))
         check(idle.metadataPublications == idleCount, "matching absent selection is not detail ownership")
     }
+
+    static func metadataValueTransferCases() async throws {
+        // This exercises the immutable decoded graph that moves from a worker callback to the
+        // actor-owned publication branch. The detached task receives production values, not
+        // fixture mirrors, and mutates only local copy-on-write carriers.
+        let metadata = try details([original], embedded: true)
+        var libraryRoot = metadataWire()
+        libraryRoot["libraryItem"] = libraryItemWire()
+        let withLibrary = try decoded(libraryRoot)
+        let originalEntryCount = metadata.metaItems.count
+        let originalWatched = withLibrary.watchedVideoIds
+        let transferred = await Task.detached(priority: nil) {
+            var entries = metadata.metaItems
+            entries.removeLast()
+            var library = withLibrary.libraryItem
+            library?.removed = true
+            var watched = withLibrary.watchedVideoIds ?? []
+            watched.append("worker-watch")
+            let changed = CoreMetaDetails(
+                selected: metadata.selected,
+                metaItems: entries,
+                streams: metadata.streams,
+                metaStreams: metadata.metaStreams,
+                libraryItem: library,
+                watchedVideoIds: watched)
+            return (changed, library, CoreLoadable<[CoreMeta]>.ready([]))
+        }.value
+        let loadableReadyAndEmpty: Bool
+        switch transferred.2 {
+        case .ready(let values): loadableReadyAndEmpty = values.isEmpty
+        case .loading, .err: loadableReadyAndEmpty = false
+        }
+        check(metadata.metaItems.count == originalEntryCount
+              && withLibrary.libraryItem?.removed == false
+              && withLibrary.watchedVideoIds == originalWatched,
+              "decoded metadata and library values stay unchanged after detached worker copy")
+        check(transferred.0.metaItems.count == originalEntryCount - 1
+              && transferred.0.libraryItem?.removed == true
+              && transferred.0.watchedIds == Set(["worker-watch"])
+              && loadableReadyAndEmpty,
+              "decoded metadata graph and conditional loadable transfer as Sendable values")
+    }
+
     static func metadataReplacement(_ label: String, old: CoreMetaDetails,
                                     next: CoreMetaDetails, sourceChange: Bool = false) {
         let probe = AddonPublicationProbe(); probe.accept(old)
@@ -372,7 +415,7 @@ import os
             Double(tailElapsed) / 1_000_000, Double(tailElapsed) / Double(iterations) / 1_000_000))
     }
 
-    static func main() throws {
+    static func main() async throws {
         let statusProbe = AddonPublicationProbe()
         let currentRequest: [String: Any] = ["base": base,
             "path": ["resource": "stream", "type": "series", "id": "synthetic-title:1:2"]]
@@ -444,6 +487,7 @@ import os
         check(!probe.needs(stringNumeric) && !probe.streamsChange(stringNumeric), "decoder-equivalent byte counts stay quiet")
         try metadataValueCases()
         try libraryEventCases()
+        try await metadataValueTransferCases()
         try finiteLargeValueCases()
         finiteResumeTimecodeCases()
         dateParserCases()
