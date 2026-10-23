@@ -2288,6 +2288,15 @@ final class DebridCacheAwareness: ObservableObject {
     private var task: Task<Void, Never>?
     private var usenetTask: Task<Void, Never>?
 
+    /// Read-only facts from each last successful check, valid only in the credential epoch that
+    /// produced them. Reading this never refreshes a provider or promises present availability.
+    var confirmedCacheSnapshot: (capture: CredentialScopeRegistry.Capture, hashes: Set<String>, usenetURLs: Set<String>) {
+        let capture = CredentialScopeRegistry.shared.capture()
+        guard CredentialScopeRegistry.shared.isCurrent(capture) else { return (capture, [], []) }
+        return (capture, lastQueriedCapture == capture ? cachedHashes : [],
+                lastUsenetQueriedCapture == capture ? cachedUsenetURLs : [])
+    }
+
     /// Collect the RAW-torrent infoHashes in `groups` (a raw torrent is `url == nil`, `infoHash != nil`)
     /// and, if that set changed since the last query, ask the coordinator which are cached. Cheap and
     /// debounced: identical input returns immediately, and an empty input or no-key path clears nothing

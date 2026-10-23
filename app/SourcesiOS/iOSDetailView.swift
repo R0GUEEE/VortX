@@ -2903,6 +2903,7 @@ struct iOSDetailView: View {
         let suspended = presentation != nil
         iOSSourceList(
             groups: suspended ? [] : rankedMovie().groups,
+            sourceRows: suspended ? [] : sourceList.quickFilterGroups,
             progress: core.streamLoadProgress(),
             playbackMeta: moviePlaybackMeta,
             states: !suspended && sourceList.isSettled ? core.streamAddonStates() : [],
@@ -2926,7 +2927,9 @@ struct iOSDetailView: View {
             onSessionAudioLanguageChange: { sourceList.sessionAudioLanguages = $0 },
             download: movieDownloadHandler,
             isSuspended: suspended,
-            refind: refindEnabled ? { refindMovieSources() } : nil
+            refind: refindEnabled ? { refindMovieSources() } : nil,
+            quickFilters: sourceList.quickFilters,
+            onQuickFiltersChange: { sourceList.setQuickFilters($0) }
         )
         // Equatable gate: unrelated detail re-renders (progress ticks, hero state) skip re-diffing the
         // 1000+ row list; the groups compare is a buffer-identity fast path until the model republishes.
@@ -4075,6 +4078,7 @@ struct iOSDetailView: View {
         let suspended = presentation != nil
         iOSSourceList(
             groups: suspended ? [] : rankedLive(),
+            sourceRows: suspended ? [] : sourceList.quickFilterGroups,
             progress: core.streamLoadProgress(),
             playbackMeta: livePlaybackMeta,
             states: !suspended && sourceList.isSettled ? core.streamAddonStates() : [],
@@ -4093,7 +4097,9 @@ struct iOSDetailView: View {
             sessionAudioLanguages: sourceList.sessionAudioLanguages,
             onSessionAudioLanguageChange: { sourceList.sessionAudioLanguages = $0 },
             isSuspended: suspended,
-            refind: refindEnabled ? { refindMovieSources() } : nil
+            refind: refindEnabled ? { refindMovieSources() } : nil,
+            quickFilters: sourceList.quickFilters,
+            onQuickFiltersChange: { sourceList.setQuickFilters($0) }
         )
         .equatable()   // see sourceSection: skip re-diffing the list on unrelated re-renders
         .padding(.horizontal, Theme.Space.md)
@@ -5970,6 +5976,7 @@ struct iOSEpisodeStreams: View {
         let suspended = presentation != nil
         return iOSSourceList(
             groups: suspended ? [] : rankedEpisode(),
+            sourceRows: suspended ? [] : sourceList.quickFilterGroups,
             progress: core.streamLoadProgress(forStreamId: shownVideo.id),
             playbackMeta: PlaybackMeta(
                 libraryId: meta.id, videoId: shownVideo.id, type: "series", name: meta.name,
@@ -6003,7 +6010,9 @@ struct iOSEpisodeStreams: View {
             download: episodeDownloadHandler,
             downloadWithAddon: episodeDownloadWithAddonHandler,
             isSuspended: presentation != nil,
-            refind: refindEnabled ? { refindEpisodeSources() } : nil
+            refind: refindEnabled ? { refindEpisodeSources() } : nil,
+            quickFilters: sourceList.quickFilters,
+            onQuickFiltersChange: { sourceList.setQuickFilters($0) }
         )
         // Equatable gate: unrelated episode re-renders skip re-diffing the ranked list (the
         // groups compare is a buffer-identity fast path until the model republishes).
@@ -7146,7 +7155,7 @@ private struct iOSEpisodeThumbImage: View {
 /// duplicate streams that share the same id, so the ~4/sec republish keeps each row's identity stable (Lazy
 /// diffing no longer reshuffles the list). Built bounded to the render window, so the per-row string work stays
 /// capped no matter how many thousand sources a title returns.
-private struct SourceRow: Identifiable { let id: String; let addon: String; let stream: CoreStream }
+private typealias SourceRow = SourceQuickFilterPolicy.Row
 
 /// One add-on section in the windowed render plan: the group (for its header) plus only the rows that fit the
 /// shared render budget. A collapsed group carries an empty `rows` (its header still shows the full count).
@@ -7223,6 +7232,7 @@ struct iOSSourceList: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var accessibilityContrast
     let groups: [CoreStreamSourceGroup]
+    let sourceRows: [SourceQuickFilterPolicy.Group]
     let progress: (loaded: Int, total: Int)
     /// The resolved movie, episode, or live identity. Only Infuse consumes it as filename metadata.
     var playbackMeta: PlaybackMeta? = nil
@@ -7301,6 +7311,8 @@ struct iOSSourceList: View {
     /// renders. The caller owns the whole action (bust the per-title auxiliary caches, call
     /// `core.refindSources`, and `sourceList.beginRefresh()`); this component only surfaces the control.
     var refind: (() -> Void)? = nil
+    var quickFilters = SourceQuickFilterPolicy.Selection()
+    var onQuickFiltersChange: (@MainActor (SourceQuickFilterPolicy.Selection) -> Void)? = nil
 
     @State private var sourceFilter: String? = nil      // nil = all add-ons
     @State private var selectedSourceAddon: String? = nil
@@ -7338,20 +7350,20 @@ struct iOSSourceList: View {
     /// The streams of `group`, reordered by the active sort. Best leaves the engine ranking intact;
     /// Size and Seeders sort descending with unknown values sinking to the bottom (sizeForSort 0,
     /// seedersForSort -1), so direct/debrid links don't outrank real torrents in a Seeders sort.
-    private func sortedStreams(_ group: CoreStreamSourceGroup) -> [CoreStream] {
+    private func sortedStreams(_ group: SourceQuickFilterPolicy.Group) -> [SourceRow] {
         switch sortMode {
-        case .best:    return group.streams
-        case .size:    return stableDescendingStreams(group.streams, key: StreamRanking.sizeForSort)
-        case .seeders: return stableDescendingStreams(group.streams, key: StreamRanking.seedersForSort)
+        case .best:    return group.rows
+        case .size:    return stableDescendingStreams(group.rows, key: { StreamRanking.sizeForSort($0.stream) })
+        case .seeders: return stableDescendingStreams(group.rows, key: { StreamRanking.seedersForSort($0.stream) })
         }
     }
 
     /// Parse each comparison key once, keeping the ranked input order for equal keys. The group can
     /// contain thousands of streams even though only its first window of rows is rendered.
     private func stableDescendingStreams<Key: Comparable>(
-        _ streams: [CoreStream], key: (CoreStream) -> Key
-    ) -> [CoreStream] {
-        let keyed: [(index: Int, stream: CoreStream, key: Key)] = streams.enumerated().map {
+        _ streams: [SourceRow], key: (SourceRow) -> Key
+    ) -> [SourceRow] {
+        let keyed: [(index: Int, stream: SourceRow, key: Key)] = streams.enumerated().map {
             (index: $0.offset, stream: $0.element, key: key($0.element))
         }
         let sorted = keyed.sorted { $0.key == $1.key ? $0.index < $1.index : $0.key > $1.key }
@@ -7362,8 +7374,8 @@ struct iOSSourceList: View {
     // Still loading unless every add-on answered, OR the settle timeout fired, which flips a hung
     // resolution to the real "No sources found" state instead of an endless spinner.
     private var loading: Bool { !sourcesSettled }
-    private var visibleGroups: [CoreStreamSourceGroup] {
-        groups.filter { sourceFilter == nil || $0.addon == sourceFilter }
+    private var visibleGroups: [SourceQuickFilterPolicy.Group] {
+        sourceRows.filter { sourceFilter == nil || $0.group.addon == sourceFilter }
     }
 
     /// Windowed render plan for the grouped list: walk the visible groups, spending a shared row budget
@@ -7373,26 +7385,21 @@ struct iOSSourceList: View {
     /// not collapsed), so "Show more" is offered only when growing the window actually reveals more rows.
     private var windowedPlan: (groups: [WindowedGroup], shown: Int, expandable: Int) {
         let groups = visibleGroups
-        let takes = Self.windowTakes(counts: groups.map { collapsed.contains($0.addon) ? nil : $0.streams.count },
+        let takes = Self.windowTakes(counts: groups.map { collapsed.contains($0.group.addon) ? nil : $0.rows.count },
                                      limit: renderLimit)
         var shown = 0
         var expandable = 0
         var out: [WindowedGroup] = []
-        for (group, take) in zip(groups, takes) {
+        for (display, take) in zip(groups, takes) {
+            let group = display.group
             guard let take else {
                 out.append(WindowedGroup(id: group.addon, group: group, rows: []))
                 continue
             }
             expandable += group.streams.count
             // Keep every header, but do no per-stream parsing/sorting once this group's row budget is zero.
-            let streams = take > 0 ? sortedStreams(group) : []
-            var seen: [String: Int] = [:]
-            let rows = streams.prefix(take).map { s -> SourceRow in
-                let base = s.id
-                let n = seen[base, default: 0]; seen[base] = n + 1
-                return SourceRow(id: "\(base)#\(n)", addon: group.addon, stream: s)
-            }
-            out.append(WindowedGroup(id: group.addon, group: group, rows: Array(rows)))
+            let rows = take > 0 ? Array(sortedStreams(display).prefix(take)) : []
+            out.append(WindowedGroup(id: group.addon, group: group, rows: rows))
             shown += take
         }
         return (out, shown, expandable)
@@ -7558,8 +7565,25 @@ struct iOSSourceList: View {
                 // hidden; otherwise the movie rail would be empty, since the toggle lives in that bar.
                 if showAllSources || !showsPrimaryControls {
                     if groups.count > 1 { sourceAddonTabs }
+                    if let onQuickFiltersChange {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            SourceQuickFilterControls(selection: quickFilters, change: onQuickFiltersChange)
+                                .padding(.vertical, Theme.Space.xs)
+                        }
+                        SourceQuickFilterHelp()
+                    }
                     sortBar
-                    groupedList
+                    if visibleGroups.isEmpty {
+                        Text("No sources match these list filters.")
+                            .font(Theme.Typography.body).foregroundStyle(Theme.Palette.textSecondary)
+                        Button("Reset list filters") {
+                            onQuickFiltersChange?(.init())
+                            selectSourceAddon(nil)
+                        }
+                        .buttonStyle(ChipButtonStyle())
+                    } else {
+                        groupedList
+                    }
                     unresolvedFooter
                 }
             }
@@ -7575,6 +7599,7 @@ struct iOSSourceList: View {
             collapsed = []
         }
         .onChange(of: sourceFilter) { selectedSourceAddon = $0 }
+        .onChange(of: quickFilters) { _ in renderLimit = Self.sourceWindowInitial }
         .onAppear {
             if externalPlayerTargets.isEmpty {
                 externalPlayerTargets = ExternalPlayer.installed
@@ -8108,6 +8133,8 @@ extension iOSSourceList: Equatable {
             && lhs.sessionAudioLanguages == rhs.sessionAudioLanguages
             && lhs.launchEnginePreference == rhs.launchEnginePreference
             && lhs.groups == rhs.groups
+            && lhs.sourceRows == rhs.sourceRows
+            && lhs.quickFilters == rhs.quickFilters
     }
 }
 

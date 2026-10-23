@@ -30,3 +30,4 @@ bash scripts/test-local-nntp-playback.sh
 bash scripts/test-player-first-frame-artwork.sh
 bash scripts/test-random-pick.sh
 bash scripts/test-player-session-audio-presets.sh
+bash scripts/test-source-quick-filters.sh

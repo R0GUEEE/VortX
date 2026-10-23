@@ -52,6 +52,43 @@ final class SourceListModel: ObservableObject, SourceIndexLifecycleParticipant {
     /// Setting it changes `inputsHash`, which retriggers the detached rank with the override installed as a
     /// task-local. nil = profile preference.
     @Published var sessionAudioLanguages: [String]? = nil
+    /// Transient list projection only. It never changes ranking, best, settlement or playback receipts.
+    @Published private var quickFilterSession = SourceQuickFilterPolicy.Session()
+    private var quickFilterIdentity: OutputIdentity?
+    private var quickFilterProfileID: UUID?
+    private var quickFilterCacheCapture: CredentialScopeRegistry.Capture?
+    var quickFilters: SourceQuickFilterPolicy.Selection { quickFilterSession.selection }
+
+    var quickFilterGroups: [SourceQuickFilterPolicy.Group] {
+        quickFilterSession.displayed(
+            scopeIsCurrent: publishedIdentity == outputIdentity(for: context) && quickFilterIdentity == publishedIdentity,
+            cacheIsCurrent: quickFilterCacheCapture.map { CredentialScopeRegistry.shared.isCurrent($0) } == true)
+    }
+
+    func setQuickFilters(_ selection: SourceQuickFilterPolicy.Selection) {
+        let snapshot = debridCache?.confirmedCacheSnapshot
+        quickFilterCacheCapture = snapshot?.capture
+        quickFilterSession.select(selection, cachedHashes: snapshot?.hashes ?? [], cachedUsenetURLs: snapshot?.usenetURLs ?? [])
+    }
+
+    private func projectQuickFilters() {
+        let snapshot = debridCache?.confirmedCacheSnapshot
+        quickFilterCacheCapture = snapshot?.capture
+        quickFilterSession.refresh(cachedHashes: snapshot?.hashes ?? [], cachedUsenetURLs: snapshot?.usenetURLs ?? [])
+    }
+
+    private func installQuickFilterIndex(_ index: SourceQuickFilterPolicy.Index) {
+        let identity = outputIdentity(for: context)
+        let profileID = ProfileStore.shared.activeID
+        let snapshot = debridCache?.confirmedCacheSnapshot
+        let reset = quickFilterIdentity != identity || quickFilterProfileID != profileID
+            || quickFilterCacheCapture != snapshot?.capture
+        quickFilterIdentity = identity
+        quickFilterProfileID = profileID
+        quickFilterCacheCapture = snapshot?.capture
+        quickFilterSession.install(index, resetSelection: reset,
+            cachedHashes: snapshot?.hashes ?? [], cachedUsenetURLs: snapshot?.usenetURLs ?? [])
+    }
 
     var groups: [CoreStreamSourceGroup] {
         publishedIdentity == outputIdentity(for: context) ? publishedGroups : []
@@ -246,6 +283,16 @@ final class SourceListModel: ObservableObject, SourceIndexLifecycleParticipant {
         self.mediaServers = mediaServers
         self.debridCache = debridCache
         self.jsProvider = jsProvider
+        // Deliver after @Published's willSet, then read the current-credential snapshot. Queued
+        // emissions cannot restore another account's retained cache facts. No new provider requests.
+        Publishers.CombineLatest(debridCache.$cachedHashes, debridCache.$cachedUsenetURLs)
+            .removeDuplicates { $0.0 == $1.0 && $0.1 == $1.1 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.projectQuickFilters()
+            }
+            .store(in: &subscriptions)
 
         var events: [AnyPublisher<Void, Never>] = [
             core.$streamsEpoch.map { _ in () }.eraseToAnyPublisher(),      // ready-stream set really changed
@@ -384,6 +431,8 @@ final class SourceListModel: ObservableObject, SourceIndexLifecycleParticipant {
         pendingSignature = signature
         generation &+= 1
         let gen = generation
+        let previousQuickFilterIndex = quickFilterIdentity == outputIdentity(for: ctx)
+            && quickFilterProfileID == ProfileStore.shared.activeID ? quickFilterSession.index : .empty
 
         // Immutable snapshot on the main actor; everything below is value types.
         let raw = ctx.streamId.map { core.streamGroups(forStreamId: $0) } ?? core.streamGroups()
@@ -502,6 +551,8 @@ final class SourceListModel: ObservableObject, SourceIndexLifecycleParticipant {
                 }
             }
             let streamCount = ranked.reduce(0) { $0 + $1.streams.count }
+            let quickFilterIndex = SourceQuickFilterPolicy.Index(groups: ranked, previous: previousQuickFilterIndex,
+                reportedTags: StreamRanking.flavorTags)
 
             await MainActor.run {
                 guard let self = owner.value else { return }
@@ -539,6 +590,7 @@ final class SourceListModel: ObservableObject, SourceIndexLifecycleParticipant {
                 // 250 ms coalescer is broken (this used to fire per body eval, thousands of lines).
                 VXProbe.log("sing", "merged rebuild inst=\(self.instanceID) meta=\(metaToken) groups=\(ranked.count) streams=\(streamCount) torbox=\(torboxStreams.count) singularity=\(singularityStreams.count) gen=\(gen)")
                 self.publishedGroups = ranked
+                self.installQuickFilterIndex(quickFilterIndex)
                 self.publishedBest = rankedBest
                 self.publishedTiers = rankedTiers
                 self.publishedResolutionOptions = rankedResOpts
@@ -568,6 +620,10 @@ final class SourceListModel: ObservableObject, SourceIndexLifecycleParticipant {
         publishedSignature = nil
         publishedIdentity = nil
         publishedGroups = []
+        quickFilterSession.invalidate()
+        quickFilterIdentity = nil
+        quickFilterProfileID = nil
+        quickFilterCacheCapture = nil
         publishedBest = nil
         publishedTiers = []
         publishedResolutionOptions = []

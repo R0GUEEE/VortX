@@ -3178,7 +3178,7 @@ struct FullBleedBackdrop: View {
 /// duplicate streams that share the same id, so the ~4/sec republish no longer reassigns every row's identity
 /// (which stranded the tvOS focus handle and defeated Lazy diffing). Built bounded to the render window, so the
 /// per-row string work stays capped no matter how many thousand sources a title returns.
-private struct SourceRow: Identifiable { let id: String; let addon: String; let stream: CoreStream }
+private typealias SourceRow = SourceQuickFilterPolicy.Row
 
 struct CoreStreamList: View {
     let title: String
@@ -3498,24 +3498,21 @@ struct CoreStreamList: View {
         let groups = sourceList.groups                               // best source first within each add-on
         let best = sourceList.best
         let streamCount = groups.reduce(0) { $0 + $1.streams.count }
-        let visible = groups.filter { sourceFilter == nil || $0.addon == sourceFilter }
+        let visible = sourceList.quickFilterGroups.filter { sourceFilter == nil || $0.group.addon == sourceFilter }
         // Window the RENDERED rows: build at most `sourceRenderLimit` stable-id rows from the visible groups,
         // stopping the moment the budget is hit (bounded string work, no matter how many thousand sources land).
         // Ranking + auto-pick (playBest below) still read the FULL `groups`, never these windowed rows, so
         // Watch-Now always picks the GLOBAL best, not the best of the first 100.
-        var seen: [String: Int] = [:]
         var rows: [SourceRow] = []
         rows.reserveCapacity(sourceRenderLimit)
         buildRows: for g in visible {
-            for s in g.streams {
-                let base = s.id
-                let n = seen[base, default: 0]; seen[base] = n + 1
-                rows.append(SourceRow(id: "\(base)#\(n)", addon: g.addon, stream: s))
+            for row in g.rows {
+                rows.append(row)
                 if rows.count >= sourceRenderLimit { break buildRows }
             }
         }
         let shownRows = rows
-        let visibleCount = visible.reduce(0) { $0 + $1.streams.count }   // total in the filtered view, for "Show more"
+        let visibleCount = visible.reduce(0) { $0 + $1.rows.count }   // total in the filtered view, for "Show more"
         let hasMore = visibleCount > shownRows.count
         // Scope the readiness gate to THIS episode too (binge-desync fix): the unscoped progress counts every
         // episode's add-ons that ever loaded into meta_details, so a stale page would read "ready" off the
@@ -3751,11 +3748,21 @@ struct CoreStreamList: View {
                 }
                 if showAllSources {
                     VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                        if TVDetailSourceColumnFocusPolicy.filterBarOwnsUpEscape(groupsCount: groups.count) {
+                        if TVDetailSourceColumnFocusPolicy.filterBarOwnsUpEscape(groupsCount: groups.count, hasQuickFilters: true) {
                             // The filter bar is the column's top boundary: Up from any filter chip returns to
                             // the nearest semantic action row. (#206)
                             filterBar(groups, total: streamCount)
                                 .modifier(DetailMoveCommandHandler(action: sourceMoveHandler(from: .lower, state: actionState)))
+                        }
+                        SourceQuickFilterHelp()
+                        if visibleCount == 0 {
+                            Text("No sources match these list filters.")
+                                .font(Theme.Typography.body).foregroundStyle(Theme.Palette.textSecondary)
+                            Button("Reset list filters") {
+                                sourceList.setQuickFilters(.init())
+                                sourceFilter = nil
+                            }
+                            .buttonStyle(ChipButtonStyle())
                         }
                         // LazyVStack so only on-screen rows are built; the window caps how many rows exist at all,
                         // keeping the focus tree small. Rows carry a stable content id (SourceRow), so the ~4/sec
@@ -3763,7 +3770,7 @@ struct CoreStreamList: View {
                         LazyVStack(spacing: Theme.Space.sm) {
                             ForEach(Array(shownRows.enumerated()), id: \.element.id) { index, row in
                                 let rowView = streamRow(row.addon, row.stream)
-                                if TVDetailSourceColumnFocusPolicy.sourceRowOwnsUpEscape(at: index, groupsCount: groups.count) {
+                                if TVDetailSourceColumnFocusPolicy.sourceRowOwnsUpEscape(at: index, groupsCount: groups.count, hasQuickFilters: true) {
                                     // No filter bar: the FIRST row is the column's top boundary, so Up from it
                                     // alone returns to the action row. Up from any deeper row stays native and
                                     // moves one row up in the list (#206).
@@ -3901,6 +3908,7 @@ struct CoreStreamList: View {
         // Reset the render window when the list collapses (so re-expanding starts fresh at the top) or the
         // title changes (a new list should not inherit the previous title's expanded window).
         .onChange(of: showAllSources) { _ in if !showAllSources { sourceRenderLimit = Self.sourceWindowInitial } }
+        .onChange(of: sourceList.quickFilters) { _ in sourceRenderLimit = Self.sourceWindowInitial }
         .onChange(of: meta?.libraryId) { _ in sourceRenderLimit = Self.sourceWindowInitial }
         // Auxiliary contributors carry the exact title/episode token. Each owner clears the old publication
         // before loading a replacement, and SourceListModel checks the same token again before merging.
@@ -4719,12 +4727,15 @@ struct CoreStreamList: View {
     private func filterBar(_ groups: [CoreStreamSourceGroup], total: Int) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: Theme.Space.sm) {
-                Button { randomPlayIntent?.revoke(); sourceFilter = nil } label: { Text("All (\(total))") }
-                    .buttonStyle(ChipButtonStyle(selected: sourceFilter == nil))
-                ForEach(groups) { group in
-                    Button { randomPlayIntent?.revoke(); sourceFilter = group.addon } label: { Text("\(group.addon) (\(group.streams.count))") }
-                        .buttonStyle(ChipButtonStyle(selected: sourceFilter == group.addon))
+                if groups.count > 1 {
+                    Button { randomPlayIntent?.revoke(); sourceFilter = nil } label: { Text("All (\(total))") }
+                        .buttonStyle(ChipButtonStyle(selected: sourceFilter == nil))
+                    ForEach(groups) { group in
+                        Button { randomPlayIntent?.revoke(); sourceFilter = group.addon } label: { Text("\(group.addon) (\(group.streams.count))") }
+                            .buttonStyle(ChipButtonStyle(selected: sourceFilter == group.addon))
+                    }
                 }
+                SourceQuickFilterControls(selection: sourceList.quickFilters, change: sourceList.setQuickFilters)
             }
             .padding(.vertical, Theme.Space.xs)
         }
