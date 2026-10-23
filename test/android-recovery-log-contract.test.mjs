@@ -42,3 +42,14 @@ test('export keeps narrow provider paths and read-only URI handoff', () => {
   assert.match(paths, /diagnostics-export\//);
   assert.doesNotMatch(paths, /<(?:root|external)-path|path="(?:\.|\/)"/);
 });
+
+test('only scheduled retirement is contained, and failed close never releases its writer', () => {
+  assert.match(source('VortXApplication.kt'), /runNativeRetirementAttempt\(close\)/);
+  const helper = source('engine/NativeRetirementDispatch.kt');
+  assert.match(helper, /catch \(cancel: CancellationException\) \{\s*throw cancel/);
+  assert.match(helper, /catch \(_: Exception\) \{\s*onUnconfirmed\(\)/);
+  assert.doesNotMatch(helper, /catch[^\n]*(?:Throwable|Error)|retired\.remove/);
+  const coordinator = source('engine/NativeAccountCoordinator.kt');
+  assert.match(coordinator, /dispose \{ old\.session\.close\(\); retired\.remove\(old\.session\) \}/);
+  assert.match(coordinator, /prior\.close\(\); retired\.remove\(prior\)/);
+});

@@ -40,6 +40,7 @@ import com.vortx.android.engine.EngineStremioRepository
 import com.vortx.android.engine.NativeCatalogRepository
 import com.vortx.android.engine.AndroidNativePlaybackResolver
 import com.vortx.android.engine.NativeAccountCoordinator
+import com.vortx.android.engine.runNativeRetirementAttempt
 import com.vortx.android.engine.NativeProfileAccess
 import com.vortx.android.engine.VortxAccountScope
 import com.vortx.android.engine.VortxAndroidCheckpointKey
@@ -112,7 +113,11 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
     private val nativeAccounts: NativeAccountCoordinator by lazy { NativeAccountCoordinator(VortxJniBindings,
         VortxEncryptedCheckpointStore(java.io.File(noBackupFilesDir, "native-state"), VortxAndroidCheckpointKey::get),
         ::VortxJniResourceTransport, { syncManager?.sessionOwnerSnapshot() == it },
-        { close -> applicationScope.launch { close() }; Unit },
+        { close -> applicationScope.launch {
+            runNativeRetirementAttempt(close) {
+                Log.w(TAG, "Native retirement could not finish; the previous writer remains reserved")
+            }
+        }; Unit },
         { withContext(Dispatchers.Main) {
             ProfileStore.sharedOrNull()?.attachNativeGateway(nativeProfiles)
         } },
