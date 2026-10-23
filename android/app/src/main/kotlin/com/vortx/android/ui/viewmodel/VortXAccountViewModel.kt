@@ -145,6 +145,15 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
     private val _syncNotice = MutableStateFlow<String?>(null)
     val syncNotice: StateFlow<String?> = _syncNotice.asStateFlow()
 
+    // Form cleanup identity is independent of request completion and account authority.
+    // Editing A -> B -> A revokes old cleanup, without enabling a second concurrent submit.
+    private var authFormIdentity = Any()
+    private var activeAuthSubmission: Any? = null
+
+    private fun invalidateAuthForm() {
+        authFormIdentity = Any()
+    }
+
     init {
         viewModelScope.launch {
             sync.syncProblem.collect { problem -> _syncNotice.value = problem }
@@ -153,6 +162,7 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
 
     fun onModeChange(mode: VortXAccountMode) {
         if (_mode.value == mode) return
+        invalidateAuthForm()
         _mode.value = mode
         _formState.value = VortXAccountFormState.Idle
         _totpRequired.value = false
@@ -160,11 +170,11 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
         if (mode != VortXAccountMode.SIGN_IN) stopQrJoiner()
     }
 
-    fun onLoginChange(value: String) { _login.value = value }
-    fun onUsernameChange(value: String) { _username.value = value }
-    fun onPasswordChange(value: String) { _password.value = value }
-    fun onTotpChange(value: String) { _totp.value = value }
-    fun onRecoveryInputChange(value: String) { _recoveryInput.value = value }
+    fun onLoginChange(value: String) { invalidateAuthForm(); _login.value = value }
+    fun onUsernameChange(value: String) { invalidateAuthForm(); _username.value = value }
+    fun onPasswordChange(value: String) { invalidateAuthForm(); _password.value = value }
+    fun onTotpChange(value: String) { invalidateAuthForm(); _totp.value = value }
+    fun onRecoveryInputChange(value: String) { invalidateAuthForm(); _recoveryInput.value = value }
 
     fun retrySessionRestore() {
         sync.retrySessionRestore()
@@ -243,12 +253,40 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
             return
         }
         stopQrJoiner()
+        val identity = Any()
+        val submittedMode = _mode.value
+        val admission = sync.captureLocalLibraryMutationAdmission()
+        authFormIdentity = identity
+        activeAuthSubmission = identity
         _formState.value = VortXAccountFormState.Submitting
         viewModelScope.launch {
-            when (_mode.value) {
-                VortXAccountMode.SIGN_IN -> signIn()
-                VortXAccountMode.REGISTER -> register()
-                VortXAccountMode.RECOVER -> recover()
+            try {
+                if (authFormIdentity !== identity) return@launch
+                when (submittedMode) {
+                    VortXAccountMode.SIGN_IN -> signIn()
+                    VortXAccountMode.REGISTER -> register()
+                    VortXAccountMode.RECOVER -> recover()
+                }
+            } catch (cancel: CancellationException) {
+                if (authFormIdentity === identity) clearAuthInputs()
+                throw cancel
+            } catch (_: Exception) {
+                // Adoption revokes the old account admission, but must not leave its own
+                // original secrets live. Never clear fields belonging to an edited form.
+                if (authFormIdentity === identity) clearAuthInputs()
+                admission?.invoke {
+                    if (authFormIdentity === identity) {
+                        _formState.value = VortXAccountFormState.Error(AUTH_RETRY_NOTICE)
+                    }
+                    true
+                }
+            } finally {
+                // An edit still waits for this request, while a mode-change/new submission
+                // can already own another spinner. Neither completion clears replacement input.
+                if (activeAuthSubmission === identity) {
+                    activeAuthSubmission = null
+                    if (_formState.value == VortXAccountFormState.Submitting) _formState.value = VortXAccountFormState.Idle
+                }
             }
         }
     }
@@ -443,6 +481,7 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
     }
 
     fun signOut() {
+        invalidateAuthForm()
         if (!sync.signOut()) {
             _syncNotice.value =
                 "Secure storage is unavailable. Your VortX session was not changed. Please try again."
@@ -462,6 +501,7 @@ class VortXAccountViewModel(private val sync: VortXSyncManager) : ViewModel() {
 
     private companion object {
         /// Floor for a NEW password (register/recover). Sign-in never gates: existing accounts rule.
+        const val AUTH_RETRY_NOTICE = "Could not complete this account action. Your saved data is preserved. Please try again."
         const val POST_AUTH_RETRY_NOTICE = "Signed in. Sync could not finish. Your saved data is preserved. Try Sync now again."
         const val SYNC_RETRY_NOTICE = "Couldn't sync right now. Your saved data is preserved. Try Sync now again."
         const val RECONCILE_RETRY_NOTICE = "Couldn't finish syncing. Your saved data is preserved. Choose an option to retry."
