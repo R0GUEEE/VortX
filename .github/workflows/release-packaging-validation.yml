@@ -138,6 +138,14 @@ jobs:
           --tests com.vortx.android.engine.NativeWatchedMigrationProducerTest
           --tests com.vortx.android.sync.VortXSyncManagerStaleAddonEnvelopeTest
           --tests com.vortx.android.ui.viewmodel.PlaybackResolveFenceTest
+          --tests com.vortx.android.ui.randompick.RandomPickPolicyTest
+          --tests com.vortx.android.ui.randompick.RandomLibraryPickModelTest
+          --tests com.vortx.android.ui.randompick.RandomEpisodePickModelTest
+          --tests com.vortx.android.ui.randompick.RandomEpisodePlaybackLeaseTest
+          --tests com.vortx.android.ui.randompick.RandomEpisodeAccessTest
+          --tests com.vortx.android.ui.randompick.RandomTitlePlayRequestTest
+          --tests com.vortx.android.ui.randompick.RandomPickControlsContractTest
+          --tests com.vortx.android.ui.tv.TvDetailSourcesActionContractTest
           --tests com.vortx.android.whatsnew.ChangelogParserTest
           --tests com.vortx.android.player.ExoPlayerEngineStatePolicyTest
           --tests com.vortx.android.player.PlaybackMetadataTest
