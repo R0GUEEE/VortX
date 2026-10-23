@@ -1,5 +1,23 @@
 import Foundation
 
+/// Detail membership is independent of the Library screen's type/sort/watched filters. Build this value
+/// once from the complete acknowledged projection, then overlay metadata without scanning history again.
+struct VortxLibraryMembership: Sendable {
+    private let savedByID: [String: VortxJSON]
+
+    init(_ projected: [VortxJSON] = []) {
+        var saved: [String: VortxJSON] = [:]
+        for row in projected {
+            guard row["previouslyWatched"] != .bool(true), case .string(let id) = row["_id"],
+                  saved[id] == nil else { continue }
+            saved[id] = row
+        }
+        savedByID = saved
+    }
+
+    func item(for id: String) -> VortxJSON? { savedByID[id] }
+}
+
 /// Compatibility entry point for CoreBridge's existing Load/Unload wire. It never initializes or
 /// calls Stremio. Unsupported actions return false and record a non-sensitive diagnostic code.
 /// Account migration/key acquisition remain explicit prerequisites to constructing the session.
@@ -20,6 +38,8 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     private let lock: NSRecursiveLock
     private let mutationFIFO: VortxNativeFIFOAdmission
     private var values: [String: VortxJSON] = [:]
+    // Replaced with acknowledged state under lock, never with a filtered Library screen response.
+    private var metadataLibraryMembership = VortxLibraryMembership()
     private var externalMetadataReceipts: [Data: (Data, UUID)] = [:]
     private var externalMetadataObservation = UUID()
     private var selections: [String: VortxJSON] = [:]
@@ -225,7 +245,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         }
     }
     func close() {
-        lock.lock(); closed = true; mutationFIFO.close(); let old = Array(tasks.values); tasks.removeAll(); generations.removeAll(); values.removeAll(); addonInventories.removeAll(); addonConfirmation = nil; addonOperation = UUID(); lock.unlock()
+        lock.lock(); closed = true; mutationFIFO.close(); let old = Array(tasks.values); tasks.removeAll(); generations.removeAll(); values.removeAll(); metadataLibraryMembership = VortxLibraryMembership(); addonInventories.removeAll(); addonConfirmation = nil; addonOperation = UUID(); lock.unlock()
         session.revoke()
         old.forEach { $0.cancel() }; Task { await session.close() }
     }
@@ -338,7 +358,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         guard !closed, generations[field] == ticket else { lock.unlock(); return }
         var changedFields: [String] = []
         fields.forEach {
-            let projected = $0.key == "meta_details" ? metaWithPlayback($0.value, library: values["library"]?["catalog"]?.array ?? []) : $0.value
+            let projected = $0.key == "meta_details" ? metaWithPlayback($0.value, library: metadataLibraryMembership) : $0.value
             if values[$0.key] != projected { changedFields.append($0.key) }
             values[$0.key] = projected
             if $0.key == "meta_details" { observeExternalMetadata(projected) }
@@ -1554,19 +1574,23 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         // The formatter is local to this complete pass: no mutable formatter crosses threads.
         let formatter = ISO8601DateFormatter()
         let projected = try projectedLibraryItems(state, formatter: formatter)
+        let membership = VortxLibraryMembership(projected)
         let descriptors = (lock.withLock { resourceRegistryValid ? registry : [] }).map { addon in VortxJSON.object(["transportUrl": .string(addon.transportUrl), "manifest": addon.manifest ?? .object([:])]) }
         var fields: [String: VortxJSON] = ["native_state": state, "ctx": .object(["profile": .object(["addons": .array(descriptors)])]),
                 "native_playback": playback ?? .null,
                 "continue_watching_preview": .object(["items": .array((playback?["continueWatching"]?.array ?? []).compactMap { playbackRow($0, formatter: formatter) })]),
                 "native_history": .object(["items": .array((playback?["history"]?.array ?? []).compactMap { playbackRow($0, formatter: formatter) })]),
                 "library": libraryProjection(state: state, request: libraryRequest, projected: projected) ?? .object(["catalog": .array(projected), "selectable": .object(["types": .array([]), "sorts": .array([])])])]
-        if let detail = values["meta_details"] { fields["meta_details"] = metaWithPlayback(detail, library: projected) }
+        if let detail = values["meta_details"] { fields["meta_details"] = metaWithPlayback(detail, library: membership) }
+        // Only create-before-exposure and the locked acknowledged-state transaction call this method.
+        // Install the same full projection used by the metadata in this transaction.
+        metadataLibraryMembership = membership
         return fields
     }
-    private func metaWithPlayback(_ detail: VortxJSON, library: [VortxJSON]) -> VortxJSON {
+    private func metaWithPlayback(_ detail: VortxJSON, library: VortxLibraryMembership) -> VortxJSON {
         guard case .object(var fields) = detail, let id = string(detail["selected"]?["metaPath"]?["id"]) else { return detail }
         // Saved membership only: a watched-only Library row must leave Detail offering Add to Library.
-        fields["libraryItem"] = library.first { $0["_id"] == .string(id) && $0["previouslyWatched"] != .bool(true) } ?? .null
+        fields["libraryItem"] = library.item(for: id) ?? .null
         fields["watchedVideoIds"] = playback?["watchedVideoIdsByTitle"]?[id] ?? .array([])
         return .object(fields)
     }

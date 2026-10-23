@@ -2,6 +2,7 @@
 import Foundation
 
 // PRODUCTION_JSON
+// PRODUCTION_MEMBERSHIP
 // PRODUCTION_ERROR
 // PRODUCTION_PREVIOUSLY_WATCHED
 // BASELINE_PREVIOUSLY_WATCHED
@@ -18,15 +19,32 @@ private final class CurrentProjection {
     private var playback: VortxJSON?
     private var libraryRequest: VortxJSON?
     private var values: [String: VortxJSON]
+    private var metadataLibraryMembership = VortxLibraryMembership()
+    private var generations: [String: UUID] = [:]
+    private var closed = false
+    private let changed: ([String]) -> Void = { _ in }
+    private func observeExternalMetadata(_ value: VortxJSON) {}
     init(playback: VortxJSON?, request: VortxJSON? = nil, detailID: String = "dup") {
         self.playback = playback
         libraryRequest = request
         values = ["meta_details": .object(["selected": .object(["metaPath": .object(["id": .string(detailID)])])])]
     }
-    func fields(_ state: VortxJSON) throws -> VortxJSON { .object(try stateFields(state)) }
+    func fields(_ state: VortxJSON) throws -> VortxJSON {
+        let fields = try stateFields(state)
+        fields.forEach { values[$0.key] = $0.value }
+        return .object(fields)
+    }
     func library(_ state: VortxJSON, request: VortxJSON?) -> VortxJSON? { libraryProjection(state: state, request: request) }
     func search(_ state: VortxJSON, query: String, limit: Int) -> VortxJSON? { localSearchProjection(state: state, query: query, maxResults: limit) }
+    func resourceDetail(_ id: String, stale: Bool = false) -> VortxJSON? {
+        let ticket = UUID()
+        generations["meta_details"] = stale ? UUID() : ticket
+        publish(["meta_details": .object(["selected": .object(["metaPath": .object(["id": .string(id)])]),
+                                        "unknownFixtureField": .string("retained")])], field: "meta_details", ticket: ticket)
+        return values["meta_details"]
+    }
     // PRODUCTION_CURRENT
+    // PRODUCTION_CURRENT_PUBLICATION
 }
 
 private final class BaselineProjection {
@@ -156,6 +174,32 @@ private final class BaselineProjection {
         do { _ = try newInvalid.fields(.object([:])) } catch { rejected += 1 }
         check(rejected == 2, "missing active library must still reject")
         print("PASS actual production projection: \(comparisons) full JSON/library/search comparisons, all six sorts, type filters, first-match and timestamp/removal boundaries")
+
+        let movies = CurrentProjection(playback: playback, request: request("name", type: "movie"))
+        let movieFields = try movies.fields(document)
+        check(movieFields["library"]?["catalog"]?.array?.contains { $0["_id"] == .string("dup") } == false,
+              "fixture's series really is absent from the filtered movie screen")
+        let seriesDetail = movies.resourceDetail("dup")
+        check(seriesDetail?["libraryItem"]?["_id"] == .string("dup"), "filtered-out saved series must retain resource Detail membership")
+        check(seriesDetail?["watchedVideoIds"] == .array([.string("dup:1:1")]), "watched ids remain from the acknowledged playback projection")
+        check(seriesDetail?["unknownFixtureField"] == .string("retained"), "metadata overlay retains unrelated raw fields")
+        check(movies.resourceDetail("history-only")?["libraryItem"] == .null, "watched-only row is never saved membership")
+        _ = movies.resourceDetail("dup")
+        check(movies.resourceDetail("not-in-library", stale: true)?["libraryItem"]?["_id"] == .string("dup"),
+              "actual publish ticket guard rejects stale metadata before membership lookup")
+        _ = try movies.fields(state([saved("replacement")]))
+        check(movies.resourceDetail("dup")?["libraryItem"] == .null &&
+              movies.resourceDetail("replacement")?["libraryItem"]?["_id"] == .string("replacement"),
+              "acknowledged replacement retires old membership without merging history")
+        let first: VortxJSON = .object(["_id": .string("same"), "opaque": .object(["keep": .unsigned(UInt64.max)])])
+        let watchedOnly: VortxJSON = .object(["_id": .string("same"), "previouslyWatched": .bool(true)])
+        let second: VortxJSON = .object(["_id": .string("same"), "name": .string("later duplicate")])
+        let index = VortxLibraryMembership([watchedOnly, .null, .object(["_id": .integer(7)]), first, second])
+        check(index.item(for: "same") == first && index.item(for: "missing") == nil,
+              "membership keeps first eligible literal-id row and all opaque values")
+        check(VortxLibraryMembership().item(for: "same") == nil, "empty/retired membership has no rows")
+        print("PASS filtered Library/resource metadata: current publish ticket, full membership, first-wins/opaque fields and acknowledged replacement")
+        if ProcessInfo.processInfo.environment["VORTX_LIBRARY_PROJECTION_FUNCTIONAL_ONLY"] == "1" { return }
 
         // Worst-shaped ordinary library: every saved row is also in a long CW array.
         // The old oracle runs once, not per sort; timing is host-only, not an installed-device claim.
