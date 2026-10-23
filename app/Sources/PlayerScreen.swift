@@ -1989,6 +1989,7 @@ struct PlayerScreen: View {
     /// wait-and-hop runs at most once per playback (no unbounded loop). Reset on each new media load.
     @State private var awaitedFreshSources = false
     @State private var hasStartedPlaying = false
+    @State private var firstFrameCover = PlayerFirstFrameCoverPolicy<PlayerLoadToken>()
     /// Wall-clock uptime of the genuine first-frame event (set only alongside the true `hasStartedPlaying =
     /// true` transition below, never at the "foreground re-mount was not issued, restore the playing state"
     /// site - that one never actually stopped presentation, so resetting this there would wrongly reopen the
@@ -2369,11 +2370,32 @@ struct PlayerScreen: View {
             .ignoresSafeArea()
     }
 
+    private var firstFrameCoverMetadata: PlaybackMeta? {
+        pendingAdvance?.issued == true ? pendingAdvance?.meta : curMeta
+    }
+
+    private var firstFrameCoverMedia: PlayerFirstFrameMedia {
+        .init(libraryID: firstFrameCoverMetadata?.libraryId, videoID: firstFrameCoverMetadata?.videoId)
+    }
+
+    private var firstFrameCoverLayer: some View {
+        let metadata = firstFrameCoverMetadata
+        let displayTitle = pendingAdvance?.issued == true ? (pendingAdvance?.title ?? title) : curTitle
+        return PlayerFirstFrameArtwork(
+            visible: firstFrameCover.showsArtwork(media: firstFrameCoverMedia, failed: loadFailed,
+                exited: playbackExited, contextCurrent: playbackMutationTarget.stillOwnsCurrentContext(core: core)),
+            id: metadata?.libraryId, type: metadata?.type ?? "movie", title: displayTitle, poster: metadata?.poster
+        )
+        .id(firstFrameCoverMedia)
+    }
+
     private var mpvBody: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
             playerSurface
+
+            firstFrameCoverLayer
 
             // A dedicated transparent surface owns one-finger taps independently of pinch. Actual
             // buttons/panels remain above it; decorative buffering must not steal its hit tests.
@@ -2533,6 +2555,7 @@ struct PlayerScreen: View {
         .onAppear {
             refreshAutoSkipSettings()
             playbackExited = false
+            firstFrameCover.beginPresentation()
             persistenceBlockedForExit = false
             // Diagnostic-only: this is the player surface, so the heartbeat reports the player route.
             VXProbeState.shared.setRoute("player")
@@ -2883,6 +2906,16 @@ struct PlayerScreen: View {
         loadToken: PlayerLoadToken,
         position: Double
     ) {
+        // The deferred-start token exists only after the exact existing start/audio transaction.
+        // Delayed acceptance must also reveal; keep this before the existing one-shot effects latch.
+        if pendingAdvance == nil, assetSanityDeferredStartToken == loadToken,
+           assetSanityAttempt.isAccepted(owner: loadToken) {
+            firstFrameCover.acceptStart(callbackOwner: loadToken,
+                activeOwner: coordinator.player?.activeLoadToken,
+                mountGeneration: (coordinator.player as? AVPlayerEngineController)?.currentItemGeneration ?? 0,
+                media: firstFrameCoverMedia, accepted: true,
+                contextCurrent: !playbackExited && playbackMutationTarget.stillOwnsCurrentContext(core: core))
+        }
         guard assetSanityAttempt.isAccepted(owner: loadToken),
               assetSanityStartEffectsToken != loadToken else { return }
         assetSanityStartEffectsToken = loadToken
@@ -3136,6 +3169,9 @@ struct PlayerScreen: View {
         }
         if let loadToken, loadToken == coordinator.player?.activeLoadToken {
             adoptResumeSurfaceIfCurrent(loadToken: loadToken)
+            firstFrameCover.bind(owner: loadToken,
+                mountGeneration: (coordinator.player as? AVPlayerEngineController)?.currentItemGeneration ?? 0,
+                media: firstFrameCoverMedia)
             // AV callbacks are generation-fenced by the engine; mpv uses a fresh token per mount.
             completionEvidence.begin(owner: loadToken,
                                      mountGeneration: (coordinator.player as? AVPlayerEngineController)?.currentItemGeneration ?? 0)
@@ -4396,6 +4432,10 @@ struct PlayerScreen: View {
         )
         let issuedToken = candidateToken == player.activeLoadToken ? candidateToken : nil
         if let issuedToken {
+            let coverMetadata = pendingAdvance?.meta ?? curMeta
+            firstFrameCover.bind(owner: issuedToken,
+                mountGeneration: (player as? AVPlayerEngineController)?.currentItemGeneration ?? 0,
+                media: .init(libraryID: coverMetadata?.libraryId, videoID: coverMetadata?.videoId))
             // Same-source recovery retains the latest viewer pause across the new file's startup.
             recoveryPauseIntent = capturedRecoveryPause
             recoveryPauseTarget = requestedResumeOrigin
@@ -7928,6 +7968,7 @@ struct PlayerScreen: View {
         episodeSourceHydrationGeneration = UUID()
         persistenceBlockedForExit = hasUncommittedIssuedMedia
         playbackExited = true
+        firstFrameCover.retire()
         invalidateEpisodeResolution()
         episodeSwitchGeneration &+= 1
         episodeResolveGeneration = nil

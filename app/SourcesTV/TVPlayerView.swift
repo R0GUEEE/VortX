@@ -563,6 +563,7 @@ struct TVPlayerView: View {
     /// wait-and-hop runs at most once per playback (TVPlayerView is fresh per playback, so it starts false).
     @State private var awaitedFreshSources = false
     @State private var hasStartedPlaying = false
+    @State private var firstFrameCover = PlayerFirstFrameCoverPolicy<PlayerLoadToken>()
     /// Wall-clock uptime of the genuine first-frame event (set only alongside the true `hasStartedPlaying =
     /// true` transition below, never at the "foreground re-mount was not issued, restore the playing state"
     /// sites - those never actually stopped presentation, so resetting this there would wrongly reopen the
@@ -1103,25 +1104,35 @@ struct TVPlayerView: View {
 
     private var controlsHidden: Bool { !showInfo && !showOptions && !loadFailed }
 
+    private var firstFrameCoverMetadata: PlaybackMeta? {
+        pendingAdvance?.issued == true ? pendingAdvance?.meta : (curMeta ?? meta)
+    }
+
+    private var firstFrameCoverMedia: PlayerFirstFrameMedia {
+        .init(libraryID: firstFrameCoverMetadata?.libraryId, videoID: firstFrameCoverMetadata?.videoId)
+    }
+
+    private var firstFrameCoverLayer: some View {
+        let metadata = firstFrameCoverMetadata
+        let displayTitle = pendingAdvance?.issued == true
+            ? (pendingAdvance?.title ?? title) : (curTitle.isEmpty ? title : curTitle)
+        return PlayerFirstFrameArtwork(
+            visible: firstFrameCover.showsArtwork(media: firstFrameCoverMedia, failed: loadFailed,
+                exited: leftPlayback, contextCurrent: playbackMutationTarget.stillOwnsCurrentContext(core: core)),
+            id: metadata?.libraryId, type: metadata?.type ?? "movie", title: displayTitle, poster: metadata?.poster
+        )
+        .id(firstFrameCoverMedia)
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
             Color.black.ignoresSafeArea()
 
             playerSurface
 
-            // BINGE-ADVANCE SURFACE GATE: while an episode advance is in flight (parked by play(episode:),
-            // cleared exactly at commitPendingAdvanceOnFirstFrame), the surface underneath still holds the
-            // OUTGOING episode: during the resolve window the old file is literally still rendering, and
-            // after the incoming load is issued AVPlayerLayer retains its last decoded contents across
-            // replaceCurrentItem (the mpv Metal layer likewise keeps its last drawable) until the incoming
-            // file's first frame. That read as "plays seconds of the OLD episode" on a binge advance. Hold
-            // an opaque cover for the whole pendingAdvance window; it drops on the same main-actor turn as
-            // the first-frame commit, so the first visible frame IS the committed episode. The published
-            // identity itself is untouched (still first-frame commit); this gates only what is VISIBLE.
-            // Source switches (switchStream) never park a pendingAdvance and are deliberately not covered.
-            if pendingAdvance?.issued == true {
-                Color.black.ignoresSafeArea()
-            }
+            // Shared launch/incoming-episode art replaces the existing pending-advance black gate.
+            // Same-media recovery retains the last revealed picture; identity still commits only below.
+            firstFrameCoverLayer
 
             // UIKit owns ALL remote input. Presented in a dedicated key window so the focus engine has no
             // competitor and every press falls through to here. Swipes come via the pan recognizer.
@@ -1195,6 +1206,7 @@ struct TVPlayerView: View {
         .tint(Theme.Palette.accent)
         .onAppear {
             refreshAutoSkipSettings()
+            firstFrameCover.beginPresentation()
             VXProbeState.shared.setRoute("player")
             // #130 mitigation: hold a short background assertion while a loopback (torrent) stream plays, so a
             // quick app-switch away does not immediately suspend us and tear down the server listener. No-op
@@ -1671,6 +1683,16 @@ struct TVPlayerView: View {
         loadToken: PlayerLoadToken,
         position: Double
     ) {
+        // Keep delayed asset acceptance on the same exact deferred-start/active-owner transaction.
+        // Delayed acceptance must also reveal; keep this before the existing one-shot effects latch.
+        if pendingAdvance == nil, assetSanityDeferredStartToken == loadToken,
+           assetSanityAttempt.isAccepted(owner: loadToken) {
+            firstFrameCover.acceptStart(callbackOwner: loadToken,
+                activeOwner: coordinator.player?.activeLoadToken,
+                mountGeneration: (coordinator.player as? AVPlayerEngineController)?.currentItemGeneration ?? 0,
+                media: firstFrameCoverMedia, accepted: true,
+                contextCurrent: !leftPlayback && playbackMutationTarget.stillOwnsCurrentContext(core: core))
+        }
         guard assetSanityAttempt.isAccepted(owner: loadToken),
               assetSanityStartEffectsToken != loadToken else { return }
         assetSanityStartEffectsToken = loadToken
@@ -1950,6 +1972,9 @@ struct TVPlayerView: View {
         }
         if let loadToken, loadToken == coordinator.player?.activeLoadToken {
             adoptResumeSurfaceIfCurrent(loadToken: loadToken)
+            firstFrameCover.bind(owner: loadToken,
+                mountGeneration: (coordinator.player as? AVPlayerEngineController)?.currentItemGeneration ?? 0,
+                media: firstFrameCoverMedia)
             // AV callbacks are generation-fenced by the engine; mpv uses a fresh token per mount.
             completionEvidence.begin(owner: loadToken,
                                      mountGeneration: (coordinator.player as? AVPlayerEngineController)?.currentItemGeneration ?? 0)
@@ -4255,6 +4280,10 @@ struct TVPlayerView: View {
         }
         if let issuedToken {
             cancelEmptySourceRecovery()
+            let coverMetadata = pendingAdvance?.meta ?? curMeta ?? meta
+            firstFrameCover.bind(owner: issuedToken,
+                mountGeneration: (player as? AVPlayerEngineController)?.currentItemGeneration ?? 0,
+                media: .init(libraryID: coverMetadata?.libraryId, videoID: coverMetadata?.videoId))
             // Same-source recovery retains the latest viewer pause across the new file's startup.
             recoveryPauseIntent = capturedRecoveryPause
             recoveryPauseTarget = requestedResumeOrigin
@@ -11028,6 +11057,7 @@ struct TVPlayerView: View {
         cancelDirectResumeInventoryRefresh()
         exitAcceptedLoadToken = assetSanityAccepted ? exitLoadToken : nil
         leftPlayback = true   // FIRST: a pending EOF last-chance backfill must never resurrect a player the user left
+        firstFrameCover.retire()
         cancelEmptySourceRecovery()
         refreshPlaybackIdleTimer()
         refindTask?.cancel(); refindTask = nil; refinding = false   // a settling re-find must not retry into a left player
