@@ -163,7 +163,10 @@ class ProfileStore private constructor(context: Context) {
             notifyHomeTransitionListeners(); publishActiveProfile(); notifySwitchListeners()
         }
     }
-    private fun applyNativeProjection(value: NativeProfileGateway.Projection, forceSettings: Boolean = false) {
+    private fun applyNativeProjection(value: NativeProfileGateway.Projection, forceSettings: Boolean = false) = ContinueWatchingOwnerGate.serialized {
+        checkNotNull(nativeGateway).withProjection(value) { applyNativeProjectionLocked(value, forceSettings) }
+    }
+    private fun applyNativeProjectionLocked(value: NativeProfileGateway.Projection, forceSettings: Boolean) {
         var acknowledged = value
         val previous = active
         val incoming = value.profiles.firstOrNull { it.id == value.activeID }
@@ -662,27 +665,30 @@ class ProfileStore private constructor(context: Context) {
 
     private fun capturePendingNativeContinueWatchingDiscovery(profile: UserProfile): Boolean {
         if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED && continueWatchingMigration.witness != null) {
-            val captured = com.vortx.android.integrations.NativeProviderAccess.capture(
-                com.vortx.android.integrations.NativeProviderCredentials.GROUPS[0]) { nativeGateway?.read() }
-            val guard = captured?.first
-            val projection = captured?.second
-            val epoch = com.vortx.android.integrations.TraktAuth.currentSessionEpoch
-            // Unrelated discovery edits join the pending legacy choice in one checkpoint. The temporary
-            // Local projection is not an explicit source edit and must never overwrite the qualified choice.
-            continueWatchingMigration.retainDiscoveryCapture(profile, ProfileDiscoveryPreferencesStore.capture(prefs))
-            continueWatchingMigration.attempt(projection?.profiles?.firstOrNull { it.id == profile.id },
-                projection?.activeID.orEmpty(), guard?.owner, epoch,
-                save = { edited -> com.vortx.android.integrations.NativeProviderAccess.guarded(checkNotNull(guard)) {
-                    if (nativeGateway?.read() == projection) checkNotNull(nativeGateway).save(edited, adding = false) else null
-                } }, authorityIsCurrent = { guard != null && acknowledgedNativeAccount == guard.owner &&
-                    com.vortx.android.integrations.NativeProviderAccess.current(guard) &&
-                    com.vortx.android.integrations.TraktAuth.currentSessionEpoch == epoch },
-                readbackIsCurrent = { saved -> nativeGateway?.read() == saved },
-            )?.let { saved ->
-                applyNativeProjection(saved, forceSettings = true)
-                prefs.edit().putBoolean(com.vortx.android.integrations.ScrobbleService.KEY_TRAKT_CONTINUE_WATCHING, false).apply()
+            val gateway = checkNotNull(nativeGateway)
+            return gateway.withProjection(gateway.read()) {
+                val captured = com.vortx.android.integrations.NativeProviderAccess.capture(
+                    com.vortx.android.integrations.NativeProviderCredentials.GROUPS[0]) { nativeGateway?.read() }
+                val guard = captured?.first
+                val projection = captured?.second
+                val epoch = com.vortx.android.integrations.TraktAuth.currentSessionEpoch
+                // Unrelated discovery edits join the pending legacy choice in one checkpoint. The temporary
+                // Local projection is not an explicit source edit and must never overwrite the qualified choice.
+                continueWatchingMigration.retainDiscoveryCapture(profile, ProfileDiscoveryPreferencesStore.capture(prefs))
+                continueWatchingMigration.attempt(projection?.profiles?.firstOrNull { it.id == profile.id },
+                    projection?.activeID.orEmpty(), guard?.owner, epoch,
+                    save = { edited -> com.vortx.android.integrations.NativeProviderAccess.guarded(checkNotNull(guard)) {
+                        if (nativeGateway?.read() == projection) checkNotNull(nativeGateway).save(edited, adding = false) else null
+                    } }, authorityIsCurrent = { guard != null && acknowledgedNativeAccount == guard.owner &&
+                        com.vortx.android.integrations.NativeProviderAccess.current(guard) &&
+                        com.vortx.android.integrations.TraktAuth.currentSessionEpoch == epoch },
+                    readbackIsCurrent = { saved -> nativeGateway?.read() == saved },
+                )?.let { saved ->
+                    applyNativeProjection(saved, forceSettings = true)
+                    prefs.edit().putBoolean(com.vortx.android.integrations.ScrobbleService.KEY_TRAKT_CONTINUE_WATCHING, false).apply()
+                }
+                true
             }
-            return true
         }
         return false
     }

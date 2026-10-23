@@ -135,7 +135,13 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
         check(BuildConfig.NATIVE_ENGINE_ENABLED) { "Native streaming accounts are not enabled" }
         return nativeAccounts
     }
-    private val nativeProfiles: NativeProfileAccess by lazy { NativeProfileAccess { nativeAccounts.session() } }
+    private val nativeProfiles: NativeProfileAccess by lazy { NativeProfileAccess(
+        publicationAdmission = { runtime, action ->
+            val account = nativeAccounts.accountFor(runtime)
+            account != null && nativeAccounts.withProfileMutation(runtime, account, action)
+        },
+        session = { nativeAccounts.session() },
+    ) }
     private val nativeWatchlist by lazy { com.vortx.android.engine.NativeWatchlistAccess(nativeAccounts) }
     private val nativeForYou by lazy { com.vortx.android.engine.NativeForYouAccess(nativeAccounts) }
     private val nativeStreamingAuth by lazy { com.vortx.android.engine.NativeStreamingAuthRepository(nativeAccounts, applicationScope) }
