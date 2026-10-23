@@ -64,10 +64,11 @@ const markers = ['private func string(', 'private func projectedLibraryItems(', 
 const combined = fixture
   .replace('// PRODUCTION_JSON', member(resource, 'indirect enum VortxJSON:'))
   .replace('// PRODUCTION_MEMBERSHIP', membership)
+  .replace('// PRODUCTION_LOCK', member(current, 'final class VortxNativeFacadeLock:'))
   .replace('// PRODUCTION_ERROR', member(runtime, 'enum VortxNativeError:'))
   .replace('// PRODUCTION_PREVIOUSLY_WATCHED', member(watched, 'enum VortxNativePreviouslyWatched {'))
   .replace('// BASELINE_PREVIOUSLY_WATCHED', member(oldWatched, 'enum VortxNativePreviouslyWatched {').replaceAll('VortxNativePreviouslyWatched', 'BaselinePreviouslyWatched'))
-  .replace('// PRODUCTION_CURRENT_PUBLICATION', member(current, 'private func publish('))
+  .replace('// PRODUCTION_CURRENT_PUBLICATION', member(current, 'private func stageChanged(') + '\n' + member(current, 'private func publish('))
   .replace('// PRODUCTION_CURRENT', markers.map(m => member(current, m)).join('\n'))
   .replace('// PRODUCTION_BASELINE', markers.map(m => member(prior, m)).join('\n').replaceAll('VortxNativePreviouslyWatched', 'BaselinePreviouslyWatched'));
 fs.writeFileSync(out + '/Combined.swift', combined);

@@ -1,4 +1,6 @@
 import Foundation
+import Darwin
+import os
 
 /// Detail membership is independent of the Library screen's type/sort/watched filters. Build this value
 /// once from the complete acknowledged projection, then overlay metadata without scanning history again.
@@ -18,6 +20,53 @@ struct VortxLibraryMembership: Sendable {
     func item(for id: String) -> VortxJSON? { savedByID[id] }
 }
 
+/// One recursive transaction boundary for both the facade and its FIFO admission helper.
+/// Checked Sendable: both stored locks are immutable imported synchronization primitives;
+/// every mutable owner/depth/queue value lives in the unfair lock's checked Sendable State.
+final class VortxNativeFacadeLock: NSLocking, Sendable {
+    private struct State: Sendable {
+        var owner: UInt64?
+        var depth = 0
+        var pending: [@Sendable () -> Void] = []
+    }
+    private let underlying = NSRecursiveLock()
+    private let storage = OSAllocatedUnfairLock(initialState: State())
+
+    func lock() {
+        underlying.lock()
+        let thread = UInt64(pthread_mach_thread_np(pthread_self()))
+        storage.withLock { state in
+            precondition(state.owner == nil || state.owner == thread)
+            state.owner = thread; state.depth += 1
+        }
+    }
+    func unlock() {
+        let thread = UInt64(pthread_mach_thread_np(pthread_self()))
+        let ready = storage.withLock { state -> [@Sendable () -> Void] in
+            precondition(state.owner == thread && state.depth > 0)
+            state.depth -= 1
+            guard state.depth == 0 else { return [] }
+            state.owner = nil
+            var ready: [@Sendable () -> Void] = []
+            swap(&ready, &state.pending)
+            return ready
+        }
+        underlying.unlock()
+        // Swap retains the entire batch before releasing F. Neither queue reset nor an
+        // element's final capture destruction can call external code while F is held.
+        withExtendedLifetime(ready) {
+            for delivery in ready { delivery() }
+        }
+    }
+    func withLock<Result>(_ operation: () throws -> Result) rethrows -> Result {
+        lock(); defer { unlock() }
+        return try operation()
+    }
+    func afterOutermostUnlock(_ delivery: @escaping @Sendable () -> Void) {
+        withLock { storage.withLock { $0.pending.append(delivery) } }
+    }
+}
+
 /// Compatibility entry point for CoreBridge's existing Load/Unload wire. It never initializes or
 /// calls Stremio. Unsupported actions return false and record a non-sensitive diagnostic code.
 /// Account migration/key acquisition remain explicit prerequisites to constructing the session.
@@ -35,7 +84,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     private var registrySnapshot: [VortxResourceAddon] { lock.withLock { registry } }
     // Dispatch admission is one synchronous transaction, including nested begin/enqueue helpers.
     // This prevents a profile change/rebind from slipping between a UI identity read and enqueue.
-    private let lock: NSRecursiveLock
+    private let lock: VortxNativeFacadeLock
     private let mutationFIFO: VortxNativeFIFOAdmission
     private var values: [String: VortxJSON] = [:]
     // Replaced with acknowledged state under lock, never with a filtered Library screen response.
@@ -214,10 +263,14 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     }
     private init(session: VortxNativeSession, registry: [VortxResourceAddon], mutationAccepted: @escaping @Sendable () -> Void,
                  progressAccepted: (@Sendable () -> Void)?, changed: @escaping @Sendable ([String]) -> Void) {
-        let lock = NSRecursiveLock()
+        let lock = VortxNativeFacadeLock()
         self.lock = lock; self.mutationFIFO = VortxNativeFIFOAdmission(lock: lock)
         self.session = session; self.registry = registry; self.changed = changed; self.mutationAccepted = mutationAccepted
         self.progressAccepted = progressAccepted
+    }
+    private func stageChanged(_ fields: [String]) {
+        let callback = changed
+        lock.afterOutermostUnlock { callback(fields) }
     }
     func ownsSession(_ candidate: VortxNativeSession) -> Bool { session === candidate }
     func stateData(_ field: String) -> Data? {
@@ -323,9 +376,10 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             registry = replacement; resourceRegistryValid = true; registryGeneration = UUID()
             values["ctx"] = .object(["profile": .object(["addons": .array(replacement.map {
                 .object(["transportUrl": .string($0.transportUrl), "manifest": $0.manifest ?? .object([:])])
-            })])]); return true
+            })])]); stageChanged(["ctx"])
+            return true
         }
-        guard accepted else { throw VortxNativeError.superseded }; changed(["ctx"])
+        guard accepted else { throw VortxNativeError.superseded }
     }
     /// Called under lock. Keep the durable-state publication, discard only prior resource ownership.
     private func invalidateResourcePublications() {
@@ -363,8 +417,8 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             values[$0.key] = projected
             if $0.key == "meta_details" { observeExternalMetadata(projected) }
         }
+        if !changedFields.isEmpty { stageChanged(changedFields.sorted()) }
         lock.unlock()
-        if !changedFields.isEmpty { changed(changedFields.sorted()) }
     }
     private func enqueue(_ field: String, initial: VortxJSON? = nil, operation: @escaping @Sendable () async throws -> [String: VortxJSON]) -> Bool {
         enqueue(field, initial: initial) { _ in try await operation() }
@@ -529,7 +583,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                 // FIFO intents each publish their acknowledged state before the next task executes.
                 // A later get_state must not hide the profile transition's accepted state.
                 if profileTransition { self.lock.withLock { self.pendingProfileTransitions -= 1 }; transitionReleased = true }
-                if let publication, !publication.changed.isEmpty { self.changed(publication.changed) }
+                if let publication, !publication.changed.isEmpty { self.stageChanged(publication.changed) }
                 guard publication != nil, let document = state["nativeSync"] else { throw VortxNativeError.closed }
                 if ["report_progress", "mark_watched", "reset_watched"].contains(type) {
                     let count = playback["continueWatching"]?.array?.count ?? 0

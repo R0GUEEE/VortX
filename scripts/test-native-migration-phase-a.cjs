@@ -295,8 +295,12 @@ async function main() {
         sources = ['app/SourcesShared/OwnerHistoryExactJSON.swift',
             'app/Tests/OwnerHistorySnapshotConservationTests.swift', 'app/Tests/OwnerHistorySnapshotConservationMain.swift'];
     } else if (fifo) {
-        sources = ['app/SourcesShared/VortxNativeRuntime.swift', 'app/SourcesShared/VortxResourceBridge.swift',
-            'app/SourcesShared/VortxNativeHostFieldMutation.swift', 'app/SourcesShared/VortxNativeFIFOAdmission.swift',
+        // Ownership-only lane: retain exact declaration provenance without importing the
+        // unrelated C ABI/runtime/resource implementation or requiring a packaged SDK.
+        capture('test/xperience-harness-inputs.cjs');
+        capture('app/SourcesShared/VortxNativeRuntime.swift');
+        capture('app/SourcesShared/VortxNativeHostFieldMutation.swift');
+        sources = ['app/SourcesShared/VortxNativeFIFOAdmission.swift',
             'app/Tests/VortxNativeFIFOAdmissionTests.swift', 'app/Tests/VortxNativeFIFOAdmissionMain.swift'];
     } else if (stage === 'publication') {
         sources = ['app/Tests/CoreBridgePublicationFenceContractTests.swift'];
@@ -366,7 +370,23 @@ async function main() {
     const copies = new Map();
     for (const [file, bytes] of captured) copies.set(file, write(`source-evidence/${file}`, bytes));
     const inputs = sources.map(file => copies.get(file));
-    if (mpvTLS) {
+    if (fifo) {
+        const declarations = [
+            { owner: 'app/SourcesShared/VortxNativeRuntime.swift', signature: 'enum VortxNativeError:' },
+            { owner: 'app/SourcesShared/VortxNativeHostFieldMutation.swift', signature: 'protocol VortxMutationAuthority:' }
+        ].map(item => ({
+            ...item, bytes: extractDeclaration(captured.get(item.owner).toString('utf8'), item.signature)
+        }));
+        inputs.push(write('generated/FIFOContracts.swift',
+            'import Foundation\n\n' + declarations.map(item => item.bytes).join('\n\n') + '\n'));
+        write('fifo-contract-extraction.json', JSON.stringify({
+            declarations: declarations.map(({ owner, signature, bytes }) => ({
+                owner, signature, ownerSHA256: digest(captured.get(owner)), declarationSHA256: digest(Buffer.from(bytes))
+            })),
+            declarationTransformations: [],
+            boundary: 'Whole actual FIFO and unchanged 14-case XCTest files; exact enum/protocol only, no native ABI, resource, Session, storage or owned-receipt proof'
+        }, null, 2) + '\n');
+    } else if (mpvTLS) {
         const controller = captured.get('app/Sources/Player/MPVMetalViewController.swift').toString('utf8');
         const declarations = ['    private func applyRequiredTLSPolicy() -> Bool',
             '    private func configureLiveMode(_ live: Bool)'].map(signature => ({

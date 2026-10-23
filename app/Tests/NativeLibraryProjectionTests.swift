@@ -1,8 +1,11 @@
 // Pure synthetic source-extraction fixture. No app, SDK, account, network, or device state.
 import Foundation
+import Darwin
+import os
 
 // PRODUCTION_JSON
 // PRODUCTION_MEMBERSHIP
+// PRODUCTION_LOCK
 // PRODUCTION_ERROR
 // PRODUCTION_PREVIOUSLY_WATCHED
 // BASELINE_PREVIOUSLY_WATCHED
@@ -13,7 +16,7 @@ private struct FixtureAddon {
 }
 
 private final class CurrentProjection {
-    private let lock = NSRecursiveLock()
+    private let lock = VortxNativeFacadeLock()
     private let registry: [FixtureAddon] = [.init(transportUrl: "https://fixture.invalid/manifest.json", manifest: .object(["id": .string("fixture")]))]
     private let resourceRegistryValid = true
     private var playback: VortxJSON?
@@ -22,7 +25,7 @@ private final class CurrentProjection {
     private var metadataLibraryMembership = VortxLibraryMembership()
     private var generations: [String: UUID] = [:]
     private var closed = false
-    private let changed: ([String]) -> Void = { _ in }
+    private let changed: @Sendable ([String]) -> Void = { _ in }
     private func observeExternalMetadata(_ value: VortxJSON) {}
     init(playback: VortxJSON?, request: VortxJSON? = nil, detailID: String = "dup") {
         self.playback = playback

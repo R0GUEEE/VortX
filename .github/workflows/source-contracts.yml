@@ -7,6 +7,8 @@ on:
       - "scripts/test-subtitle-source-contracts.sh"
       - "scripts/test-apple-playback-recovery.sh"
       - "scripts/test-profile-selection-read.sh"
+      - "scripts/test-native-facade-lock.sh"
+      - "test/native-facade-lock.mjs"
       - "scripts/test-legacy-profile-recovery.sh"
       - "scripts/test-native-playback-snapshot.sh"
       - "scripts/test-native-library-projection-perf.sh"
@@ -61,6 +63,8 @@ on:
       - "scripts/test-subtitle-source-contracts.sh"
       - "scripts/test-apple-playback-recovery.sh"
       - "scripts/test-profile-selection-read.sh"
+      - "scripts/test-native-facade-lock.sh"
+      - "test/native-facade-lock.mjs"
       - "scripts/test-legacy-profile-recovery.sh"
       - "scripts/test-native-playback-snapshot.sh"
       - "scripts/test-native-library-projection-perf.sh"
@@ -156,6 +160,7 @@ jobs:
       - run: bash scripts/test-subtitle-source-contracts.sh
       - run: bash scripts/test-apple-playback-recovery.sh
       - run: bash scripts/test-profile-selection-read.sh
+      - run: bash scripts/test-native-facade-lock.sh
       - run: bash scripts/test-legacy-profile-recovery.sh
       - name: Fetch immutable public playback snapshot baseline
         run: git fetch --no-tags --depth=1 origin 57e1a98806d99b1ba074a455791b20aaea33894a
