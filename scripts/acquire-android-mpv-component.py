@@ -9,7 +9,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-import xml.etree.ElementTree as ET
+from xml.parsers import expat
 import zipfile
 
 MAX_BYTES = 512 * 1024 * 1024
@@ -64,6 +64,41 @@ class ReleaseRedirects(HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, message, headers, new_url)
 
 
+def manifest_identity(raw):
+    """Read only manifest identity; forbid DTDs/entities before expansion, in any encoding."""
+    require(len(raw) <= 65536, "Oversized AAR manifest")
+    parser = expat.ParserCreate(namespace_separator="}")
+    depth, elements, root, uses = 0, 0, None, []
+
+    def reject_declaration(*unused):
+        raise ValueError("Unsupported AAR manifest declarations")
+
+    def start(name, attributes):
+        nonlocal depth, elements, root
+        depth += 1
+        elements += 1
+        require(depth <= 32 and elements <= 4096, "AAR manifest exceeds structure bound")
+        if depth == 1:
+            root = (name, attributes)
+        elif depth == 2 and name == "uses-sdk":
+            uses.append(attributes)
+
+    def end(name):
+        nonlocal depth
+        depth -= 1
+
+    parser.StartDoctypeDeclHandler = reject_declaration
+    parser.EntityDeclHandler = reject_declaration
+    parser.ExternalEntityRefHandler = reject_declaration
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.StartElementHandler, parser.EndElementHandler = start, end
+    try:
+        parser.Parse(raw, True)
+    except expat.ExpatError as error:
+        raise ValueError("Invalid AAR manifest XML") from error
+    return root, uses
+
+
 def verify_aar(path, checksum):
     require(path.is_file() and not path.is_symlink() and 0 < path.stat().st_size <= MAX_BYTES,
             "Missing, linked or oversized component AAR")
@@ -79,13 +114,10 @@ def verify_aar(path, checksum):
         require("classes.jar" in names and "AndroidManifest.xml" in names, "Not a complete AAR")
         require(archive.getinfo("AndroidManifest.xml").file_size <= 65536, "Oversized AAR manifest")
         manifest = archive.read("AndroidManifest.xml")
-        require(b"<!DOCTYPE" not in manifest.upper() and b"<!ENTITY" not in manifest.upper(),
-                "Unsupported AAR manifest declarations")
-        root = ET.fromstring(manifest)
-        uses = root.findall("uses-sdk")
-        require(root.tag == "manifest" and root.get("package") == "dev.jdtech.mpv"
+        root, uses = manifest_identity(manifest)
+        require(root[0] == "manifest" and root[1].get("package") == "dev.jdtech.mpv"
                 and len(uses) == 1
-                and uses[0].get("{http://schemas.android.com/apk/res/android}minSdkVersion") == "26",
+                and uses[0].get("http://schemas.android.com/apk/res/android}minSdkVersion") == "26",
                 "Component AAR must retain the real minSdk 26 manifest")
         libraries = [name for name in names if name.startswith("jni/") and name.endswith(".so")]
         require(all(len(name.split("/")) == 3 for name in libraries), "Invalid native AAR layout")

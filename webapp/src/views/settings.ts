@@ -428,7 +428,7 @@ function segmented(opts: { value: string; label: string; on: boolean }[], action
 }
 
 function toggle(action: string, on: boolean): string {
-  return `<button class="switch${on ? " on" : ""}" role="switch" aria-checked="${on}" data-action="${action}"><span class="switch-knob"></span></button>`;
+  return `<button class="switch${on ? " on" : ""}" role="switch" aria-checked="${on ? "true" : "false"}" data-action="${action}"><span class="switch-knob"></span></button>`;
 }
 
 /** A -/+ stepper showing a percentage. `dir` is carried on data-dir; `kind` distinguishes which value. */

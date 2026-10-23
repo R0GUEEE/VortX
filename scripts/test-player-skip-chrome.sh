@@ -7,6 +7,7 @@ node --input-type=module - "$fixture_dir" <<'NODE'
 import assert from 'node:assert/strict';
 import {readFileSync, writeFileSync} from 'node:fs';
 const source = readFileSync('app/Sources/PlayerScreen.swift', 'utf8');
+const glass = readFileSync('app/SourcesShared/GlassStyle.swift', 'utf8');
 const start = source.indexOf('private enum PlayerSkipChromePolicy {');
 assert(start >= 0, 'extract shipping policy');
 let depth = 1, end = source.indexOf('{', start) + 1;
@@ -23,7 +24,13 @@ assert(source.includes('!loadFailed, !stillWatchingPrompt,'), 'modal suppresses 
 assert(source.includes('(!skipSharesChrome || !skipEditActive)'), 'Mac editor suppresses competing Skip action');
 assert(source.includes('let promptAvailable = !controlsVisible && !isLocked'),
        'revealing manual Skip must not activate an automatic countdown during scrubbing');
-assert(source.includes('shadow: .bar, tone: .scrim'), 'video chrome uses the shared video scrim role');
+const plateStart = glass.indexOf('private struct VortXPlayerBottomBackplateModifier:');
+const plateEnd = glass.indexOf('extension View {', plateStart);
+assert(plateStart >= 0 && plateEnd > plateStart, 'bound the actual shared video backplate');
+const plate = glass.slice(plateStart, plateEnd);
+assert(source.includes('.vortxPlayerBottomBackplate()') &&
+       plate.includes('shadow: .bar') && plate.includes('tone: .scrim'),
+       'video chrome uses the actual shared video scrim role');
 console.log('PASS shipping consumer wiring; automatic-skip controls gate retained');
 NODE
 xcrun swiftc -swift-version 6 -strict-concurrency=complete -warnings-as-errors \

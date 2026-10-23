@@ -128,11 +128,22 @@ for workflow in "$ANDROID_CI_WF" "$ANDROID_RELEASE_WF"; do
     printf 'pin: %s vortx-core=%s (parent approval owns replacement)\n' "$(basename "$workflow")" "$vortx_pin"
 done
 
-require_literal "release runs actual sync tests against the real host JNI" '--init-script native-sync-hosted.init.gradle' "$ANDROID_RELEASE_WF"
-require_literal "release admits all native sync JNI cases" 'VORTX_JNI_SYNC: "1"' "$ANDROID_RELEASE_WF"
-require_literal "release requires actual backup revision JNI tests" '--tests com.vortx.android.sync.VortXSyncManagerBackupRevisionTest' "$ANDROID_RELEASE_WF"
-require_literal "release requires all native account tests" '--tests com.vortx.android.sync.NativeAccountSyncTest' "$ANDROID_RELEASE_WF"
-require_literal "release retains post-runtime library proof" 'postRuntimeLibrarySha256:$after' "$ANDROID_RELEASE_WF"
-require_literal "release does not accept native sync skips" 'Require real native BackupRevision14 plus NativeAccountSync8, zero skips/failures' "$REPO_ROOT/android/native-sync-hosted.init.gradle"
+readonly NATIVE_SYNC_HOST_SCRIPT="$REPO_ROOT/scripts/test-android-native-sync-host.sh"
+for workflow in "$ANDROID_CI_WF" "$ANDROID_RELEASE_WF"; do
+    require_literal "$(basename "$workflow") invokes the exact shared native sync gate" 'bash ../scripts/test-android-native-sync-host.sh' "$workflow"
+    require_literal "$(basename "$workflow") admits all native sync JNI cases" 'VORTX_JNI_SYNC: "1"' "$workflow"
+    require_literal "$(basename "$workflow") retains separate native sync results" 'name: VortX-Android-native-sync-host-tests' "$workflow"
+done
+require_literal "pretag sync binds the existing host receipt to exact app source" 'SOURCE_COMMIT: ${{ github.sha }}' "$ANDROID_CI_WF"
+require_literal "the original owner-history and Media3 gate remains active" '--init-script owner-history-hosted.init.gradle' "$ANDROID_CI_WF"
+require_literal "shared sync gate uses actual native runtime validation" '--init-script native-sync-hosted.init.gradle' "$NATIVE_SYNC_HOST_SCRIPT"
+require_literal "shared sync gate requires all backup revision JNI tests" '--tests com.vortx.android.sync.VortXSyncManagerBackupRevisionTest' "$NATIVE_SYNC_HOST_SCRIPT"
+require_literal "shared sync gate requires all native account tests" '--tests com.vortx.android.sync.NativeAccountSyncTest' "$NATIVE_SYNC_HOST_SCRIPT"
+require_literal "shared sync gate requires fresh XML" 'test ! -e app/build/test-results/testPlayDebugUnitTest' "$NATIVE_SYNC_HOST_SCRIPT"
+require_literal "shared sync gate rejects native/source changes" 'cmp --silent "$VORTX_JNI_SOURCE_MANIFEST" "$VORTX_JNI_SOURCE_MANIFEST.current"' "$NATIVE_SYNC_HOST_SCRIPT"
+require_literal "shared sync gate retains post-runtime library proof" 'postRuntimeLibrarySha256:$after' "$NATIVE_SYNC_HOST_SCRIPT"
+require_literal "shared sync gate retains post-runtime private input digest" 'postRuntimeSourceInputsSha256:$inputs' "$NATIVE_SYNC_HOST_SCRIPT"
+require_literal "shared sync gate records 22 executed and 17 real JNI cases" 'executed:22,realJniCases:17,skipped:0,failures:0,errors:0' "$NATIVE_SYNC_HOST_SCRIPT"
+require_literal "shared sync gate never accepts native sync skips" 'Require real native BackupRevision14 plus NativeAccountSync8, zero skips/failures' "$REPO_ROOT/android/native-sync-hosted.init.gradle"
 
 printf 'PASS: Android VortX engine release selection/package contract\n'

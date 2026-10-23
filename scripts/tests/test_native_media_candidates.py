@@ -234,10 +234,10 @@ class AndroidMpvComponentBinding(unittest.TestCase):
     URL = "https://github.com/VortXTV/VortX/releases/download/vendor-fixture/libmpv.aar"
 
     @staticmethod
-    def fixture(path, *, min_sdk="26", missing=None, extra_abi=False, duplicate=False):
+    def fixture(path, *, min_sdk="26", missing=None, extra_abi=False, duplicate=False, manifest=None):
         entries = {
             "classes.jar": b"synthetic classes, not executable",
-            "AndroidManifest.xml": (
+            "AndroidManifest.xml": manifest if manifest is not None else (
                 '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
                 'package="dev.jdtech.mpv"><uses-sdk android:minSdkVersion="' + min_sdk + '"/></manifest>'
             ).encode(),
@@ -343,6 +343,41 @@ class AndroidMpvComponentBinding(unittest.TestCase):
                 checksum = self.fixture(target, duplicate=True)
             with self.assertRaisesRegex(ValueError, "membership"):
                 ACQUIRE.verify_aar(target, checksum)
+
+    def test_manifest_encoding_and_character_references_keep_the_same_identity(self):
+        document = ('<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                    'package="dev.jdtech.mpv"><uses-sdk android:minSdkVersion="2&#54;"/></manifest>')
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "fixture.aar"
+            for encoding in ("utf-8", "utf-16"):
+                with self.subTest(encoding=encoding):
+                    checksum = self.fixture(target, manifest=document.encode(encoding))
+                    ACQUIRE.verify_aar(target, checksum)
+
+    def test_aar_manifest_rejects_dtd_entities_in_every_supported_encoding(self):
+        manifest = ('<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                    'package="dev.jdtech.mpv"><uses-sdk android:minSdkVersion="26"/></manifest>')
+        declarations = (
+            '<!DOCTYPE manifest>',
+            '<!DOCTYPE manifest [<!ENTITY value "26">]>',
+            '<!DOCTYPE manifest [<!ENTITY value SYSTEM "file:///unread-fixture">]>',
+            '<!DOCTYPE manifest [<!ENTITY % value "ignored">%value;]>',
+            '<!DOCTYPE manifest SYSTEM "https://unread.invalid/fixture.dtd">',
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "fixture.aar"
+            for declaration in declarations:
+                for encoding in ("utf-8", "utf-16"):
+                    with self.subTest(declaration=declaration, encoding=encoding):
+                        checksum = self.fixture(target, manifest=(declaration + manifest).encode(encoding))
+                        with self.assertRaisesRegex(ValueError, "declarations"):
+                            ACQUIRE.verify_aar(target, checksum)
+
+    def test_manifest_structure_and_malformed_xml_fail_closed(self):
+        for raw in (b"<manifest>", b"<manifest>" + b"<node>" * 32 + b"</node>" * 32 + b"</manifest>",
+                    b"<manifest>" + b"<node/>" * 4096 + b"</manifest>", b" " * 65537):
+            with self.subTest(prefix=raw[:40]), self.assertRaises(ValueError):
+                ACQUIRE.manifest_identity(raw)
 
 
 if __name__ == "__main__":

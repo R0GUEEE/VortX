@@ -170,9 +170,71 @@ function readText(file) {
 }
 
 export function projectBuildFromYmlText(content) {
-  const builds = [...String(content).matchAll(/CURRENT_PROJECT_VERSION:\s*"([0-9]+)"/g)].map((match) => match[1]);
-  if (builds.length !== 6) die(`app/project.yml must contain exactly six CURRENT_PROJECT_VERSION values (found ${builds.length})`, "project-build");
-  if (new Set(builds).size !== 1) die(`app/project.yml build values disagree: ${builds.join(", ")}`, "project-build");
+  // This deliberately accepts the checked-in block-YAML layout only. Count named targets,
+  // not free-floating version lines: native ships five, historical projects also name VortX.
+  const required = ["VortXiOSNative", "VortXMac", "VortXTV", "VortXTopShelf", "VortXTVLite"];
+  const allowed = new Set([...required, "VortX", "CinemaUISmokeRenderer"]);
+  const targets = new Map();
+  const path = [];
+  let sections = 0;
+  const invalid = (reason) => die("app/project.yml " + reason, "project-build");
+  for (const line of String(content).split(/\r?\n/)) {
+    if (!line.trim() || line.trimStart().startsWith("#")) continue;
+    const indent = line.length - line.trimStart().length;
+    while (path.length && path.at(-1).indent >= indent) path.pop();
+    const keys = path.map((item) => item.key);
+    const header = line.match(/^( *)([A-Za-z_][A-Za-z0-9_]*):[ \t]*(?:#.*)?$/);
+    const mapping = line.match(/^( *)(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))[ \t]*:/);
+    const mappingKey = mapping && (mapping[2] ?? mapping[3] ?? mapping[4]);
+    const structural = (indent === 0 && mappingKey === "targets") ||
+      (keys[0] === "targets" && keys.length === 2 && indent === 4 && mappingKey === "settings") ||
+      (keys[0] === "targets" && keys.length === 3 && keys[2] === "settings" && indent === 6 && mappingKey === "base");
+    if (structural && !header) invalid("uses unsupported inline or quoted structural metadata");
+    if (/\bCURRENT_PROJECT_VERSION\b/.test(line)) {
+      const value = line.match(/^        CURRENT_PROJECT_VERSION:[ \t]+"([0-9]+)"[ \t]*(?:#.*)?$/)?.[1];
+      if (!value || keys.length !== 4 || keys[0] !== "targets" ||
+          keys[2] !== "settings" || keys[3] !== "base" ||
+          path.some((item, index) => item.indent !== index * 2) ||
+          !allowed.has(keys[1]) || keys[1] === "CinemaUISmokeRenderer") {
+        invalid("has an unexpected or misplaced CURRENT_PROJECT_VERSION");
+      }
+      const target = targets.get(keys[1]);
+      if (target.build !== null) invalid("has duplicate build values for " + keys[1]);
+      if (!Number.isSafeInteger(Number(value)) || Number(value) <= 0) {
+        invalid("build must be a positive safe integer for " + keys[1]);
+      }
+      target.build = value;
+    }
+    if (keys.length === 1 && keys[0] === "targets" && indent === 2) {
+      if (!header || !allowed.has(header[2])) invalid("has an unexpected target declaration");
+      if (targets.has(header[2])) invalid("has duplicate target " + header[2]);
+      targets.set(header[2], { build: null, settings: false, base: false });
+    }
+    if (!header) continue;
+    const key = header[2];
+    if (indent === 0 && key === "targets" && ++sections !== 1) invalid("has duplicate targets sections");
+    if (keys[0] === "targets" && targets.has(keys[1])) {
+      const target = targets.get(keys[1]);
+      if (keys.length === 2 && indent === 4 && key === "settings") {
+        if (target.settings) invalid("has duplicate settings for " + keys[1]);
+        target.settings = true;
+      }
+      if (keys.length === 3 && keys[2] === "settings" && indent === 6 && key === "base") {
+        if (target.base) invalid("has duplicate settings.base for " + keys[1]);
+        target.base = true;
+      }
+    }
+    path.push({ indent, key });
+  }
+  if (sections !== 1) invalid("must contain one targets section");
+  for (const name of required) if (!targets.has(name)) invalid("is missing required target " + name);
+  const expected = [...required, ...(targets.has("VortX") ? ["VortX"] : [])];
+  const builds = expected.map((name) => {
+    const build = targets.get(name).build;
+    if (build === null) invalid("is missing CURRENT_PROJECT_VERSION for " + name);
+    return build;
+  });
+  if (new Set(builds).size !== 1) invalid("build values disagree: " + builds.join(", "));
   return requirePositiveInteger("project-build", builds[0]);
 }
 

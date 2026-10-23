@@ -444,8 +444,11 @@ private fun requireWatchedCredentialFree(evidence: WatchedEvidence.Evidence, ins
 internal fun requireWatchedSourceCredentialFree(scope: WatchedEvidence.Scope, bytes: ByteArray) {
     val source = NativeProfileOverlayWitness.parseDocument(bytes)
     if (scope.verifiedStreamingUID == null) requireOwnAccountSourceCredentialFree(source)
-    else for (key in listOf("libraryResponseBase64", "addonsResponseBase64", "profileOverlayBase64"))
-        requireOwnAccountSourceCredentialFree(NativeProfileOverlayWitness.parseDocument(watchedDecode64(source.getString(key))))
+    else for (key in listOf("libraryResponseBase64", "addonsResponseBase64", "profileOverlayBase64")) {
+        val encoded = source.opt(key)
+        require(encoded is String) { "Malformed own-account watched source envelope" }
+        requireOwnAccountSourceCredentialFree(NativeProfileOverlayWitness.parseDocument(watchedDecode64(encoded)))
+    }
 }
 internal fun watchedSHA(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 /** Platform JSONObject.numberToString can collapse exact BigDecimal values through double/long.

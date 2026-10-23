@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from xml.parsers import expat
 
 LIMIT = 32 * 1024 * 1024
 SKIP = {"node_modules", "target", "build", "_build", ".git", ".gradle", "dist", ".next", "source-evidence", "_recovery"}
@@ -265,6 +266,18 @@ GITHUB_SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 class GitHubNoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, response, code, message, headers, new_url):
         raise ValueError("GitHub source redirects require explicit reconciliation")
+
+
+class RegistryHTTPSRedirects(urllib.request.HTTPRedirectHandler):
+    """Public registries may redirect between HTTPS origins, never downgrade protocols."""
+    max_redirections = 5
+
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        target = urllib.parse.urlsplit(new_url)
+        if (target.scheme != "https" or not target.hostname or target.username or target.password
+                or target.port not in (None, 443) or target.fragment):
+            raise ValueError("Unsupported registry metadata redirect")
+        return super().redirect_request(request, response, code, message, headers, new_url)
 
 
 def github_repository(name):
@@ -537,10 +550,59 @@ def get(url, github=False):
             with urllib.request.build_opener(GitHubNoRedirect()).open(request, timeout=30) as response:
                 raw = response.read(LIMIT + 1)
         else:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.build_opener(RegistryHTTPSRedirects()).open(request, timeout=30) as response:
                 raw = response.read(LIMIT + 1)
     if len(raw) > LIMIT: raise ValueError("Registry response exceeds bound")
     return raw
+
+
+def maven_versions(raw):
+    """Stream the existing version path without DTD/entity expansion or an unbounded tree."""
+    if len(raw) > LIMIT: raise ValueError("Maven metadata exceeds bound")
+    parser = expat.ParserCreate(namespace_separator="}")
+    parser.buffer_text = True
+    path, versions, text = [], [], None
+    elements, capture = 0, False
+
+    def reject_declaration(*unused):
+        raise ValueError("Unsupported Maven metadata declarations")
+
+    def version_path():
+        return len(path) == 4 and path[1:] == ["versioning", "versions", "version"]
+
+    def start(name, attributes):
+        nonlocal elements, text, capture
+        path.append(name)
+        elements += 1
+        if len(path) > 64 or elements > 200_000:
+            raise ValueError("Maven metadata exceeds structure bound")
+        if version_path():
+            text, capture = [], True
+        elif text is not None:
+            capture = False  # Match ElementTree node.text: exclude child text and tails.
+
+    def characters(value):
+        if capture and version_path(): text.append(value)
+
+    def end(name):
+        nonlocal text, capture
+        if version_path():
+            value = "".join(text)
+            if value: versions.append(value)
+            text, capture = None, False
+        path.pop()
+
+    parser.StartDoctypeDeclHandler = reject_declaration
+    parser.EntityDeclHandler = reject_declaration
+    parser.ExternalEntityRefHandler = reject_declaration
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.StartElementHandler, parser.EndElementHandler = start, end
+    parser.CharacterDataHandler = characters
+    try:
+        parser.Parse(raw, True)
+    except expat.ExpatError as error:
+        raise ValueError("Invalid Maven metadata XML") from error
+    return versions
 
 
 def releases(ecosystem, name):
@@ -562,7 +624,6 @@ def releases(ecosystem, name):
         stable = [row["vers"] for row in rows if not row.get("yanked") and stable_key(row["vers"]) is not None]
         latest = max(stable, key=stable_key) if stable else None
     elif ecosystem in ("maven", "plugin"):
-        import xml.etree.ElementTree as ET
         group, artifact = name.split(":", 1) if ecosystem == "maven" else (name, f"{name}.gradle.plugin")
         path = f"{group.replace('.', '/')}/{artifact}/maven-metadata.xml"
         bases = ["https://dl.google.com/dl/android/maven2/", "https://repo.maven.apache.org/maven2/"] if group.startswith(("androidx.", "com.android.", "com.google.android.")) else ["https://repo.maven.apache.org/maven2/", "https://plugins.gradle.org/m2/"]
@@ -572,12 +633,11 @@ def releases(ecosystem, name):
         failure = None
         for base in bases:
             source = base + path
-            try: data = ET.fromstring(get(source)); break
+            try: versions = maven_versions(get(source)); break
             except urllib.error.HTTPError as error:
                 if error.code != 404: raise
                 failure = error
         else: raise ValueError("Maven metadata unavailable") from failure
-        versions = [node.text for node in data.findall("./versioning/versions/version") if node.text]
         stable = [version for version in versions if stable_key(version) is not None]
         latest = max(stable, key=stable_key) if stable else None
     elif ecosystem == "github":

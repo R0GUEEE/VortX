@@ -41,6 +41,7 @@ on:
     paths:
       - "android/**"
       - "scripts/acquire-android-mpv-component.py"
+      - "scripts/test-android-native-sync-host.sh"
       - ".github/workflows/android.yml"
   workflow_dispatch:
 
@@ -232,6 +233,31 @@ jobs:
           echo "VORTX_JNI_EXPECTED_SHA256=$library_sha" >> "$GITHUB_ENV"
           echo "VORTX_JNI_RECEIPT=$proof/host-jni.json" >> "$GITHUB_ENV"
           echo "VORTX_JNI_SOURCE_MANIFEST=$source_manifest" >> "$GITHUB_ENV"
+
+      # Execute the exact release sync gate before owner-history reuses the JUnit output path.
+      # The authenticated host library/receipt above are reused; no additional native build runs.
+      - name: Require real native sync revision and account tests before packaging
+        timeout-minutes: 30
+        working-directory: android
+        env:
+          JAVA_TOOL_OPTIONS: "-XX:ActiveProcessorCount=1"
+          VORTX_JNI_SYNC: "1"
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          mkdir -p app/build/reports/native-sync-host
+          bash ../scripts/test-android-native-sync-host.sh
+
+      - name: Retain native sync pretag JUnit before owner-history execution
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VortX-Android-native-sync-host-tests
+          path: |
+            android/app/build/test-results/testPlayDebugUnitTest/*.xml
+            android/app/build/reports/owner-history-host/host-jni.json
+            android/app/build/reports/native-sync-host/host-jni-accepted.json
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Run owner-history37 and separate Media3 17 with real host JNI
         timeout-minutes: 30

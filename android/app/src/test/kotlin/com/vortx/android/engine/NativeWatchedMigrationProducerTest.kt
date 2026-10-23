@@ -345,10 +345,17 @@ class NativeWatchedMigrationProducerTest {
         // archive carrying one is structurally invalid and must never be replayed as owner evidence.
         val uidArchive = JSONArray(batch.archive().toString())
         uidArchive.getJSONObject(0).put("verifiedStreamingUid", "foreign-streaming-uid")
-        assertFailure {
-            NativeWatchedMigrationProducer { error("foreign UID archive must be rejected before fetch") }
-                .prepare(scope, source, roster, retainedArchive = uidArchive, isCurrent = { true })
+        var uidFetchAttempted = false
+        try {
+            NativeWatchedMigrationProducer {
+                uidFetchAttempted = true
+                error("foreign UID archive must be rejected before fetch")
+            }.prepare(scope, source, roster, retainedArchive = uidArchive, isCurrent = { true })
+            fail("Expected shared source with a forged streaming UID to be rejected")
+        } catch (error: IllegalArgumentException) {
+            assertEquals("Malformed own-account watched source envelope", error.message)
         }
+        assertFalse("A forged streaming UID must be rejected before metadata fetch", uidFetchAttempted)
     }
 
     @Test

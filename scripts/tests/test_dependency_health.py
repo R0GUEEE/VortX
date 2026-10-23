@@ -264,6 +264,81 @@ class DependencyHealthTests(unittest.TestCase):
         self.assertEqual(report["unresolved_entries"], 1)
         self.assertFalse(report["complete"])
 
+class MavenMetadataSecurityTests(unittest.TestCase):
+    name = "public.example:fixture"
+    source = "https://repo.maven.apache.org/maven2/public/example/fixture/maven-metadata.xml"
+    document = ('<metadata><versioning><versions><version>1.0.0</version>'
+                '<version>2.0.&#48;</version><version>3.0.0-rc.1</version>'
+                '</versions></versioning></metadata>')
+
+    def test_normal_metadata_encodings_keep_versions_latest_and_source(self):
+        for encoding in ("utf-8", "utf-16"):
+            with self.subTest(encoding=encoding), patch.object(health, "get", return_value=self.document.encode(encoding)) as fetch:
+                metadata = health.releases("maven", self.name)
+            self.assertEqual(metadata, {"versions":["1.0.0", "2.0.0", "3.0.0-rc.1"],
+                                        "latest_stable":"2.0.0", "source":self.source})
+            fetch.assert_called_once_with(self.source)
+
+    def test_version_path_text_and_namespace_behavior_is_retained(self):
+        document = (b'<metadata><version>ignored</version><versioning><versions>'
+                    b'<version>1.0.0<ignored>9.0.0</ignored>8.0.0</version>'
+                    b'<version/><version xmlns="urn:ignored">7.0.0</version>'
+                    b'<version><![CDATA[2.0.0]]></version></versions></versioning></metadata>')
+        self.assertEqual(health.maven_versions(document), ["1.0.0", "2.0.0"])
+
+    def test_dtd_entities_reject_before_any_expansion_in_all_encodings(self):
+        declarations = (
+            '<!DOCTYPE metadata>',
+            '<!DOCTYPE metadata [<!ENTITY value "1.0.0">]>',
+            '<!DOCTYPE metadata [<!ENTITY value SYSTEM "file:///unread-fixture">]>',
+            '<!DOCTYPE metadata [<!ENTITY % value "ignored">%value;]>',
+            '<!DOCTYPE metadata SYSTEM "https://unread.invalid/fixture.dtd">',
+        )
+        for declaration in declarations:
+            for encoding in ("utf-8", "utf-16"):
+                with self.subTest(declaration=declaration, encoding=encoding), \
+                     self.assertRaisesRegex(ValueError, "declarations"):
+                    health.maven_versions((declaration + self.document).encode(encoding))
+
+    def test_size_structure_and_malformed_xml_are_bounded(self):
+        with patch.object(health, "LIMIT", 10), self.assertRaisesRegex(ValueError, "bound"):
+            health.maven_versions(self.document.encode())
+        for raw in (b"<metadata>", b"<metadata>" + b"<node>" * 64 + b"</node>" * 64 + b"</metadata>",
+                    b"<metadata>" + b"<node/>" * 200_000 + b"</metadata>"):
+            with self.subTest(prefix=raw[:40]), self.assertRaises(ValueError):
+                health.maven_versions(raw)
+
+    def test_rejected_metadata_retains_complete_previous_cursor_and_source(self):
+        previous = {"versions":["0.9.0", "1.0.0"], "latest_stable":"1.0.0", "source":self.source,
+                    "observed_at":"2026-10-21T00:00:00+00:00"}
+        inventory = {"entries":[{"ecosystem":"maven", "name":self.name, "current":"1.0.0",
+                                 "kind":"declared-library"}], "coverage_gaps":[]}
+        malicious = '<!DOCTYPE metadata [<!ENTITY value "2.0.0">]>' + self.document
+        with patch.object(health, "get", return_value=malicious.encode("utf-16")):
+            result = health.compare(inventory, {"releases":{"maven:" + self.name:previous}}, 1)
+        self.assertEqual(result["releases"]["maven:" + self.name], previous)
+        self.assertEqual(result["registry_errors"], [{"component":"maven:" + self.name, "reason":"ValueError"}])
+        self.assertEqual(result["new_releases"], [])
+        self.assertEqual(result["entries"][0]["status"], "unverified")
+        self.assertFalse(result["complete"])
+
+    def test_public_registry_redirects_require_https_without_userinfo(self):
+        handler = health.RegistryHTTPSRedirects()
+        request = health.urllib.request.Request(self.source)
+        for url in ("http://repo.maven.apache.org/fixture", "ftp://repo.maven.apache.org/fixture",
+                    "file:///unread-fixture", "https://user:fixture@repo.maven.apache.org/fixture",
+                    "https://repo.maven.apache.org:444/fixture", "https://repo.maven.apache.org/fixture#fragment"):
+            with self.subTest(redirect=url), self.assertRaises(ValueError):
+                handler.redirect_request(request, None, 302, "Found", {}, url)
+        allowed = handler.redirect_request(request, None, 302, "Found", {},
+                                           "https://plugins-artifacts.gradle.org/fixture")
+        self.assertEqual(allowed.host, "plugins-artifacts.gradle.org")
+        with patch.object(health.urllib.request, "build_opener") as build:
+            build.return_value.open.return_value.__enter__.return_value.read.return_value = b"metadata"
+            self.assertEqual(health.get(self.source), b"metadata")
+        self.assertIsInstance(build.call_args.args[0], health.RegistryHTTPSRedirects)
+
+
 class GitHubHistoryTests(unittest.TestCase):
     name = "public/example"
     source = "https://api.github.com/repos/public/example/releases"
