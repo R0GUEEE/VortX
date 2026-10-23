@@ -123,6 +123,8 @@ private enum PlayerPremiumControlsRenderingTests {
     static func main() {
         _ = NSApplication.shared
         NSApplication.shared.setActivationPolicy(.prohibited)
+        // This probe's accent-edge predicate is blue; use the real source-derived Ocean palette.
+        PlayerThemeFixture.select("ocean")
 
         let suiteName = "VortX.PlayerPremiumControlsRenderingTests"
         guard let testDefaults = UserDefaults(suiteName: suiteName) else {

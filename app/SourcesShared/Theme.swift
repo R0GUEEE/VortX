@@ -27,6 +27,8 @@ enum Theme {
         // Accent is user-themeable via ThemeManager (8 curated accents). accentSoft / onAccent follow it.
         static var accent: Color { ThemeManager.shared.accent }             // focus / selection / primary / progress
         static var accentBright: Color { ThemeManager.shared.accentBright } // focus glow highlight
+        static var playerGlassAccent: Color { ThemeManager.shared.playerGlassAccent }
+        static var playerGlassUsesCrimson: Bool { ThemeManager.shared.playerGlassUsesCrimson }
         static var accentSoft: Color { accent.opacity(0.18) }
         static var onAccent: Color { ThemeManager.shared.onAccent } // accent-adaptive ink (was a fixed warm-brown that read orange on every accent)
         static let danger = rgb(0.871, 0.282, 0.337)            // #DE4856 destructive (log out, remove), a cooler red so it doesn't read as "leftover orange" next to a non-warm accent
