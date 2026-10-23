@@ -150,7 +150,7 @@ enum OwnerResumeStore {
 
 /// One title's watch state inside a profile's private overlay: enough to render Continue Watching,
 /// resume, and watched markers without touching the account's shared library.
-struct WatchEntry: Codable, Equatable {
+struct WatchEntry: Codable, Equatable, Sendable {
     var videoId: String?          // movie id, or imdbId:season:episode for the episode in progress
     var timeOffsetMs: Int
     var durationMs: Int

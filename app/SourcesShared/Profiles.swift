@@ -5,7 +5,7 @@ import os
 /// One viewer of the app: local view settings (name, avatar, theme, parental PIN) plus an optional
 /// binding to its own Stremio account. Profiles without their own account share the primary one,
 /// so a "Kids" profile can be the same account with a different look and a PIN on the way out.
-struct UserProfile: Codable, Identifiable, Equatable {
+struct UserProfile: Codable, Identifiable, Equatable, Sendable {
     var id = UUID()
     var name: String
     var avatar: String                 // an emoji
@@ -56,7 +56,7 @@ struct UserProfile: Codable, Identifiable, Equatable {
     /// What follows a viewer between profiles: track languages and the subtitle look. Synced
     /// with the roster, so a profile keeps its preferences across devices. Raw-string fields
     /// mirror the UserDefaults representations one-to-one.
-    struct PlaybackPrefs: Codable, Equatable {
+    struct PlaybackPrefs: Codable, Equatable, Sendable {
         var audioLang: String
         var subtitleLang: String
         var forcedPolicy: String
