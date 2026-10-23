@@ -39,3 +39,4 @@ xcrun swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors 
 xcrun swiftc -parse-as-library -warnings-as-errors app/SourcesShared/ProfilePickerLayout.swift app/Tests/ProfilePickerLayoutTests.swift -o "$profile_test_dir/profile-picker-layout"
 "$profile_test_dir/profile-picker-layout"
 bash scripts/test-native-profile-picker-routing.sh
+bash scripts/test-profile-picker-public-seed.sh

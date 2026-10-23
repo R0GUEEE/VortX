@@ -83,6 +83,31 @@ enum ProfilePickerLayoutTests {
             .components(separatedBy: "private struct ProfileAvatarTile")[0]
         precondition(artwork.contains("AddonClient.cinemeta"))
         precondition(!artwork.contains("CoreBridge") && !artwork.contains("ProfileStore"))
+        let loadArtwork = artwork.components(separatedBy: "func load() async {")[1]
+            .components(separatedBy: "func startRotation(reduceMotion:")[0]
+        precondition(loadArtwork.range(of: "if movie != nil { return }")!.lowerBound <
+                     loadArtwork.range(of: "await catalogRequest.value")!.lowerBound,
+                     "warm public artwork must not wait for a fresh catalog")
+        let initialArtwork = artwork.components(separatedBy: "private func showInitialCandidate() async {")[1]
+            .components(separatedBy: "private func prewarmNext(after")[0]
+        precondition(initialArtwork.contains("for index in decoded + cold"),
+                     "decoded public art must precede a shuffled network candidate")
+        precondition(artwork.contains("candidates = Self.readPublicSeed()"))
+        precondition(artwork.contains(".cachesDirectory, in: .userDomainMask"))
+        precondition(artwork.contains("size <= publicSeedByteLimit"))
+        precondition(artwork.contains("seed.movies.count <= candidateLimit"))
+        precondition(artwork.contains("url.user == nil, url.password == nil"))
+        precondition(artwork.contains("url.query == nil, url.fragment == nil"))
+        precondition(artwork.contains("age >= -60, age <= publicSeedLifetime"))
+        let publicMovie = picker.components(separatedBy: "private struct ProfilePickerMovie:")[1]
+            .components(separatedBy: "private struct ProfilePickerBackdrop: View")[0]
+        precondition(publicMovie.contains("var firstPaintArtworkURLs: [String]"))
+        precondition(publicMovie.contains("ArtworkFallbackPolicy.candidates([poster, background])"),
+                     "the first public image must not sit behind a slow large backdrop")
+        let backdropSource = picker.components(separatedBy: "private struct ProfilePickerBackdrop: View")[1]
+            .components(separatedBy: "private final class ProfilePickerArtwork")[0]
+        precondition(backdropSource.contains("if let cached = synchronousCache"))
+        precondition(backdropSource.contains("movie.firstPaintArtworkURLs"))
         precondition(artwork.contains("guard movie == nil, !Task.isCancelled else { return }"))
         precondition(artwork.contains("prewarmNext(after: index)"))
         precondition(artwork.contains("PosterImageLoader.cached(url, maxPixel: Self.artworkMaxPixel)"))

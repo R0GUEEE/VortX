@@ -1,8 +1,10 @@
 package com.vortx.android.foryou
 
 import com.vortx.android.model.MetaItem
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -33,6 +35,7 @@ internal class ForYouRowsModel(
     private val collectionRaw = HashMap<String, List<MetaItem>>()
     private var interestJob: Job? = null
     private var collectionJob: Job? = null
+    private var collectionRequest: Any? = null
     private var owned: Set<String> = emptySet()
     private var watched: Set<String> = emptySet()
     private var pinned: List<SmartCollection> = emptyList()
@@ -51,6 +54,7 @@ internal class ForYouRowsModel(
     }
 
     fun clear() {
+        collectionRequest = null
         interestJob?.cancel(); collectionJob?.cancel()
         interestJob = null; collectionJob = null
         interestKey = null; collectionKey = null
@@ -85,18 +89,33 @@ internal class ForYouRowsModel(
         pinned = collections
         val key = "$profileId|$day|" + collections.joinToString(",") { "${it.id}=${it.rules}" }
         if (key == collectionKey) return
+        collectionRequest = null
         collectionJob?.cancel()
         collectionKey = key
         val wanted = collections.map(::rawKey).toSet()
         collectionRaw.keys.retainAll(wanted)
         val missing = collections.filter { rawKey(it) !in collectionRaw }
         if (missing.isEmpty()) return
+        val request = Any()
+        collectionRequest = request
         collectionJob = scope.launch {
-            for (collection in missing) {
-                val items = titles(collection.rules, ruleTitles, day)
-                if (collectionKey != key) return@launch
-                if (items.isNotEmpty()) collectionRaw[rawKey(collection)] = items
-                publish()
+            try {
+                for (collection in missing) {
+                    val items = try { titles(collection.rules, ruleTitles, day) }
+                        catch (cancel: CancellationException) { throw cancel }
+                        catch (_: Exception) { emptyList() }
+                    coroutineContext.ensureActive()
+                    if (collectionRequest !== request || collectionKey != key) return@launch
+                    if (items.isNotEmpty()) collectionRaw[rawKey(collection)] = items
+                    publish()
+                }
+            } finally {
+                // Retain successful raw rows, including rows hidden by the watched filter. Empty/failing
+                // rows retry only on a later refresh; a retired request cannot reset a replacement's key.
+                if (collectionRequest === request && collectionKey == key) {
+                    collectionRequest = null
+                    if (missing.any { rawKey(it) !in collectionRaw }) collectionKey = null
+                }
             }
         }
     }

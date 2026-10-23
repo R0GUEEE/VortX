@@ -5,7 +5,7 @@ import { cwPosition, recordProgress, captureProgressAdmission } from "./store";
 import { getSettings, type SubtitlesMode } from "./settings";
 import type { SubtitleTrack } from "./addon";
 import { mountControls, type PlayerController, type SkipSegment } from "./playerControls";
-import { nativePlaybackActive } from "./desktop";
+import { nativePlaybackOwned } from "./desktop";
 import { releaseNative } from "./nativePlayer";
 
 /** The slim title context the player needs to record Continue Watching progress. */
@@ -590,7 +590,7 @@ function showError(host: HTMLElement, message: string): void {
 /** Tear down playback: destroy the hls.js instance (if any), stop the element, hide the overlay. Also ends a
  *  desktop native session, which shares this host, so route changes and Escape stop mpv too. */
 export function close(): void {
-  if (nativePlaybackActive()) releaseNative();
+  if (nativePlaybackOwned()) releaseNative();
   playToken++; // invalidate any play() still awaiting its hls.js import
   sessionFallbacks = [];
   sessionIndex = 0;

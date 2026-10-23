@@ -138,69 +138,91 @@ class ProfilePickerArtworkController(
     private val fetchCandidates: suspend () -> List<ProfilePickerArtworkCandidate>,
     private val loadArtwork: suspend (String) -> Boolean,
     private val rotationIntervalMillis: Long = ROTATION_INTERVAL_MILLIS,
+    private val readCachedCandidates: suspend () -> List<ProfilePickerArtworkCandidate> = { emptyList() },
+    private val loadCachedArtwork: suspend (String) -> Boolean = { false },
+    private val writeCachedCandidates: suspend (List<ProfilePickerArtworkCandidate>) -> Unit = {},
 ) {
     private val _movie = MutableStateFlow<ProfilePickerArtworkCandidate?>(null)
     val movie: StateFlow<ProfilePickerArtworkCandidate?> = _movie.asStateFlow()
 
+    private var didAttemptCache = false
     private var didAttemptCatalog = false
     private var candidates: List<ProfilePickerArtworkCandidate> = emptyList()
     private var currentIndex = -1
-    private val readyIDs = mutableSetOf<String>()
+    private val readyURLs = mutableMapOf<String, String>()
     private val unavailableIDs = mutableSetOf<String>()
 
-    /** Run until the picker leaves composition. The caller's cancellation is deliberately allowed through. */
+    /** Cached public art is published before any live catalog await; selection never waits for either. */
     suspend fun run(reducedMotion: Boolean) = coroutineScope {
+        seedFromCache()
         ensureCandidates()
         if (_movie.value == null) showInitialCandidate()
-        if (_movie.value == null) return@coroutineScope
-        if (candidates.size < 2) return@coroutineScope
+        if (_movie.value == null || candidates.size < 2) return@coroutineScope
 
-        // Keep the selected candidate and the next candidate warm. A single child owns this prewarm; there
-        // is no second rotation clock and no unbounded queue of catalog/artwork requests.
         var prewarm: Job? = launch { preload(candidates[nextIndex(currentIndex)]) }
         if (reducedMotion) {
             prewarm?.join()
             return@coroutineScope
         }
-
         while (currentCoroutineContext().isActive) {
             delay(rotationIntervalMillis)
             prewarm?.join()
             prewarm = null
             val next = nextReadyIndex(currentIndex) ?: break
-            currentIndex = next
-            _movie.value = candidates[next]
+            publishReady(next)
             prewarm = launch { preload(candidates[nextIndex(next)]) }
         }
     }
 
-    /** Test-visible evidence that cancellation never turns a candidate into a persistent art failure. */
     internal fun unavailableCandidateIDs(): Set<String> = unavailableIDs.toSet()
+
+    /** Cache probes never use HTTP and a missing/purged image is not a persistent candidate failure. */
+    private suspend fun seedFromCache() {
+        if (didAttemptCache || _movie.value != null) return
+        val cached = try { readCachedCandidates().take(CANDIDATE_LIMIT) }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { emptyList() }
+        currentCoroutineContext().ensureActive()
+        candidates = cached
+        for ((index, candidate) in cached.withIndex()) {
+            for (url in candidate.artworkURLs) {
+                val loaded = try { loadCachedArtwork(url) }
+                    catch (cancel: CancellationException) { throw cancel }
+                    catch (_: Exception) { false }
+                currentCoroutineContext().ensureActive()
+                if (loaded) {
+                    didAttemptCache = true
+                    readyURLs[candidate.id] = url
+                    currentIndex = index
+                    _movie.value = candidate.copy(artworkURLs = listOf(url))
+                    return
+                }
+            }
+        }
+        didAttemptCache = true
+    }
 
     private suspend fun ensureCandidates() {
         if (didAttemptCatalog) return
-        // Mark the attempt only after a successful, non-cancelled fetch. If the picker disappears while
-        // JSON is in flight, the next visible session may retry instead of inheriting a false failure.
-        val fetched = try {
-            fetchCandidates()
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Throwable) {
-            // A public catalog outage is non-blocking for profile selection. Keep the controller in an
-            // empty, completed state instead of taking the launch picker down with an engine/network error.
-            emptyList()
-        }
+        val fetched = try { fetchCandidates().take(CANDIDATE_LIMIT) }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { emptyList() }
         currentCoroutineContext().ensureActive()
         didAttemptCatalog = true
-        candidates = fetched.take(CANDIDATE_LIMIT)
+        // A failed refresh must not remove already visible public artwork or its title.
+        if (fetched.isEmpty()) return
+        val visible = _movie.value
+        candidates = if (visible == null) fetched else
+            (listOf(visible) + fetched.filterNot { it.id == visible.id }).take(CANDIDATE_LIMIT)
+        currentIndex = visible?.let { current -> candidates.indexOfFirst { it.id == current.id } } ?: -1
+        if (visible != null) persistReady()
     }
 
     private suspend fun showInitialCandidate() {
         for (index in candidates.indices) {
             currentCoroutineContext().ensureActive()
-            if (preload(candidates[index])) {
-                currentIndex = index
-                _movie.value = candidates[index]
+            if (preload(candidates[index]) != null) {
+                publishReady(index)
                 return
             }
         }
@@ -211,41 +233,190 @@ class ProfilePickerArtworkController(
         for (offset in 1 until candidates.size) {
             currentCoroutineContext().ensureActive()
             val index = (from + offset) % candidates.size
-            if (preload(candidates[index])) return index
+            if (preload(candidates[index]) != null) return index
         }
         return null
     }
 
     private fun nextIndex(index: Int): Int = (index + 1) % candidates.size
 
-    private suspend fun preload(candidate: ProfilePickerArtworkCandidate): Boolean {
-        if (candidate.id in readyIDs) return true
-        if (candidate.id in unavailableIDs) return false
+    private suspend fun publishReady(index: Int) {
+        currentCoroutineContext().ensureActive()
+        val candidate = candidates[index]
+        val winner = checkNotNull(readyURLs[candidate.id])
+        currentIndex = index
+        // The consumer receives the actual successful URL, not the already-failed prefix list.
+        _movie.value = candidate.copy(artworkURLs = listOf(winner))
+        persistReady()
+    }
+
+    private suspend fun persistReady() {
+        val visible = _movie.value ?: return
+        val snapshot = (listOf(visible) + candidates.filterNot { it.id == visible.id }.map { candidate ->
+            readyURLs[candidate.id]?.let { candidate.copy(artworkURLs = listOf(it)) } ?: candidate
+        }).take(CANDIDATE_LIMIT)
+        try { writeCachedCandidates(snapshot) }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { /* A public presentation cache cannot block profile selection. */ }
+        currentCoroutineContext().ensureActive()
+    }
+
+    private suspend fun preload(candidate: ProfilePickerArtworkCandidate): ProfilePickerArtworkCandidate? {
+        readyURLs[candidate.id]?.let { return candidate.copy(artworkURLs = listOf(it)) }
+        if (candidate.id in unavailableIDs) return null
         for (url in candidate.artworkURLs) {
             currentCoroutineContext().ensureActive()
-            val loaded = try {
-                loadArtwork(url)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Throwable) {
-                false
-            }
+            val loaded = try { loadArtwork(url) }
+                catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) { false }
             currentCoroutineContext().ensureActive()
             if (loaded) {
-                readyIDs += candidate.id
-                return true
+                readyURLs[candidate.id] = url
+                return candidate.copy(artworkURLs = listOf(url))
             }
         }
-        // Only a fully attempted, non-cancelled candidate is negatively cached. CancellationException
-        // from the loader reaches the caller above and never reaches this line.
         unavailableIDs += candidate.id
-        return false
+        return null
     }
 
     private companion object {
         const val ROTATION_INTERVAL_MILLIS = 5_000L
     }
 }
+
+/** Public Family-catalog presentation only. Never stores profiles, accounts, history or add-on URLs. */
+internal object ProfilePickerPublicArtworkCacheCodec {
+    const val MAX_BYTES = 32 * 1024
+    private const val SCHEMA = 1
+    private const val SOURCE = "cinemeta-family-public-v1"
+    private const val MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
+    private val imageHosts = setOf("images.metahub.space", "image.tmdb.org", "m.media-amazon.com")
+
+    private fun valid(candidate: ProfilePickerArtworkCandidate): ProfilePickerArtworkCandidate? {
+        if (!Regex("tt[0-9]{5,12}").matches(candidate.id)) return null
+        val name = candidate.name.trim()
+        if (name.isEmpty() || name.length > 200 || name.any { it.code < 32 || it.code == 127 }) return null
+        val urls = candidate.artworkURLs.distinct().filter(::isPublicArtworkURL).take(2)
+        return if (urls.isEmpty()) null else candidate.copy(name = name, artworkURLs = urls)
+    }
+
+    private fun isPublicArtworkURL(url: String): Boolean {
+        if (url.length !in 1..1024) return false
+        val uri = try { java.net.URI(url) } catch (_: Exception) { return false }
+        return uri.scheme.equals("https", ignoreCase = true) &&
+            uri.host?.lowercase(java.util.Locale.ROOT) in imageHosts &&
+            uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null &&
+            (uri.port == -1 || uri.port == 443)
+    }
+
+    fun encode(candidates: List<ProfilePickerArtworkCandidate>, nowMillis: Long): String? {
+        if (nowMillis <= 0L) return null
+        val selected = candidates.mapNotNull(::valid).distinctBy { it.id }.take(CANDIDATE_LIMIT)
+        if (selected.isEmpty()) return null
+        val rows = org.json.JSONArray()
+        selected.forEach { row -> rows.put(JSONObject().put("id", row.id).put("name", row.name)
+            .put("urls", org.json.JSONArray(row.artworkURLs))) }
+        val text = JSONObject().put("schema", SCHEMA).put("source", SOURCE)
+            .put("savedAt", nowMillis).put("movies", rows).toString()
+        return text.takeIf { it.toByteArray(Charsets.UTF_8).size <= MAX_BYTES }
+    }
+
+    fun decode(text: String, nowMillis: Long): List<ProfilePickerArtworkCandidate> = try {
+        if (text.toByteArray(Charsets.UTF_8).size > MAX_BYTES || nowMillis <= 0L) emptyList() else {
+            val root = JSONObject(text)
+            require(root.keys().asSequence().toSet() == setOf("schema", "source", "savedAt", "movies"))
+            require(root.opt("schema") == SCHEMA && root.opt("source") == SOURCE)
+            val savedNumber = root.opt("savedAt") as? Number ?: error("Invalid public artwork cache clock")
+            val savedAt = java.math.BigDecimal(savedNumber.toString()).longValueExact()
+            require(savedAt in 1..nowMillis && nowMillis - savedAt <= MAX_AGE_MS)
+            val rows = root.getJSONArray("movies")
+            require(rows.length() in 1..CANDIDATE_LIMIT)
+            val output = ArrayList<ProfilePickerArtworkCandidate>(rows.length())
+            val ids = HashSet<String>()
+            for (index in 0 until rows.length()) {
+                val row = rows.getJSONObject(index)
+                require(row.keys().asSequence().toSet() == setOf("id", "name", "urls"))
+                val id = row.opt("id") as? String ?: error("Invalid public artwork id")
+                val name = row.opt("name") as? String ?: error("Invalid public artwork name")
+                val urls = row.getJSONArray("urls")
+                require(urls.length() in 1..2)
+                val original = ProfilePickerArtworkCandidate(id, name, (0 until urls.length()).map {
+                    urls.get(it) as? String ?: error("Invalid public artwork URL")
+                })
+                val accepted = valid(original) ?: error("Invalid public artwork record")
+                require(accepted == original && ids.add(id))
+                output += accepted
+            }
+            output
+        }
+    } catch (_: Exception) { emptyList() }
+}
+
+/** A replace-only bounded app-cache file. Old good data survives a failed write or refresh. */
+private class ProfilePickerPublicArtworkCache(private val file: java.io.File) {
+    suspend fun read(): List<ProfilePickerArtworkCandidate> = withContext(Dispatchers.IO) {
+        try {
+            if (!file.isFile || file.length() > ProfilePickerPublicArtworkCacheCodec.MAX_BYTES) return@withContext emptyList()
+            val bytes = file.inputStream().use { input ->
+                val output = ByteArrayOutputStream()
+                val buffer = ByteArray(4096)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (output.size() + count > ProfilePickerPublicArtworkCacheCodec.MAX_BYTES) return@withContext emptyList()
+                    output.write(buffer, 0, count)
+                }
+                output.toByteArray()
+            }
+            currentCoroutineContext().ensureActive()
+            ProfilePickerPublicArtworkCacheCodec.decode(bytes.toString(Charsets.UTF_8), System.currentTimeMillis())
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { emptyList() }
+    }
+
+    suspend fun write(candidates: List<ProfilePickerArtworkCandidate>): Unit = withContext(Dispatchers.IO) {
+        val text = ProfilePickerPublicArtworkCacheCodec.encode(candidates, System.currentTimeMillis())
+            ?: return@withContext
+        var temporary: java.io.File? = null
+        try {
+            val parent = checkNotNull(file.parentFile)
+            if (!parent.isDirectory && !parent.mkdirs()) return@withContext
+            temporary = java.io.File.createTempFile("profile-picker-art-", ".pending", parent)
+            temporary.writeText(text, Charsets.UTF_8)
+            currentCoroutineContext().ensureActive()
+            try {
+                java.nio.file.Files.move(temporary.toPath(), file.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                java.nio.file.Files.move(temporary.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { /* Public artwork cache is optional; retain the prior file. */ }
+        finally { temporary?.delete() }
+        Unit
+    }
+}
+
+/** Local-data probe only. A later URL presentation can still miss memory/disk cache after eviction. */
+private suspend fun loadCachedPickerArtwork(context: Context, imageLoader: ImageLoader, url: String): Boolean =
+    withContext(Dispatchers.IO) {
+        try {
+            val snapshot = imageLoader.diskCache?.openSnapshot(url) ?: return@withContext false
+            snapshot.use {
+                val request = ImageRequest.Builder(context)
+                    .data(it.data.toFile())
+                    .memoryCacheKey(url)
+                    .size(PICKER_ARTWORK_DECODE_PX, PICKER_ARTWORK_DECODE_PX)
+                    .scale(coil3.size.Scale.FIT)
+                    .precision(coil3.size.Precision.INEXACT)
+                    .build()
+                val loaded = imageLoader.execute(request) is SuccessResult
+                currentCoroutineContext().ensureActive()
+                loaded
+            }
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { false }
+    }
 
 /** Read the Android equivalent of Apple's scenePhase so backgrounded pickers stop catalog/artwork work. */
 @Composable
@@ -272,10 +443,16 @@ internal fun rememberProfilePickerMovie(
 ): ProfilePickerArtworkCandidate? {
     val context = LocalContext.current.applicationContext
     val imageLoader = remember(context) { SingletonImageLoader.get(context) }
-    val controller = remember(context, imageLoader) {
+    val publicCache = remember(context) {
+        ProfilePickerPublicArtworkCache(java.io.File(context.cacheDir, "profile-picker-public-art-v1.json"))
+    }
+    val controller = remember(context, imageLoader, publicCache) {
         ProfilePickerArtworkController(
             fetchCandidates = ::fetchPublicFamilyMovies,
             loadArtwork = { url -> loadPickerArtwork(context, imageLoader, url) },
+            readCachedCandidates = publicCache::read,
+            loadCachedArtwork = { url -> loadCachedPickerArtwork(context, imageLoader, url) },
+            writeCachedCandidates = publicCache::write,
         )
     }
     val movie by controller.movie.collectAsState()
@@ -302,6 +479,8 @@ internal fun ProfilePickerCinematicBackdrop(
                 com.vortx.android.ui.components.FallbackArtwork(
                     urls = current.artworkURLs,
                     contentDescription = null,
+                    maxDecodePx = PICKER_ARTWORK_DECODE_PX,
+                    decodeScale = coil3.size.Scale.FIT,
                     modifier = Modifier.fillMaxSize(),
                     placeholder = { Box(Modifier.fillMaxSize().background(VortXTheme.colors.canvas)) },
                 )
@@ -372,7 +551,9 @@ private suspend fun loadPickerArtwork(context: Context, imageLoader: ImageLoader
         try {
             val request = ImageRequest.Builder(context)
                 .data(url)
-                .size(1920, 1920)
+                .size(PICKER_ARTWORK_DECODE_PX, PICKER_ARTWORK_DECODE_PX)
+                .scale(coil3.size.Scale.FIT)
+                .precision(coil3.size.Precision.INEXACT)
                 .build()
             imageLoader.execute(request) is SuccessResult
         } catch (cancelled: CancellationException) {
@@ -400,6 +581,7 @@ private fun readBoundedUtf8(input: InputStream): String? {
     return output.toString(Charsets.UTF_8.name())
 }
 
+private const val PICKER_ARTWORK_DECODE_PX = 1920
 private const val ARTWORK_FADE_MILLIS = 800
 private const val CATALOG_TIMEOUT_MILLIS = 12_000
 private const val CATALOG_MAX_BYTES = 512 * 1024

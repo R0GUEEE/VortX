@@ -389,7 +389,7 @@ async function start(): Promise<void> {
   window.addEventListener("vortx:watchlist-changed", () => { if (parseRoute().name === "library") renderLibrary(mainHost()); });
   window.addEventListener("vortx:profile-changed", (event) => {
     if (event instanceof CustomEvent && event.detail?.fromSync && isPlayerOpen()) return;
-    void renderRoute(parseRoute());
+    void reloadAddonsAndRender();
   });
   // Validate the token in the background, then pull the account sync doc so a returning (already signed-in)
   // user's add-ons, library, and Continue Watching refresh on load - not only on a fresh sign-in. Never

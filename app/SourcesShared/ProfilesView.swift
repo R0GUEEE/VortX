@@ -442,6 +442,11 @@ private struct ProfilePickerMovie: Identifiable, Hashable {
         ArtworkFallbackPolicy.candidates([background, poster])
     }
 
+    var firstPaintArtworkURLs: [String] {
+        // Do not put a large backdrop's timeout ahead of the public poster's first paint.
+        ArtworkFallbackPolicy.candidates([poster, background])
+    }
+
     var cacheKey: String {
         "\(id)|\(background ?? "")|\(poster ?? "")"
     }
@@ -483,8 +488,15 @@ private struct ProfilePickerBackdrop: View {
             .clipped()
             .task(id: movie?.cacheKey) {
                 guard let movie else { return }
-                let loaded = await ArtworkFallbackPolicy.firstAvailable(movie.artworkURLs) {
-                    await PosterImageLoader.load($0, maxPixel: ProfilePickerArtwork.artworkMaxPixel)
+                let loaded: VXPosterImage?
+                if let cached = synchronousCache {
+                    // Prefer a prewarmed landscape background, or an already-decoded poster,
+                    // without awaiting an uncached URL earlier in the normal quality order.
+                    loaded = cached
+                } else {
+                    loaded = await ArtworkFallbackPolicy.firstAvailable(movie.firstPaintArtworkURLs) {
+                        await PosterImageLoader.load($0, maxPixel: ProfilePickerArtwork.artworkMaxPixel)
+                    }
                 }
                 guard !Task.isCancelled, let loaded else { return }
                 let key = movie.cacheKey
@@ -517,6 +529,27 @@ private final class ProfilePickerArtwork: ObservableObject {
     static let shared = ProfilePickerArtwork()
 
     private static let candidateLimit = 12
+    private static let publicSeedByteLimit = 32_768
+    private static let publicSeedLifetime: TimeInterval = 30 * 24 * 60 * 60
+
+    // Cache only public Family-catalog metadata. This lives in purgeable Caches, not account
+    // defaults/backups, and contains no owner/profile/history/add-on configuration or signed URL.
+    private struct PublicSeed: Codable {
+        let version: Int
+        let savedAt: Date
+        let movies: [PublicMovie]
+    }
+
+    private struct PublicMovie: Codable {
+        let id: String
+        let name: String
+        let poster: String
+    }
+
+    private static var publicSeedURL: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("vortx-profile-picker-public-v1.json")
+    }
     private static let rotationIntervalNanoseconds: UInt64 = 5_000_000_000
     // Keep the rotating picker bounded to full HD on TV, without a 4K prefetch queue.
     fileprivate static let artworkMaxPixel: CGFloat = {
@@ -538,6 +571,16 @@ private final class ProfilePickerArtwork: ObservableObject {
     private var prewarmTask: Task<Bool, Never>?
     private var rotationToken = UUID()
 
+    private init() {
+        candidates = Self.readPublicSeed()
+        // Publish public metadata synchronously. ProfilePickerBackdrop can begin its own existing
+        // cache-first load immediately; it must not wait behind a fresh catalog request.
+        if let index = candidates.firstIndex(where: { Self.hasDecodedArtwork($0) }) ?? candidates.indices.first {
+            currentIndex = index
+            movie = candidates[index]
+        }
+    }
+
     deinit {
         catalogRequest?.cancel()
         rotationTask?.cancel()
@@ -547,8 +590,12 @@ private final class ProfilePickerArtwork: ObservableObject {
     func load() async {
         if !didAttemptCatalog {
             didAttemptCatalog = true
-            catalogRequest = Task { await Self.fetchCandidates() }
+            let preferredID = movie?.id
+            catalogRequest = Task { await Self.fetchCandidates(preferredID: preferredID) }
         }
+        // A warm singleton or disk-restored public seed is already usable. Refreshing public
+        // metadata continues independently and must not postpone first paint or rotation.
+        if movie != nil { return }
         guard let catalogRequest else { return }
         let fetched = await catalogRequest.value
         guard !Task.isCancelled else { return }
@@ -612,11 +659,15 @@ private final class ProfilePickerArtwork: ObservableObject {
 
     private func showInitialCandidate() async {
         guard !candidates.isEmpty, !Task.isCancelled else { return }
-        for index in candidates.indices.shuffled() {
-            if await preload(candidates[index]) {
+        let shuffled = candidates.indices.shuffled()
+        let decoded = shuffled.filter { Self.hasDecodedArtwork(candidates[$0]) }
+        let cold = shuffled.filter { !Self.hasDecodedArtwork(candidates[$0]) }
+        for index in decoded + cold {
+            if await preload(candidates[index], firstPaint: true) {
                 guard !Task.isCancelled else { return }
                 currentIndex = index
                 movie = candidates[index]
+                Self.writePublicSeed(candidates, preferredID: candidates[index].id)
                 prewarmNext(after: index)
                 return
             }
@@ -636,7 +687,7 @@ private final class ProfilePickerArtwork: ObservableObject {
         }
     }
 
-    private func preload(_ candidate: ProfilePickerMovie) async -> Bool {
+    private func preload(_ candidate: ProfilePickerMovie, firstPaint: Bool = false) async -> Bool {
         if readyIDs.contains(candidate.id) {
             let remainsDecoded = candidate.artworkURLs.contains { raw in
                 guard let url = URL(string: raw) else { return false }
@@ -647,8 +698,14 @@ private final class ProfilePickerArtwork: ObservableObject {
             // hint; force the shared loader through its cache/URLCache path again before use.
             readyIDs.remove(candidate.id)
         }
+        // The preferred initial candidate may already be decoded without a readyIDs hint.
+        // Do not await a cold poster when its landscape background is already ready (or vice versa).
+        if Self.hasDecodedArtwork(candidate) {
+            readyIDs.insert(candidate.id)
+            return true
+        }
         if unavailableIDs.contains(candidate.id) { return false }
-        let image = await ArtworkFallbackPolicy.firstAvailable(candidate.artworkURLs) {
+        let image = await ArtworkFallbackPolicy.firstAvailable(firstPaint ? candidate.firstPaintArtworkURLs : candidate.artworkURLs) {
             await PosterImageLoader.load($0, maxPixel: Self.artworkMaxPixel)
         }
         // Cancellation is not a real art failure; do not poison this candidate for the next visible
@@ -662,7 +719,70 @@ private final class ProfilePickerArtwork: ObservableObject {
         return true
     }
 
-    private static func fetchCandidates() async -> [ProfilePickerMovie] {
+    private static func hasDecodedArtwork(_ candidate: ProfilePickerMovie) -> Bool {
+        candidate.artworkURLs.contains { raw in
+            guard let url = URL(string: raw) else { return false }
+            return PosterImageLoader.cached(url, maxPixel: Self.artworkMaxPixel) != nil
+        }
+    }
+
+    private static func publicMovieID(_ id: String) -> Bool {
+        guard id.hasPrefix("tt") else { return false }
+        let digits = id.dropFirst(2)
+        return (5...12).contains(digits.count) && digits.utf8.allSatisfy { (48...57).contains($0) }
+    }
+
+    private static func publicPoster(_ raw: String?, id: String) -> String {
+        if let raw, raw.utf8.count <= 2_048, let url = URLComponents(string: raw),
+           url.scheme?.lowercased() == "https", url.user == nil, url.password == nil,
+           url.query == nil, url.fragment == nil, url.port == nil || url.port == 443,
+           ["images.metahub.space", "live.metahub.space", "image.tmdb.org"].contains(url.host?.lowercased() ?? "") {
+            return raw
+        }
+        // Reconstruct from a validated public IMDb identifier rather than persisting unknown,
+        // token-bearing or account-specific artwork endpoints received in catalog metadata.
+        return "https://images.metahub.space/poster/medium/\(id)/img"
+    }
+
+    private static func readPublicSeed() -> [ProfilePickerMovie] {
+        guard let url = publicSeedURL,
+              let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size > 0, size <= publicSeedByteLimit,
+              let data = try? Data(contentsOf: url), data.count <= publicSeedByteLimit,
+              let seed = try? JSONDecoder().decode(PublicSeed.self, from: data), seed.version == 1,
+              seed.movies.count <= candidateLimit else { return [] }
+        let age = Date().timeIntervalSince(seed.savedAt)
+        guard age >= -60, age <= publicSeedLifetime else { return [] }
+        var seen = Set<String>()
+        return seed.movies.compactMap { entry in
+            let name = entry.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard publicMovieID(entry.id), !name.isEmpty, name.utf8.count <= 800,
+                  seen.insert(entry.id).inserted else { return nil }
+            return ProfilePickerMovie(id: entry.id, name: name,
+                                      poster: publicPoster(entry.poster, id: entry.id),
+                                      background: "https://images.metahub.space/background/big/\(entry.id)/img")
+        }
+    }
+
+    private static func writePublicSeed(_ candidates: [ProfilePickerMovie], preferredID: String?) {
+        guard let url = publicSeedURL else { return }
+        let ordered = candidates.filter { $0.id == preferredID } + candidates.filter { $0.id != preferredID }
+        var seen = Set<String>()
+        let movies = ordered.compactMap { candidate -> PublicMovie? in
+            let name = candidate.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard publicMovieID(candidate.id), !name.isEmpty, name.utf8.count <= 800,
+                  seen.insert(candidate.id).inserted else { return nil }
+            return PublicMovie(id: candidate.id, name: name, poster: publicPoster(candidate.poster, id: candidate.id))
+        }
+        let seed = PublicSeed(version: 1, savedAt: Date(), movies: Array(movies.prefix(candidateLimit)))
+        guard !seed.movies.isEmpty, let data = try? JSONEncoder().encode(seed),
+              data.count <= publicSeedByteLimit else { return }
+        // Cache failure is cosmetic only; never reset account data or block the picker.
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
+
+    private static func fetchCandidates(preferredID: String?) async -> [ProfilePickerMovie] {
         let client = AddonClient()
         guard let titles = try? await client.catalog(base: AddonClient.cinemeta,
                                                      type: "movie", id: "top", genre: "Family") else {
@@ -681,16 +801,23 @@ private final class ProfilePickerArtwork: ObservableObject {
             }
             return seen.insert(title.id).inserted
         }
-        let bounded = Array(eligible.shuffled().prefix(candidateLimit))
+        let preferred = eligible.filter { $0.id == preferredID }
+        let others = eligible.filter { $0.id != preferredID }.shuffled()
+        let bounded = Array((preferred + others).prefix(candidateLimit))
         guard !bounded.isEmpty else { return [] }
 
-        return bounded.map { title in
+        let movies = bounded.map { title in
             let metahub = "https://images.metahub.space/background/big/\(title.id)/img"
             return ProfilePickerMovie(id: title.id,
                                       name: title.name,
                                       poster: title.poster,
                                       background: metahub)
         }
+        // Refresh for the next launch even when load() returned immediately for a warm seed.
+        // A previously visible seed is retained only if it is still in this public Family catalog.
+        guard !Task.isCancelled else { return [] }
+        writePublicSeed(movies, preferredID: preferredID)
+        return movies
     }
 }
 

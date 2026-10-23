@@ -24,7 +24,7 @@ const mocks = {
   "./dom": "export const el = () => globalThis.__playerSourceFence.host;",
   "./store": "export const cwPosition = () => 0; export const recordProgress = () => {}; export const captureProgressAdmission = () => () => true;",
   "./settings": "export const getSettings = () => ({ skipStep: 10, subtitlesMode: 'always', subtitleLang: '' });",
-  "./desktop": "export const nativePlaybackActive = () => false;",
+  "./desktop": "export const nativePlaybackOwned = () => false;",
   "./nativePlayer": "export const releaseNative = () => {};",
   "./playerControls": `export function mountControls(host, video, ctx) {
     const control = { ctx, video, hls: undefined, disposed: false, setHls(value) { this.hls = value; }, dispose() { this.disposed = true; }, refreshSubtitles() {}, setAutoMuted() {}, consumeAutoMuted() { return false; }, toast() {}, notice() {}, setSkipSegments() {} };

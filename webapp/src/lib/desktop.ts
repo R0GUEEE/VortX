@@ -124,6 +124,7 @@ export interface MpvStatus {
 // Play and stop share one ordered lane. The generation increments when a request is MADE, so a newer
 // request revokes an older one's right to finish after any of its awaited native commands completes.
 let requestedGeneration = 0;
+let pendingGeneration: number | null = null;
 let activeGeneration: number | null = null;
 let lane: Promise<void> = Promise.resolve();
 
@@ -138,10 +139,17 @@ export function nativePlaybackActive(): boolean {
   return activeGeneration !== null && activeGeneration === requestedGeneration;
 }
 
+/** Whether the overlay/source owns a native request, including preparation or an in-flight start.
+ *  Teardown must revoke pending requests too; transport controls still require active playback. */
+export function nativePlaybackOwned(): boolean {
+  return nativePlaybackActive() || pendingGeneration !== null && pendingGeneration === requestedGeneration;
+}
+
 /** Play a torrent stream in native mpv, optionally resuming at `startSeconds`. Resolves true once mpv owns
  *  playback, false when this request was superseded or the source cannot be played natively. */
 export function playTorrent(stream: Stream, startSeconds = 0): Promise<boolean> {
   const generation = ++requestedGeneration;
+  pendingGeneration = generation;
   let started = false;
   return queue(async () => {
     await stopNative();
@@ -159,12 +167,15 @@ export function playTorrent(stream: Stream, startSeconds = 0): Promise<boolean> 
     }
     activeGeneration = generation;
     started = true;
+  }).finally(() => {
+    if (pendingGeneration === generation) pendingGeneration = null;
   }).then(() => started);
 }
 
 /** Stop native playback in the same ordered lane as play requests. */
 export function stopTorrent(): Promise<void> {
   ++requestedGeneration;
+  pendingGeneration = null;
   return queue(async () => {
     await stopNative();
     activeGeneration = null;

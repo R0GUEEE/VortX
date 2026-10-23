@@ -47,6 +47,11 @@ class LiveGuideTest {
         assertEquals(6, LiveGuidePolicy.marks(window).size)
     }
 
+    @Test fun `window duration widens hours before multiplication`() {
+        assertEquals(7_730_941_129_200_000L, LiveGuidePolicy.window(0L, Int.MAX_VALUE).endMs)
+        assertEquals(-7_730_941_132_800_000L, LiveGuidePolicy.window(0L, Int.MIN_VALUE).endMs)
+    }
+
     @Test fun `cells are clipped to the window and slivers dropped`() {
         val cells = LiveGuidePolicy.cells(programmes, LiveGuideWindow(base + 5_400_000, base + 12_600_000), 10f)
         assertEquals(listOf("ev2", "plain"), cells.map { it.programme.id })

@@ -20,6 +20,8 @@ on:
       - "scripts/test-sync-derived-document-revisions.sh"
       - "scripts/test-native-bootstrap-archive.sh"
       - "scripts/test-profile-roster-propagation.sh"
+      - "scripts/test-profile-picker-public-seed.sh"
+      - "test/android-profile-picker-startup.test.mjs"
       - "scripts/test-cw-service-selection.sh"
       - "scripts/test-home-cw-selection.sh"
       - "scripts/test-episode-source-isolation.sh"
@@ -68,6 +70,8 @@ on:
       - "scripts/test-sync-derived-document-revisions.sh"
       - "scripts/test-native-bootstrap-archive.sh"
       - "scripts/test-profile-roster-propagation.sh"
+      - "scripts/test-profile-picker-public-seed.sh"
+      - "test/android-profile-picker-startup.test.mjs"
       - "scripts/test-cw-service-selection.sh"
       - "scripts/test-home-cw-selection.sh"
       - "scripts/test-episode-source-isolation.sh"
@@ -151,6 +155,7 @@ jobs:
       - run: bash scripts/test-sync-derived-document-revisions.sh
       - run: bash scripts/test-native-bootstrap-archive.sh
       - run: bash scripts/test-profile-roster-propagation.sh
+      - run: node --test test/android-profile-picker-startup.test.mjs
       - name: Fetch immutable public Continue Watching regression baselines
         run: |
           git fetch --no-tags --depth=1 origin 0e196c586ebe95810476be8efde84fb0c061ca12

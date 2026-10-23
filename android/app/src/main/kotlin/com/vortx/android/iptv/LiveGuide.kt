@@ -67,7 +67,7 @@ object LiveGuidePolicy {
     /** The window the guide opens on: from the current half hour, [hours] long. */
     fun window(nowMs: Long, hours: Int): LiveGuideWindow {
         val start = nowMs / HALF_HOUR_MS * HALF_HOUR_MS
-        return LiveGuideWindow(start, start + hours * 2 * HALF_HOUR_MS)
+        return LiveGuideWindow(start, start + hours.toLong() * 2 * HALF_HOUR_MS)
     }
 
     fun shifted(window: LiveGuideWindow, halfHours: Int): LiveGuideWindow =

@@ -21,7 +21,7 @@ import { defaultSeason, episodesForSeason, isSeries, seasonsOf, sortedVideos } f
 import { actionOf, escapeHtml, httpUrl, cssImageURL } from "../lib/dom";
 import { icon } from "../lib/icons";
 import { play, setSkipSegments, currentPlayToken, close as closePlayer, isPlayerOpen } from "../lib/player";
-import { isDesktop, nativePlaybackActive } from "../lib/desktop";
+import { isDesktop, nativePlaybackOwned } from "../lib/desktop";
 import { playNative, releaseNative } from "../lib/nativePlayer";
 import { cwPosition, cwProgress, cwResumeId, inLibrary, toggleLibrary, hasNativeAccountProjection,
   canEditAccountWatchlist, inAccountWatchlist, setAccountWatchlist } from "../lib/store";
@@ -827,9 +827,9 @@ async function playStream(stream: Stream): Promise<void> {
     return;
   }
   if (!stream.url || !/^https?:\/\//i.test(stream.url)) return;
-  // One player at a time: an in-page source replaces a running native session (synchronously, so play()
+  // One player at a time: an in-page source revokes an active or pending native request (synchronously, so play()
   // below still starts inside the click's user-activation window).
-  if (nativePlaybackActive()) releaseNative();
+  if (nativePlaybackOwned()) releaseNative();
 
   // Fallback chain: the chosen url first, then the decodable-audio-preferred pool (deduped). So an
   // undecodable-audio pick still starts where the user asked but can auto-advance to a source with sound.
