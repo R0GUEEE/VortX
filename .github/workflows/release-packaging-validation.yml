@@ -132,6 +132,9 @@ jobs:
           --tests com.vortx.android.sync.DurableSessionStateTest
           --tests com.vortx.android.sync.NativeAccountSyncTest
           --tests com.vortx.android.sync.VortXSessionOwnerTransitionContractTest
+          --tests com.vortx.android.diagnostics.DiagnosticShareOperationTest
+          --tests com.vortx.android.engine.NativeRetirementDispatchTest
+          --tests com.vortx.android.sync.NativeAccountAttemptTest
           --tests com.vortx.android.player.ExoPlayerEngineStatePolicyTest
           --tests com.vortx.android.player.PlaybackMetadataTest
           --tests 'com.vortx.android.engine.NativeOwnAccountSourcesTest.malformed own row is held without losing valid siblings or raw source bytes'
@@ -275,6 +278,9 @@ jobs:
 
       - name: Prove all-shell failure aggregation keeps every gate fail-closed
         run: node scripts/test-shell-validation-aggregation.mjs
+
+      - name: Test explicit watched-history retry and account readiness
+        run: bash scripts/test-native-watched-retry.sh "$GITHUB_WORKSPACE"
 
       # Pinned XcodeGen, identical version + checksum gate as release-tvos.yml so project
       # generation here observes the same generator the release lane uses.
