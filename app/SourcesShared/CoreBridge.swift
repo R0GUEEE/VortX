@@ -5572,17 +5572,14 @@ final class CoreBridge: ObservableObject {
             // the common tail must still publish changedFields/revision so WatchedIndex receives this
             // library receipt while a player is active.
             if !playerWasActive {
+                let requestGeneration = metaLoadTargetLock.withLock { nativeMetaRequestGeneration }
                 let details = decode(CoreMetaDetails.self, field: "meta_details")
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, self.publicationStillCurrent(publicationToken), let current = self.metaDetails else { return }
-                    let changed = current.libraryItem?.id != details?.libraryItem?.id
-                        || current.libraryItem?.removed != details?.libraryItem?.removed
-                        || current.libraryItem?.temp != details?.libraryItem?.temp
-                        // An account/sync refresh can exchange one episode id for another while
-                        // preserving the count. Comparing the count made the open detail page retain
-                        // its old tick set until a reload, falsely appearing to undo a successful mark.
-                        || LibraryWatchedMutationPolicy.watchedMembershipChanged(current.watchedVideoIds, details?.watchedVideoIds)
-                    if changed { self.metaDetails = details }
+                    guard let self, self.publicationStillCurrent(publicationToken),
+                          CredentialScopeRegistry.shared.isCurrent(credentialCapture),
+                          self.metaLoadTargetLock.withLock({ self.nativeMetaRequestGeneration == requestGeneration }),
+                          let merged = Self.libraryMetaDetailsUpdate(current: self.metaDetails, next: details) else { return }
+                    self.metaDetails = merged
                 }
             }
         }
@@ -5801,6 +5798,18 @@ final class CoreBridge: ObservableObject {
     /// provider/request/retained/loading/library changes cannot hide behind one ID.
     private static func metaDetailsNeedsRepublish(current: CoreMetaDetails?, next: CoreMetaDetails?) -> Bool {
         current != next
+    }
+
+    /// A library event carries library/watch facts, not authority to replace a newer provider or
+    /// source payload. Missing/malformed/unloaded metadata cannot clear a resident detail. Compare
+    /// the entire library value (including resume and display fields), retaining watched-set semantics.
+    private static func libraryMetaDetailsUpdate(current: CoreMetaDetails?, next: CoreMetaDetails?) -> CoreMetaDetails? {
+        guard let current, let next, let selection = current.selected,
+              selection == next.selected,
+              current.libraryItem != next.libraryItem || current.watchedIds != next.watchedIds else { return nil }
+        return CoreMetaDetails(selected: current.selected, metaItems: current.metaItems,
+            streams: current.streams, metaStreams: current.metaStreams,
+            libraryItem: next.libraryItem, watchedVideoIds: next.watchedVideoIds)
     }
 
     /// True when a republish changed something the SOURCE LIST derives from: presence, the loaded

@@ -139,8 +139,11 @@ const resourceMarkers = ['indirect enum VortxJSON: Codable, Equatable, Sendable 
 // transport/lease execution is compiled or mocked by this pure host fixture.
 fs.writeFileSync(`${out}/ProductionResourceValues.swift`, 'import Foundation\n'
   + resourceMarkers.map(marker => block(bridge, marker)).join('\n'));
+const hasLibraryMerge = core.includes('private static func libraryMetaDetailsUpdate(');
+if (!hasLibraryMerge && ref === 'working-tree') throw new Error('Missing current library overlay merge');
 const predicates = ['private static func metaDetailsNeedsRepublish(', 'private static func metaDetailsStreamsChanged(',
   'private static func currentReadyStreamCount('];
+if (hasLibraryMerge) predicates.push('private static func libraryMetaDetailsUpdate(');
 predicates.push(core.includes('private static func streamSetsEqual(')
   ? 'private static func streamSetsEqual(' : 'private static func streamSetSignature(');
 declarations.push(`@MainActor final class AddonPublicationProbe {
@@ -157,17 +160,41 @@ declarations.push(`@MainActor final class AddonPublicationProbe {
   func needs(_ next: CoreMetaDetails?) -> Bool { Self.metaDetailsNeedsRepublish(current: metaDetails, next: next) }
   func streamsChange(_ next: CoreMetaDetails?) -> Bool { Self.metaDetailsStreamsChanged(current: metaDetails, next: next) }
   func readyCount(_ group: [String: Any]) -> Int? { Self.currentReadyStreamCount(group) }
+  // Actual pure merge helper; surrounding account/request fences are source-checked below,
+  // not executed as a real CoreBridge receipt in this RAM fixture.
+  ${hasLibraryMerge ? `func acceptLibrary(_ next: CoreMetaDetails?) {
+    if let merged = Self.libraryMetaDetailsUpdate(current: metaDetails, next: next) { metaDetails = merged }
+  }` : ''}
   func groups(streamID: String? = nil) -> [CoreStreamSourceGroup] {
     guard let metaDetails else { return [] }
     return assembleStreamGroups(metaDetails, streamId: streamID)
   }
   // Actual coalesced accepted branch only. Account/profile/request fences, the
-  // legacy library event setter and raw error-sidecar cache are NOT modeled.
+  // raw error-sidecar cache are NOT modeled.
   func accept(_ details: CoreMetaDetails?) {
     ${block(core, 'if Self.metaDetailsNeedsRepublish(current: self.metaDetails, next: details) {')}
   }
 }`);
 fs.writeFileSync(`${out}/ProductionPublication.swift`, 'import Foundation\n' + declarations.join('\n'));
+if (hasLibraryMerge) {
+const libraryStart = core.indexOf('let requestGeneration = metaLoadTargetLock.withLock { nativeMetaRequestGeneration }');
+if (libraryStart < 0) throw new Error('Missing library request generation capture');
+const libraryClosure = block(core.slice(libraryStart), 'DispatchQueue.main.async { [weak self] in');
+const libraryGuards = ['self.publicationStillCurrent(publicationToken)',
+  'CredentialScopeRegistry.shared.isCurrent(credentialCapture)',
+  'self.metaLoadTargetLock.withLock({ self.nativeMetaRequestGeneration == requestGeneration })',
+  'Self.libraryMetaDetailsUpdate(current: self.metaDetails, next: details)', 'self.metaDetails = merged'];
+function libraryCallerAccepts(source) {
+  return libraryGuards.every(guard => source.includes(guard)) && !source.includes('self.metaDetails = details');
+}
+if (!libraryCallerAccepts(libraryClosure)) throw new Error('Library overlay caller contract failed');
+for (const guard of libraryGuards) {
+  if (libraryCallerAccepts(libraryClosure.replace(guard, 'REMOVED_GUARD'))) throw new Error('Library caller negative control accepted');
+}
+fs.writeFileSync(`${out}/library-caller-contract.txt`, 'Actual library overlay caller contract PASS; five guard-removal negatives rejected; not executor/native receipt proof\n');
+} else {
+  fs.writeFileSync(`${out}/library-caller-contract.txt`, 'Historical source predates library overlay merge; no new caller contract result claimed\n');
+}
 // Models and tests compile directly from input snapshots; no source declaration,
 // date formatter, protocol annotation or test assertion is edited during prepare.
 NODE

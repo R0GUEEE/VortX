@@ -88,6 +88,97 @@ import os
     static func decoded(_ root: [String: VortxJSON]) throws -> CoreMetaDetails {
         try VortxJSON.object(root).decode(CoreMetaDetails.self)
     }
+    static func libraryItemWire() -> VortxJSON {
+        .object(["_id": .string("synthetic-title"), "type": .string("series"),
+            "name": .string("Synthetic library"), "poster": .string("https://poster.invalid/old"),
+            "removed": .bool(false), "temp": .bool(false), "previouslyWatched": .bool(false),
+            "state": .object(["timeOffset": .integer(5), "duration": .integer(100),
+                "video_id": .string("synthetic-title:1:1"), "lastWatched": .string("2026-10-24"),
+                "flaggedWatched": .integer(0), "timesWatched": .integer(0)])])
+    }
+    static func libraryEventCases() throws {
+        var root = metadataWire()
+        root["libraryItem"] = libraryItemWire()
+        root["watchedVideoIds"] = .array([.string("a"), .string("b")])
+        let old = try decoded(root)
+        func accepts(_ label: String, _ nextRoot: [String: VortxJSON]) throws {
+            let next = try decoded(nextRoot), probe = AddonPublicationProbe()
+            probe.accept(old)
+            let publications = probe.metadataPublications, epoch = probe.streamsEpoch
+            probe.acceptLibrary(next)
+            check(probe.metadataPublications == publications + 1, "library event \(label) publishes full overlay")
+            check(probe.metaDetails?.libraryItem == next.libraryItem
+                  && probe.metaDetails?.watchedIds == next.watchedIds, "library event \(label) adopts exact library/watch values")
+            check(probe.streamsEpoch == epoch, "library event \(label) does not rebuild sources")
+            probe.acceptLibrary(next)
+            check(probe.metadataPublications == publications + 1, "library event \(label) repeat quiet")
+        }
+        for (field, value) in [("type", VortxJSON.string("movie")), ("name", .string("Replacement name")),
+                               ("poster", .string("https://poster.invalid/new")), ("removed", .bool(true)),
+                               ("temp", .bool(true)), ("previouslyWatched", .bool(true))] {
+            var changed = root, item = fields(root["libraryItem"]!)
+            item[field] = value; changed["libraryItem"] = .object(item)
+            try accepts(field, changed)
+        }
+        for (field, value) in [("timeOffset", VortxJSON.integer(6)), ("duration", .integer(101)),
+                               ("video_id", .string("synthetic-title:1:2")), ("lastWatched", .string("2026-10-25")),
+                               ("flaggedWatched", .integer(1)), ("timesWatched", .integer(1))] {
+            var changed = root, item = fields(root["libraryItem"]!), state = fields(item["state"]!)
+            state[field] = value; item["state"] = .object(state); changed["libraryItem"] = .object(item)
+            try accepts("state \(field)", changed)
+        }
+        var removed = root; removed.removeValue(forKey: "libraryItem")
+        try accepts("removed library row", removed)
+        var watched = root; watched["watchedVideoIds"] = .array([.string("a"), .string("c")])
+        try accepts("same-count watched replacement", watched)
+        var empty = root; empty.removeValue(forKey: "watchedVideoIds")
+        try accepts("cleared watched membership", empty)
+
+        // Current provider/source values can advance after the worker captured an older library
+        // snapshot for the same request. Only its library fields may be merged into current UI.
+        var currentRoot = root
+        currentRoot = replaceMetaRow(currentRoot, index: 1,
+            changes: ["retainedWhileLoading": .object(["type": .string("Ready"), "content": .object([
+                "id": .string("synthetic-title"), "type": .string("series"), "name": .string("Newer retained")])])])
+        let sources = try details([["url": .string("https://media.invalid/newest")]])
+        let current = CoreMetaDetails(selected: old.selected, metaItems: try decoded(currentRoot).metaItems,
+            streams: sources.streams, metaStreams: sources.metaStreams,
+            libraryItem: old.libraryItem, watchedVideoIds: old.watchedVideoIds)
+        let probe = AddonPublicationProbe(); probe.accept(current)
+        let epoch = probe.streamsEpoch
+        probe.acceptLibrary(try decoded(watched))
+        check(probe.metaDetails?.metaItems == current.metaItems && probe.metaDetails?.streams == current.streams
+              && probe.metaDetails?.metaStreams == current.metaStreams && probe.metaDetails?.selected == current.selected,
+              "library overlay preserves newer provider/retained/stream/selection values")
+        check(probe.streamsEpoch == epoch && probe.metaDetails?.watchedIds == Set(["a", "c"]),
+              "older library carrier changes watched overlay without source-epoch churn")
+        let accepted = probe.metaDetails, count = probe.metadataPublications
+        probe.acceptLibrary(nil)
+        var unloaded = watched; unloaded.removeValue(forKey: "selected")
+        probe.acceptLibrary(try decoded(unloaded))
+        check(probe.metaDetails == accepted && probe.metadataPublications == count,
+              "missing/null/unloaded library snapshot cannot erase detail")
+        for pathKey in ["metaPath", "streamPath"] {
+            for field in ["resource", "type", "id"] {
+                var changed = watched, selected = fields(root["selected"]!), path = fields(selected[pathKey]!)
+                path[field] = .string("replacement")
+                selected[pathKey] = .object(path); changed["selected"] = .object(selected)
+                probe.acceptLibrary(try decoded(changed))
+                check(probe.metaDetails == accepted && probe.metadataPublications == count,
+                      "library event rejects replaced \(pathKey).\(field)")
+            }
+        }
+        var reordered = watched; reordered["watchedVideoIds"] = .array([.string("c"), .string("a"), .string("a")])
+        probe.acceptLibrary(try decoded(reordered))
+        check(probe.metadataPublications == count, "library watched order/duplicate-only carrier stays quiet")
+        let closed = AddonPublicationProbe(); closed.acceptLibrary(old)
+        check(closed.metaDetails == nil && closed.metadataPublications == 0, "library event cannot reopen closed detail")
+        var noSelection = root; noSelection.removeValue(forKey: "selected")
+        let idle = AddonPublicationProbe(); idle.accept(try decoded(noSelection))
+        let idleCount = idle.metadataPublications
+        idle.acceptLibrary(try decoded(unloaded))
+        check(idle.metadataPublications == idleCount, "matching absent selection is not detail ownership")
+    }
     static func metadataReplacement(_ label: String, old: CoreMetaDetails,
                                     next: CoreMetaDetails, sourceChange: Bool = false) {
         let probe = AddonPublicationProbe(); probe.accept(old)
@@ -140,12 +231,7 @@ import os
             }
         }
         var library = root
-        library["libraryItem"] = .object(["_id": .string("synthetic-title"), "type": .string("series"),
-            "name": .string("Synthetic library"), "poster": .string("https://poster.invalid/old"),
-            "removed": .bool(false), "temp": .bool(false), "previouslyWatched": .bool(false),
-            "state": .object(["timeOffset": .integer(5), "duration": .integer(100),
-                "video_id": .string("synthetic-title:1:1"), "lastWatched": .string("2026-10-24"),
-                "flaggedWatched": .integer(0), "timesWatched": .integer(0)])])
+        library["libraryItem"] = libraryItemWire()
         let libraryOld = try decoded(library)
         for (field, value) in [("type", VortxJSON.string("movie")), ("name", .string("Replacement name")),
                                ("poster", .string("https://poster.invalid/new")), ("removed", .bool(true)),
@@ -357,6 +443,7 @@ import os
         probe.accept(numeric)
         check(!probe.needs(stringNumeric) && !probe.streamsChange(stringNumeric), "decoder-equivalent byte counts stay quiet")
         try metadataValueCases()
+        try libraryEventCases()
         try finiteLargeValueCases()
         finiteResumeTimecodeCases()
         dateParserCases()
