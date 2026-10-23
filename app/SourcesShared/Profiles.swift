@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import os
 
 /// One viewer of the app: local view settings (name, avatar, theme, parental PIN) plus an optional
 /// binding to its own Stremio account. Profiles without their own account share the primary one,
@@ -175,6 +176,55 @@ struct UserProfile: Codable, Identifiable, Equatable {
     }
 }
 
+/// Process-local selection facts for synchronous worker reads. This is not a playback, credential or
+/// navigation authority. A nil read means startup or a synchronous Published mutation is in progress.
+enum ProfileSelectionRead {
+    struct Snapshot: Equatable, Sendable {
+        struct Profile: Equatable, Sendable {
+            let id: UUID
+            let isOwner: Bool
+            let usesOwnAccount: Bool
+            var usesEngineHistory: Bool { isOwner || usesOwnAccount }
+        }
+        let activeID: UUID?
+        let activeProfile: Profile?
+        var activeUsesEngineHistory: Bool { activeProfile?.usesEngineHistory ?? true }
+    }
+
+    private struct State: Sendable {
+        var initialized = false
+        var mutationDepth = 0
+        var value: Snapshot?
+    }
+    private static let state = OSAllocatedUnfairLock(initialState: State())
+
+    static func snapshot() -> Snapshot? {
+        state.withLock { value in
+            guard value.initialized, value.mutationDepth == 0 else { return nil }
+            return value.value
+        }
+    }
+
+    // Only the synchronous ProfileStore owner writes this mirror. No external callbacks, defaults,
+    // Keychain, bridge access or actor crossing occurs under this lock. The owner's actor closure is
+    // migrated separately; a checked scalar read does not certify the old mutable owner as Sendable.
+    fileprivate static func beginMutation() { state.withLock { $0.mutationDepth += 1 } }
+    fileprivate static func endMutation(_ snapshot: Snapshot) {
+        state.withLock { value in
+            precondition(value.mutationDepth > 0)
+            value.value = snapshot
+            value.mutationDepth -= 1
+        }
+    }
+    fileprivate static func publishInitial(_ snapshot: Snapshot) {
+        state.withLock { value in
+            precondition(!value.initialized && value.mutationDepth == 0)
+            value.value = snapshot
+            value.initialized = true
+        }
+    }
+}
+
 /// The profile roster and the active selection. The roster persists as JSON in UserDefaults; each
 /// own-account profile keeps its Stremio authKey in its own Keychain slot, and the pre-profiles
 /// primary slot keeps serving every shared profile. Mutate from the main thread only (the
@@ -206,6 +256,7 @@ final class ProfileStore: ObservableObject {
     private var legacySelectionMutationRetirements: [Bool] = []
     @Published private(set) var profiles: [UserProfile] = [] {
         willSet {
+            ProfileSelectionRead.beginMutation()
             let retiresSession = Self.legacyWatchBinding(in: profiles, activeID: activeID)
                 != Self.legacyWatchBinding(in: newValue, activeID: activeID)
             legacyRosterMutationRetirements.append(retiresSession)
@@ -214,11 +265,13 @@ final class ProfileStore: ObservableObject {
         didSet {
             let retiresSession = legacyRosterMutationRetirements.removeLast()
             if retiresSession { retireLegacyHistoryNotices() }
+            ProfileSelectionRead.endMutation(selectionReadSnapshot())
             LegacyWatchOwnership.endProfileMutation()
         }
     }
     @Published private(set) var activeID: UUID? {
         willSet {
+            ProfileSelectionRead.beginMutation()
             let retiresSession = activeID != newValue
             legacySelectionMutationRetirements.append(retiresSession)
             LegacyWatchOwnership.beginProfileMutation(retire: retiresSession)
@@ -226,8 +279,16 @@ final class ProfileStore: ObservableObject {
         didSet {
             let retiresSession = legacySelectionMutationRetirements.removeLast()
             if retiresSession { retireLegacyHistoryNotices() }
+            ProfileSelectionRead.endMutation(selectionReadSnapshot())
             LegacyWatchOwnership.endProfileMutation()
         }
+    }
+    private func selectionReadSnapshot() -> ProfileSelectionRead.Snapshot {
+        // Read actual stored fields after assignment, not willSet's proposed value: a synchronous
+        // Published subscriber may have nested a roster or selection mutation during publication.
+        .init(activeID: activeID, activeProfile: profiles.first(where: { $0.id == activeID }).map {
+            .init(id: $0.id, isOwner: $0.isOwner, usesOwnAccount: $0.usesOwnAccount)
+        })
     }
     private static func legacyWatchBinding(in roster: [UserProfile], activeID: UUID?) -> LegacyWatchOwnership.ProfileBinding? {
         roster.first(where: { $0.id == activeID }).map {
@@ -720,6 +781,7 @@ final class ProfileStore: ObservableObject {
     private(set) var deletedProfileIDs: Set<String> = []
 
     private init() {
+        defer { ProfileSelectionRead.publishInitial(selectionReadSnapshot()) }
         loadDeletedTombstones()
         load()
         if profiles.isEmpty { migrateFromSingleAccount() }

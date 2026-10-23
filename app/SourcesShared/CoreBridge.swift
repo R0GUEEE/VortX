@@ -234,7 +234,8 @@ final class CoreBridge: ObservableObject {
     }
     /// Called only under nativeFacadeLock; never substitute a new session into a captured target.
     private func currentNativePlaybackBinding() -> PlaybackMutationOwnershipPolicy.NativeBinding? {
-        guard let profile = ProfileStore.shared.activeID, let capture = nativeCredentialCapture,
+        guard let selection = ProfileSelectionRead.snapshot(), let profile = selection.activeProfile?.id,
+              selection.activeID == profile, let capture = nativeCredentialCapture,
               CredentialScopeRegistry.shared.isCurrent(capture), let facade = nativeFacadeStorage,
               facade.isAvailable, facade.registryBinding?.profileID == profile.uuidString else { return nil }
         let epoch = facade.accountGeneration
@@ -489,7 +490,8 @@ final class CoreBridge: ObservableObject {
     }
     private func captureNativeWatchlistTarget() -> NativeWatchlistTarget? {
         nativeFacadeLock.withLock {
-            guard let profile = ProfileStore.shared.activeID, let capture = nativeCredentialCapture,
+            guard let selection = ProfileSelectionRead.snapshot(), let profile = selection.activeProfile?.id,
+                  selection.activeID == profile, let capture = nativeCredentialCapture,
                   CredentialScopeRegistry.shared.isCurrent(capture), let facade = nativeFacadeStorage,
                   let binding = facade.watchlistBinding, UUID(uuidString: binding.profileID) == profile,
                   nativePublishedAccountGeneration == binding.accountGeneration else { return nil }
@@ -1350,6 +1352,9 @@ final class CoreBridge: ObservableObject {
     @MainActor
     func start() {
         guard !started else { return }
+        // App environment injection happens after start(). Finish the same synchronous profile/defaults
+        // projection before a native bootstrap task can attempt to capture a worker selection.
+        _ = ProfileStore.shared
         started = true
         // The usenet anime retry reads the resident title's episode numbers through this provider.
         Task { @MainActor in

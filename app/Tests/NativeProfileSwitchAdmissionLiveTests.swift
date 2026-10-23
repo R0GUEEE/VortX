@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import os
 
 private final class PreferenceCheckpointGate: VortxCheckpointStore, @unchecked Sendable {
     let backing: VortxEncryptedCheckpointStore
@@ -291,8 +292,17 @@ enum StreamRanking { static func invalidateCaches() {} }
 
 final class ProfileStore: @unchecked Sendable {
     static let shared = ProfileStore()
-    var profiles: [UserProfile] = []
-    var activeID: UUID?
+    var profiles: [UserProfile] = [] {
+        willSet { ProfileSelectionRead.beginMutation() }
+        didSet { ProfileSelectionRead.endMutation(selectionReadSnapshot()) }
+    }
+    var activeID: UUID? {
+        willSet { ProfileSelectionRead.beginMutation() }
+        didSet { ProfileSelectionRead.endMutation(selectionReadSnapshot()) }
+    }
+    // The only instance is shared, first used by @MainActor setup. The extractor puts the
+    // current real namespace and scalar projector in this file; no mirror predicate is copied.
+    private init() { ProfileSelectionRead.publishInitial(selectionReadSnapshot()) }
     var nativeProfileError: String?
     var pickedThisLaunch = false
 

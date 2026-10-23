@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import CoreFoundation
+import os
 
 // External environment only. The extractor appends the production receive, merge,
 // projection and main-queue publication functions without replacing their bodies.
@@ -38,8 +39,17 @@ typealias PlaybackMutationTarget = PlaybackMutationOwnershipPolicy.Target
 // performs production native/host decoding and chooses the acknowledged active UUID.
 final class ProfileStore: @unchecked Sendable {
     static let shared = ProfileStore()
-    var profiles: [UserProfile] = []
-    var activeID: UUID? = UUID(uuidString: AppleSyncReceivePublicationPeer.owner)
+    var profiles: [UserProfile] = [] {
+        willSet { ProfileSelectionRead.beginMutation() }
+        didSet { ProfileSelectionRead.endMutation(selectionReadSnapshot()) }
+    }
+    var activeID: UUID? = UUID(uuidString: AppleSyncReceivePublicationPeer.owner) {
+        willSet { ProfileSelectionRead.beginMutation() }
+        didSet { ProfileSelectionRead.endMutation(selectionReadSnapshot()) }
+    }
+    // One singleton per peer process, first accessed by @MainActor receive setup. The real
+    // namespace/projector and these fileprivate writer callsites share Combined.swift.
+    private init() { ProfileSelectionRead.publishInitial(selectionReadSnapshot()) }
     var active: UserProfile? { profiles.first { $0.id == activeID } }
     var activeUsesEngineHistory: Bool { active?.usesEngineHistory ?? true }
     var activeKeychainAccount: String { "synthetic.account" }

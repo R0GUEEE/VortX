@@ -65,6 +65,10 @@ if (process.argv[2] === '--extract') {
     '    private func pushSyncDocAt(', '    private func commitNativePulledDocument(', '    private func applyNativeGlobals(',
     '    static func ownedAddons(', '    func syncDown(', '    private func handle(', '    private func startPoll()'];
   let combined = await readFile('app/Tests/AppleSyncReceivePublicationPeer.swift', 'utf8');
+  // Keep fileprivate mirror publishers and their exact production namespace in Combined.swift.
+  // The split UserProfile.swift input below contains only model declarations and imports.
+  combined += '\n' + slice(profiles, 'enum ProfileSelectionRead {', '\n/// The profile roster and the active selection.')
+    + '\nextension ProfileStore {\n' + member(profiles, '    private func selectionReadSnapshot()') + '\n}\n';
   function exactDeclaration(expression, label) {
     const matches = [...manager.text.matchAll(expression)];
     assert.equal(matches.length, 1, `missing or ambiguous ${label}`);
@@ -150,7 +154,7 @@ if (process.argv[2] === '--extract') {
     + slice(models, 'struct CoreLibraryRequest:', '// MARK: - VortX account-owned add-on')
     + slice(models, 'struct CoreCtx:', '// MARK: assembled UI row')
     + slice(models, 'struct VortXOwnedAddon {', '// MARK: - Stremio mirror settings'));
-  await writeFile(join(output, 'UserProfile.swift'), slice(profiles, 'import Foundation', '/// The profile roster and the active selection.'));
+  await writeFile(join(output, 'UserProfile.swift'), slice(profiles, 'import Foundation', '/// Process-local selection facts'));
   receipts.push({ path: discovery.path, marker: 'entire Foundation-only discovery persistence bridge', sourceSHA256: sha256(discovery.text), sliceSHA256: sha256(discovery.text) });
   await writeFile(join(output, 'Discovery.swift'), discovery.text);
   // Include the actual observable cache, not just static reads from the backing store:
@@ -164,7 +168,7 @@ if (process.argv[2] === '--extract') {
   await writeFile(join(output, 'Combined.swift'), combined);
   await writeFile(join(output, 'extraction.json'), JSON.stringify({ sourceHEAD: process.env.VORTX_RECEIVE_SOURCE_HEAD, receipts, productionMatches,
     boundaries: ['Synthetic keys and owned encrypted checkpoint directories', 'Loopback HTTP request environment',
-      'ProfileStore presentation sink invokes actual discovery apply; quarantine/admission and UI board rendering are not exercised',
+      'ProfileStore RAM sink initializes the real mirror once and brackets roster/activeID mutations; actual scalar projector and discovery apply are extracted; real Combine publication, quarantine/admission and UI board rendering are not exercised',
       'Fresh fixture sessions perform genuine deterministic empty legacy import and exact receipt replay; no real-account preparation, provider fetch or open-detail refresh exercised',
       'Explicit fixture uploader obtains an authenticated GET witness and requires exact create0/base-plus-one; it does not perform the manager upload merge'],
     combinedSHA256: sha256(combined) }, null, 2));
