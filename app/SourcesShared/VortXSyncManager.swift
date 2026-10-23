@@ -894,7 +894,7 @@ final class VortXSyncManager: ObservableObject {
     }
     func retryNativeWatchedMigration() async {
         if CoreBridge.shared.hasNativeSession { _ = await syncDown(force: true) }
-        else { _ = await restoreNativeCheckpoint() }
+        else { _ = await retryAccountRestore() }
     }
     func publishNativeOwnOverlayPending(_ value: VortxJSON, capture: CredentialScopeRegistry.Capture) throws {
         guard isCurrent(capture), case .object(let records) = value else { throw VortxNativeError.superseded }
