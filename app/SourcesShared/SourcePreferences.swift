@@ -2,7 +2,7 @@ import Foundation
 
 /// The source categories the ranking system recognises. `mediaServer` is FIRST so `allCases` (the fresh-install
 /// default order) puts your own servers at the top, which is what a person who connects one expects.
-enum SourceType: String, CaseIterable, Codable {
+enum SourceType: String, CaseIterable, Codable, Sendable {
     case mediaServer = "mediaServer"
     case debrid  = "debrid"
     case usenet  = "usenet"
@@ -35,7 +35,7 @@ enum SourceType: String, CaseIterable, Codable {
 /// `@Published` knobs the Settings controls bind to, so their `didSet`s persist + invalidate caches, and every
 /// knob it sets is captured per-profile by the Settings `onChange(of: rankingSignature)` trigger exactly like a
 /// manual edit. Presets leave the keyword/regex filters and safety mode alone (those are user-owned).
-enum SourcePreset: String, CaseIterable, Identifiable {
+enum SourcePreset: String, CaseIterable, Identifiable, Sendable {
     case bestQuality, balanced, dataSaver
     var id: String { rawValue }
     var label: String {
@@ -510,7 +510,7 @@ extension SourcePreferences {
     /// so moving it into `Task.detached` made this the first off-main reader. Carrying the compiled regex
     /// references is safe: `NSRegularExpression` is documented immutable + thread-safe for matching, so only
     /// the singleton's concurrent REASSIGNMENT was the race, and a snapshot freezes that out.
-    struct Snapshot: SourcePrefsReading, @unchecked Sendable {   // @unchecked: NSRegularExpression is thread-safe for matching but not Sendable-marked
+    struct Snapshot: SourcePrefsReading, Sendable {
         let useAddonOrder: Bool
         let typeOrder: [SourceType]
         let noFiltersActive: Bool

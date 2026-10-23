@@ -18,6 +18,7 @@ xcrun swiftc -parse-as-library -warnings-as-errors \
   app/SourcesShared/CoreModels.swift \
   app/SourcesShared/SourceSettlementPolicy.swift \
   app/Sources/Player/AudioLanguagePolicy.swift \
+  app/SourcesShared/RankingMemo.swift \
   app/SourcesShared/StreamRanking.swift \
   app/Tests/BingeSourceMemoryRaceContractTests.swift -o "$binge_test_dir/ranking"
 "$binge_test_dir/ranking"

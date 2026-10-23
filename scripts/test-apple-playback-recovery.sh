@@ -31,3 +31,4 @@ bash scripts/test-player-first-frame-artwork.sh
 bash scripts/test-random-pick.sh
 bash scripts/test-player-session-audio-presets.sh
 bash scripts/test-source-quick-filters.sh
+bash scripts/test-ranking-cache-concurrency.sh
