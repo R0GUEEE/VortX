@@ -48,7 +48,6 @@ enum UsenetNodeClient {
 
     struct Endpoint: Sendable, Equatable {
         let base: String
-        let requiresNativeCapabilities: Bool
     }
 
     struct Selection: Sendable {
@@ -256,45 +255,40 @@ enum UsenetNodeClient {
                              timeout: TimeInterval, selection: Selection = Selection(),
                              ownerIsCurrent: @escaping @Sendable () async -> Bool) async throws -> CreatedStream {
         try await createStream(base: endpoint.base, nzbURLs: nzbURLs, servers: servers, session: session,
-                               timeout: timeout, requiresNativeCapabilities: endpoint.requiresNativeCapabilities,
-                               selection: selection, ownerIsCurrent: ownerIsCurrent)
+                               timeout: timeout, selection: selection, ownerIsCurrent: ownerIsCurrent)
     }
 
     static func createStream(base: String, nzbURLs: [String], servers: [String], session: URLSession,
-                             timeout: TimeInterval, requiresNativeCapabilities: Bool = false,
-                             selection: Selection = Selection(),
+                             timeout: TimeInterval, selection: Selection = Selection(),
                              ownerIsCurrent: @escaping @Sendable () async -> Bool) async throws -> CreatedStream {
         guard let origin = NativeTransportPolicy.localControlBase(base) else { throw ClientError.unsafeEndpoint }
         try Task.checkCancellation()
         guard await ownerIsCurrent() else { throw CancellationError() }
-        if requiresNativeCapabilities, !selection.isValid { throw ClientError.invalidSelector }
+        guard selection.isValid else { throw ClientError.invalidSelector }
         let noRedirects = NoRedirects()
-        if requiresNativeCapabilities {
-            var probe = URLRequest(url: origin.appendingPathComponent("nzb/capabilities"))
-            probe.timeoutInterval = min(timeout, 4)
-            probe.cachePolicy = .reloadIgnoringLocalCacheData
-            let (capabilities, response) = try await session.data(for: probe, delegate: noRedirects)
-            guard acceptsNativeCapabilities(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0,
-                                            body: capabilities) else { throw ClientError.nativeUnavailable }
+        var probe = URLRequest(url: origin.appendingPathComponent("nzb/capabilities"))
+        probe.timeoutInterval = min(timeout, 4)
+        probe.cachePolicy = .reloadIgnoringLocalCacheData
+        let (capabilities, response) = try await session.data(for: probe, delegate: noRedirects)
+        guard acceptsNativeCapabilities(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0,
+                                        body: capabilities) else { throw ClientError.nativeUnavailable }
+        try Task.checkCancellation()
+        if (try? JSONDecoder().decode(NativeCapabilities.self, from: capabilities))?.diskPreload == true,
+           let allowance = UsenetDiskAllowance.current() {
+            await postDiskAllowance(origin: origin, bytes: allowance, session: session)
             try Task.checkCancellation()
-            if (try? JSONDecoder().decode(NativeCapabilities.self, from: capabilities))?.diskPreload == true,
-               let allowance = UsenetDiskAllowance.current() {
-                await postDiskAllowance(origin: origin, bytes: allowance, session: session)
-                try Task.checkCancellation()
-            }
         }
-        let lease = requiresNativeCapabilities
-            ? OperationLease(origin: origin, session: session, ownerIsCurrent: ownerIsCurrent) : nil
-        lease?.startMonitoring()
+        let lease = OperationLease(origin: origin, session: session, ownerIsCurrent: ownerIsCurrent)
+        lease.startMonitoring()
         do {
             return try await withTaskCancellationHandler {
-                try await lease?.validateOwner()
+                try await lease.validateOwner()
                 try Task.checkCancellation()
                 return try await postCreate(origin: origin, nzbURLs: nzbURLs, servers: servers,
                     session: session, timeout: timeout, selection: selection, lease: lease)
-            } onCancel: { lease?.close() }
+            } onCancel: { lease.close() }
         } catch {
-            lease?.close()
+            lease.close()
             throw error
         }
     }
@@ -313,16 +307,13 @@ enum UsenetNodeClient {
 
     private static func postCreate(origin: URL, nzbURLs: [String], servers: [String], session: URLSession,
                                    timeout: TimeInterval, selection: Selection,
-                                   lease: OperationLease?) async throws -> CreatedStream {
+                                   lease: OperationLease) async throws -> CreatedStream {
         let createURL = origin.appendingPathComponent("nzb/create")
-        var body: [String: Any] = ["servers": servers, "nzbUrls": nzbURLs]
-        if let lease {
-            body["operationId"] = lease.id
-            if let index = selection.fileIdx { body["fileIdx"] = index }
-            if let pattern = selection.fileMustInclude { body["fileMustInclude"] = pattern }
-            if let episode = selection.episode {
-                body["episode"] = ["season": episode.season, "episode": episode.episode]
-            }
+        var body: [String: Any] = ["servers": servers, "nzbUrls": nzbURLs, "operationId": lease.id]
+        if let index = selection.fileIdx { body["fileIdx"] = index }
+        if let pattern = selection.fileMustInclude { body["fileMustInclude"] = pattern }
+        if let episode = selection.episode {
+            body["episode"] = ["season": episode.season, "episode": episode.episode]
         }
         guard let payload = try? JSONSerialization.data(withJSONObject: body) else { throw ClientError.badResponse }
         var request = URLRequest(url: createURL)
@@ -333,9 +324,9 @@ enum UsenetNodeClient {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         let (data, response) = try await session.data(for: request, delegate: NoRedirects())
         try Task.checkCancellation()
-        try await lease?.validateOwner()
+        try await lease.validateOwner()
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        if lease != nil, code == 422 {
+        if code == 422 {
             // A 422 also covers a selector with no matching file. Do not turn every native refusal
             // into an archive diagnosis, and never log the untrusted response text.
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -349,7 +340,7 @@ enum UsenetNodeClient {
         guard (200...299).contains(code) else {
             // Keep the engine's fixed reason (e.g. provider_unavailable vs provider_timeout) so a failed
             // play is diagnosable; the status alone hid whether the NZB download or the provider failed.
-            if lease != nil, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let reason = object["error"] as? String, nativeReasonCodes.contains(reason) {
                 throw ClientError.nativeFailed(code, reason)
             }
@@ -357,7 +348,7 @@ enum UsenetNodeClient {
         }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let key = object["key"] as? String, !key.isEmpty else { throw ClientError.badResponse }
-        // A Node key is one opaque value, never additional query parameters or a fragment.
+        // A stream key is one opaque value, never additional query parameters or a fragment.
         let keyCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         guard let encodedKey = key.addingPercentEncoding(withAllowedCharacters: keyCharacters) else {
             throw ClientError.badResponse

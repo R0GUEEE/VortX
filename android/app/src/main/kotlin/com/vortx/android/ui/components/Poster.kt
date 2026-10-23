@@ -136,7 +136,7 @@ fun RailHeader(title: String, eyebrow: String? = null, modifier: Modifier = Modi
 /// "continue" is the CW rail, everything else is an add-on catalog row).
 private const val CONTINUE_WATCHING_ROW_ID = "continue"
 
-internal fun showEmptyCatalogContinuation(catalog: Catalog, nativeMode: Boolean = com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED): Boolean =
+internal fun showEmptyCatalogContinuation(catalog: Catalog, nativeMode: Boolean = true): Boolean =
     nativeMode && catalog.hasNextPage && catalog.items.isEmpty()
 
 internal fun posterMenuFor(catalog: Catalog): PosterCardMenu = when {

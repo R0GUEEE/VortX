@@ -73,7 +73,7 @@ import kotlinx.coroutines.yield
 /// PER-PROFILE HISTORY: the per-episode and per-season watched toggles route straight into
 /// [onToggleWatched]/[onMarkSeasonWatched] ([DetailViewModel.setVideoWatched]/[setSeasonWatched]), which write
 /// through the SAME `CatalogRepository` seam the phone uses. That seam is where the main-profile-via-engine /
-/// overlay-profile-via-local-overlay split is enforced (`EngineStremioRepository.overlayProfiles()`); this UI
+/// overlay-profile-via-local-overlay split is enforced by the engine repository; this UI
 /// never touches history directly, so an overlay profile can never mutate the account library from the couch.
 @Composable
 fun TvSeasonEpisodeSection(

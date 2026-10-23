@@ -54,22 +54,17 @@ trigger_block() {
 [[ -f "$RELEASE_WF" ]] || fail "release workflow missing: $RELEASE_WF"
 [[ -f "$VALIDATION_WF" ]] || fail "secretless validation workflow missing: $VALIDATION_WF"
 
-# Release and candidate builds must share the same immutable wrapper revision; otherwise a
-# source-level history API can link on one platform yet ship an older engine on another.
-engine_pin=""
+# The app has one engine. Keep native source-pinning checks below, and ensure no protected
+# platform lane can restore the removed legacy checkout.
 for wf in "$APPLE_RELEASE_WF" "$ANDROID_CI_WF" "$RELEASE_WF"; do
-    pin="$(awk '/repository: VortXTV\/stremiox-core/{active=1; next}
-        active && /^[[:space:]]+ref:/{print $2; exit}' "$wf")"
-    [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || fail "$(basename "$wf") wrapper pin must be immutable"
-    [[ -z "$engine_pin" || "$engine_pin" = "$pin" ]] || fail "Apple/Android wrapper pins differ"
-    engine_pin="$pin"
+    require_absent "$(basename "$wf") never checks out the removed engine" \
+        'repository: VortXTV/stremiox-core|STREMIOX_CORE_DIR|path: core$' "$wf"
 done
 candidate_signing_step="$(awk '/name: Verify signed release artifacts against the pinned production signer/{active=1; next}
     active && /^[[:space:]]+- name:/{exit} active{print}' "$ANDROID_CI_WF")"
 require_grep "signed candidate APK and AAB both verify complete engine ABIs" \
     'verify-native-android-artifacts\.sh .*--native-only|--native-only --staged-dir android/app/src/main/jniLibs' \
     <(printf '%s\n' "$candidate_signing_step")
-ok "Apple and both Android lanes use one exact wrapper revision"
 native_pin="$(awk '/^      NORMAL_NATIVE_REVISION:/{print $2}' "$APPLE_RELEASE_WF")"
 [[ "$native_pin" = a3169f338f3f05da4ad3adb39a1e557c3ddcac33 ]] || fail "Apple normal native pin differs from the reviewed revision"
 apple_native_ref="$(awk '/repository: VortXTV\/vortx-core/{active=1; next}
@@ -143,9 +138,8 @@ require_grep "secretless Apple validation retains actual player content verifica
     'bash scripts/verify-mpvkit-dvfel-artifacts\.sh "\$DEST"' "$VALIDATION_WF"
 ok "actual MPV selector accepts the reviewed fallback/pair and rejects partial, foreign and legacy inputs"
 
-# Exercise the actual effective expression and generator shell routing without compiling or
-# downloading anything. Command fixtures log only the selected XcodeGen route; the real generated
-# target/dependency/define/floor contract remains in test-native-apple-project.rb.
+# Exercise the real native-only selector, removed-mode rejection, and generator shell using
+# inert command boundaries. Production compile/link/package is covered by the native shell lane.
 node --input-type=module - "$APPLE_RELEASE_WF" "$REPO_ROOT" <<'NODE'
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -153,20 +147,20 @@ import {spawnSync} from 'node:child_process';
 const [workflow, root] = process.argv.slice(2);
 const source = readFileSync(workflow, 'utf8');
 const input = source.match(/^      native_only:\n([\s\S]*?)(?=^      [a-z_]+:)/m)?.[1];
-assert.ok(input, 'native selection input must exist');
+assert.ok(input, 'compatibility input must exist');
 assert.match(input, /^        type: boolean$/m);
 const defaultValue = input.match(/^        default: (true|false)$/m)?.[1];
-assert.equal(defaultValue, 'true', 'shipping dispatch must default to native');
+assert.equal(defaultValue, 'true', 'dispatch must default to native-only');
 const build = source.match(/^  build-tvos:\n([\s\S]*?)^  attach-release:/m)?.[1];
-assert.ok(build, 'build job must be distinct from the release-write job');
+assert.ok(build, 'build job must remain distinct from the release-write job');
 const expression = build.match(/^      VORTX_NATIVE_ONLY: \$\{\{ (.+) \}\}$/m)?.[1];
-assert.ok(expression, 'build job must define its single effective selector');
+assert.ok(expression, 'build job must define its single compatibility selector');
 assert.equal((build.match(/inputs\.native_only/g) ?? []).length, 1,
-  'no build consumer may bypass the effective selector with absent push inputs');
-const evaluate = new Function('github', 'inputs', `return (${expression});`);
+  'build consumers must not route independently from absent push inputs');
+const evaluate = new Function('github', 'inputs', 'return (' + expression + ');');
 const step = (name) => {
-  const block = build.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
-  assert.ok(block, `${name}: required step missing`);
+  const block = build.split(/^      - /m).find(value => value.startsWith('name: ' + name + '\n'));
+  assert.ok(block, name + ': required step missing');
   return block;
 };
 const run = (block) => {
@@ -175,60 +169,61 @@ const run = (block) => {
   return script.split('\n').filter(line => line.startsWith('          '))
     .map(line => line.slice(10)).join('\n');
 };
-const shellConsumers = ['Generate the Xcode project', 'Smoke-test tvOS launch in a simulator (fail closed)',
-  'Gate iOS-simulator link + dSYM (fail closed)', 'Package Full tvOS test IPA', 'Package the IPAs'];
-assert.equal((build.match(/^          NATIVE_ONLY:/gm) ?? []).length, shellConsumers.length);
-for (const name of shellConsumers) {
-  assert.match(step(name), /^          NATIVE_ONLY: \$\{\{ env\.VORTX_NATIVE_ONLY \}\}$/m,
-    `${name}: use the same effective native selection`);
+assert.equal((build.match(/^          NATIVE_ONLY:/gm) ?? []).length, 0,
+  'removed engine selector must not gate a native shell or package proof');
+for (const name of ['Capture exact native SDK and player inputs before app compilation',
+  'Verify exact native app selection and linked inputs']) {
+  assert.equal(step(name).match(/^        if: (.+)$/m), null, name + ': proof must be unconditional');
 }
-const proofConditions = ['Capture exact native SDK and player inputs before app compilation',
-  'Verify exact native app selection and linked inputs'].map(name => {
-    const condition = step(name).match(/^        if: (.+)$/m)?.[1];
-    assert.equal(condition, "env.VORTX_NATIVE_ONLY == 'true'", `${name}: proof condition`);
-    return new Function('env', `return (${condition});`);
-  });
-const comparison = step('Constrain legacy comparison to artifact-only builds');
-const comparisonCondition = comparison.match(/^        if: (.+)$/m)?.[1];
-assert.equal(comparisonCondition, "env.VORTX_NATIVE_ONLY != 'true'");
-const comparisonRequired = new Function('env', `return (${comparisonCondition});`);
+for (const name of ['Generate the Xcode project', 'Smoke-test tvOS launch in a simulator (fail closed)',
+  'Gate iOS-simulator link + dSYM (fail closed)', 'Package Full tvOS test IPA', 'Package the IPAs']) {
+  assert(!/\$NATIVE_ONLY|\$VORTX_NATIVE_ONLY/.test(run(step(name))),
+    name + ': no compatibility-mode branch may bypass native processing');
+}
+assert(run(step('Capture exact native SDK and player inputs before app compilation'))
+  .includes('verify-native-apple-package.py snapshot'));
+assert(run(step('Verify exact native app selection and linked inputs'))
+  .includes('verify-native-apple-package.py verify'));
+for (const name of ['Package Full tvOS test IPA', 'Package the IPAs']) {
+  assert(run(step(name)).includes('verify-native-apple-package.py verify-archive'),
+    name + ': archive content proof must remain enabled');
+}
+const removedMode = step('Reject removed legacy comparison builds');
+const removedCondition = removedMode.match(/^        if: (.+)$/m)?.[1];
+assert.equal(removedCondition, "env.VORTX_NATIVE_ONLY != 'true'");
+const rejectRequired = new Function('env', 'return (' + removedCondition + ');');
+assert(build.indexOf('name: Reject removed legacy comparison builds') <
+  build.indexOf('name: Preflight the engine token (fail closed)'),
+  'removed modes must be rejected before any private-source fetch');
 const generator = run(step('Generate the Xcode project'));
 const commands = 'ruby() { printf "ruby:%s\\n" "$*"; }\nxcodegen() { printf "xcodegen:%s\\n" "$*"; }\n';
 for (const [name, event, inputs, expected] of [
   ['push without inputs', 'push', {}, true],
-  ['push ignores dispatch comparison value', 'push', {native_only: false}, true],
+  ['push ignores dispatch-only value', 'push', {native_only: false}, true],
   ['default dispatch', 'workflow_dispatch', {native_only: defaultValue === 'true'}, true],
   ['explicit native dispatch', 'workflow_dispatch', {native_only: true}, true],
-  ['explicit legacy comparison', 'workflow_dispatch', {native_only: false}, false],
+  ['removed comparison dispatch', 'workflow_dispatch', {native_only: false}, false],
 ]) {
   const selected = evaluate({event_name: event}, inputs);
   assert.equal(selected, expected, name);
   const env = {VORTX_NATIVE_ONLY: String(selected)};
-  for (const proof of proofConditions) assert.equal(proof(env), expected, `${name}: native proof`);
-  assert.equal(comparisonRequired(env), !expected, `${name}: comparison guard`);
-  const routed = spawnSync('bash', ['-c', commands + generator], {cwd: root, encoding: 'utf8',
-    env: {...process.env, NATIVE_ONLY: env.VORTX_NATIVE_ONLY, VORTX_ENGINE_SOURCE_REVISION: '0'.repeat(40)}});
-  assert.equal(routed.status, 0, `${name}: ${routed.stderr}`);
+  assert.equal(rejectRequired(env), !expected, name + ': removed-mode guard');
+  const script = (rejectRequired(env) ? run(removedMode) + '\n' : '') + commands + generator;
+  const routed = spawnSync('bash', ['-euo', 'pipefail', '-c', script], {cwd: root, encoding: 'utf8',
+    env: {...process.env, ...env, VORTX_ENGINE_SOURCE_REVISION: '0'.repeat(40)}});
+  assert(!routed.error && routed.signal === null, name + ': fixture did not finish normally');
   if (expected) {
+    assert.equal(routed.status, 0, name + ': ' + routed.stderr);
     assert.match(routed.stdout, /ruby:..\/scripts\/generate-native-apple-project\.rb --engine-revision 0{40} /);
     assert.match(routed.stdout, /xcodegen:generate --spec \.native-project\.yml\n/);
+    assert(!/^xcodegen:generate$/m.test(routed.stdout), 'base-project fallback returned');
   } else {
-    assert.equal(routed.stdout, 'xcodegen:generate\n', 'explicit comparison keeps the legacy spec');
+    assert.notEqual(routed.status, 0, name + ': removed mode must fail');
+    assert(!/^(ruby|xcodegen):/m.test(routed.stdout), 'removed mode reached project generation');
   }
 }
-const comparisonScript = run(comparison);
-for (const [name, tag, id, publish, accepted] of [
-  ['artifact-only comparison', '', '', 'false', true],
-  ['comparison with release tag', 'v0.5.0-beta.1', '', 'false', false],
-  ['comparison with release ID', '', '123', 'false', false],
-  ['comparison publication', '', '', 'true', false],
-]) {
-  const result = spawnSync('bash', ['-c', comparisonScript], {encoding: 'utf8',
-    env: {...process.env, COMPARISON_RELEASE_TAG: tag, COMPARISON_RELEASE_ID: id, COMPARISON_PUBLISH: publish}});
-  assert.equal(result.status === 0, accepted, name);
-}
 NODE
-ok "actual Apple effective selector routes push/default dispatch and every proof to native; legacy comparison cannot ship"
+ok "Apple native-only routing rejects removed dispatch modes before fetch and keeps every native proof enabled"
 
 require_grep "Apple builds the native resource host" \
     'run: ./scripts/build-ffi-xcframework.sh --resource-host$' "$APPLE_RELEASE_WF"
@@ -255,13 +250,13 @@ require_grep "Apple owner-history ABI is an explicit additional symbol gate" \
     'mode.*!= owner-history.*expected.*owner_history_symbols' "$REPO_ROOT/scripts/verify-native-engine-abi.sh"
 require_grep "Mac server is built from the same pinned private workspace" \
     'run: ./scripts/build-mac-server.sh$' "$APPLE_RELEASE_WF"
+require_grep "Android engine always compiles the resource host" \
+    'add\("jni,server,resource-host"\)' "$GRADLE_BUILD"
 for wf in "$ANDROID_CI_WF" "$RELEASE_WF"; do
-    # Every engine-required Gradle invocation, including the separately signed
-    # build, must select the same resource-host feature set.
-    awk '/VORTX_REQUIRE_ENGINE: "1"/ { required++; waiting=1; next }
-         waiting { if ($0 !~ /VORTX_NATIVE_RESOURCE_HOST: "1"/) exit 1; enabled++; waiting=0 }
-         END { if (!required || required != enabled || waiting) exit 1 }' "$wf" ||
-        fail "$(basename "$wf") has an engine build without the resource host"
+    require_grep "$(basename "$wf") requires a freshly built engine" \
+        'VORTX_REQUIRE_ENGINE: "1"' "$wf"
+    require_absent "$(basename "$wf") never selects a removed engine mode" \
+        'vortx\.native(Engine|ResourceHost)=false|VORTX_NATIVE_(ENGINE|RESOURCE_HOST):' "$wf"
     require_grep "$(basename "$wf") invokes native-only staged/package verification" \
         '--native-only --staged-dir android/app/src/main/jniLibs' "$wf"
 done
@@ -522,14 +517,16 @@ require_grep "validation installs pinned XcodeGen" \
     'xcodegen.*--version' "$VALIDATION_WF"
 require_grep "validation generates CI-only stub engine xcframeworks" \
     'build-stub-engine-xcframeworks\.sh' "$VALIDATION_WF"
-require_grep "validation verifies StremioXCore stub marker" \
-    'StremioXCore\.xcframework/STUB-CI-ONLY\.txt' "$VALIDATION_WF"
+require_absent "validation never generates the removed legacy engine" \
+    'StremioXCore\.xcframework|stremiox_core_schema_version|fetch-node-macos\.sh' "$VALIDATION_WF"
+require_grep "validation verifies the CI-only Mac daemon marker" \
+    'vortx-streaming-server\.STUB-CI-ONLY\.txt' "$VALIDATION_WF"
 require_grep "validation verifies VortxEngine stub marker" \
     'VortxEngine\.xcframework/STUB-CI-ONLY\.txt' "$VALIDATION_WF"
 require_grep "validation proves the supported Full tvOS arm64 simulator link" \
-    'dd-tv".*both arm64' "$VALIDATION_WF"
+    'dd-tv".*in-process arm64' "$VALIDATION_WF"
 require_grep "validation proves the Lite x86_64 tvOS simulator link" \
-    'dd-tvlite-x86.*core-only x86_64' "$VALIDATION_WF"
+    'dd-tvlite-x86.*native x86_64' "$VALIDATION_WF"
 require_grep "stub engine preserves the real nested module map destination" \
     'header_dir="\$header_dir/vortx"' "$REPO_ROOT/scripts/build-stub-engine-xcframeworks.sh"
 require_grep "stub frameworks provide a universal simulator slice" \
@@ -538,8 +535,12 @@ require_grep "stub framework plist declares x86_64 simulator support" \
     'architectures.*x86_64' "$REPO_ROOT/scripts/build-stub-engine-xcframeworks.sh"
 require_grep "validation uses one supported PKCS12 password for store and key" \
     'ADHOC_KEY_PASS: vortx-adhoc-ci-store' "$VALIDATION_WF"
-require_grep "validation generates the Xcode project from project.yml" \
-    'xcodegen generate' "$VALIDATION_WF"
+require_grep "validation generates the native Xcode project" \
+    'xcodegen generate --spec \.native-ci-project\.yml' "$VALIDATION_WF"
+require_grep "validation invokes the same native generator as release packaging" \
+    'ruby ../scripts/generate-native-apple-project\.rb' "$VALIDATION_WF"
+require_grep "validation uses an explicit CI-only source sentinel" \
+    'engine-revision 0000000000000000000000000000000000000000' "$VALIDATION_WF"
 require_grep "validation builds tvOS shell via xcodebuild" \
     'build_shell VortXTV ' "$VALIDATION_WF"
 require_grep "validation builds tvOS Lite shell via xcodebuild" \
@@ -562,10 +563,38 @@ require_grep "validation resolves engine symbols from the selected executable" \
     'nm -gU "\$executable_dir/\$exe"' "$VALIDATION_WF"
 require_grep "validation verifies Mach-O executables in produced apps" \
     'Mach-O' "$VALIDATION_WF"
-require_grep "validation verifies linked engine symbols are resolved" \
-    '_stremiox_core_schema_version' "$VALIDATION_WF"
+require_grep "validation verifies linked native state symbols are resolved" \
+    '_vortx_init_from_state_json' "$VALIDATION_WF"
+require_grep "validation verifies linked native resource-host symbols are resolved" \
+    '_vortx_resource_host_new' "$VALIDATION_WF"
+require_grep "validation verifies linked in-process server symbols are resolved" \
+    '_vortx_server_start' "$VALIDATION_WF"
 require_grep "validation checks for unresolved engine symbols" \
     'unresolved engine symbols' "$VALIDATION_WF"
+
+# Compare the minimal hand-written stub declarations to the actual tracked public Swift calls.
+# This detects source/stub drift; it is not private ABI or runtime proof.
+node --input-type=module - "$REPO_ROOT" <<'NODE'
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {join} from 'node:path';
+const root = process.argv[2];
+const stub = readFileSync(join(root, 'scripts/build-stub-engine-xcframeworks.sh'), 'utf8');
+const header = stub.split('cat > "$ENGINE_STUB_SRC/vortx/vortx_ffi.h" <<\'EOF\'\n')[1]?.split('\nEOF')[0];
+assert.ok(header, 'actual CI header heredoc missing');
+const calls = text => new Set([...text.matchAll(/\bvortx_[A-Za-z0-9_]+\s*\(/g)].map(m => m[0].replace(/\s*\($/, '')));
+const publicSwift = ['VortxNativeRuntime.swift', 'VortxResourceBridge.swift',
+  'OwnerHistorySessionRuntime.swift', 'VortxNativeServer.swift'].map(name =>
+    readFileSync(join(root, 'app/SourcesShared', name), 'utf8')).join('\n');
+assert.deepEqual([...calls(header)].sort(), [...calls(publicSwift)].sort(),
+  'CI declarations must cover exactly the public Swift C call sites');
+assert.equal(calls(header).size, 24, 'review changed native stub surface explicitly');
+assert(!/CORE_STUB_SRC|generate_stub_framework "StremioXCore"/.test(stub),
+  'removed legacy stub generation returned');
+assert(stub.includes('int main(void) { return 78; }'), 'CI-only Mac executable must always fail closed');
+assert(stub.includes('vortx-streaming-server.STUB-CI-ONLY.txt'), 'CI-only Mac marker is required');
+NODE
+ok "CI stub surface covers all 24 public Swift calls and the Mac daemon stays unavailable"
 
 # --- Contract 3c: CI-only stub isolation (stubs never enter protected release lanes) ---------------
 # The stub engine xcframeworks exist ONLY for the secretless PR lane. Protected workflows

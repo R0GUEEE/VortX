@@ -14,6 +14,7 @@ import com.vortx.android.security.FailClosedCredentialStore
 import com.vortx.android.security.PersistentCredentialAvailability
 import com.vortx.android.profile.ProfileStore
 import com.vortx.android.profile.DashboardProfileEdits
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -40,6 +41,8 @@ import java.net.URLEncoder
 import java.net.URL
 import java.util.Collections
 import java.util.IdentityHashMap
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.ContinuationInterceptor
 
 /**
  * Publish the app-owned effective add-on removal set and its LWW stamps without replacing any other `vortx`
@@ -793,6 +796,11 @@ internal class DurablePendingSyncState(
 class VortXSyncManager internal constructor(context: Context, private val scope: CoroutineScope) {
     constructor(context: Context) : this(context, CoroutineScope(SupervisorJob() + Dispatchers.IO))
 
+    // Preserve the caller Job while running synchronous native/checkpoint work on the manager worker.
+    // The production worker is IO; injected test scopes keep their deterministic dispatcher.
+    private val nativeWorkDispatcher =
+        scope.coroutineContext[ContinuationInterceptor] as? CoroutineDispatcher ?: Dispatchers.IO
+
     /** The account fields the server returns (mirrors Apple `VortXSyncManager.Account`). */
     data class Account(
         val id: String,
@@ -954,7 +962,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         // Native receives can remain bodyless indefinitely. Exportable global edits must own
         // their own durable retry instead of waiting for an unrelated library/profile mutation.
         // Profile mirrors and remote application do not create a second upload intent.
-        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED && changed.any {
+        if (changed.any {
             it in SettingsBackup.SYNCABLE_SETTING_TYPES && it !in NATIVE_PROFILE_SETTING_KEYS
         }) armPendingSync(lease, recordEdit = true)
     }
@@ -1022,10 +1030,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         initialOwnerEpoch = initialSessionLoad.ownerEpochOrInitial(),
         persist = store::persist,
         clear = store::clear,
-        ownerTransition = { mutation ->
-            if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) mutation()
-            else metadataKeys.runOwnerTransition { debridKeys.runOwnerTransition(mutation) }
-        },
+        ownerTransition = { mutation -> mutation() },
     )
     private val operations = SessionOperationCoordinator()
 
@@ -1041,7 +1046,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     )
 
     private val _syncProblem = MutableStateFlow<String?>(null)
-    /** A terminal writer incompatibility, surfaced by the existing account status line. */
+    /** Writer/engine incompatibility, surfaced by the existing account status line. */
     val syncProblem: StateFlow<String?> = _syncProblem.asStateFlow()
     @Volatile private var upgradeRequiredLease: SyncSessionLease? = null
 
@@ -1055,6 +1060,23 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         publishIfSyncLeaseCurrent(lease) {
             upgradeRequiredLease = lease
             _syncProblem.value = "Update VortX to keep syncing. Your changes are still on this device."
+        }
+    }
+
+    private fun markNativeAccountUnavailable(lease: SyncSessionLease, gateway: NativeAccountGateway) {
+        var firstNotice = false
+        publishIfSyncLeaseCurrent(lease) {
+            if (nativeGateway === gateway && !requiresUpgrade(lease)) {
+                firstNotice = _syncProblem.value != NATIVE_ACCOUNT_UNAVAILABLE
+                _syncProblem.value = NATIVE_ACCOUNT_UNAVAILABLE
+            }
+        }
+        if (firstNotice) DiagnosticsLog.log("native-account", "sync result=failed reason=native_linkage_unavailable")
+    }
+
+    private fun clearNativeAccountUnavailable(lease: SyncSessionLease, gateway: NativeAccountGateway) {
+        publishIfSyncLeaseCurrent(lease) {
+            if (nativeGateway === gateway && _syncProblem.value == NATIVE_ACCOUNT_UNAVAILABLE) _syncProblem.value = null
         }
     }
 
@@ -1129,7 +1151,6 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     }
 
     internal fun attachNativeGateway(gateway: NativeAccountGateway) {
-        check(com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED)
         nativeGateway = gateway
         bindNativeProviders()
         scope.launch { syncDown(force = true) }
@@ -1139,7 +1160,6 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         } }
     }
     internal fun installNativeGatewayTestSeam(gateway: NativeAccountGateway, credentials: com.vortx.android.integrations.CredentialStoreAccess? = null) {
-        check(com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED)
         nativeGateway = gateway
         if (credentials != null) { nativeProviderStore = credentials; nativeProviderTestStore = true }
         bindNativeProviders()
@@ -1351,6 +1371,18 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
 
     // MARK: - Flows
 
+    /** The holder owns the worker result until the caller has resumed without prompt cancellation. */
+    private suspend fun deriveAuthKey(derive: () -> ByteArray): ByteArray {
+        val pending = AtomicReference<ByteArray?>()
+        try {
+            // Return Unit across the dispatcher boundary; a raw key cannot be lost during cancellation.
+            withContext(Dispatchers.Default) { pending.set(derive()) }
+            return checkNotNull(pending.getAndSet(null))
+        } finally {
+            pending.getAndSet(null)?.fill(0)
+        }
+    }
+
     /**
      * Create an account. Generates the kdf salt, derives the master key, mints a random data key + a
      * recovery code, wraps the data key under BOTH the master key and the recovery key, and posts the
@@ -1361,63 +1393,71 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         val operation = beginAuthOperation()
         val kdfSalt = VortXCrypto.randomBytes(16)
         val iters = VortXCrypto.DEFAULT_ITERS
-        val masterKey = VortXCrypto.masterKey(password, kdfSalt, iters)
-        val dataKey = VortXCrypto.randomBytes(32)
-        val recoveryCode = VortXCrypto.makeRecoveryCode()
-        val recoveryKey = VortXCrypto.recoveryKey(recoveryCode, kdfSalt, iters)
-        val wrappedPw = VortXCrypto.seal(masterKey, dataKey)
-        val wrappedRec = VortXCrypto.seal(recoveryKey, dataKey)
-        if (wrappedPw == null || wrappedRec == null) {
-            return RegisterResult(AuthResult.Failed("Could not set up encryption."), null)
-        }
-        val body = JSONObject().apply {
-            put("email", email)
-            put("username", username)
-            put("kdfSalt", VortXCrypto.b64(kdfSalt))
-            put("kdfIters", iters)
-            put("authVerifier", VortXCrypto.authVerifier(masterKey, password))
-            put("wrappedKeyPassword", wrappedPw)
-            put("wrappedKeyRecovery", wrappedRec)
-            put("recVerifier", VortXCrypto.recVerifier(recoveryKey, recoveryCode))
-            // Sent ONLY so the worker can put it in the welcome email; it is never stored server-side (the
-            // worker marks it "NEVER written to the DB"), matching Apple's register body. Without it the
-            // welcome email falls back to a generic "save your code" note.
-            put("recoveryCode", recoveryCode)
-        }
-        if (!operation.isCurrent()) {
-            return RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
-        }
-        val callPermit = operation.acquireCallPermit()
-            ?: return RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
-        val (code, json) = request(
-            "POST",
-            "/v1/auth/register",
-            body,
-            callPermit = callPermit,
-        )
-        if (!operation.isCurrent()) {
-            val created = code == 200 && !json?.optString("token").isNullOrEmpty()
-            return if (created) {
-                RegisterResult.superseded(recoveryCode)
-            } else {
-                RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
+        val masterKey = deriveAuthKey { VortXCrypto.masterKey(password, kdfSalt, iters) }
+        try {
+            val dataKey = VortXCrypto.randomBytes(32)
+            val recoveryCode = VortXCrypto.makeRecoveryCode()
+            val recoveryKey = deriveAuthKey { VortXCrypto.recoveryKey(recoveryCode, kdfSalt, iters) }
+            try {
+                val wrappedPw = VortXCrypto.seal(masterKey, dataKey)
+                val wrappedRec = VortXCrypto.seal(recoveryKey, dataKey)
+                if (wrappedPw == null || wrappedRec == null) {
+                    return RegisterResult(AuthResult.Failed("Could not set up encryption."), null)
+                }
+                val body = JSONObject().apply {
+                    put("email", email)
+                    put("username", username)
+                    put("kdfSalt", VortXCrypto.b64(kdfSalt))
+                    put("kdfIters", iters)
+                    put("authVerifier", VortXCrypto.authVerifier(masterKey, password))
+                    put("wrappedKeyPassword", wrappedPw)
+                    put("wrappedKeyRecovery", wrappedRec)
+                    put("recVerifier", VortXCrypto.recVerifier(recoveryKey, recoveryCode))
+                    // Sent ONLY so the worker can put it in the welcome email; it is never stored server-side (the
+                    // worker marks it "NEVER written to the DB"), matching Apple's register body. Without it the
+                    // welcome email falls back to a generic "save your code" note.
+                    put("recoveryCode", recoveryCode)
+                }
+                if (!operation.isCurrent()) {
+                    return RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
+                }
+                val callPermit = operation.acquireCallPermit()
+                    ?: return RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
+                val (code, json) = request(
+                    "POST",
+                    "/v1/auth/register",
+                    body,
+                    callPermit = callPermit,
+                )
+                if (!operation.isCurrent()) {
+                    val created = code == 200 && !json?.optString("token").isNullOrEmpty()
+                    return if (created) {
+                        RegisterResult.superseded(recoveryCode)
+                    } else {
+                        RegisterResult(AuthResult.Failed(AUTH_SUPERSEDED), null)
+                    }
+                }
+                val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
+                val acct = json?.optJSONObject("account")
+                if (code == 200 && token != null && acct != null) {
+                    return when (adopt(operation, token, acct, dataKey)) {
+                        SessionAdoption.ADOPTED -> RegisterResult(AuthResult.Ok, recoveryCode)
+                        SessionAdoption.STALE -> RegisterResult.superseded(recoveryCode)
+                        SessionAdoption.STORAGE_FAILURE -> RegisterResult.secureStorageFailure(recoveryCode)
+                    }
+                }
+                val message = when (json?.optString("error")) {
+                    "email_taken" -> "That email is already registered."
+                    "username_taken" -> "That username is taken."
+                    else -> "Could not create the account."
+                }
+                return RegisterResult(AuthResult.Failed(message), null)
+            } finally {
+                recoveryKey.fill(0)
             }
+        } finally {
+            masterKey.fill(0)
         }
-        val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
-        val acct = json?.optJSONObject("account")
-        if (code == 200 && token != null && acct != null) {
-            return when (adopt(operation, token, acct, dataKey)) {
-                SessionAdoption.ADOPTED -> RegisterResult(AuthResult.Ok, recoveryCode)
-                SessionAdoption.STALE -> RegisterResult.superseded(recoveryCode)
-                SessionAdoption.STORAGE_FAILURE -> RegisterResult.secureStorageFailure(recoveryCode)
-            }
-        }
-        val message = when (json?.optString("error")) {
-            "email_taken" -> "That email is already registered."
-            "username_taken" -> "That username is taken."
-            else -> "Could not create the account."
-        }
-        return RegisterResult(AuthResult.Failed(message), null)
     }
 
     /**
@@ -1442,36 +1482,40 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         // Reject a downgraded work factor from the UNAUTHENTICATED prelogin response before deriving the key.
         if (iters < VortXCrypto.MIN_ITERS) return AuthResult.Failed("Could not verify VortX security parameters. Try again.")
 
-        val masterKey = VortXCrypto.masterKey(password, salt, iters)
-        val body = JSONObject().apply {
-            put("login", login)
-            put("authVerifier", VortXCrypto.authVerifier(masterKey, password))
-            if (!totp.isNullOrEmpty()) put("totp", totp)
-        }
-        if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
-        val loginPermit = operation.acquireCallPermit()
-            ?: return AuthResult.Failed(AUTH_SUPERSEDED)
-        val (code, json) = request(
-            "POST",
-            "/v1/auth/login",
-            body,
-            callPermit = loginPermit,
-        )
-        if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
-        if (code == 401 && json?.optString("error") == "totp_required") return AuthResult.TotpRequired
-
-        val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
-        val acct = json?.optJSONObject("account")
-        val wrappedPw = json?.optString("wrappedKeyPassword").takeUnless { it.isNullOrEmpty() }
-        val dataKey = wrappedPw?.let { VortXCrypto.open(masterKey, it) }
-        if (code == 200 && token != null && acct != null && dataKey != null) {
-            return when (adopt(operation, token, acct, dataKey)) {
-                SessionAdoption.ADOPTED -> AuthResult.Ok
-                SessionAdoption.STALE -> AuthResult.Failed(AUTH_SUPERSEDED)
-                SessionAdoption.STORAGE_FAILURE -> AuthResult.Failed(SESSION_STORAGE_FAILURE)
+        val masterKey = deriveAuthKey { VortXCrypto.masterKey(password, salt, iters) }
+        try {
+            val body = JSONObject().apply {
+                put("login", login)
+                put("authVerifier", VortXCrypto.authVerifier(masterKey, password))
+                if (!totp.isNullOrEmpty()) put("totp", totp)
             }
+            if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
+            val loginPermit = operation.acquireCallPermit()
+                ?: return AuthResult.Failed(AUTH_SUPERSEDED)
+            val (code, json) = request(
+                "POST",
+                "/v1/auth/login",
+                body,
+                callPermit = loginPermit,
+            )
+            if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
+            if (code == 401 && json?.optString("error") == "totp_required") return AuthResult.TotpRequired
+
+            val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
+            val acct = json?.optJSONObject("account")
+            val wrappedPw = json?.optString("wrappedKeyPassword").takeUnless { it.isNullOrEmpty() }
+            val dataKey = wrappedPw?.let { VortXCrypto.open(masterKey, it) }
+            if (code == 200 && token != null && acct != null && dataKey != null) {
+                return when (adopt(operation, token, acct, dataKey)) {
+                    SessionAdoption.ADOPTED -> AuthResult.Ok
+                    SessionAdoption.STALE -> AuthResult.Failed(AUTH_SUPERSEDED)
+                    SessionAdoption.STORAGE_FAILURE -> AuthResult.Failed(SESSION_STORAGE_FAILURE)
+                }
+            }
+            return AuthResult.Failed(if (code == 401) "Wrong login or password." else "Could not sign in.")
+        } finally {
+            masterKey.fill(0)
         }
-        return AuthResult.Failed(if (code == 401) "Wrong login or password." else "Could not sign in.")
     }
 
     /** Start the joiner side of VortX account device pairing. */
@@ -1565,37 +1609,45 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         // Same downgrade guard as signIn: recover-start is unauthenticated too.
         if (iters < VortXCrypto.MIN_ITERS) return AuthResult.Failed("Could not verify VortX security parameters. Try again.")
 
-        val recoveryKey = VortXCrypto.recoveryKey(trimmed, salt, iters)
-        val dataKey = VortXCrypto.open(recoveryKey, wrappedRec) ?: return AuthResult.Failed("That recovery code is not correct.")
-        // Keep the existing kdfSalt (it also derives the recovery key); derive the new master from it.
-        val newMaster = VortXCrypto.masterKey(newPassword, salt, iters)
-        val wrappedPw = VortXCrypto.seal(newMaster, dataKey) ?: return AuthResult.Failed("Could not re-encrypt.")
-        val body = JSONObject().apply {
-            put("email", email)
-            put("recVerifier", VortXCrypto.recVerifier(recoveryKey, trimmed))
-            put("newAuthVerifier", VortXCrypto.authVerifier(newMaster, newPassword))
-            put("newWrappedKeyPassword", wrappedPw)
-        }
-        if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
-        val completePermit = operation.acquireCallPermit()
-            ?: return AuthResult.Failed(AUTH_SUPERSEDED)
-        val (code, json) = request(
-            "POST",
-            "/v1/auth/recover-complete",
-            body,
-            callPermit = completePermit,
-        )
-        if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
-        val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
-        val acct = json?.optJSONObject("account")
-        if (code == 200 && token != null && acct != null) {
-            return when (adopt(operation, token, acct, dataKey)) {
-                SessionAdoption.ADOPTED -> AuthResult.Ok
-                SessionAdoption.STALE -> AuthResult.Failed(AUTH_SUPERSEDED)
-                SessionAdoption.STORAGE_FAILURE -> AuthResult.Failed(SESSION_STORAGE_FAILURE)
+        val recoveryKey = deriveAuthKey { VortXCrypto.recoveryKey(trimmed, salt, iters) }
+        try {
+            val dataKey = VortXCrypto.open(recoveryKey, wrappedRec) ?: return AuthResult.Failed("That recovery code is not correct.")
+            // Keep the existing kdfSalt (it also derives the recovery key); derive the new master from it.
+            val newMaster = deriveAuthKey { VortXCrypto.masterKey(newPassword, salt, iters) }
+            try {
+                val wrappedPw = VortXCrypto.seal(newMaster, dataKey) ?: return AuthResult.Failed("Could not re-encrypt.")
+                val body = JSONObject().apply {
+                    put("email", email)
+                    put("recVerifier", VortXCrypto.recVerifier(recoveryKey, trimmed))
+                    put("newAuthVerifier", VortXCrypto.authVerifier(newMaster, newPassword))
+                    put("newWrappedKeyPassword", wrappedPw)
+                }
+                if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
+                val completePermit = operation.acquireCallPermit()
+                    ?: return AuthResult.Failed(AUTH_SUPERSEDED)
+                val (code, json) = request(
+                    "POST",
+                    "/v1/auth/recover-complete",
+                    body,
+                    callPermit = completePermit,
+                )
+                if (!operation.isCurrent()) return AuthResult.Failed(AUTH_SUPERSEDED)
+                val token = json?.optString("token").takeUnless { it.isNullOrEmpty() }
+                val acct = json?.optJSONObject("account")
+                if (code == 200 && token != null && acct != null) {
+                    return when (adopt(operation, token, acct, dataKey)) {
+                        SessionAdoption.ADOPTED -> AuthResult.Ok
+                        SessionAdoption.STALE -> AuthResult.Failed(AUTH_SUPERSEDED)
+                        SessionAdoption.STORAGE_FAILURE -> AuthResult.Failed(SESSION_STORAGE_FAILURE)
+                    }
+                }
+                return AuthResult.Failed("Recovery failed.")
+            } finally {
+                newMaster.fill(0)
             }
+        } finally {
+            recoveryKey.fill(0)
         }
-        return AuthResult.Failed("Recovery failed.")
     }
 
     /** Sign out only after the encrypted session clear succeeds. */
@@ -1875,8 +1927,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         if (!isSyncLeaseCurrent(lease)) return SyncDocPull.Failed
         if (code == 304) return if (ifNoneMatch != null && etag == "\"$ifNoneMatch\"")
             SyncDocPull.Unchanged(ifNoneMatch) else SyncDocPull.Failed
-        if (code == 404) return if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED &&
-            (lastSyncedVersion(lease) > 0 || syncState.nativeBackupSeen(lease.accountId))) SyncDocPull.Failed
+        if (code == 404) return if (lastSyncedVersion(lease) > 0 || syncState.nativeBackupSeen(lease.accountId)) SyncDocPull.Failed
             else SyncDocPull.Empty(BackupReadWitness(lease, null))
         if (code != 200) return SyncDocPull.Failed                // network/server error: do not clobber
         val body = json ?: return SyncDocPull.Failed
@@ -1888,14 +1939,10 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         // applies any other stale account data. A real server only returns a version >= our high-water mark.
         if (pulledVersion < lastSyncedVersion(lease) && !allowOlderAddonTombstones) return SyncDocPull.Failed
         val plaintext = openSyncDocument(lease, docStr, pulledVersion) ?: return SyncDocPull.Failed
-        val obj = runCatching { if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED)
-            com.vortx.android.engine.NativeProfileOverlayWitness.parseAccountDocument(plaintext)
-            else JSONObject(String(plaintext, Charsets.UTF_8)) }.getOrNull()
+        val obj = runCatching { com.vortx.android.engine.NativeProfileOverlayWitness.parseAccountDocument(plaintext) }.getOrNull()
             ?: return SyncDocPull.Failed                          // undecodable plaintext: do not clobber
-        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) {
-            var remembered = false
-            if (!publishIfSyncLeaseCurrent(lease) { remembered = syncState.markNativeBackupSeen(lease.accountId) } || !remembered) return SyncDocPull.Failed
-        }
+        var remembered = false
+        if (!publishIfSyncLeaseCurrent(lease) { remembered = syncState.markNativeBackupSeen(lease.accountId) } || !remembered) return SyncDocPull.Failed
         return if (isSyncLeaseCurrent(lease)) {
             SyncDocPull.Doc(obj, BackupReadWitness(lease, pulledVersion), plaintext.copyOf())
         } else {
@@ -1955,13 +2002,10 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         if (code != 200) return PushOutcome.Error
         val accepted = json?.opt("accepted") as? Boolean ?: return PushOutcome.Error
         if (accepted) {
-            if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) {
-                var remembered = false
-                if (!publishIfSyncLeaseCurrent(lease) { remembered = syncState.markNativeBackupSeen(lease.accountId) } || !remembered) return PushOutcome.Error
-            }
+            var remembered = false
+            if (!publishIfSyncLeaseCurrent(lease) { remembered = syncState.markNativeBackupSeen(lease.accountId) } || !remembered) return PushOutcome.Error
             // Native acceptance is not yet a completed local transaction (seed apply, host and
             // credential receipts can still fail). Its caller stamps only after those all succeed.
-            if (!com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED && !advanceVersion(lease, version)) return PushOutcome.Error
             return PushOutcome.Accepted(version)
         }
         // A winner echo is not the base of our document. Only a fresh authenticated GET + merge
@@ -1993,7 +2037,6 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
 
     private fun candidateIsCurrent(lease: SyncSessionLease, candidate: DerivedBackup): Boolean {
         if (candidate.witness.lease !== lease || !isSyncLeaseCurrent(lease)) return false
-        if (!com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return true
         if (candidate.gateway !== nativeGateway) return false
         // New edits on this same mount remain pending through exact carrier ACK. A replacement
         // installation can never send or acknowledge a candidate captured by the retired mount.
@@ -2060,30 +2103,20 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
 
     private suspend fun syncUp(lease: SyncSessionLease): Boolean {
         if (!isSyncLeaseCurrent(lease) || requiresUpgrade(lease)) return false
-        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { nativeSyncMutex.withLock { nativeSyncUp(lease) } }
+        return try { withContext(nativeWorkDispatcher) {
+            nativeSyncMutex.withLock {
+                val gateway = nativeGateway ?: return@withLock false
+                runNativeAccountAttempt(onUnavailable = { markNativeAccountUnavailable(lease, gateway) }) {
+                    nativeSyncUp(lease, gateway)
+                }.also { if (it) clearNativeAccountUnavailable(lease, gateway) }
+            }
+        } }
             catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
             catch (_: Exception) { false }
-        // Stamp snapshot taken when the push BEGINS, before the blob is built: a key re-edited while this
-        // push is in flight gets a newer stamp and stays dirty (its newer value was not necessarily carried).
-        val pushedStamps = readDirtySettings()
-        val pushedAddonOrder = addonPrefs.orderDirtyAt()
-        val initial = mergeLocalIntoDoc(lease) ?: return false    // failed pull: never overwrite the account doc
-        if (!isSyncLeaseCurrent(lease)) return false
-        val synced = pushDerivedDoc(lease, initial) { mergeLocalIntoDoc(lease) }
-        // Only a CONFIRMED push clears its stamps; a failed/lost push leaves every key dirty so the next
-        // pull cannot clobber the un-pushed local edits.
-        if (synced && isSyncLeaseCurrent(lease)) {
-            syncLeaseAdmission(lease).invoke {
-                clearPushedDirtySettings(pushedStamps)
-                addonPrefs.clearPushedOrderDirty(pushedAddonOrder)
-                true
-            }
-        }
-        return synced && isSyncLeaseCurrent(lease)
     }
 
-    private suspend fun nativeSyncDown(lease: SyncSessionLease, force: Boolean = false, routineReceive: Boolean = false): Boolean {
-        val gateway = nativeGateway ?: return false
+    private suspend fun nativeSyncDown(lease: SyncSessionLease, gateway: NativeAccountGateway, force: Boolean = false, routineReceive: Boolean = false): Boolean {
+        if (gateway !== nativeGateway) return false
         val account = SessionOwnerSnapshot.Account(lease.accountId, lease.ownerEpoch)
         if (force) nativeReceiveReceipt = null
         val conditionalVersion = if (routineReceive && !force) conditionalReceiveVersion(lease, gateway) else null
@@ -2106,7 +2139,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         }
         nativeReceiveReceipt = null
         if (pulled is SyncDocPull.Empty) {
-            return nativeSyncUp(lease)
+            return nativeSyncUp(lease, gateway)
         }
         val pull = pulled as? SyncDocPull.Doc ?: return false
         if (!isSyncLeaseCurrent(lease)) return false
@@ -2182,8 +2215,8 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         }
     }
 
-    private suspend fun nativeSyncUp(lease: SyncSessionLease): Boolean {
-        val gateway = nativeGateway ?: return false
+    private suspend fun nativeSyncUp(lease: SyncSessionLease, gateway: NativeAccountGateway): Boolean {
+        if (gateway !== nativeGateway) return false
         val account = SessionOwnerSnapshot.Account(lease.accountId, lease.ownerEpoch)
         var pushedStamps: Map<String, Double> = emptyMap()
         var pushedPreferences: JSONObject? = null
@@ -2621,158 +2654,18 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         lease: SyncSessionLease,
         force: Boolean = false,
         routineReceive: Boolean = false,
-        onComparisonReceiveCompleted: () -> Unit = {},
     ): Boolean {
         if (!isSyncLeaseCurrent(lease)) return false
-        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { nativeSyncMutex.withLock { nativeSyncDown(lease, force, routineReceive) } }
+        return try { withContext(nativeWorkDispatcher) {
+            nativeSyncMutex.withLock {
+                val gateway = nativeGateway ?: return@withLock false
+                runNativeAccountAttempt(onUnavailable = { markNativeAccountUnavailable(lease, gateway) }) {
+                    nativeSyncDown(lease, gateway, force, routineReceive)
+                }.also { if (it) clearNativeAccountUnavailable(lease, gateway) }
+            }
+        } }
             catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
             catch (_: Exception) { false }
-        // PENDING-EDIT GUARD: restore a durable process-death marker and retry its push before any
-        // foreground pull. Even a forced pull must not overwrite a fresh local edit.
-        if (retryPendingPushBeforePull(lease)) return false
-        val pull = pullSyncDocResult(lease, allowOlderAddonTombstones = true)
-        if (!isSyncLeaseCurrent(lease)) return false
-        if (retryPendingPushBeforePull(lease)) return false
-        val doc: JSONObject
-        val version: Long
-        when (pull) {
-            is SyncDocPull.Doc -> { doc = pull.doc; version = pull.version }
-            else -> return false                                 // .empty / .failed: never wipe local
-        }
-        val parsed = VortXSyncDoc.parse(doc)
-        val lastVersion = lastSyncedVersion(lease)
-        var libraryTombstonesChanged = false
-        var addonTombstonesChanged = false
-        var shouldApplyVersionedPayload = false
-        val foldedTombstones = withContext(Dispatchers.Main) {
-            publishIfSyncLeaseCurrent(lease) {
-                applyingRemote = true
-                try {
-                    // Always fold LWW add-on state from a successfully decrypted doc before the version gate.
-                    // This is safe on stale/equal/forced pulls because every stamp only advances by max, and
-                    // it lets a newer peer reinstall (addedAt) make a previously removed URL present again.
-                    // Fold the persistent, stamp-less web mirror second and only here: merge mints it only
-                    // for an entirely untracked URL, so a known explicit Android install is never re-removed.
-                    val addonFold = foldAddonTombstonesForSyncDown(
-                        tombstones = addonTombstones,
-                        parsed = parsed,
-                        pulledVersion = version,
-                        lastSyncedVersion = lastVersion,
-                        force = force,
-                    )
-                    addonTombstonesChanged = addonFold.changed
-                    shouldApplyVersionedPayload = addonFold.shouldApplyVersionedPayload
-                    if (addonTombstonesChanged) {
-                        doc.optJSONObject("vortx")?.let { applyAddonTombstonesToVortx(it, addonTombstones) }
-                    }
-                    // An older authenticated document is permitted only to contribute the add-on MAX fold above.
-                    // Its library tombstones and every versioned account field remain behind the H-2 barrier.
-                    if (
-                        addonFold.shouldFoldLibraryTombstones &&
-                            (parsed.deletedLibrary.isNotEmpty() || OwnerLibraryHistoryPolicy.canonicalLibraryTombstones(parsed).isNotEmpty())
-                    ) {
-                        libraryTombstonesChanged = libraryTombstones.merge(
-                            parsed.deletedLibrary,
-                            OwnerLibraryHistoryPolicy.canonicalLibraryTombstones(parsed),
-                        )
-                        refreshSettingsShadow()
-                        if (libraryTombstonesChanged) {
-                            doc.optJSONObject("vortx")?.let(::applyLibraryTombstonesToVortx)
-                        }
-                    }
-                } finally {
-                    applyingRemote = false
-                }
-            }
-        }
-        if (!foldedTombstones || !isSyncLeaseCurrent(lease)) return false
-        if (libraryTombstonesChanged || addonTombstonesChanged) requestSyncSoon()
-        // An older/equal authenticated envelope may advance only LWW tombstones. Enforce those removals
-        // immediately, but never hydrate descriptors or apply order until the normal version gate opens.
-        if (addonTombstonesChanged && !enforceRemovedAccountAddons(lease)) return false
-        // VERSION-WINS: profile/settings data applies only from a STRICTLY-NEWER remote. Equal docs may run a
-        // forced explicit restore, while an older authenticated doc contributes only add-on tombstone stamps.
-        if (!shouldApplyVersionedPayload) {
-            return libraryTombstonesChanged || addonTombstonesChanged
-        }
-        if (!syncLeaseAdmission(lease).invoke { ownerWatchedIntents.merge(lease.accountId, doc.optJSONObject("vortx")?.optJSONObject("ownerWatched")) }) return false
-        libraryGateway?.let { gateway ->
-            gateway.captureAccountLibraryLease()?.let { native ->
-                if (!gateway.ownerWatchedChanged(native, syncLeaseAdmission(lease))) return false
-            }
-        }
-        versionedPayloadTestObserver?.invoke()
-        val resolvedRoster = SettingsBackup.resolveRosterForPull(
-            pulledBlob = doc.opt("settings"),
-            fallbackRoster = parsed.roster,
-            fallbackModifiedSeconds = parsed.rosterModifiedSeconds,
-            fallbackIsLossless = parsed.rosterIsLossless,
-        )
-        var restored = libraryTombstonesChanged || addonTombstonesChanged
-        val published = withContext(Dispatchers.Main) {
-            val store = resolveStore() ?: return@withContext false
-            publishIfSyncLeaseCurrent(lease) {
-                applyingRemote = true                            // the whole apply must not arm a self-echo push
-                try {
-                    // TOMBSTONES FIRST so the roster union below can never resurrect a deleted profile
-                    // (tombstone-vs-resurrection precedence). mergeDeletedTombstones also prunes the live roster.
-                    if (parsed.deletedProfiles.isNotEmpty() &&
-                        store.mergeDeletedTombstones(parsed.deletedProfiles)
-                    ) {
-                        restored = true
-                    }
-                    // Roster UNION (never shrinks local; newest-wins by epoch-SECONDS; subtracts tombstones).
-                    resolvedRoster.roster?.let { remote ->
-                        if (remote.isNotEmpty()) {
-                            foldNativeProfileRoster(store, doc, remote, resolvedRoster.modifiedSeconds, parsed.rosterIsLossless)
-                            restored = true
-                        }
-                    }
-                    if (foldDashboardProfileEdits(store, doc)) restored = true
-                    // Per-profile watch overlays: union + LWW by lastWatched, never touching owner/engine history.
-                    if (parsed.overlays.isNotEmpty()) {
-                        for ((profileId, entries) in parsed.overlays) {
-                            store.applyRemoteOverlay(profileId, entries)
-                        }
-                        restored = true
-                    }
-                    // Re-assert this session's local deletes after the fold: a profile deleted this session stays
-                    // gone even if the pulled doc predates its tombstone (the resurrect window).
-                    store.applyLocalTombstones()
-                    // gap 1: adopt the account's GLOBAL app settings (theme, subtitle style, player toggles,
-                    // home/discover layout, ...). Never-wipe: only keys the blob carries are written; a key it
-                    // omits keeps this device's own value. Under applyingRemote so these writes never arm a push.
-                    if (applyDeviceSettings(doc.opt("settings"))) restored = true
-                } finally {
-                    applyingRemote = false
-                }
-            }
-        }
-        if (!published || !isSyncLeaseCurrent(lease)) return false
-        // Account add-on descriptors/order are versioned payload. Every native mutation is lease-fenced so
-        // an account switch cannot install, remove, or reorder against the new session's engine state.
-        if (applyRemoteAccountAddons(lease, parsed)) restored = true
-        // A failed receipt must leave this version retryable; other fields may already have converged.
-        if (!applyRemoteOwnerLibrary(lease, parsed)) return false
-        if (parsed.ownerLibrary?.isNotEmpty() == true) restored = true
-        if (!isSyncLeaseCurrent(lease)) return false
-        // gap 2: adopt connected-service (debrid) keys set on another device. Applied off the Main thread
-        // (DebridKeys is thread-safe and its writes do not arm a push, so this needs no Main hop or the
-        // applyingRemote window). Owner-scoped by DebridKeys' account binding; never clears a key the blob omits.
-        val apiKeys = doc.optJSONObject("apiKeys")
-        if (applyDebridKeys(apiKeys)) restored = true
-        if (applyMetadataKeys(apiKeys)) restored = true
-        // Stamp the applied version so the version-wins guard holds across relaunches (per account).
-        if (!advanceVersion(lease, version)) return false
-        // STARTUP HEAL: a settings key that is STILL dirty after this pull (a previous session's edit whose
-        // debounced push never landed) needs its own push so the account converges on the local value.
-        // Debounced and self-gated; the push reads LOCAL values (local wins) and clears the stamps it carries.
-        if (readDirtySettings().isNotEmpty()) requestSyncSoon()
-        // Comparison mode's return value describes changed fields, not admission. A valid no-op
-        // restore is complete only here, after publication/library receipts and durable revision ACK.
-        if (!isSyncLeaseCurrent(lease)) return false
-        onComparisonReceiveCompleted()
-        return restored
     }
 
     /** Remove only add-ons with an effective tombstone; repository skips protected engine stubs. */
@@ -3135,10 +3028,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     /** Conflict resolution: adopt the account's roster (forced). Still UNIONs, so no local-only profile is lost. */
     suspend fun useAccountData(): Boolean {
         val lease = captureSyncLease() ?: return false
-        var comparisonReceiveCompleted = false
-        val restored = syncDown(lease, force = true,
-            onComparisonReceiveCompleted = { comparisonReceiveCompleted = true })
-        val received = if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) restored else comparisonReceiveCompleted
+        val received = syncDown(lease, force = true)
         return received && isSyncLeaseCurrent(lease)
     }
 
@@ -3183,8 +3073,8 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         if (retryPendingPushBeforePull(lease)) return false
         val received = syncDown(lease, force = true)
         // Native receive reports admission/publication success. A later push cannot settle a failed
-        // account restore. The comparison path's Boolean still means "some field was restored".
-        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED && !received) return false
+        // account restore.
+        if (!received) return false
         if (!isSyncLeaseCurrent(lease)) return false
         if (retryPendingPushBeforePull(lease)) return false
         val pushed = syncUp(lease)
@@ -3234,7 +3124,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
             captureSyncLease()
                 ?.takeIf { it.accountId == account.id && it.token == token }
                 ?.let { armPendingSync(it, recordEdit = false) }
-            if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) scope.launch { syncDown(force = true) }
+            scope.launch { syncDown(force = true) }
         }
         return adoption
     }
@@ -3507,6 +3397,8 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
             "Secure storage is unavailable. Your VortX session was not changed. Please try again."
         private const val AUTH_SUPERSEDED =
             "This account action was superseded by a newer sign-in or sign-out."
+        private const val NATIVE_ACCOUNT_UNAVAILABLE =
+            "The native engine is unavailable or incompatible. Your saved data and pending changes are preserved. Update VortX or export diagnostics, then retry sync."
 
         /**
          * The v2 sync-document WRITE gate, held FALSE. Matches Apple `VortXSyncManager.writeSyncDocV2`

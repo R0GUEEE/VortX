@@ -1,7 +1,5 @@
 import Foundation
-#if canImport(VortxEngine) && VORTX_ENGINE_RESOURCE_HOST
 import VortxEngine
-#endif
 
 /// Lossless JSON at the addon boundary: preserve headers, subtitle options, binge hints and
 /// provider extensions instead of rebuilding a reduced stream from a ranking decision.
@@ -281,7 +279,6 @@ final class VortxResourceBridge: @unchecked Sendable {
     }
 }
 
-#if canImport(VortxEngine) && VORTX_ENGINE_RESOURCE_HOST
 /// Artifact-gated live transport. No shared mutable kernel handle participates in network calls.
 final class VortxCResourceTransport: VortxResourceTransport, @unchecked Sendable {
     private let host: UnsafeMutableRawPointer
@@ -309,4 +306,3 @@ final class VortxCResourceTransport: VortxResourceTransport, @unchecked Sendable
         func cancel() { vortx_cancel_cancel(handle) }
     }
 }
-#endif

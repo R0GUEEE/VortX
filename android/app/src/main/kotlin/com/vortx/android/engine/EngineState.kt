@@ -35,7 +35,7 @@ internal sealed interface AuthAttemptOutcome {
     data class Failed(override val requestId: String, val message: String) : AuthAttemptOutcome
 }
 
-/// Decoders that turn the engine's JSON state (as returned by [StremioCoreNative.getState]) into the
+/// Decoders that turn the engine's JSON state (as returned by the engine) into the
 /// Android domain models the Compose UI renders. The shapes mirror the Apple `CoreModels` Codable
 /// structs exactly (same serde output): `_id`, `posterShape`, snake_case nested keys, and the
 /// `Loadable` wrapper `{ "type": "Ready", "content": ... }`.
@@ -177,7 +177,7 @@ internal object EngineState {
         val items = mutableListOf<MetaItem>()
         // GROUP 2a fix (device-verified crash: "Discover Load more"): "Load more" appends the NEXT
         // page's `catalog` entry onto this same flattened array (see [EngineActions.loadDiscoverNextPage]
-        // / [EngineStremioRepository.discoverNextPage]'s doc comment -- the engine returns every page
+        // / [NativeCatalogRepository.discoverNextPage]'s doc comment -- the engine returns every page
         // loaded so far, not just the new one). Some add-ons legitimately repeat an item across a page
         // boundary (a short catalog padded to the requested page size, or two pages racing on the same
         // underlying skip), which handed [PosterGrid]'s `LazyVerticalGrid` a DUPLICATE `key = { it.id }`
@@ -384,7 +384,7 @@ internal object EngineState {
     /// (or JSON null) when signed out -- the same test Apple `CoreBridge.isLoggedIn` uses. Because the
     /// engine hydrates `profile` from its own persisted storage at construction (mirrors
     /// `stremio-core-web::initialize_runtime`), this reflects a RESTORED sign-in immediately after
-    /// [StremioCoreNative.init] returns, with no extra action needed.
+    /// the engine returns, with no extra action needed.
     fun parseAuthState(ctxJson: String): AuthState {
         val profile = ctxJson.toJsonObjectOrNull()?.optJSONObject("profile") ?: return AuthState.SignedOut
         val user = profile.optJSONObject("auth")?.optJSONObject("user") ?: return AuthState.SignedOut
@@ -679,7 +679,7 @@ internal object EngineState {
     /// settled (Ready or an engine error -- anything but still `Loading`). Unlike
     /// [parseCatalogWithFilters]'s callers (which historically used "has any items" as their readiness
     /// gate, an acceptable fail-soft tradeoff from S03), this also recognizes a GENUINELY empty result
-    /// (a genre filter with zero matches) as settled, so [EngineStremioRepository.discover] does not
+    /// (a genre filter with zero matches) as settled, so [NativeCatalogRepository.discover] does not
     /// have to ride the full load timeout for a catalog that already answered "nothing here".
     fun discoverCatalogSettled(json: String): Boolean {
         val root = json.toJsonObjectOrNull() ?: return false

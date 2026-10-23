@@ -335,10 +335,11 @@ class NativeWatchedMigrationProducerTest {
 
         val foreignArchive = JSONArray(batch.archive().toString())
         foreignArchive.getJSONObject(0).put("accountId", "account.foreign")
-        val unresolved = NativeWatchedMigrationProducer { error("foreign archive must not be accepted") }
-            .prepare(scope, source, roster, retainedArchive = foreignArchive, isCurrent = { true })
-        assertFalse(unresolved.isComplete)
-        assertEquals("episode_inventory_unavailable", unresolved.pending().getJSONObject(0).getString("reason"))
+        // Foreign journal ownership is rejected before metadata work; it is not a retryable inventory gap.
+        assertFailure {
+            NativeWatchedMigrationProducer { error("foreign archive must not be accepted") }
+                .prepare(scope, source, roster, retainedArchive = foreignArchive, isCurrent = { true })
+        }
 
         // The UID field is only accepted for an independent authenticated source.  A shared source
         // archive carrying one is structurally invalid and must never be replayed as owner evidence.

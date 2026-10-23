@@ -138,20 +138,10 @@ struct VortXAccountJoinerView: View {
                 status = .failed; return
             case .signedIn(let email):
                 status = .signedIn(email)
-#if VORTX_NATIVE_DATA_ENGINE
                 // qrPoll has already adopted the authenticated account and scheduled its
                 // fenced, single-flight restore. Closing this sheet cannot cancel that work.
                 // The app's restore/picker surface reports loading or Retry separately.
                 onSignedIn()
-#else
-                // Pull the account's add-ons/library/settings onto this fresh TV, then hydrate the engine.
-                if await VortXSyncManager.shared.reconcileAfterSignIn() == .hasAccountData {
-                    await VortXSyncManager.shared.useAccountData()
-                }
-                await VortXSyncManager.shared.hydrateEngineFromOwnedAddons()
-                try? await Task.sleep(nanoseconds: 900_000_000)   // let the check mark land
-                onSignedIn()
-#endif
                 return
             }
         }

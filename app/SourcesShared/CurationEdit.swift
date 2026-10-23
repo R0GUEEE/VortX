@@ -55,9 +55,7 @@ struct CurationEditSession {
     let document: CurationDocument
     let legacyRegister: VortxJSON
     let companionRegister: VortxJSON?
-    #if VORTX_NATIVE_DATA_ENGINE
     let target: CoreBridge.NativeXperienceTarget?
-    #endif
 }
 
 /// The existing editor's name/rules/Home/delete gesture owns its original raw register too.
@@ -68,9 +66,7 @@ struct CurationLegacyEditSession {
     let collection: SmartCollection
     let isNew: Bool
     let expectedRegister: VortxJSON?
-    #if VORTX_NATIVE_DATA_ENGINE
     let target: CoreBridge.NativeXperienceTarget?
-    #endif
 }
 
 enum CurationLegacyEdit {

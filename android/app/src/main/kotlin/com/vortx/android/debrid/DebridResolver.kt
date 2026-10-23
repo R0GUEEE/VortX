@@ -69,7 +69,7 @@ internal object DebridFileSelection {
 /// Native in-client debrid resolution for Android: turn a torrent (infoHash / magnet) into a DIRECT,
 /// streamable HTTPS URL through the user's own debrid account, so cached torrents play instantly without
 /// a debrid add-on. This is the Kotlin port of the Apple `DebridResolver.swift` (RealDebrid + TorBox
-/// torrent flows), wired into [com.vortx.android.engine.EngineStremioRepository.resolve].
+/// torrent flows), wired into [com.vortx.android.engine.NativeCatalogRepository.resolve].
 ///
 /// Keys live in [DebridKeys] (EncryptedSharedPreferences), the Android analogue of the Apple Keychain.
 /// HTTP is Android's [HttpURLConnection] and JSON is `org.json` (both ship with the platform, no added
@@ -1342,7 +1342,7 @@ internal class DebridResolver(private val keys: DebridKeys) {
     // ------------------------------------------------------------------------------------------------
     // Provider circuit breaker (shared, process-lifetime). Guards EVERY resolve/download entry point here (the
     // single choke all callers funnel through: the DebridCoordinator's failover race + CW resume AND the
-    // engine's direct play-time resolve in EngineStremioRepository), so a provider/source pair that has been
+    // engine's direct play-time resolve in the engine repository), so a provider/source pair that has been
     // failing has a shared, cross-screen memory of that and a leg fails fast with NO network instead of
     // re-hammering a provider some OTHER caller already learned is down for this hash. Mirrors the Apple
     // DebridCoordinator breaker guards (app/SourcesShared/DebridResolver.swift ~1289-1418); on Android the

@@ -191,7 +191,6 @@ enum UsenetLocalResolver {
 
     struct NativeOwner: Sendable {
         let credential: CredentialScopeRegistry.Capture
-        let requiresNativeAuthority: Bool
         let isCurrent: @Sendable () async -> Bool
 
         func validate() async throws {
@@ -211,10 +210,9 @@ enum UsenetLocalResolver {
     @MainActor
     static func captureNativeOwner() -> NativeOwner {
         let credential = CredentialScopeRegistry.shared.capture()
-        let requiresNativeAuthority = StremioServer.nativeTransportSelected
         let check = nativeOwnerCheck(capture: credential)
         let coherent = CredentialScopeRegistry.shared.isCurrent(credential)
-        return NativeOwner(credential: credential, requiresNativeAuthority: requiresNativeAuthority,
+        return NativeOwner(credential: credential,
                            isCurrent: {
                                guard coherent else { return false }
                                return await check()
@@ -306,9 +304,6 @@ enum UsenetLocalResolver {
     /// E+1 preparation, or a source-list refresh is not an account or playback-owner retirement.
     @MainActor
     static func nativeOwnerCheck(capture: CredentialScopeRegistry.Capture) -> @Sendable () async -> Bool {
-        guard StremioServer.nativeTransportSelected else {
-            return { CredentialScopeRegistry.shared.isCurrent(capture) }
-        }
         let target = PlaybackMutationTarget.capture(core: CoreBridge.shared)
         let profileID = ProfileStore.shared.activeID
         return { @MainActor in

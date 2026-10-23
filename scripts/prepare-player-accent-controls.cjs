@@ -12,13 +12,35 @@ const repoRoot = process.env.VORTX_ROOT
   ? path.resolve(process.env.VORTX_ROOT)
   : path.resolve(__dirname, '..');
 const outputDirectory = process.argv[2];
-if (!outputDirectory) {
+if (require.main === module && !outputDirectory) {
   throw new Error('usage: node prepare-player-accent-controls.js <generated-output-directory>');
 }
 
 const read = relative => fs.readFileSync(path.join(repoRoot, relative), 'utf8');
 const production = read('app/Sources/PlayerScreen.swift');
 const themeManager = read('app/SourcesShared/ThemeManager.swift');
+const theme = read('app/SourcesShared/Theme.swift');
+const eligibilityStart = theme.indexOf('@propertyWrapper\nstruct GlassEligibility:');
+const eligibilityEnd = theme.indexOf("/// Apple's Liquid Glass belongs", eligibilityStart);
+if (eligibilityStart < 0 || eligibilityEnd <= eligibilityStart) throw new Error('Missing source glass eligibility');
+const glassEligibility = theme.slice(eligibilityStart, eligibilityEnd);
+const glass = read('app/SourcesShared/GlassStyle.swift');
+const policyStart = glass.indexOf('enum VortXPlayerChromePolicy {');
+const policyEnd = glass.indexOf('/// The actual large video backplate', policyStart);
+if (policyStart < 0 || policyEnd <= policyStart) throw new Error('Missing production player chrome policy');
+// Compile all shared glass definitions, including the actual bottom backplate and timing protection.
+const playerGlass = glass;
+const playerThemeStart = themeManager.indexOf('    var playerGlassUsesCrimson:');
+const playerThemeEnd = themeManager.indexOf('    /// Ink that sits ON the accent fill', playerThemeStart);
+if (playerThemeStart < 0 || playerThemeEnd <= playerThemeStart) throw new Error('Missing player theme projection');
+const playerThemeProjection = themeManager.slice(playerThemeStart, playerThemeEnd)
+  .replace(/\bvar playerGlass/g, 'static var playerGlass');
+const themeRGBStart = themeManager.indexOf('private func themeRGB(');
+const themeRGBEnd = themeManager.indexOf('/// A selectable accent.', themeRGBStart);
+if (themeRGBStart < 0 || themeRGBEnd <= themeRGBStart) throw new Error('Missing source color helper');
+const themeRGBHelper = themeManager.slice(themeRGBStart, themeRGBEnd);
+// The player glass reads the shared Effects glass choice; VisualEffects is Foundation-only, so compile it as is.
+const visualEffects = read('app/SourcesShared/VisualEffects.swift').replace(/^import Foundation\n/m, '');
 const harness = fs.readFileSync(path.join(repoRoot, 'app/Tests/PlayerAccentControlsReduceTransparencyTests.swift'), 'utf8');
 
 const start = production.indexOf('private enum PlayerControlReduceTransparencyOverrideKey');
@@ -63,6 +85,12 @@ const swiftAccentRows = accents.map(accent => `
 // opts into the shared palette-backed glass helper. OLED values are the exact ThemeManager ladder;
 // warm values reproduce ThemeManager.tintedDark(brightness) without constructing the real singleton.
 const palette = `
+// Only satisfies unrelated shared-glass invalidation; palette values below come from source.
+// This RAM-only shell does not construct the persistent application ThemeManager.
+@MainActor private final class ThemeManager: ObservableObject {
+    static let shared = ThemeManager()
+}
+
 private struct AccentSpec {
     let id: String
     let base: (Double, Double, Double)
@@ -90,6 +118,8 @@ private enum PlayerThemeFixture {
 
     static var accent: Color { current.baseColor }
     static var accentBright: Color { current.brightColor }
+
+${playerThemeProjection}
 
     // Matches ThemeManager.onAccent's current source logic (ThemeManager.swift:118-141).
     static var onAccent: Color {
@@ -134,9 +164,13 @@ private enum PlayerThemeFixture {
 }
 
 enum Theme {
+    enum Radius { static let card: CGFloat = 16 }
+    enum Space { static let md: CGFloat = 20 }
     enum Palette {
         static var accent: Color { PlayerThemeFixture.accent }
         static var accentBright: Color { PlayerThemeFixture.accentBright }
+        static var playerGlassUsesCrimson: Bool { PlayerThemeFixture.playerGlassUsesCrimson }
+        static var playerGlassAccent: Color { PlayerThemeFixture.playerGlassAccent }
         static var onAccent: Color { PlayerThemeFixture.onAccent }
         static var canvas: Color { PlayerThemeFixture.canvas }
         static var surface1: Color { PlayerThemeFixture.surface1 }
@@ -149,11 +183,21 @@ enum Theme {
 }
 `;
 
-fs.mkdirSync(outputDirectory, { recursive: true });
-const generated = [
+const playerGlassFixture = [
   'import SwiftUI',
   'import AppKit',
+  themeRGBHelper,
   palette,
+  visualEffects,
+  glassEligibility,
+  playerGlass,
+].join('\n');
+module.exports = { playerGlassFixture };
+
+if (require.main === module) {
+fs.mkdirSync(outputDirectory, { recursive: true });
+const generated = [
+  playerGlassFixture,
   modifier,
   harness,
 ].join('\n');
@@ -161,4 +205,5 @@ const outputPath = path.join(outputDirectory, 'accent.swift');
 fs.writeFileSync(outputPath, generated);
 console.log(`prepared source-extracted player accent fixture: ${outputPath}`);
 console.log(`palette source: ThemeManager.accents (${accents.length} accents), RAM-only; no preferences or app state`);
+}
 

@@ -89,36 +89,23 @@ internal class StoreTvProfileGateway(
     private val store: ProfileStore,
     private val native: NativeStreamingAccountViewModel?,
 ) : TvProfileGateway {
-    override fun read(): TvProfileGateway.Snapshot = if (BuildConfig.NATIVE_ENGINE_ENABLED) {
+    override fun read(): TvProfileGateway.Snapshot {
         val state = native?.state?.value
-        TvProfileGateway.Snapshot(state?.profiles.orEmpty(), state?.activeID, store.selectionPending)
-    } else TvProfileGateway.Snapshot(store.profiles, store.activeID, store.selectionPending)
+        return TvProfileGateway.Snapshot(state?.profiles.orEmpty(), state?.activeID, store.selectionPending)
+    }
 
     override fun capture(profile: UserProfile, adding: Boolean, selection: Boolean): TvProfileGateway.Admission? {
-        if (BuildConfig.NATIVE_ENGINE_ENABLED) {
-            val model = native ?: return null
-            val editor = if (selection) model.captureSelection(profile) else model.captureEditor(profile, adding)
-            return editor?.let { TvProfileGateway.Admission { action -> model.commitEditor(it, action) } }
-        }
-        val (before, revision) = ContinueWatchingOwnerGate.serialized { read() to it }
-        if ((!selection && !adding && before.activeID != profile.id) ||
-            (if (adding) before.profiles.any { it.id == profile.id } else before.profiles.none { it == profile })) return null
-        return legacyTvProfileAdmission { action -> ContinueWatchingOwnerGate.serialized { currentRevision ->
-            val current = read()
-            check(currentRevision == revision)
-            check(current.profiles === before.profiles)
-            check(current.activeID == before.activeID)
-            check(if (adding) current.profiles.none { it.id == profile.id } else current.profiles.any { it == profile })
-            action()
-        } }
+        val model = native ?: return null
+        val editor = if (selection) model.captureSelection(profile) else model.captureEditor(profile, adding)
+        return editor?.let { TvProfileGateway.Admission { action -> model.commitEditor(it, action) } }
     }
 
     override fun select(profile: UserProfile, admission: TvProfileGateway.Admission): Result<ProfileSelectionRequest> =
         selectTvProfile(admission) {
             val outcome = store.select(profile)
-            val after = if (BuildConfig.NATIVE_ENGINE_ENABLED) checkNotNull(native?.captureSelection(checkNotNull(store.active))) else null
+            val after = checkNotNull(native?.captureSelection(checkNotNull(store.active)))
             captureProfileSelection(store, profile, outcome,
-                nativeAdmission = after?.let { captured -> { checkNotNull(native).commitEditor(captured) {} } })
+                nativeAdmission = { checkNotNull(native).commitEditor(after) {} })
         }
 
     override fun save(profile: UserProfile, adding: Boolean, admission: TvProfileGateway.Admission): Boolean = admission.commit {
@@ -141,16 +128,16 @@ internal class StoreTvProfileGateway(
 @Composable
 internal fun rememberTvProfileGateway(): TvProfileGateway? {
     val store = ProfileStore.sharedOrNull()
-    val native: NativeStreamingAccountViewModel? = if (BuildConfig.NATIVE_ENGINE_ENABLED) {
+    val native: NativeStreamingAccountViewModel? = run {
         val app = LocalContext.current.applicationContext as? VortXApplication
         val accounts = remember(app) { runCatching { app?.nativeStreamingAccounts() }.getOrNull() }
         if (accounts == null) null else viewModel(key = "tv-profile-management", factory = NativeStreamingAccountViewModel.Creator(accounts))
-    } else null
+    }
     DisposableEffect(native) { onDispose { native?.close() } }
     val state = native?.state?.collectAsState()?.value
     // Observe active edits as well as selection; native roster updates are observed above.
     store?.activeProfile?.collectAsState()?.value
-    if (store == null || (BuildConfig.NATIVE_ENGINE_ENABLED && state?.mounted != true)) return null
+    if (store == null || state?.mounted != true) return null
     return remember(store, native, state) { StoreTvProfileGateway(store, native) }
 }
 

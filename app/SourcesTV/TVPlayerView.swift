@@ -3133,7 +3133,7 @@ struct TVPlayerView: View {
                 }
             }
             .padding(.horizontal, 60).padding(.bottom, 50)
-            .background(LinearGradient(colors: [.clear, .black.opacity(0.9)], startPoint: .top, endPoint: .bottom))
+            .background(VortXPlayerBackdrop(platform: .television))
         }
         .transition(.opacity)
     }
@@ -3196,7 +3196,8 @@ struct TVPlayerView: View {
             Spacer(minLength: 0)
             if currentTime > 0 {
                 Text(timeString(currentTime)).font(.callout.monospacedDigit())
-                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .foregroundStyle(.white)
+                    .vortxPlayerTimeLabelProtection()
             }
         }
         .frame(height: 28)
@@ -3209,7 +3210,9 @@ struct TVPlayerView: View {
         let d: CGFloat = big ? 92 : 64
         return Image(systemName: icon)
             .font(.system(size: big ? 38 : 26, weight: .semibold))
-            .foregroundStyle(sel ? Theme.Palette.canvas : Theme.Palette.textPrimary)
+            .foregroundStyle(sel
+                ? (Theme.Palette.playerGlassUsesCrimson ? Color.white : Theme.Palette.canvas)
+                : Theme.Palette.textPrimary)
             .frame(width: d, height: d)
             .background { ctrlButtonBackground(sel) }
             .scaleEffect(accessibilityReduceMotion ? 1.0 : (sel ? 1.12 : 1.0))
@@ -3223,7 +3226,7 @@ struct TVPlayerView: View {
     /// the remote-driven `selected` focus state and navigation are untouched.
     @ViewBuilder private func ctrlButtonBackground(_ selected: Bool) -> some View {
         if selected {
-            Circle().fill(Theme.Palette.accent)
+            Circle().fill(Theme.Palette.playerGlassAccent)
         } else {
             Circle().fill(.clear).vortxGlass(in: Circle(), fillAlpha: VortXGlass.pillFillAlpha, shadow: .disc)
         }
@@ -11599,15 +11602,18 @@ struct TVPlayerView: View {
                 }
                 HStack(spacing: spacing) {
                     Text(timeString(shown)).font(.callout.monospacedDigit())
-                        .foregroundStyle(scrubbing ? Theme.Palette.accent : Theme.Palette.textPrimary)
+                        .foregroundStyle(.white)
+                        .vortxPlayerTimeLabelProtection()
                         .frame(width: sideWidth, alignment: .leading)
                     scrubber
                     VStack(alignment: .trailing, spacing: 2) {
                         Text(timeString(duration)).font(.callout.monospacedDigit())
-                            .foregroundStyle(Theme.Palette.textSecondary)
+                            .foregroundStyle(.white)
+                            .vortxPlayerTimeLabelProtection()
                         if let ends = endsAtClock {
                             Text(ends).font(.caption.monospacedDigit())
-                                .foregroundStyle(Theme.Palette.textTertiary)
+                                .foregroundStyle(.white)
+                                .vortxPlayerTimeLabelProtection()
                         }
                     }
                     .frame(width: sideWidth, alignment: .trailing)

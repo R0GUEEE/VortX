@@ -98,14 +98,14 @@ fun WhosWatchingScreen(
     // The native picker is still a ProfileStore surface, but its selection request must carry a live native
     // admission witness. Keep this model scoped to the picker so the host can consume the request without
     // borrowing an optional owner/session from the Settings screen.
-    val nativeModel: NativeStreamingAccountViewModel? = if (BuildConfig.NATIVE_ENGINE_ENABLED) {
+    val nativeModel: NativeStreamingAccountViewModel? = run {
         val app = LocalContext.current.applicationContext as? VortXApplication
         val accounts = remember(app) { runCatching { app?.nativeStreamingAccounts() }.getOrNull() }
         if (accounts == null) null else viewModel(
             key = "profile-picker-selection",
             factory = NativeStreamingAccountViewModel.Creator(accounts),
         )
-    } else null
+    }
     DisposableEffect(nativeModel) { onDispose { nativeModel?.close() } }
     val lifecycleActive = rememberProfilePickerLifecycleActive()
     val reducedMotion = rememberReducedMotion()
@@ -167,13 +167,13 @@ fun WhosWatchingScreen(
         // same selection transaction so a legacy SwitchAccount token or NeedsSignIn state cannot be replaced
         // by a synthetic picker message or an ABA-prone roster re-read.
         val request = try {
-            val nativeAdmission: (() -> Boolean)? = if (BuildConfig.NATIVE_ENGINE_ENABLED) {
+            val nativeAdmission: (() -> Boolean)? = run {
                 val selected = checkNotNull(store.active) { "Choose the profile again." }
                 val captured = checkNotNull(nativeModel?.captureSelection(selected)) { "Choose the profile again." }
                 // A typed value: a bare lambda on the next line would bind as checkNotNull's trailing lambda.
-                val admission: () -> Boolean = { nativeModel?.commitEditor(captured) {} == true }
+                val admission: () -> Boolean = { nativeModel.commitEditor(captured) {} }
                 admission
-            } else null
+            }
             captureProfileSelection(store, profile, outcome, nativeAdmission = nativeAdmission)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -329,6 +329,10 @@ fun WhosWatchingScreen(
                 )
             }
             if (!layout.isPhone) Spacer(Modifier.weight(1f))
+            // Protected rosters keep export behind the existing profile PIN/selection route.
+            if (pinTarget == null && roster.none { it.hasPin }) DiagnosticLogAction(mayShare = {
+                pinTarget == null && store.profiles.none { it.hasPin }
+            })
         }
 
         pinTarget?.let { target ->

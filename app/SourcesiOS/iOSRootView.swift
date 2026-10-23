@@ -236,11 +236,9 @@ struct iOSRootView: View {
             VStack(spacing: 0) {
                 offlineBanner
                 updateBanner
-                #if VORTX_NATIVE_DATA_ENGINE
                 if launchReady, shellVisible, !playbackGate.playerActive {
                     NativeWatchedMigrationNotice()
                 }
-                #endif
             }
         }
         // Hide the whole shell (screens, tab bar, update banner) behind brand canvas while the launch

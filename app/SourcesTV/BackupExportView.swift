@@ -90,24 +90,10 @@ struct BackupExportView: View {
         .onAppear { start() }
         .onDisappear { poller?.cancel() }
         .alert("This account already has data", isPresented: $showConflict) {
-            #if !VORTX_NATIVE_DATA_ENGINE
-            // The SAME three-way choice SyncSettingsView offers (mergeBoth / useAccountData / pushThisDevice),
-            // but the BACKUP default is "Keep this device": the user came here to SAVE this Apple TV's data,
-            // so pushThisDevice() is the primary button. None of the three can silently drop a profile
-            // (syncDown unions the local roster back in even on "Use account's data").
-            // keepThisDeviceOverridingAccount, not pushThisDevice: reached only after the account's doc was
-            // positively READ, so this is the user's informed choice to overwrite it and the one push allowed
-            // past the #145 restore gate.
-            Button("Keep this device") { resolve { await $0.keepThisDeviceOverridingAccount() ? .completed : .failed } }
-            #endif
             Button("Merge both (keep all profiles)") { resolve { await $0.mergeBoth() ? .completed : .failed } }
             Button("Use account's data") { resolve { await $0.useAccountData() } }
         } message: {
-            #if VORTX_NATIVE_DATA_ENGINE
             Text("This VortX account already holds synced data. Merge both to keep every profile, or restore the account's data. Native backups do not overwrite an account with a legacy device snapshot.")
-            #else
-            Text("This VortX account already holds synced data. Keep this device to save this Apple TV's data over it, merge both to keep every profile, or use the account's data instead.")
-            #endif
         }
     }
 

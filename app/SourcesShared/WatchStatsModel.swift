@@ -86,11 +86,7 @@ final class WatchStatsModel: ObservableObject {
         let profile: LegacyWatchOwnership.ProfileBinding?
         let keychainAccount: String
         let usesEngineHistory: Bool
-#if VORTX_NATIVE_DATA_ENGINE
         let target: PlaybackMutationTarget
-#else
-        let expectedUID: String?
-#endif
     }
 
     private struct LoadRequest {
@@ -135,17 +131,10 @@ final class WatchStatsModel: ObservableObject {
         guard let epoch = LegacyWatchOwnership.captureApplicationEpoch() else { return nil }
         let profiles = ProfileStore.shared
         let credential = CredentialScopeRegistry.shared.capture()
-#if VORTX_NATIVE_DATA_ENGINE
         let authority = Authority(epoch: epoch, credential: credential, profileID: profiles.activeID,
                                   profile: profileBinding(profiles), keychainAccount: profiles.activeKeychainAccount,
                                   usesEngineHistory: profiles.activeUsesEngineHistory,
                                   target: PlaybackMutationTarget.capture(core: .shared))
-#else
-        let authority = Authority(epoch: epoch, credential: credential, profileID: profiles.activeID,
-                                  profile: profileBinding(profiles), keychainAccount: profiles.activeKeychainAccount,
-                                  usesEngineHistory: profiles.activeUsesEngineHistory,
-                                  expectedUID: CoreBridge.shared.currentUID())
-#endif
         return authorityIsCurrent(authority) ? authority : nil
     }
 
@@ -156,11 +145,7 @@ final class WatchStatsModel: ObservableObject {
               profiles.activeID == authority.profileID, profileBinding(profiles) == authority.profile,
               profiles.activeKeychainAccount == authority.keychainAccount,
               profiles.activeUsesEngineHistory == authority.usesEngineHistory else { return false }
-#if VORTX_NATIVE_DATA_ENGINE
         guard authority.target.stillOwnsCurrentContext(core: .shared) else { return false }
-#else
-        guard CoreBridge.shared.currentUID() == authority.expectedUID else { return false }
-#endif
         return LegacyWatchOwnership.applicationEpochIsCurrent(authority.epoch)
             && CredentialScopeRegistry.shared.isCurrent(authority.credential)
     }
@@ -223,7 +208,6 @@ final class WatchStatsModel: ObservableObject {
         desired.isLoading = true
         publish()
         guard isCurrent(request) else { abandon(request); return }
-#if VORTX_NATIVE_DATA_ENGINE
         guard let playback = CoreBridge.shared.nativePlaybackSnapshot() else {
             guard isCurrent(request) else { abandon(request); return }
             records = []
@@ -251,44 +235,6 @@ final class WatchStatsModel: ObservableObject {
                                plays: plays, lastWatched: timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil)
         }
         finishLoad(loaded, request: request)
-#else
-        guard authority.usesEngineHistory else {
-            // Overlay profile: its private overlay only, never the engine buckets.
-            finishLoad(Self.overlayRecords(ProfileStore.shared.watch), request: request)
-            return
-        }
-
-        // The library wait remains the existing read-only, bounded reader. Cancellation does not make
-        // its internal polling stop early, so original-generation/authority checks remain mandatory.
-        libraryTask = Task { @MainActor [weak self] in
-            guard self?.isCurrent(request) == true, !Task.isCancelled else {
-                self?.abandon(request)
-                return
-            }
-            await CoreBridge.shared.loadLibraryAndAwait()
-            guard let self else { return }
-            guard !Task.isCancelled, self.isCurrent(request) else {
-                self.abandon(request)
-                return
-            }
-            let expectedUID = request.authority.expectedUID
-            let generation = request.generation
-            let liveLibrary = CoreBridge.shared.library?.catalog ?? []
-            let liveCW = CoreBridge.shared.continueWatching
-            guard self.isCurrent(request) else { self.abandon(request); return }
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                let bucket = Self.bucketRecords(expectedUID: expectedUID)
-                let merged = Self.mergeLive(into: bucket, library: liveLibrary, continueWatching: liveCW)
-                DispatchQueue.main.async {
-                    // The generation selects only the ORIGINAL retained request. It cannot select or
-                    // recapture a successor's authority, even if the profile/UID later returns to A.
-                    guard let self, let original = self.activeRequest,
-                          original.generation == generation else { return }
-                    self.finishLoad(merged, request: original)
-                }
-            }
-        }
-#endif
     }
 
     private func abandon(_ request: LoadRequest) {

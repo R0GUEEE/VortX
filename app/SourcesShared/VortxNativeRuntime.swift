@@ -1,8 +1,6 @@
 import Foundation
 import Darwin
-#if canImport(VortxEngine) && VORTX_ENGINE_STATE_BRIDGE
 import VortxEngine
-#endif
 
 /// The native store ABI, kept separate from the shipping Stremio screen facade. Snapshots belong
 /// to the explicit account/profile owner passed by the caller. This layer never reads credentials,
@@ -200,7 +198,6 @@ final class VortxNativeRuntime: @unchecked Sendable {
 
 // Deliberate artifact gate: old frameworks contain no public hydration declaration. Enable only
 // after the header/export audit passes for every linked slice. Mac/Lite are not newly linked here.
-#if canImport(VortxEngine) && VORTX_ENGINE_STATE_BRIDGE
 struct VortxCABI: VortxRuntimeABI {
     private func copy(_ pointer: UnsafeMutablePointer<CChar>?) -> String? {
         guard let pointer else { return nil }
@@ -223,7 +220,6 @@ struct VortxCABI: VortxRuntimeABI {
     }
     func state(_ handle: UInt) -> String? { copy(vortx_get_state_json(OpaquePointer(bitPattern: handle))) }
     func delta(_ handle: UInt) -> String? { copy(vortx_get_state_delta_json(OpaquePointer(bitPattern: handle))) }
-    #if VORTX_ENGINE_OWNER_HISTORY_BRIDGE
     func canonicalizeOwnerHistoryEvidence(_ evidence: String) -> String? {
         guard let pointer = vortx_owner_history_canonicalize_evidence_json(evidence) else { return nil }
         defer { vortx_string_free(pointer) }
@@ -231,7 +227,5 @@ struct VortxCABI: VortxRuntimeABI {
         guard length <= 16 * 1024 * 1024 else { return nil }
         return String(data: Data(bytes: pointer, count: length), encoding: .utf8)
     }
-    #endif
     func free(_ handle: UInt) { vortx_engine_free(OpaquePointer(bitPattern: handle)) }
 }
-#endif

@@ -219,7 +219,7 @@ for (const cut of recoveryCuts) test(`actual ${cut.tag} selection consumes only 
 });
 
 test('actual private promotion exports only the fetched commit matching authenticated selection', () => fixture(dir => {
-  const body = script('Promote the vortx-core engine workspace + verify both engines (fail closed)');
+  const body = script('Promote the vortx-core engine workspace + verify it (fail closed)');
   // Stop before filesystem promotion; execute the exact pin checks and provenance export.
   const guard = body.slice(0, body.indexOf('\nrm -rf vortx-core'));
   assert(guard.includes('VORTX_ENGINE_SOURCE_REVISION='));
@@ -252,7 +252,7 @@ function assertNativeWiring(text = workflow, android = androidWorkflows) {
     'ADMITTED_SOURCE: ${{ steps.recovery.outputs.source_sha }}', 'ADMITTED_NATIVE_REVISION: ${{ steps.recovery.outputs.native_revision }}',
   ]) assert(selector.includes(`          ${binding}\n`), binding);
   assert.doesNotMatch(selector, /^        if:/m);
-  const promote = step('Promote the vortx-core engine workspace + verify both engines (fail closed)', text);
+  const promote = step('Promote the vortx-core engine workspace + verify it (fail closed)', text);
   assert(promote.includes('EXPECTED_NATIVE_REVISION: ${{ steps.native_source.outputs.revision }}'));
   assert(promote.includes('[ "$NATIVE_REVISION" = "$EXPECTED_NATIVE_REVISION" ]'));
   assert(promote.includes('echo "VORTX_ENGINE_SOURCE_REVISION=$NATIVE_REVISION" >> "$GITHUB_ENV"'));
@@ -272,7 +272,7 @@ function assertNativeWiring(text = workflow, android = androidWorkflows) {
   const ordered = ['Validate immutable Beta 1 source recovery', "Preserve the workflow revision's native acceptance tool",
     'Checkout the immutable recovered app source', 'Verify immutable recovered source checkout',
     'Select the authenticated native source revision', 'Bind native acceptance tooling to workflow and source provenance',
-    'Fetch vortx-core (private monorepo, pinned)', 'Promote the vortx-core engine workspace + verify both engines (fail closed)',
+    'Fetch vortx-core (private monorepo, pinned)', 'Promote the vortx-core engine workspace + verify it (fail closed)',
     'Cache vortx-ffi xcframework', 'Capture exact native SDK and player inputs before app compilation'];
   const offsets = ordered.map(name => text.indexOf(`      - name: ${name}\n`));
   assert(offsets.every(value => value >= 0));
@@ -280,7 +280,7 @@ function assertNativeWiring(text = workflow, android = androidWorkflows) {
   for (const lane of android) {
     const checkout = step('Fetch vortx-core (private monorepo, pinned)', lane);
     assert.deepEqual(checkout.match(/^          ref: .*$/gm), [`          ref: ${normalNative}`]);
-    const promotion = step('Promote the vortx-core workspace + record exact private source pins', lane);
+    const promotion = step('Promote the vortx-core workspace + record the exact private source pin', lane);
     assert(promotion.includes(`test "$vortx_sha" = "${normalNative}"`));
     assert(promotion.includes('echo "VORTX_ENGINE_SOURCE_SHA=$vortx_sha" >> "$GITHUB_ENV"'));
     assert.match(lane, /^          key: .*\$\{\{ env\.VORTX_ENGINE_SOURCE_SHA \}\}.*hashFiles/m);
@@ -292,8 +292,8 @@ test('normal and historical native selection wiring rejects scoped workflow muta
   const mutations = [
     ['Fetch vortx-core (private monorepo, pinned)', '${{ steps.native_source.outputs.revision }}', normalNative],
     ['Select the authenticated native source revision', '${{ steps.recovery.outputs.native_revision }}', '${{ inputs.recovery_source_commit }}'],
-    ['Promote the vortx-core engine workspace + verify both engines (fail closed)', '${{ steps.native_source.outputs.revision }}', historicalNative],
-    ['Promote the vortx-core engine workspace + verify both engines (fail closed)', '[ "$NATIVE_REVISION" = "$EXPECTED_NATIVE_REVISION" ]', 'true'],
+    ['Promote the vortx-core engine workspace + verify it (fail closed)', '${{ steps.native_source.outputs.revision }}', historicalNative],
+    ['Promote the vortx-core engine workspace + verify it (fail closed)', '[ "$NATIVE_REVISION" = "$EXPECTED_NATIVE_REVISION" ]', 'true'],
     ['Validate immutable Beta 1 source recovery', `native_revision=${historicalNative}`, `native_revision=${normalNative}`],
     ['Cache vortx-ffi xcframework', '${{ env.VORTX_ENGINE_SOURCE_REVISION }}', 'unbound'],
     ['Verify complete native engine ABI', 'VortxEngine.xcframework owner-history ;;', 'VortxEngine.xcframework resource-host ;;'],

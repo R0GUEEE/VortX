@@ -6,8 +6,9 @@ retains the original fractional, plain and day-prefix fallback order.
 
 The production file passed strict Swift 6 compilation and eight focused local
 source-unit groups, including exact legacy-date and concurrent-call comparisons.
-That source unit did not compile this package manifest or run its twelve Swift
-Testing cases. Full SwiftPM validation remains open at this incremental milestone.
+The separate hosted package validation in run39114019008 passed its twelve Swift
+Testing cases at that recorded source. New source changes still require their own package run;
+the standalone package result does not certify an application target.
 
 To run the package suite when allocating a test slot:
 

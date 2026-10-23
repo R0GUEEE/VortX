@@ -11,6 +11,7 @@ const fs = require('node:fs');
 const player = fs.readFileSync('app/Sources/PlayerScreen.swift', 'utf8');
 const styles = fs.readFileSync('app/SourcesShared/SeekBarStyle.swift', 'utf8');
 const test = fs.readFileSync('app/Tests/PlayerPremiumControlsRenderingTests.swift', 'utf8');
+const { playerGlassFixture } = require('./scripts/prepare-player-accent-controls.cjs');
 
 function slice(source, start, end) {
   const a = source.indexOf(start);
@@ -41,17 +42,8 @@ if (!controlChrome.includes('.frame(minHeight: 44)')) {
   throw new Error('Production player toolbar button lost its minimum target height');
 }
 
-const palette = `
-enum Theme {
-  enum Palette {
-    static let accent = Color(red: 0.22, green: 0.58, blue: 0.91)
-  }
-}
-`;
 const output = [
-  'import SwiftUI',
-  'import AppKit',
-  palette,
+  playerGlassFixture,
   seekLeaves,
   seekSurface,
   skipMarkers,
@@ -65,7 +57,7 @@ fs.writeFileSync(process.argv[2] + '/premium-controls.swift',
   output.replace(/\b(?:fileprivate|private) (?=(?:final )?(?:class|struct|enum|func|var|let))/g, ''));
 NODE
 
-xcrun swiftc -Onone -parse-as-library \
+nice -n 15 xcrun swiftc -Onone -j 1 -num-threads 1 -target "$(uname -m)-apple-macosx14.0" -parse-as-library \
   "$premium_test_dir/premium-controls.swift" \
   -o "$premium_test_dir/premium-controls"
-"$premium_test_dir/premium-controls" "$premium_test_dir"
+nice -n 15 "$premium_test_dir/premium-controls" "$premium_test_dir"

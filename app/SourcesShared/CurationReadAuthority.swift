@@ -35,7 +35,6 @@ enum CurationReadContextDelivery {
             return .init(profileID: profileID, importRegisters: [:], isCurrent: accountIsCurrent,
                          currentImportRegisters: { [:] }, retire: {})
         }
-        #if VORTX_NATIVE_DATA_ENGINE
         let core = CoreBridge.shared
         let target = try core.captureNativeXperienceTarget()
         do {
@@ -51,9 +50,6 @@ enum CurationReadContextDelivery {
             core.retireNativeXperienceTarget(target)
             throw error
         }
-        #else
-        throw CurationFailure.unavailable
-        #endif
     }
 }
 

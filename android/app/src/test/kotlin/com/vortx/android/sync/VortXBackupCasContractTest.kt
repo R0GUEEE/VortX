@@ -69,7 +69,6 @@ class VortXBackupCasContractTest {
         var failPut: Pair<Int, JSONObject?>? = null
         var loseAcceptedResponse = false
         init {
-            check(com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED)
             manager.installSyncTestSeam(VortXSyncManager.Session("fixture-only", account, key), 0, transport = { method, _, body, _ ->
                 if (method == "GET") {
                     gets++

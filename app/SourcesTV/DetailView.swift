@@ -1997,12 +1997,10 @@ struct CoreSeasonedEpisodes: View {
 
     private var episodeHistoryReady: Bool {
         guard core.metaDetails?.meta?.id == meta.id, core.metaDetails?.meta?.type == meta.type else { return false }
-        #if VORTX_NATIVE_DATA_ENGINE
         if core.usesNativeProfileState {
             return core.metaDetails?.watchedVideoIds != nil
                 && core.nativePlaybackTargetIsCurrent(.capture(core: core))
         }
-        #endif
         return true
     }
 
@@ -2452,7 +2450,6 @@ struct CoreSeasonedEpisodes: View {
 
     private func markEpisodeWatched(_ video: CoreVideo, isWatched: Bool) {
         noteEpisodeInteraction()
-        #if VORTX_NATIVE_DATA_ENGINE
         let target = PlaybackMutationTarget.capture(core: core)
         let expected = detailTarget
         let profileID = profiles.activeID
@@ -2470,9 +2467,6 @@ struct CoreSeasonedEpisodes: View {
             isCurrent() ? "Couldn't update watched status. Long-press the episode to try again."
                         : "Profile or title changed. Please try again."
         })
-        #else
-        core.markVideoWatched(video, !isWatched, expected: detailTarget)
-        #endif
     }
 
     /// The episode the page's Play target points at: the engine's current episode while unwatched, else the
@@ -4738,7 +4732,6 @@ struct LibraryChip: View {
         let saved = core.detailInLibrary
         // The button stays the root view so the caller's focus wrapper keeps attaching to it.
         Button {
-            #if VORTX_NATIVE_DATA_ENGINE
             // The acknowledged native path, as on iPhone and iPad: the change is saved first, then mirrored
             // to Trakt/SIMKL watchlists, and only while this profile and title still own the gesture.
             let target = PlaybackMutationTarget.capture(core: core)
@@ -4760,13 +4753,6 @@ struct LibraryChip: View {
                 isCurrent() ? "Couldn't update Library. Please try again."
                             : "Profile or title changed. Please try again."
             })
-            #else
-            if saved {
-                core.removeDetailFromLibrary()   // removes from library + mirrors to external watchlists
-            } else {
-                core.addDetailToLibrary()
-            }
-            #endif
         } label: {
             if libraryAction.errorMessage != nil {
                 Label("Library: try again", systemImage: "exclamationmark.circle")

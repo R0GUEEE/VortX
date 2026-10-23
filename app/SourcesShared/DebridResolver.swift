@@ -1768,7 +1768,7 @@ extension DebridCoordinator {
            let message = UsenetFailureMessage.forLocalReason(reason) {
             return .failed(message)
         }
-        if StremioServer.nativeTransportSelected, !remoteAvailable {
+        if !remoteAvailable {
             return .failed("This NZB could not be started with the configured providers. Native playback supports raw video, stored RAR and COPY 7z archives. Compressed, encrypted or repair-required sources need a supported TorBox route or another source.")
         }
         return .failed("This NZB source could not be started. Check that the provider is available and try another source.")
@@ -1885,8 +1885,7 @@ extension DebridCoordinator {
                 ?? stream.usenetURLs.first {
             var nativeFallbackOwner: UsenetLocalResolver.NativeOwner?
             #if !VORTX_NO_EMBEDDED_SERVER
-            let ownsNativeAttempt = nativeOwner.requiresNativeAuthority
-                && !(confirmedUsenetURLs?.contains(nzb) ?? false)
+            let ownsNativeAttempt = !(confirmedUsenetURLs?.contains(nzb) ?? false)
             if ownsNativeAttempt {
                 guard await warmNativeUsenet(owner: nativeOwner) else { return nil }
             } else {
@@ -1908,7 +1907,7 @@ extension DebridCoordinator {
             // With their own providers configured, a play never starts a new TorBox download; an existing
             // or already-finished TorBox job for this NZB is still used. TorBox-only users are unchanged.
             var allowCloudCreate = true
-            if resumingCloudJob, nativeOwner.requiresNativeAuthority { nativeFallbackOwner = nativeOwner }
+            if resumingCloudJob { nativeFallbackOwner = nativeOwner }
             // BUILT-IN NNTP (full targets only): when the user configured their OWN usenet providers, resolve
             // the nzb on device through the embedded server's dormant NNTP engine (no debrid). Preferred over
             // TorBox EXCEPT when TorBox already has this source confirmed-cached (an instant direct link that
@@ -1924,7 +1923,7 @@ extension DebridCoordinator {
             let usenetSavedServers = UsenetProviderStore.loadEnabledServers(ownerCapture: usenetCapture)
             allowCloudCreate = usenetSavedServers.isEmpty || torBoxHasItCached
             if !torBoxHasItCached, !resumingCloudJob, (!stream.usenetServers.isEmpty || !usenetSavedServers.isEmpty) {
-                nativeFallbackOwner = nativeOwner.requiresNativeAuthority ? nativeOwner : nil
+                nativeFallbackOwner = nativeOwner
                 do {
                     let nativeOwnerIsCurrent = nativeOwner.isCurrent
                     // The resident title's episode list gives the absolute number for the anime retry.

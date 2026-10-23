@@ -46,7 +46,7 @@ class WhosWatchingPickerContractTest {
         assertTrue(source.contains("editorVisible -> onCancelEditor()"))
         assertTrue(source.contains(".clickable(onClick = {}) // consume panel taps"))
         assertTrue(source.contains("nativeModel?.captureSelection(selected)"))
-        assertTrue(source.contains("nativeModel?.commitEditor(captured) {} == true"))
+        assertTrue(source.contains("nativeModel.commitEditor(captured) {}"))
         assertTrue(source.contains("captureProfileSelection(store, profile, outcome, nativeAdmission = nativeAdmission)"))
         assertTrue(source.contains("catch (cancelled: CancellationException)"))
         assertTrue(source.contains("throw cancelled"))
@@ -57,26 +57,10 @@ class WhosWatchingPickerContractTest {
         val source = readSource("ProfilesScreen.kt")
 
         assertTrue(source.contains("onSelected: (ProfileSelectionRequest) -> Unit"))
-        assertTrue(source.contains("onSelected(captureProfileSelection(store, profile, outcome))"))
         assertTrue(source.contains("onSelected(captureProfileSelection(store, profile, outcome, nativeAdmission = nativeAdmission))"))
-        assertTrue(source.contains("val after = checkNotNull(nativeModel?.captureSelection(selected))"))
+        assertTrue(source.contains("val after = checkNotNull(nativeModel.captureSelection(selected))"))
         assertTrue(source.contains("catch (cancelled: CancellationException)"))
         assertTrue(source.contains("throw cancelled"))
-    }
-
-    @Test
-    fun `legacy settings pin and editor save use the actual owner gate admission`() {
-        val source = readSource("ProfilesScreen.kt")
-
-        assertTrue(source.contains("private data class LegacyProfileAdmission"))
-        assertTrue(source.contains("store.profiles === roster"))
-        assertTrue(source.contains("store.activeID == activeID"))
-        assertTrue(source.contains("current === profile && current == profile"))
-        assertTrue(source.contains("if (!witnessMatches || !targetMatches) false else"))
-        assertTrue(source.contains("action()"))
-        assertTrue(source.contains("legacyAdmission?.commit(store)"))
-        assertTrue(source.contains("ProfilesPinRequest(profile, captured, legacyAdmission)"))
-        assertTrue(source.contains("The profile changed. Reopen the editor before trying again."))
     }
 
     @Test

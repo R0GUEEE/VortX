@@ -1,8 +1,6 @@
 import Foundation
 import Darwin
-#if canImport(VortxEngine) && VORTX_ENGINE_OWNER_HISTORY_BRIDGE
 import VortxEngine
-#endif
 
 /// Dedicated opaque-session ABI. An Engine ABI or UInt from VortxNativeRuntime cannot be used
 /// here. Every return still requires its documented host validation; no method acknowledges disk.
@@ -82,7 +80,6 @@ final class OwnerHistorySessionRuntime: @unchecked Sendable {
 /// The production adapter is present but unavailable until root builds every selected SDK and
 /// explicitly enables its existing recovery proposal flag. This is not a capability advertisement.
 struct OwnerHistorySessionCABI: OwnerHistorySessionABI {
-    #if canImport(VortxEngine) && VORTX_ENGINE_OWNER_HISTORY_BRIDGE
     private final class Context {
         let verify: Verify
         init(_ verify: @escaping Verify) { self.verify = verify }
@@ -126,10 +123,4 @@ struct OwnerHistorySessionCABI: OwnerHistorySessionABI {
         }
     }
     func free(_ session: UInt) { vortx_owner_history_session_free(OpaquePointer(bitPattern: session)) }
-    #else
-    func open(_ snapshot: String, verify: @escaping Verify) -> UInt { 0 }
-    func fork(_ session: UInt, fence: String, verify: @escaping Verify) -> UInt { 0 }
-    func request(_ session: UInt, json: String, now: UInt64, verify: @escaping Verify) -> String? { nil }
-    func free(_ session: UInt) {}
-    #endif
 }

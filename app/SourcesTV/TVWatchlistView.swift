@@ -29,10 +29,8 @@ struct TVWatchlistView: View {
     @State private var selectedDetail: DetailTarget?
     @State private var detailOwner: CredentialScopeRegistry.Capture?
     @State private var detailProfileID: UUID?
-    #if VORTX_NATIVE_DATA_ENGINE
     @State private var displayedNativeTarget: CoreBridge.NativeNavigationTarget?
     @State private var detailNativeTarget: CoreBridge.NativeNavigationTarget?
-    #endif
 
     private struct DetailTarget: Hashable {
         let id: String
@@ -46,12 +44,8 @@ struct TVWatchlistView: View {
     }
 
     private var nativeReady: Bool {
-        #if VORTX_NATIVE_DATA_ENGINE
         guard let displayedNativeTarget else { return false }
         return core.nativeNavigationTargetIsCurrent(displayedNativeTarget)
-        #else
-        return true
-        #endif
     }
 
     private var canDisplay: Bool {
@@ -140,15 +134,12 @@ struct TVWatchlistView: View {
         isLoading = true
         let fence = TVWatchlistPresentationFence(owner: CredentialScopeRegistry.shared.capture(),
                                                 profileID: profiles.activeID, generation: generation)
-        #if VORTX_NATIVE_DATA_ENGINE
         // Capture the viewer before scheduling preparation. Cached profiles do not admit a native read.
         let admission = core.captureNativeWatchlistActionAdmission()
-        #endif
         reloadTask = Task { @MainActor in
             defer {
                 if generation == fence.generation { reloadTask = nil; isLoading = false }
             }
-            #if VORTX_NATIVE_DATA_ENGINE
             guard let prepared = await core.prepareNativeWatchlistActionTarget(admission),
                   core.nativeWatchlistTargetIsCurrent(prepared),
                   let navigation = core.captureNativeNavigationTarget(),
@@ -161,15 +152,10 @@ struct TVWatchlistView: View {
             } catch { return }
             guard core.nativeWatchlistTargetIsCurrent(prepared),
                   core.nativeNavigationTargetIsCurrent(navigation) else { return }
-            #else
-            let loaded = LibraryAutoAdd.watchlist()
-            #endif
             guard !Task.isCancelled, isVisible,
                   fence.allows(owner: CredentialScopeRegistry.shared.capture(), profileID: profiles.activeID,
                                generation: generation, nativeReady: true) else { return }
-            #if VORTX_NATIVE_DATA_ENGINE
             displayedNativeTarget = navigation
-            #endif
             entries = loaded
             displayedFence = fence
         }
@@ -179,17 +165,13 @@ struct TVWatchlistView: View {
         // Capture the rendered row's receipt. A queued gesture on profile A's card must not be
         // upgraded to profile B's current receipt, even if both profiles saved the same title.
         let fence = displayedFence
-        #if VORTX_NATIVE_DATA_ENGINE
         let navigation = displayedNativeTarget
-        #endif
         return PosterCard(title: entry.name ?? entry.id, poster: entry.poster,
                           type: entry.type, id: entry.id, width: kPosterWidth,
                           landscapeWidth: kLandscapeCardWidth, menu: .none,
                           onDetails: {
-            #if VORTX_NATIVE_DATA_ENGINE
             guard let navigation, core.nativeNavigationTargetIsCurrent(navigation) else { return }
             detailNativeTarget = navigation
-            #endif
             openDetails(entry, fence: fence)
         })
     }
@@ -209,11 +191,9 @@ struct TVWatchlistView: View {
         guard selectedDetail != nil else { return }
         guard let detailOwner, CredentialScopeRegistry.shared.isCurrent(detailOwner),
               detailProfileID == profiles.activeID else { selectedDetail = nil; return }
-        #if VORTX_NATIVE_DATA_ENGINE
         guard let detailNativeTarget, core.nativeNavigationTargetIsCurrent(detailNativeTarget) else {
             selectedDetail = nil; return
         }
-        #endif
     }
 }
 

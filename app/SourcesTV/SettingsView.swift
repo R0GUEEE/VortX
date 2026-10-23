@@ -25,11 +25,6 @@ struct SettingsView: View {
     // Match Frame Rate: HDRDisplayMode owns both the key and the display-mode behavior it drives, so the key
     // string lives there rather than being duplicated as a literal across the Settings screens.
     @AppStorage(HDRDisplayMode.matchFrameRateKey) private var matchFrameRate = HDRDisplayMode.defaultMatchFrameRate
-    /// Phase 8: the in-process engine streaming-server flag (default OFF, CEO/device-gated flip).
-    /// Same key as iOSSettingsView (settings parity); the row renders only in builds whose linked
-    /// VortxEngine slice carries the server (VortxNativeServerFlag.isSupported), which today is no
-    /// tvOS build (the tier-3 server cross-compile walls), so this stays invisible until it can work.
-    @AppStorage(VortxNativeServerFlag.key) private var engineServerOn = false
     @State private var showRestartConfirm = false
     @State private var editingProfile: UserProfile?
     /// In-app UI language (tvOS had no picker before). "system" follows the Apple TV language.
@@ -892,8 +887,7 @@ struct SettingsView: View {
             } else {
                 Text(StremioServer.base)
                     .font(.system(size: 18, design: .monospaced)).foregroundStyle(Theme.Palette.textTertiary)
-                // When the embedded server is unreachable, explain itself: node's run state and the
-                // server's own last log lines, so a dead server is diagnosable from the couch.
+                // Show the in-process server state when the embedded endpoint is unreachable.
                 if serverOnline == false && !StremioServer.isCustom {
                     #if !VORTX_NO_EMBEDDED_SERVER
                     Text(NodeServer.statusDescription)
@@ -904,8 +898,7 @@ struct SettingsView: View {
                     }
                     #endif
                 }
-                // Apple TV has no user-facing force quit, and a dead embedded server can
-                // only come back with a fresh process (node starts once per process).
+                // Offer an explicit app restart to reclaim process memory and restart the streaming server.
                 Button { showRestartConfirm = true } label: {
                     Label("Restart App", systemImage: "arrow.clockwise.circle")
                 }
@@ -926,30 +919,6 @@ struct SettingsView: View {
                     Label("Configure server", systemImage: "server.rack")
                 }
                 .buttonStyle(PrimaryActionStyle())
-                // Mobile runtimes cannot be swapped in-process: persist the next-launch choice.
-                if VortxNativeServerFlag.isSupported && !NativeTransportPolicy.isRequired {
-                    Button {
-                        engineServerOn.toggle()
-                    } label: {
-                        HStack(alignment: .center, spacing: Theme.Space.lg) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Engine streaming server (experimental)")
-                                    .font(Theme.Typography.cardTitle)
-                                    .foregroundStyle(Theme.Palette.textPrimary)
-                                Text("Restart VortX after changing the streaming engine.")
-                                    .font(Theme.Typography.label)
-                                    .foregroundStyle(Theme.Palette.textSecondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            Spacer(minLength: Theme.Space.md)
-                            TogglePill(isOn: engineServerOn)
-                        }
-                        .padding(Theme.Space.md)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
-                    }
-                    .buttonStyle(RowFocusStyle())
-                }
             }
             // EXTERNAL ENGINE MODE, client side. Keep this beside the server rows because people
             // looking for a Mac that serves this Apple TV will look under Streaming Server first.
@@ -1613,7 +1582,7 @@ struct SettingsView: View {
             manualUpdateResult
             infoRow(String(localized: "Version"), appVersion)
             infoRow(String(localized: "Player"), String(localized: "libmpv · MPVKit"))
-            infoRow(String(localized: "Server"), String(localized: "Stremio streaming server (nodejs-mobile)"))
+            infoRow(String(localized: "Server"), String(localized: "VortX streaming server"))
             NavigationLink { TVWhatsNewView() } label: {
                 Label("What's New", systemImage: "sparkles")
             }

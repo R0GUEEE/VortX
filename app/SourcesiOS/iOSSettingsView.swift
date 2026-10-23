@@ -75,7 +75,7 @@ struct iOSSettingsView: View {
     @State private var macRestartFailure: String?
     @State private var macRestartRecheck: Task<Void, Never>?
     /// Drives the "Share streaming server on this network" toggle (macOS only). Backed by
-    /// NodeServer.sharedOnLAN, which persists + restarts the node process when it flips.
+    /// NodeServer.sharedOnLAN, which persists and restarts the streaming-server child when it flips.
     @State private var shareOnLAN = NodeServer.sharedOnLAN
     @State private var didCopyLAN = false
     // EXTERNAL ENGINE MODE, host side (macOS only). VortXEngineHost is a headless service with no SwiftUI
@@ -96,13 +96,6 @@ struct iOSSettingsView: View {
     @State private var didCopyEngineAddress = false
     @State private var showEngineRevokeAllConfirm = false
     #endif
-    #if !os(macOS)
-    /// Phase 8: the in-process engine streaming-server flag (default OFF, CEO/device-gated flip).
-    /// Same key on every app (settings parity); the toggle renders only in builds whose VortxEngine
-    /// slice carries the server (VortxNativeServerFlag.isSupported), so it can never dangle.
-    @AppStorage(VortxNativeServerFlag.key) private var engineServerOn = false
-    #endif
-
     @AppStorage("stremiox.hdrToneMapMode") private var hdrToneMapMode = "auto"   // auto / on / off
     // Match Frame Rate is an Apple TV display-mode preference (HDRDisplayMode owns the behavior), but it is
     // bound here on the SAME key so the setting reads and writes identically on every app and the account
@@ -1446,31 +1439,17 @@ struct iOSSettingsView: View {
                 }
 
                 #if !os(macOS)
-                // The embedded server tees its console + uncaught errors + a per-second heartbeat to a log
-                // file. Surfacing it lets a user whose server dies on-device read/share the exact cause
-                // (the sim can't reproduce it). iOS/iPad only: this is the in-process NodeServer.
+                // Show the current in-process server state. Its events are included in the app diagnostics.
                 if !StremioServer.isCustom {
                     PushLink {
                         ServerLogView()
                     } label: {
                         Label("Server log", systemImage: "doc.text.magnifyingglass")
                     }
-                    // The in-process Node server CANNOT re-init once it exits (a nodejs-mobile limit), so a
-                    // "restart" on iOS is necessarily a fresh app launch. Always offered now (the user asked
-                    // for a one-tap restart to reclaim memory before/after the server is killed under
-                    // pressure), not only once it has already exited. role:.destructive + the label make the
-                    // quit explicit, and the status line below says whether the server is currently running.
+                    // This action restarts the whole app to reclaim process memory. The destructive role
+                    // and label make the quit explicit; the native server also restarts on the next launch.
                     Button(role: .destructive) { exit(0) } label: {
                         Label("Restart server (quits VortX, then reopen it)", systemImage: "arrow.clockwise")
-                    }
-                    // Mobile runtimes cannot be swapped in-process: persist the next-launch choice.
-                    if VortxNativeServerFlag.isSupported && !NativeTransportPolicy.isRequired {
-                        Toggle(isOn: $engineServerOn) {
-                            Label("Engine streaming server (experimental)", systemImage: "gearshape.2")
-                        }
-                        Text("Restart VortX after changing the streaming engine.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
                     }
                 }
                 #endif
@@ -1485,8 +1464,8 @@ struct iOSSettingsView: View {
                     } label: {
                         Label("Restart streaming server", systemImage: "arrow.clockwise")
                     }
-                    // macOS only: let this Mac act as a Stremio streaming server for the rest of the
-                    // LAN (like the desktop app), so the Apple TV / phone can use it as their server.
+                    // macOS only: let this Mac act as the streaming server for the rest of the LAN,
+                    // so the Apple TV / phone can use it as their server.
                     lanSharingControls
                 }
                 #endif
@@ -1507,7 +1486,7 @@ struct iOSSettingsView: View {
             // Deliberately OUTSIDE the two gates that wrap the rows above. `!effectiveDirectLinksOnly` gates
             // the TORRENT server, and an engine host never touches it: it fetches a debrid or direct URL and
             // remuxes it, which is exactly what a Direct Links Only build does all day. `!StremioServer.isCustom`
-            // gates rows that configure the embedded node child, and this Mac can host an engine while pointing
+            // gates rows that configure the streaming-server child, and this Mac can host an engine while pointing
             // its own playback at somebody else's server. Nesting inside either would hide a feature that works
             // fine in that state, which is worse than an extra row.
             engineHostControls
@@ -1525,13 +1504,13 @@ struct iOSSettingsView: View {
 
     #if os(macOS)
     /// The "Share on this network" toggle + LAN URL + transcoding status (macOS only). Shown when
-    /// the embedded server is in use. Flipping the toggle restarts node so the new bind takes hold.
+    /// the embedded server is in use. Flipping the toggle restarts the server so the new bind takes hold.
     @ViewBuilder private var lanSharingControls: some View {
         Toggle(isOn: Binding(
             get: { shareOnLAN },
             set: { newValue in
                 shareOnLAN = newValue
-                NodeServer.sharedOnLAN = newValue            // persists + restarts node
+                NodeServer.sharedOnLAN = newValue            // persists and restarts the server
                 didCopyLAN = false
                 scheduleMacRestartRecheck()
             }
@@ -2344,11 +2323,7 @@ struct iOSSettingsView: View {
 
     @ViewBuilder private var engineSection: some View {
         Section("Engine") {
-#if VORTX_NATIVE_DATA_ENGINE
             LabeledContent("Data engine", value: nativeEngineLabel)
-#else
-            LabeledContent("stremio-core schema", value: "\(core.schemaVersion)")
-#endif
             LabeledContent("Home rows", value: "\(core.boardRows.count)")
         }
     }

@@ -79,6 +79,7 @@ private struct PlayerTimeLabel: View {
         Text(formattedTime(clock.position))
             .font(.caption.monospacedDigit())
             .foregroundStyle(.white.opacity(opacity))
+            .vortxPlayerTimeLabelProtection()
             .opacity(!showWhenPositive || clock.position > 0 ? 1 : 0)
     }
 
@@ -496,14 +497,16 @@ private struct PlayerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
                 if #available(iOS 26.0, macOS 26.0, *) {
                     // Clear Liquid Glass tinted with the profile accent, so the edges and refraction carry it.
                     shape.fill(.clear)
-                        .glassEffect(.clear.tint(Theme.Palette.accent.opacity(active ? 0.45 : 0.30)).interactive(), in: shape)
+                        .glassEffect(.clear.tint(Theme.Palette.playerGlassAccent.opacity(active ? 0.45 : 0.30)).interactive(), in: shape)
                         .environment(\.colorScheme, .dark)
                 } else {
                     shape.fill(.ultraThinMaterial)
                         .environment(\.colorScheme, .dark)
                 }
-                shape.fill(Theme.Palette.accent.opacity(active ? 0.62 : 0.46))
-                shape.fill(neutral.opacity(0.58))
+                shape.fill(Theme.Palette.playerGlassAccent.opacity(VortXPlayerChromePolicy.controlTintAlpha(
+                    active: active, crimson: Theme.Palette.playerGlassUsesCrimson)))
+                shape.fill(neutral.opacity(VortXPlayerChromePolicy.controlVeilAlpha(
+                    crimson: Theme.Palette.playerGlassUsesCrimson)))
                 // Specular top light: the lit-glass sheen, kept off the lower half where the label sits.
                 shape.fill(LinearGradient(colors: [.white.opacity(0.13), .white.opacity(0)],
                                           startPoint: .top, endPoint: .center))
@@ -512,7 +515,7 @@ private struct PlayerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
         .clipShape(shape)
     }
 
-    // Dark face: opaque for accessibility, a 0.58 veil over the profile tint for normal video chrome.
+    // The accessibility face remains opaque. The shared policy thins only Crimson's normal veil.
     private var neutral: Color { Color(.sRGB, white: 0.08, opacity: 1) }
 
     private var foreground: Color {
@@ -522,7 +525,7 @@ private struct PlayerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
     private var border: LinearGradient {
         // A bright white rim at the top fading into the accent: the lit edge of Liquid Glass.
         let top = contrast == .increased ? 0.48 : active && isEnabled ? 0.62 : prominent ? 0.46 : 0.40
-        let tint: Color = contrast == .increased ? .white : Theme.Palette.accent
+        let tint: Color = contrast == .increased ? .white : Theme.Palette.playerGlassAccent
         return LinearGradient(colors: [Color.white.opacity(top),
                                        tint.opacity(active && isEnabled ? 0.40 : top * 0.45)],
                               startPoint: .top, endPoint: .bottom)
@@ -669,7 +672,7 @@ private struct PlayerLiveIndicator: View {
         // Liquid Glass on OS 26. Background only; the red dot stays a plain fill and playback state is unchanged.
         .vortxGlass(in: Capsule(), fillAlpha: VortXGlass.pillFillAlpha, shadow: .pill)
         Spacer()
-        PlayerTimeLabel(clock: clock, opacity: 0.85, showWhenPositive: true)
+        PlayerTimeLabel(clock: clock, showWhenPositive: true)
     }
     }
 }
@@ -690,10 +693,12 @@ private struct PlayerBottomTimeline: View {
                 PlayerTimeLabel(clock: clock)
                 Spacer(minLength: 8)
                 if let endsAtText {
-                    Text(endsAtText).font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(0.6))
+                    Text(endsAtText).font(.caption2.monospacedDigit()).foregroundStyle(.white)
+                        .vortxPlayerTimeLabelProtection()
                 }
                 Spacer(minLength: 8)
-                Text(durationText).font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.8))
+                Text(durationText).font(.caption.monospacedDigit()).foregroundStyle(.white)
+                    .vortxPlayerTimeLabelProtection()
             }
             .padding(.horizontal, 10)
         }
@@ -709,8 +714,10 @@ private struct PlayerBottomTimeline: View {
                 .animation(.easeOut(duration: 0.12), value: hasThumbnail)
             VStack(alignment: .trailing, spacing: 1) {
                 Text(durationText).font(.caption.monospacedDigit()).foregroundStyle(.white)
+                    .vortxPlayerTimeLabelProtection()
                 if let ends = endsAtText {
-                    Text(ends).font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(0.55))
+                    Text(ends).font(.caption2.monospacedDigit()).foregroundStyle(.white)
+                        .vortxPlayerTimeLabelProtection()
                 }
             }
         }
@@ -806,8 +813,7 @@ private struct PlayerBottomBarLayout: View {
             toolbar
         }
         .padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 12)
-        .vortxGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous),
-                    fillAlpha: 0.28, shadow: .bar, tone: .scrim, materialOpacity: 0.65)
+        .vortxPlayerBottomBackplate()
         .padding(.horizontal, 16).padding(.bottom, 16)
         #endif
     }
@@ -8409,12 +8415,10 @@ struct PlayerScreen: View {
     private var controls: some View {
         ZStack {
             #if os(macOS)
-            LinearGradient(colors: [.black.opacity(0.45), .clear, .black.opacity(0.38)],
-                           startPoint: .top, endPoint: .bottom)
+            VortXPlayerBackdrop(platform: .desktop)
                 .ignoresSafeArea().allowsHitTesting(false)
             #else
-            LinearGradient(colors: [.black.opacity(0.55), .clear, .black.opacity(0.75)],
-                           startPoint: .top, endPoint: .bottom)
+            VortXPlayerBackdrop(platform: .touch)
                 .ignoresSafeArea().allowsHitTesting(false)
             #endif
 

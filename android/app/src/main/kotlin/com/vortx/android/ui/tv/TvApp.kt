@@ -90,7 +90,7 @@ fun TvApp(
         var showPicker by remember { mutableStateOf(profileStore?.needsPicker == true) }
         var profileSelection by remember { mutableStateOf<ProfileSelectionRequest?>(null) }
         profileSelection?.let { request ->
-            val handoff = remember(request, auth) { ProfileSelectionHandoff(auth, BuildConfig.NATIVE_ENGINE_ENABLED) }
+            val handoff = remember(request, auth) { ProfileSelectionHandoff(auth, native = true) }
             ProfileSelectionSurface(request, handoff,
                 onComplete = { profileSelection = null; showPicker = false },
                 onChooseAgain = { profileSelection = null; showPicker = true })

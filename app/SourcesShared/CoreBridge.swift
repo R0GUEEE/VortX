@@ -4,13 +4,7 @@ import CryptoKit
 #if os(macOS)
 import AppKit
 #endif
-#if !VORTX_NATIVE_DATA_ENGINE
-import StremioXCore
-#endif
 
-#if VORTX_NATIVE_DATA_ENGINE && (!VORTX_ENGINE_STATE_BRIDGE || !VORTX_ENGINE_RESOURCE_HOST || !canImport(VortxEngine))
-#error("Native data engine requires the exact state/resource-host VortxEngine artifact and bridge conditions")
-#endif
 
 /// Search text changes before the debounced request. Carry both query and generation through
 /// worker decoding and main-thread publication so even A -> B -> A rejects a queued old A result.
@@ -44,7 +38,7 @@ struct CoreBoardPageRequest {
     }
 }
 
-/// Bridges the native Rust **stremio-core** engine (StremioXCore.xcframework) to Swift.
+/// Bridges the native Rust VortX engine (VortxEngine.xcframework) to Swift.
 ///
 /// The engine owns catalogs, library, Continue-Watching, meta and streams, the same way the official
 /// app does. We dispatch JSON actions into it, read JSON state out, and it calls us back (on a Rust
@@ -54,13 +48,8 @@ final class CoreBridge: ObservableObject {
     /// In the gated engine every active profile has a native bucket. An unbound session is
     /// unavailable, never permission to read the previous account's global overlay caches.
     var usesNativeProfileState: Bool {
-#if VORTX_NATIVE_DATA_ENGINE
         true
-#else
-        false
-#endif
     }
-#if VORTX_NATIVE_DATA_ENGINE
     private let nativeFacadeLock = NSLock()
     private var nativeFacadeStorage: VortxNativeCoreFacade?
     private var nativeCredentialCapture: CredentialScopeRegistry.Capture?
@@ -967,7 +956,6 @@ final class CoreBridge: ObservableObject {
         changedFields = ["native_state", "ctx", "library", "continue_watching_preview", "board", "search", "discover", "meta_details"]
         revision &+= 1
     }
-#endif
 
     /// Bumped on every `RuntimeEvent::NewState`; SwiftUI observes this to refresh. `changedFields`
     /// holds the field names that changed since the last bump (e.g. ["board", "ctx"]).
@@ -980,11 +968,9 @@ final class CoreBridge: ObservableObject {
     @Published private(set) var metaDetails: CoreMetaDetails?
     private let metaLoadTargetLock = NSLock()
     private var requestedMetaLoadTarget: MetaLoadTarget?
-#if VORTX_NATIVE_DATA_ENGINE
     private var nativeMetaRequestAction: Data?
     private var nativeMetaRequestGeneration = UUID()
     private var nativeMetaRequestScope: NativeResourceIntentScope?
-#endif
     /// Synchronous request identity; do not mistake the coalesced previous payload for current ownership.
     var currentMetaLoadTarget: MetaLoadTarget? {
         metaLoadTargetLock.withLock { requestedMetaLoadTarget }
@@ -1271,13 +1257,11 @@ final class CoreBridge: ObservableObject {
     /// on pause, when the player closes, and when the app goes to the background or quits. `waitUpTo` blocks
     /// for at most that long, for quitting, where nothing runs after the notification returns.
     func flushNativeProgress(waitUpTo timeout: TimeInterval? = nil) {
-#if VORTX_NATIVE_DATA_ENGINE
         guard let facade = nativeFacade else { return }
         guard let timeout else { facade.flushPendingProgress(); return }
         let done = DispatchSemaphore(value: 0)
         facade.flushPendingProgress { done.signal() }
         _ = done.wait(timeout: .now() + timeout)
-#endif
     }
 
     /// Increment/decrement the player-active depth on the MAIN actor and publish `playerActive`.
@@ -1314,7 +1298,6 @@ final class CoreBridge: ObservableObject {
     }
 
     private init() {
-#if VORTX_NATIVE_DATA_ENGINE
         credentialScopeObserver = NotificationCenter.default.addObserver(
             forName: VortXSyncManager.credentialScopeDidChangeNote, object: nil, queue: .main
         ) { [weak self] _ in
@@ -1328,50 +1311,6 @@ final class CoreBridge: ObservableObject {
                 await VortXSyncManager.shared.hydrateEngineFromOwnedAddons(credentialCapture: capture)
             }
         }
-#else
-        // Seed the observer's previous scope from the registry, rather than treating the first note seen
-        // after CoreBridge construction as an unrelated initial bind.  This preserves the account -> guest
-        // boundary even when the bridge is lazily created after the account session has already settled.
-        let initialScope = CredentialScopeRegistry.shared.capture().scope
-        lastObservedCredentialScope = initialScope
-        if case .account = initialScope {
-            Self.excludeAccountHistoryFromGuestRecommendations()
-        }
-        credentialScopeObserver = NotificationCenter.default.addObserver(
-            forName: VortXSyncManager.credentialScopeDidChangeNote,
-            object: nil,
-            queue: .main
-        ) { [weak self] note in
-            guard let self,
-                  let rawGeneration = note.userInfo?["generation"] as? NSNumber else { return }
-            let capture = CredentialScopeRegistry.shared.capture()
-            guard capture.generation == rawGeneration.uint64Value else { return }
-            let previousScope = self.lastObservedCredentialScope
-            self.credentialScopeDidChange(capture, previousScope: previousScope)
-            self.lastObservedCredentialScope = capture.scope
-        }
-        credentialBoundaryObserver = NotificationCenter.default.addObserver(
-            forName: StremioAccount.credentialBoundaryDidChange,
-            object: nil,
-            queue: .main
-        ) { [weak self] note in
-            guard let self,
-                  let rawGeneration = note.userInfo?["generation"] as? NSNumber,
-                  let eventProfileID = note.userInfo?["profileID"] as? String,
-                  let eventKeychainAccount = note.userInfo?["keychainAccount"] as? String,
-                  note.userInfo?["wasSignedIn"] as? Bool == true else { return }
-            // A same-slot credential event is accepted only for the profile/keychain identity that
-            // is still selected. A delayed A response must not rebind the newly selected B slot.
-            guard eventProfileID == ProfileStore.shared.active?.id.uuidString,
-                  eventKeychainAccount == ProfileStore.shared.activeKeychainAccount else { return }
-            let generation = rawGeneration.uint64Value
-            guard generation > self.lastCredentialBoundaryGeneration else { return }
-            self.lastCredentialBoundaryGeneration = generation
-            // Rebind before the next history receipt can be admitted. This path is intentionally
-            // deduplicated by the process-local generation and does not log or transport credentials.
-            self.signedInWithLegacyAuthKey()
-        }
-#endif
     }
 
     /// Hydrate the engine from persisted storage and start the event loop. Idempotent.
@@ -1385,7 +1324,6 @@ final class CoreBridge: ObservableObject {
                 (CoreBridge.shared.metaDetails?.meta?.videos ?? []).map { ($0.season, $0.episode) }
             }
         }
-#if VORTX_NATIVE_DATA_ENGINE
         #if os(macOS)
         // Quitting does not background the Mac app first: write held-back playback progress on the way out.
         quitProgressObserver = NotificationCenter.default.addObserver(
@@ -1398,43 +1336,6 @@ final class CoreBridge: ObservableObject {
             await VortXSyncManager.shared.hydrateEngineFromOwnedAddons()
         }
         return
-#else
-        let initialCapture = CredentialScopeRegistry.shared.capture()
-        let isSignedOutDevice: Bool
-        if case .signedOutDevice = initialCapture.scope { isSignedOutDevice = true }
-        else { isSignedOutDevice = false }
-        let exclusion = BecauseYouWatchedGuestProvenancePolicy.exclusionReceipt(
-            from: UserDefaults.standard.object(forKey: Self.localHistoryDeviceReceiptPendingKey))
-        // This proof must precede makeDir/engine initialization. Existing, unreadable, or account-tainted
-        // storage cannot become guest recommendation history merely because its account failed to restore.
-        if exclusion == nil, isSignedOutDevice,
-           BecauseYouWatchedGuestProvenancePolicy.canEstablishCleanDevice(
-            exclusionReceipt: exclusion, isSignedOutDevice: isSignedOutDevice,
-            storageIsKnownFresh: BecauseYouWatchedGuestProvenancePolicy.storageIsKnownFresh(at: Self.storageDirURL)
-           ) {
-            UserDefaults.standard.set(false, forKey: Self.localHistoryDeviceReceiptPendingKey)
-        }
-        let storageDir = Self.makeDir(at: Self.storageDirURL)
-        let cacheDir = Self.makeDir(.cachesDirectory, "stremio-core-http")
-        // The pointer is passed through but never dereferenced on the way back: the C callback
-        // resolves `CoreBridge.shared` directly. An unretained pointer round-tripped through a
-        // Rust worker thread would dangle if this object were ever deallocated.
-        let ctx = Unmanaged.passUnretained(self).toOpaque()
-        let ok = storageDir.withCString { storage in
-            cacheDir.withCString { cache in
-                stremiox_core_init(storage, cache, ctx, coreEventCallback)
-            }
-        }
-        if !ok { NSLog("[CoreBridge] stremiox_core_init failed"); return }
-        // Bring up RemoteConfig once, on the single shared launch path every Apple target runs (VortXTV,
-        // VortXTVLite, VortXiOSNative, VortXMac, VortX). Synchronously loads last-good cached JSON into the
-        // lock-free snapshot (else all-baked, behaviorally identical to shipping), then kicks a background
-        // refresh. Fail-soft: any error keeps baked defaults, so this never blocks or bricks launch.
-        Task { await RemoteConfig.shared.bootstrap() }
-        bootstrapAuth()
-        seedInitialState()
-        scheduleSessionRepair()   // runs on EVERY launch path: covers the force-close add-on-loss desync
-#endif
     }
 
     /// Pull state the engine populated at construction (e.g. `continue_watching_preview` from the
@@ -1510,47 +1411,6 @@ final class CoreBridge: ObservableObject {
         // them), so this can only ever remove an add-on the user explicitly deleted: a user-installed
         // add-on OR a REMOVABLE official one (YouTube, WatchHub, Public Domain, OpenSubtitles are
         // official=true, protected=false and the engine re-seeds them on every reset, #137).
-#if !VORTX_NATIVE_DATA_ENGINE
-        let removed = AddonTombstones.all()
-        if !removed.isEmpty {
-            func isTombstoned(_ descriptor: CoreDescriptor) -> Bool {
-                removed.contains(AddonTombstones.normalize(descriptor.transportUrl))
-                    && !descriptor.isProtected
-            }
-            let toUninstall = typed.filter(isTombstoned).compactMap { raw[$0.transportUrl] }
-            let survivingTyped = typed.filter { !isTombstoned($0) }
-            for descriptor in typed where isTombstoned(descriptor) {
-                raw.removeValue(forKey: descriptor.transportUrl)
-            }
-            let publishedRaw = raw
-            // Uninstall the tombstoned add-ons from the engine off this event-processing thread (mirrors
-            // the syncDown apply loop's @MainActor hop), so we never re-enter the engine synchronously
-            // while it is emitting the ctx event we are handling. tombstone:false via a direct dispatch
-            // because the URL is already in the set; re-recording would be a redundant no-op.
-            //
-            // Tombstoned rows must be reconciled in the engine too. The centralized selector uses
-            // UninstallAddonLocal while mirror-off, so this periodic cleanup refreshes catalogs/sources
-            // without writing an authenticated Stremio addon collection.
-            if !toUninstall.isEmpty {
-                Task { @MainActor [weak self] in
-                    guard let self, self.publicationStillCurrent(publicationToken) else { return }
-                    for rawDescriptor in toUninstall {
-                        guard self.publicationStillCurrent(publicationToken) else { return }
-                        self.dispatchCtx(["action": self.addonMutationAction("UninstallAddon", local: "UninstallAddonLocal"), "args": rawDescriptor])
-                    }
-                }
-            }
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.publicationStillCurrent(publicationToken) else { return }
-                // Keep this gate and the published descriptor snapshot atomic from the active profile's
-                // perspective.  A stale ctx callback must not enable a resolver for the next account.
-                AddonMetaGate.publish(survivingTyped.contains { $0.providesTMDBMeta })
-                self.addons = survivingTyped
-                self.rawAddonsByUrl = publishedRaw
-            }
-            return
-        }
-#endif
         DispatchQueue.main.async { [weak self] in
             guard let self, self.publicationStillCurrent(publicationToken) else { return }
             AddonMetaGate.publish(typed.contains { $0.providesTMDBMeta })
@@ -1578,7 +1438,6 @@ final class CoreBridge: ObservableObject {
         // A logout, unresolved binding, or rejected credential still belongs to the previous
         // account. Do not create a durable deletion intent or inspect engine state while fenced.
         guard addonMutationStillAllowed(mutationToken) else { return }
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             // Native removal owns its tombstone in the kernel's profile bucket.  The legacy
             // tombstone carrier cannot certify an asynchronous native transaction, so do not
@@ -1587,7 +1446,6 @@ final class CoreBridge: ObservableObject {
                   dispatchCtx(["action": addonMutationAction("UninstallAddon", local: "UninstallAddonLocal"), "args": raw]) else { return }
             return
         }
-#endif
         // Record the durable removal FIRST, before touching rawAddonsByUrl. A synced add-on can be visible
         // in the published `addons` list yet be MISSING from `rawAddonsByUrl` (its raw engine descriptor
         // never landed, e.g. a roster the sync layer added without an engine InstallAddon). The old
@@ -1751,7 +1609,6 @@ final class CoreBridge: ObservableObject {
             action = ["action": addonMutationAction("ReplaceAddon", local: "ReplaceAddonLocal"),
                       "args": ["old": old, "new": descriptor]]
         } else {
-#if VORTX_NATIVE_DATA_ENGINE
             if usesNativeProfileState, replacing {
                 // Existing native membership is updated by the kernel's atomic replacement,
                 // which retains its slot and deletion receipts. Install rejects a duplicate URL.
@@ -1763,15 +1620,9 @@ final class CoreBridge: ObservableObject {
                 action = ["action": addonMutationAction("InstallAddon", local: "InstallAddonLocal"),
                           "args": descriptor]
             }
-#else
-            action = ["action": addonMutationAction("InstallAddon", local: "InstallAddonLocal"),
-                      "args": descriptor]
-#endif
         }
         let clearTombstoneBeforeDispatch: (() -> Void)? = {
-#if VORTX_NATIVE_DATA_ENGINE
             guard !self.usesNativeProfileState else { return }
-#endif
             AddonTombstones.forget(identityURL.absoluteString)
         }
         guard addonMutationStillAllowed(mutationToken), dispatchCtx(action, beforeDispatch: clearTombstoneBeforeDispatch) else {
@@ -1787,12 +1638,10 @@ final class CoreBridge: ObservableObject {
             return .failed(retryable: true, message: "Install did not confirm. Check your connection and try again.")
         }
         if let replacingDescriptor, replacingDescriptor.transportUrl != identityURL.absoluteString {
-#if VORTX_NATIVE_DATA_ENGINE
             // The native replacement committed the old identity's CRDT tombstone atomically with
             // the new descriptor and order.  Do not mutate the legacy carrier from a published
             // view that can lag or omit disabled membership.
             if usesNativeProfileState { return .installed }
-#endif
             guard addonMutationStillAllowed(mutationToken) else {
                 return .failed(retryable: true, message: Self.accountTransitionMessage)
             }
@@ -1918,14 +1767,12 @@ final class CoreBridge: ObservableObject {
                                     replacingManifest: [String: Any]?,
                                     expectedManifest: [String: Any]?) -> Bool {
         guard addons.contains(where: { $0.transportUrl == identity }) else { return false }
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             guard let expectedManifest,
                   let data = try? JSONSerialization.data(withJSONObject: expectedManifest),
                   let submitted = try? JSONDecoder().decode(VortxJSON.self, from: data) else { return false }
             return nativeFacade?.confirmsInstalledAddon(identity, submittedManifest: submitted) == true
         }
-#endif
         guard replacingManifest != nil, let expectedManifest else { return true }
         guard let published = rawAddonsByUrl[identity]?["manifest"] as? [String: Any] else { return false }
         return NSDictionary(dictionary: published).isEqual(to: expectedManifest)
@@ -2030,13 +1877,9 @@ final class CoreBridge: ObservableObject {
         }
     }
 
-    /// stremio-core's storage schema version, a smoke check that the FFI is wired end-to-end.
+    /// The native host presentation schema version.
     var schemaVersion: UInt32 {
-#if VORTX_NATIVE_DATA_ENGINE
         1 // Native host presentation schema, not the Stremio storage schema.
-#else
-        stremiox_core_schema_version()
-#endif
     }
 
     // MARK: Auth bootstrap / migration
@@ -2319,83 +2162,23 @@ final class CoreBridge: ObservableObject {
         dispatchCtx(["action": "SyncLibraryWithAPI"])
     }
 
-    /// Seed the engine right after a fresh sign-in (LoginView wrote the authKey to the active
-    /// profile's slot). When the engine still holds ANOTHER profile's session, this routes through
-    /// the switch path instead, because bootstrapAuth would see "logged in" and keep the old session.
+    /// Refresh the published screens after an acknowledged native account import.
     func signedInWithLegacyAuthKey() {
-#if VORTX_NATIVE_DATA_ENGINE
         // The native sign-in coordinator already committed the verified source and binding.
         // Never forward its token into the retired Stremio engine or erase native addon intent.
-        loadBoard(); loadLibrary(); return
-#endif
-        // Explicit Stremio reconnect = explicit import intent (#205): the user is deliberately pulling
-        // this account's add-ons back in, so prior local removal tombstones must not suppress them
-        // (refreshAddons uninstalls any non-protected ctx add-on still in the removal set, so the
-        // import would report "0 add-ons" forever for any add-on the user once deleted here).
-        // Background pulls (launch recovery, periodic refresh) never route through this function, so
-        // ordinary removal-sticks behavior is unchanged everywhere else.
-        for removedURL in AddonTombstones.all() {
-            AddonTombstones.forget(removedURL)
-        }
-        explicitAddonImportPending = true
-        if isLoggedIn(), let key = Keychain.string(activeTokenAccount), !key.isEmpty {
-            switchAccount(token: key, explicitAddonImport: true)
-        } else {
-            bootstrapAuth()
-        }
+        loadBoard(); loadLibrary()
     }
 
-    /// Switch the engine to a different Stremio session WITHOUT logging the current one out.
-    /// (Engine Logout destroys its session server-side, which would permanently invalidate the
-    /// profile we're leaving.) LoginWithToken installs the new session in place and the engine then
-    /// pulls that account's addons + library itself; completion is accepted only when authenticated
-    /// token identity agrees with the engine ctx.
+    /// Refresh after the native coordinator has acknowledged the selected account binding.
     func switchAccount(token: String, explicitAddonImport: Bool = false) {
-#if VORTX_NATIVE_DATA_ENGINE
         // Profile selection and account binding are separate acknowledged native transactions.
-        loadBoard(); loadLibrary(); return
-#endif
-        if explicitAddonImport { explicitAddonImportPending = true }
-        beginAccountBinding(for: token)
-        let publicationToken = capturePublicationToken()
-        switchInFlight = true
-        switchFromUID = currentUID()
-        clearUserState()
-        NSLog("[CoreBridge] switching engine session (profile change)…")
-        dispatchCtx(["action": "Authenticate", "args": ["type": "LoginWithToken", "token": token]])
-        // This is a UI refresh backstop only. It is not credential proof and deliberately cannot
-        // settle `pendingAccountBinding` or permit a queued account mutation.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
-            guard let self, self.publicationStillCurrent(publicationToken), self.switchInFlight else { return }
-            self.switchInFlight = false
-            self.switchFromUID = nil
-            // Never refresh the pre-switch account merely because time elapsed. A verified
-            // binding will perform its own refresh; an unresolved switch remains fail-closed.
-            if self.pendingAccountBinding == nil, self.settledAccountBinding != nil {
-                self.refreshFromAPI()
-            }
-            self.seedInitialState()
-            self.loadBoard()
-        }
+        loadBoard(); loadLibrary()
     }
 
-    /// Log out of the engine (clears the persisted profile + library, and kills the session
-    /// server-side) and the published UI state. For explicit sign-out, never for profile switching.
+    /// Refresh after credential disconnection; native coordinators own account/session transitions.
     func logOut(rearmSignedOutRepair: Bool = true) {
-#if VORTX_NATIVE_DATA_ENGINE
         // Credential disconnection does not rebind or delete an acknowledged native account slot.
-        loadBoard(); loadLibrary(); return
-#endif
-        invalidateAuthenticationGeneration()
-        signedOutRepairGeneration &+= 1
-        let signedOutRepairRequest = SignedOutRepairRequest(
-            generation: signedOutRepairGeneration,
-            publicationToken: capturePublicationToken(),
-            rearmSessionRepair: rearmSignedOutRepair
-        )
-        self.signedOutRepairRequest = signedOutRepairRequest
-        dispatchCtx(["action": "Logout"])
-        clearUserState()
+        loadBoard(); loadLibrary()
     }
 
     /// A matching signed-out `ctx` is the only receipt allowed to release the logout publication
@@ -2504,11 +2287,9 @@ final class CoreBridge: ObservableObject {
     /// and the Live tab. Keep an absolute maximum so coalesced requests cannot lose depth.
     private func widenBoardRange(to needed: Int) {
         guard needed > boardRowsLoaded else { return }
-#if VORTX_NATIVE_DATA_ENGINE
         if !boardRowPageInFlight.isEmpty {
             deferredBoardRangeDepth = max(deferredBoardRangeDepth ?? 0, needed); return
         }
-#endif
         boardPageInFlight = true
         boardRowsLoaded = needed
         dispatch(action: ["action": "CatalogsWithExtra",
@@ -2525,7 +2306,6 @@ final class CoreBridge: ObservableObject {
         guard let board = decode(CoreBoardState.self, field: "board"), engineIndex < board.catalogs.count else { return }
         let count = board.catalogs[engineIndex].compactMap { $0.content?.ready }.flatMap { $0 }.count
         guard count > 0 else { return }   // the row has not hydrated yet; nothing to page from
-#if VORTX_NATIVE_DATA_ENGINE
         if !boardRowPageInFlight.isEmpty || board.catalogs.joined().contains(where: { $0.content?.isLoading == true }) {
             deferredBoardRowPages.insert(engineIndex); return
         }
@@ -2537,12 +2317,6 @@ final class CoreBridge: ObservableObject {
         case .exhausted: boardRowExhausted.insert(engineIndex)
         case .rejected: break
         }
-#else
-        boardRowPageInFlight[engineIndex] = CoreBoardPageRequest(itemCount: count, pageCount: board.catalogs[engineIndex].count)
-        dispatch(action: ["action": "CatalogsWithExtra",
-                          "args": ["action": "LoadNextPage", "args": engineIndex]],
-                 field: "board")
-#endif
     }
 
     /// Reconcile in-flight per-row pagination after a `board` emit (#95). A SETTLED load (the catalog no
@@ -2554,15 +2328,12 @@ final class CoreBridge: ObservableObject {
         for (index, request) in boardRowPageInFlight {
             guard index < board.catalogs.count else { boardRowPageInFlight[index] = nil; continue }
             let pages = board.catalogs[index]
-#if VORTX_NATIVE_DATA_ENGINE
             guard request.acceptsSettlement(pageCount: pages.count, isLoading: pages.contains(where: { $0.content?.isLoading == true })) else { continue }
-#endif
             if pages.contains(where: { $0.content?.isLoading == true }) { continue }   // still settling; wait
             let count = pages.compactMap { $0.content?.ready }.flatMap { $0 }.count
             boardRowPageInFlight[index] = nil
             if count <= request.itemCount { boardRowExhausted.insert(index) }
         }
-#if VORTX_NATIVE_DATA_ENGINE
         guard boardRowPageInFlight.isEmpty, !board.catalogs.joined().contains(where: { $0.content?.isLoading == true }) else { return }
         if let depth = deferredBoardRangeDepth {
             deferredBoardRangeDepth = nil
@@ -2575,7 +2346,6 @@ final class CoreBridge: ObservableObject {
             // pageable row cannot remain queued forever behind an unsupported catalog.
             if !boardRowPageInFlight.isEmpty || deferredBoardRowPages.contains(index) { break }
         }
-#endif
     }
 
     /// Apply a catalog presentation-order change to Home. The stored order only sorts populated rows after
@@ -2805,11 +2575,9 @@ final class CoreBridge: ObservableObject {
     /// extra). Results land in `searchResults`, flattened and de-duplicated into one grid.
     func search(_ query: String) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-#if VORTX_NATIVE_DATA_ENGINE
         nativeFacadeLock.withLock {
             nativeSearchRequestScope = .init(credential: CredentialScopeRegistry.shared.capture(), profileID: ProfileStore.shared.activeID)
         }
-#endif
         prepareSearch(trimmed)
         let token = searchPublication.prepare(trimmed).token
         setSearchLoading(trimmed.count >= 2, token: token)
@@ -3067,11 +2835,7 @@ final class CoreBridge: ObservableObject {
     private func assembleStreamGroups(_ details: CoreMetaDetails, streamId: String?) -> [CoreStreamSourceGroup] {
         let names = addonNamesByBase()
         let disabledAddons = ProfileStore.activeDisabledAddons()   // per-profile add-on set, hoisted once
-#if VORTX_NATIVE_DATA_ENGINE
         let removed: Set<String> = [] // account/profile membership is already resolved by the kernel
-#else
-        let removed = AddonTombstones.all()                        // durable removal set, hoisted once
-#endif
         var groups: [CoreStreamSourceGroup] = []
         var indexByBase: [String: Int] = [:]
         for group in details.allStreamGroups {
@@ -3410,7 +3174,6 @@ final class CoreBridge: ObservableObject {
         guard let residentMeta = metaDetails?.meta,
               LibraryWatchedMutationPolicy.residentMatches(expected, residentID: residentMeta.id,
                                                            residentType: residentMeta.type) else { return }
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             if EpisodePlaybackIdentity.usesSeriesLifecycle(type: residentMeta.type) {
                 let videoIDs = (residentMeta.videos ?? []).map(\.id).filter { !$0.isEmpty }
@@ -3422,7 +3185,6 @@ final class CoreBridge: ObservableObject {
             nativeWatchedIntent(id: residentMeta.id, name: residentMeta.name, type: residentMeta.type, poster: residentMeta.poster, watched: isWatched)
             return
         }
-#endif
         switch LibraryWatchedMutationPolicy.route(usesEngineHistory: ProfileStore.shared.activeUsesEngineHistory) {
         case .profileOverlay:
             // Keep this local to the active overlay. Missing detail context must remain a no-op,
@@ -3472,7 +3234,6 @@ final class CoreBridge: ObservableObject {
               LibraryWatchedMutationPolicy.residentMatches(expected, residentID: residentMeta.id,
                                                            residentType: residentMeta.type),
               residentMeta.videos?.contains(where: { $0.season == season }) == true else { return }
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             let videoIDs = (residentMeta.videos ?? []).filter { $0.season == season }.map(\.id).filter { !$0.isEmpty }
             guard !videoIDs.isEmpty else { return }
@@ -3480,7 +3241,6 @@ final class CoreBridge: ObservableObject {
                                          type: residentMeta.type, poster: residentMeta.poster, watched: isWatched)
             return
         }
-#endif
         if overlayMarkWatched(isWatched, videoIds: { meta in
             (meta.videos ?? []).filter { $0.season == season }.map(\.id)
         }) { return }
@@ -3504,12 +3264,10 @@ final class CoreBridge: ObservableObject {
               LibraryWatchedMutationPolicy.residentMatches(expected, residentID: residentMeta.id,
                                                            residentType: residentMeta.type),
               residentMeta.videos?.contains(where: { $0.id == video.id }) == true else { return }
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             nativeWatchedIntent(id: residentMeta.id, videoID: video.id, name: residentMeta.name, type: residentMeta.type, poster: residentMeta.poster, watched: isWatched)
             return
         }
-#endif
         if overlayMarkWatched(isWatched, videoIds: { _ in [video.id] }) { return }
         guard !logoutAccountMutationPending else { return }
         if !isWatched {
@@ -3600,7 +3358,6 @@ final class CoreBridge: ObservableObject {
             NSLog("[playback] dropped watched callback after profile/account ownership changed")
             return
         }
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             ScrobbleCoordinator.shared.watched(meta)
             guard allowEngineWrite else { return }
@@ -3608,7 +3365,6 @@ final class CoreBridge: ObservableObject {
                                 name: meta.name, type: meta.type, poster: meta.poster, watched: true, target: target)
             return
         }
-#endif
         if let profileID = target.overlayProfileID {
             ProfileStore.shared.markWatched(meta: meta, profileID: profileID)
             return
@@ -3726,9 +3482,7 @@ final class CoreBridge: ObservableObject {
     /// nil to mean "consult the account fallback" and 0 to mean "genuinely start fresh". Once that
     /// lands, the caller reverts to trusting any non-nil answer.
     @MainActor func engineResumeSeconds(for meta: PlaybackMeta) -> Double? {
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState { return nativeFacade?.cachedResumeSeconds(id: meta.usesSeriesLifecycle ? meta.videoId : meta.libraryId) }
-#endif
         // Overlay (non-owner) profile: the engine library item belongs to the owner account, so its saved
         // resume position is not this profile's. Decline here so the caller falls back to account.resumeOffset,
         // which reads the active overlay profile's own history. Mirrors the activeUsesEngineHistory guard used
@@ -3765,9 +3519,7 @@ final class CoreBridge: ObservableObject {
     /// mirroring `engineResumeSeconds`.
     @MainActor
     func engineResumeSecondsByLibraryId(for meta: PlaybackMeta) -> Double? {
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState { return nativeFacade?.cachedResumeSeconds(id: meta.usesSeriesLifecycle ? meta.videoId : meta.libraryId) }
-#endif
         guard ProfileStore.shared.activeUsesEngineHistory else { return nil }   // overlay: not this profile's item
         // The engine's own library item for this id: the loaded meta, else the published CW, else the RAW preview
         // (which still includes finished movies / mid-series roll-forwards the published CW prunes), else the
@@ -3854,7 +3606,6 @@ final class CoreBridge: ObservableObject {
     /// to the library on play, so dismissing there is a library removal). The engine re-emits
     /// `continue_watching_preview` + `library`, so both rails update on their own.
     func removeFromLibrary(id: String) {
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             // Native profiles keep the saved Library, Continue Watching and watch history separate, so a
             // Library removal never dismisses Continue Watching (and the reverse, below).
@@ -3862,7 +3613,6 @@ final class CoreBridge: ObservableObject {
             if library?.catalog.contains(where: { $0.id == id }) == true { dispatchCtx(["action": "RemoveFromLibrary", "args": id]) }
             return
         }
-#endif
         guard ProfileStore.shared.activeUsesEngineHistory else {
             // Overlay profile: dismissing CW must touch only the profile's private history,
             // never the owner account's library. That path is already tombstone-safe via ProfileStore,
@@ -3895,12 +3645,10 @@ final class CoreBridge: ObservableObject {
     /// (a later resume or watch revives it) and never delete the saved Library entry. The legacy engine has
     /// no separate rail: its Continue Watching membership is library membership, so it keeps the removal.
     func removeFromContinueWatching(id: String) {
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             DiagnosticsLog.log("library", "action=dismiss_continue_watching surface=menu")
             nativeDismissContinueWatching(id: id); return
         }
-#endif
         removeFromLibrary(id: id)
     }
 
@@ -3912,14 +3660,12 @@ final class CoreBridge: ObservableObject {
     /// (not one per title, unlike the single-item path) so the tombstones land promptly without N round
     /// trips. Never "just delete locally": a bare local clear would be resurrected by the next union pull.
     func clearContinueWatching() {
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             for item in continueWatching {
                 nativeDismissContinueWatching(id: item.id)
             }
             return
         }
-#endif
         guard ProfileStore.shared.activeUsesEngineHistory else {
             // Overlay profile: CW renders from the profile's private overlay; clear those entries only.
             for item in ProfileStore.shared.cwItems {
@@ -3946,7 +3692,6 @@ final class CoreBridge: ObservableObject {
     /// library entry (no `MetaItemPreview` needed), so it fits the Library tab, where items are library
     /// entries rather than full catalog previews. A no-op if the id isn't in the library.
     func setLibraryItemWatched(id: String, _ isWatched: Bool) {
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             guard let item = library?.catalog.first(where: { $0.id == id }) else { return }
             if EpisodePlaybackIdentity.usesSeriesLifecycle(type: item.type) {
@@ -3954,7 +3699,6 @@ final class CoreBridge: ObservableObject {
             }
             nativeWatchedIntent(id: id, name: item.name, type: item.type, poster: item.poster, watched: isWatched); return
         }
-#endif
         guard ProfileStore.shared.activeUsesEngineHistory else {
             overlaySetWatchedById(id, isWatched)   // overlay profile: private history only
             return
@@ -4020,14 +3764,8 @@ final class CoreBridge: ObservableObject {
         // here off-main (a UserDefaults read plus the ctx auth probe, both thread-safe) and applied BEFORE
         // `pruneFinished`, because a title Stremio reports as finished would otherwise be pruned away before
         // the floor could restore VortX's own in-progress position.
-#if !VORTX_NATIVE_DATA_ENGINE
-        let mayReplaceCW = MirrorSettings.stremioMayReplaceContinueWatching(stremioSessionLive: isLoggedIn())
-#endif
         let decodedPreview = decode(CoreCWPreview.self, field: "continue_watching_preview")
         let preview = decodedPreview?.items ?? []
-#if !VORTX_NATIVE_DATA_ENGINE
-        let library = decode(CoreLibrary.self, field: "library")?.catalog ?? []
-#endif
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.continueWatchingRebuildLock.lock()
@@ -4036,26 +3774,9 @@ final class CoreBridge: ObservableObject {
             guard isLatest,
                   self.publicationStillCurrent(publicationToken),
                   CredentialScopeRegistry.shared.isCurrent(credentialCapture) else { return }
-#if VORTX_NATIVE_DATA_ENGINE
             // The kernel has already selected the live title/episode and applied its tombstones.
             // Legacy owner floors/history unions must not resurrect superseded native rows.
             self.continueWatching = preview
-#else
-            // Owner profile only: the floor and the union are both owner-library concepts, and an overlay
-            // profile rides `profiles.cwItems` and ignores this published value entirely.
-            let ownerProfile = ProfileStore.shared.active?.isOwner == true
-            let causalPreview = ownerProfile
-                ? Self.applyCausalOwnerContinueWatching(preview, playerActive: self.playerActive) : preview
-            let engine = Self.pruneFinished(ownerProfile
-                ? Self.applyOwnedContinueWatchingFloor(causalPreview, mayReplace: mayReplaceCW)
-                : causalPreview)
-            let items = ownerProfile
-                ? Self.unionOwnerContinueWatching(engine: engine, library: library,
-                                                  history: BecauseYouWatchedDocumentHistory.ownerHistoryItems(from: OwnerHistoryStore.validRows()))
-                : engine
-            VXProbe.log("engine", "continueWatching rebuilt n=\(items.count) (engine=\(engine.count))")
-            self.continueWatching = items
-#endif
             if recordsHistoryReceipt, decodedPreview != nil {
                 self.recordAcceptedHistoryReceipt(
                     fields: ["continue_watching_preview"],
@@ -4214,9 +3935,7 @@ final class CoreBridge: ObservableObject {
             NSLog("[playback] dropped finish callback after profile/account ownership changed")
             return
         }
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState { nativeDismissContinueWatching(id: libraryId, target: target); return }
-#endif
         if let profileID = target.overlayProfileID {
             ProfileStore.shared.finishedWatching(metaId: libraryId, profileID: profileID)
             return
@@ -4239,19 +3958,8 @@ final class CoreBridge: ObservableObject {
     /// Whether the open detail page's title is saved to the library proper (present,
     /// not removed, not a temporary watched-marker entry). Drives the Library button.
     var detailInLibrary: Bool {
-#if VORTX_NATIVE_DATA_ENGINE
         guard !enginePublicationBlocked, let item = metaDetails?.libraryItem else { return false }
         return item.removed != true && item.temp != true
-#else
-        // Overlay (non-owner) profile: the engine's libraryItem belongs to the account, so the
-        // chip must reflect the profile's own overlay, kept symmetric with the guarded add/remove.
-        if !ProfileStore.shared.activeUsesEngineHistory {
-            guard let id = metaDetails?.meta?.id else { return false }
-            return ProfileStore.shared.watch[id] != nil
-        }
-        guard let item = metaDetails?.libraryItem else { return false }
-        return item.removed != true && item.temp != true
-#endif
     }
 
     /// Add the OPEN detail page's title to the library. Catalog adds round-trip a
@@ -4259,12 +3967,10 @@ final class CoreBridge: ObservableObject {
     /// Library tab or Continue Watching is in no catalog, so this hands the engine
     /// its own full meta JSON instead (a superset of the preview it expects).
     func addDetailToLibrary() {
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             guard let meta = detailMetaPreview() else { return }
             dispatchCtx(["action": "AddToLibrary", "args": meta]); return
         }
-#endif
         switch LibraryWatchedMutationPolicy.route(usesEngineHistory: ProfileStore.shared.activeUsesEngineHistory) {
         case .profileOverlay:
             // Overlay profile: save to the profile's private overlay, never the account library.
@@ -4359,14 +4065,12 @@ final class CoreBridge: ObservableObject {
                       target: PlaybackMutationTarget? = nil) -> Bool {
         let target = target ?? PlaybackMutationTarget.capture(core: self)
         guard target.stillOwnsCurrentContext(core: self) else { return false }
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             let preview = rawMetaPreview(forId: metaId) ?? fallbackPreview?.dictionary
             guard let preview, LibraryWatchedMutationPolicy.canDispatchCatalogAdd(
                 metaID: metaId, expectedType: expectedType, previewID: preview["id"] as? String, previewType: preview["type"] as? String) else { return false }
             return dispatchCtx(["action": "AddToLibrary", "args": preview])
         }
-#endif
         guard target.overlayProfileID == nil else {
             // Overlay profile: save to the profile's private overlay, never the account library.
             if let info = overlayDisplayInfo(forId: metaId, fallbackPreview: fallbackPreview) {
@@ -4394,7 +4098,6 @@ final class CoreBridge: ObservableObject {
     /// the acknowledged path, which mirrors only after the checkpoint persisted the add.
     func addToLibraryFromMenu(_ card: LibraryWatchedMutationPolicy.MetaPreview) {
         let target = PlaybackMutationTarget.capture(core: self)
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             guard target.stillOwnsCurrentContext(core: self) else { return }
             let resident = rawMetaPreview(forId: card.id).flatMap(Self.mutationPreview) ?? card
@@ -4410,7 +4113,6 @@ final class CoreBridge: ObservableObject {
             }
             return
         }
-#endif
         guard addToLibrary(metaId: card.id, expectedType: card.type, fallbackPreview: card, target: target) else { return }
         ScrobbleCoordinator.shared.addedToLibrary(
             PlaybackMeta(libraryId: card.id, videoId: card.id, type: card.type,
@@ -4421,7 +4123,6 @@ final class CoreBridge: ObservableObject {
     /// removal to Trakt/SIMKL watchlists, like the detail page. Dismissing Continue Watching never comes
     /// through here, so it never edits a watchlist.
     func removeFromLibraryFromMenu(_ card: LibraryWatchedMutationPolicy.MetaPreview) {
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             guard let saved = library?.catalog.first(where: { $0.id == card.id }) else { return }
             // Watched-only: never saved, so no watchlist was written for it. Record the removal only.
@@ -4438,7 +4139,6 @@ final class CoreBridge: ObservableObject {
             }
             return
         }
-#endif
         if ProfileStore.shared.activeUsesEngineHistory {
             guard !logoutAccountMutationPending else { return }
             ScrobbleCoordinator.shared.removedFromLibrary(
@@ -4453,9 +4153,7 @@ final class CoreBridge: ObservableObject {
     /// `tmdb…` id), never a synthetic magnet item, or it poisons official-client account sync.
     func addRawMetaToLibrary(_ meta: [String: Any]) {
         guard let id = meta["id"] as? String, !id.isEmpty else { return }
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState { dispatchCtx(["action": "AddToLibrary", "args": meta]); return }
-#endif
         guard ProfileStore.shared.activeUsesEngineHistory else {
             // Overlay profile: save to the profile's private overlay, never the account library.
             ProfileStore.shared.addLibraryEntry(metaId: id,
@@ -4484,7 +4182,6 @@ final class CoreBridge: ObservableObject {
     func addCatalogItemToAccount(id: String, type: String, stampIntent: Bool = true,
                                  target: PlaybackMutationTarget? = nil) async -> Bool {
         let target = target ?? PlaybackMutationTarget.capture(core: self)
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             guard let (facade, profile) = nativePlaybackBinding(target),
                   LibraryWatchedMutationPolicy.isCanonicalCatalogID(id),
@@ -4494,7 +4191,6 @@ final class CoreBridge: ObservableObject {
                   nativePlaybackBinding(target)?.0 === facade else { return false }
             return accepted
         }
-#endif
         guard !logoutAccountMutationPending,
               target.stillOwnsAccountContext(core: self),
               let binding = settledActiveAccountBinding(),
@@ -4532,9 +4228,7 @@ final class CoreBridge: ObservableObject {
     @discardableResult
     func addCatalogItemLocalOnly(id: String, type: String,
                                  credentialCapture: CredentialScopeRegistry.Capture) async -> Bool {
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState { return false } // the authenticated native importer owns cold recovery
-#endif
         guard !logoutAccountMutationPending, localOnlyRecoveryAllowed(credentialCapture) else { return false }
         guard LibraryWatchedMutationPolicy.isCanonicalCatalogID(id),
               let safeType = LibraryWatchedMutationPolicy.normalizedCatalogType(type),
@@ -4564,7 +4258,6 @@ final class CoreBridge: ObservableObject {
     /// creates a temporary library item if one doesn't exist, which is exactly this discover use case.
     func setCatalogWatched(metaId: String, _ isWatched: Bool,
                            fallbackPreview: LibraryWatchedMutationPolicy.MetaPreview? = nil) {
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             let preview = rawMetaPreview(forId: metaId) ?? fallbackPreview?.dictionary
             guard let preview, preview["id"] as? String == metaId, let type = preview["type"] as? String,
@@ -4574,7 +4267,6 @@ final class CoreBridge: ObservableObject {
             }
             nativeWatchedIntent(id: metaId, name: name, type: type, poster: preview["poster"] as? String, watched: isWatched); return
         }
-#endif
         guard ProfileStore.shared.activeUsesEngineHistory else {
             overlaySetWatchedById(metaId, isWatched, fallbackPreview: fallbackPreview)   // overlay profile: private history only
             return
@@ -4831,7 +4523,6 @@ final class CoreBridge: ObservableObject {
         let payload: [String: Any] = ["time": Int(timeSeconds * 1000),
                                       "duration": Int(durationSeconds * 1000),
                                       "device": device]
-#if VORTX_NATIVE_DATA_ENGINE
         if usesNativeProfileState {
             guard let (facade, _) = nativePlaybackBinding(target),
                   case .native(let binding?) = target, let epoch = binding.accountGeneration,
@@ -4839,7 +4530,6 @@ final class CoreBridge: ObservableObject {
             _ = facade.dispatchCaptured(data: data, field: "player", expectedAccountGeneration: epoch)
             return
         }
-#endif
         dispatch(action: ["action": "Player", "args": ["action": "TimeChanged", "args": payload]],
                  field: "player")
     }
@@ -5352,17 +5042,10 @@ final class CoreBridge: ObservableObject {
     }
 
     private var enginePublicationBlocked: Bool {
-#if VORTX_NATIVE_DATA_ENGINE
         return nativeFacadeLock.withLock {
             guard nativeFacadeStorage?.isAvailable == true, let capture = nativeCredentialCapture else { return true }
             return !CredentialScopeRegistry.shared.isCurrent(capture)
         }
-#else
-        PlaybackMutationOwnershipPolicy.blocksEnginePublication(
-            hasPendingBinding: pendingAccountBinding != nil,
-            credentialRejected: rejectedAccountBindingGeneration == authBindingGeneration,
-            signedOutRepairPending: signedOutRepairRequest != nil)
-#endif
     }
 
     /// Unlike the broader publication gate, this applies specifically to engine writes.  Local
@@ -5442,7 +5125,6 @@ final class CoreBridge: ObservableObject {
     /// ProfileStore calls this in the same turn as selection. It invalidates any completion for
     /// the prior profile before a new account switch or a same-account revalidation can begin.
     func activeProfileDidChange() {
-#if VORTX_NATIVE_DATA_ENGINE
         let previous = nativeFacade
         revokeNativeSession()
         Task { @MainActor in
@@ -5450,17 +5132,6 @@ final class CoreBridge: ObservableObject {
             _ = await VortXSyncManager.shared.restoreNativeCheckpoint()
         }
         return
-#else
-        invalidateAuthenticationGeneration()
-        guard !importedAwayFromStremio,
-              let token = Keychain.string(activeTokenAccount), !token.isEmpty else {
-            // A profile without a Stremio token is a valid local-only context.  The old
-            // account's repair timer was invalidated above, so arm exactly one new local timer.
-            scheduleSessionRepair()
-            return
-        }
-        beginAccountBinding(for: token)
-#endif
     }
 
     private func verifyAccountBinding(pending: PendingAccountBinding, token: String, attempt: Int) async {
@@ -5614,34 +5285,25 @@ final class CoreBridge: ObservableObject {
             let streamID = (model["streamPath"] as? [String: Any])?["id"] as? String
             metaLoadTargetLock.withLock {
                 requestedMetaLoadTarget = MetaLoadTarget(metaID: id, streamID: streamID)
-#if VORTX_NATIVE_DATA_ENGINE
                 nativeMetaRequestAction = try? JSONSerialization.data(withJSONObject: action)
                 nativeMetaRequestGeneration = UUID()
                 nativeMetaRequestScope = .init(credential: CredentialScopeRegistry.shared.capture(), profileID: ProfileStore.shared.activeID)
-#endif
             }
         } else if topLevelAction == "Unload", field == "meta_details" || field == nil {
             metaLoadTargetLock.withLock {
                 requestedMetaLoadTarget = nil
-#if VORTX_NATIVE_DATA_ENGINE
                 nativeMetaRequestAction = nil; nativeMetaRequestGeneration = UUID()
-#endif
             }
         }
         // [engine] narrate every dispatched action (its name + the field it targets) so the log shows
         // what we asked the engine to do. Gated + autoclosure: shipping builds build no string.
         VXProbe.log("engine", "dispatch \(Self.actionName(action))\(field.map { " -> \($0)" } ?? "")")
-#if VORTX_NATIVE_DATA_ENGINE
         _ = json // The shared validation above remains identical on both build lanes.
         guard let nativeFacade, !enginePublicationBlocked,
               let nativeAction = try? JSONSerialization.data(withJSONObject: action) else { return false }
         let accepted = nativeFacade.dispatch(data: nativeAction, field: field)
         if !accepted { NSLog("[CoreBridge] native action rejected: %@", nativeFacade.lastFailure ?? "unbound") }
         return accepted
-#else
-        json.withCString { stremiox_core_dispatch($0) }
-        return true
-#endif
     }
 
     /// Compact human name for a dispatched action, for the [engine] probe. Reports the top-level
@@ -5661,14 +5323,7 @@ final class CoreBridge: ObservableObject {
     /// Raw JSON bytes for a model field (e.g. "board", "continue_watching_preview"). Heavy fields
     /// (library, catalogs) serialize on the calling thread, prefer a background queue for those.
     func stateData(_ field: String) -> Data? {
-#if VORTX_NATIVE_DATA_ENGINE
         guard !enginePublicationBlocked else { return nil }; return nativeFacade?.stateData(field)
-#else
-        let quoted = "\"\(field)\"" // get_state expects a JSON field name
-        guard let ptr = quoted.withCString({ stremiox_core_get_state($0) }) else { return nil }
-        defer { stremiox_core_string_free(ptr) }
-        return Data(bytes: ptr, count: strlen(ptr))
-#endif
     }
 
     /// Decode a model field into a Codable type.
@@ -5724,41 +5379,6 @@ final class CoreBridge: ObservableObject {
         // (bootstrapAuth / switchAccount + its 6s backstop), so read+write it on main here too rather than on
         // this Rust worker thread, matching the decode branches below. Otherwise switchInFlight could latch
         // stuck-true (the switched account never reloads) through an unsynchronized cross-thread write.
-#if !VORTX_NATIVE_DATA_ENGINE
-        if fields.contains("ctx") {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                // Explicit disconnect reaches local recovery only after this signed-out ctx is
-                // visible.  Do not let the default-profile receipt flow into stale account work.
-                if let signedOutRepairRequest = self.signedOutRepairRequest, !self.isLoggedIn() {
-                    self.rearmSignedOutRepairWhenSafe(signedOutRepairRequest,
-                                                       receiptPublicationToken: publicationToken)
-                    return
-                }
-                // `ctx` is control-plane evidence: while B is pending it is the ONLY engine receipt
-                // that can prove the authenticated B token is now resident.  Never apply the data
-                // publication gate before this settlement attempt.
-                let bindingSettled = self.settleAccountBindingIfProven()
-                if bindingSettled {
-                    self.finishSettledAccountBinding()
-                    return // finish performs the one owner-replay/refresh for this settlement
-                }
-                // Anything below publishes or dispatches based on the resident account.  It must
-                // wait for a settled/signed-out context, even though the control receipt above may
-                // run while the publication gate is blocked.
-                guard !self.enginePublicationBlocked else { return }
-                if self.awaitingAuthMigration, self.isLoggedIn() {
-                    self.awaitingAuthMigration = false
-                    NSLog("[CoreBridge] authKey migrated -> pulling addons + syncing library")
-                    self.refreshFromAPI()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.loadBoard() }
-                }
-                // Dashboard owner-library edits received while another profile was selected are
-                // replayed only after this ctx proves their exact engine account is resident.
-                ProfileStore.shared.replayPendingAccountLibraryAdds(core: self)
-            }
-        }
-#endif
 
         // Decode the changed screens off the main thread, then publish on main.
         if fields.contains("continue_watching_preview") {
@@ -6325,18 +5945,7 @@ final class CoreBridge: ObservableObject {
     /// catalog prefs back. PROTECTED stubs (Cinemeta, Local Files) are never suppressed; a removable
     /// official add-on the user deleted IS, mirroring `refreshAddons` (#137).
     private static func tombstonedBases(in addons: [CoreDescriptor]) -> Set<String> {
-#if VORTX_NATIVE_DATA_ENGINE
         return [] // native installed membership already applies its own account/profile tombstones
-#else
-        let removed = AddonTombstones.all()
-        guard !removed.isEmpty else { return [] }
-        var out = Set<String>()
-        for addon in addons where !addon.isProtected {
-            let key = AddonTombstones.normalize(addon.transportUrl)
-            if removed.contains(key) { out.insert(key) }
-        }
-        return out
-#endif
     }
 
     /// The enumeration behind `allCatalogs`. `includeTombstoned: true` keeps the catalogs of removed
@@ -6510,7 +6119,6 @@ private func coreEventCallback(ctx: UnsafeMutableRawPointer?, data: UnsafePointe
 }
 
 // MARK: - Captured Xperience host-profile adapter
-#if VORTX_NATIVE_DATA_ENGINE
 extension CoreBridge {
     static let xperienceContextChangedNote = Notification.Name("vortx.xperienceContextChanged")
     struct NativeXperienceTarget {
@@ -6643,11 +6251,9 @@ extension CoreBridge {
         return result
     }
 }
-#endif
 
 // Same-file CoreBridge extension. Reuses the existing account/install/credential
 // commit authority and actual Facade FIFO; it does not introduce a second queue.
-#if VORTX_NATIVE_DATA_ENGINE
 extension CoreBridge {
     struct NativeOwnerHistoryRead {
         fileprivate let owner: NativeWatchlistTarget
@@ -6723,13 +6329,11 @@ extension CoreBridge {
         return bytes
     }
 }
-#endif
 
 // Append in CoreBridge.swift; its existing private installation/credential fields stay private.
 extension CoreBridge {
     @MainActor
     func captureNativeExternalCWRead(target: PlaybackMutationTarget) -> TraktNextEpisodeNativeLease? {
-#if VORTX_NATIVE_DATA_ENGINE
         guard case .native(let requested?) = target, let owner = captureNativeWatchlistTarget(),
               requested == owner.owner, let registry = owner.facade.registryBinding else { return nil }
         let authority = ExternalCWSourceAuthority(core: self, owner: owner)
@@ -6754,11 +6358,7 @@ extension CoreBridge {
                 return .init(id: metadata.id, type: metadata.type,
                     videos: metadata.videos.map { .init(id: $0.id, season: $0.season, episode: $0.episode) })
             })
-#else
-        return nil
-#endif
     }
-#if VORTX_NATIVE_DATA_ENGINE
     private final class ExternalCWSourceAuthority: VortxMutationAuthority, @unchecked Sendable {
         private weak var core: CoreBridge?
         private let owner: NativeWatchlistTarget
@@ -6779,5 +6379,4 @@ extension CoreBridge {
             }
         }
     }
-#endif
 }

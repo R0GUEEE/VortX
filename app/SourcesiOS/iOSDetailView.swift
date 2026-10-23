@@ -3925,12 +3925,10 @@ struct iOSDetailView: View {
 
     private var episodeRailHistoryReady: Bool {
         guard meta?.id == metaRequestID else { return false }
-        #if VORTX_NATIVE_DATA_ENGINE
         if core.usesNativeProfileState {
             return core.metaDetails?.meta?.id == metaRequestID && core.metaDetails?.watchedVideoIds != nil
                 && core.nativePlaybackTargetIsCurrent(.capture(core: core))
         }
-        #endif
         return true
     }
 
@@ -4410,7 +4408,6 @@ struct iOSDetailView: View {
 
     @ViewBuilder private func episodeActions(_ v: CoreVideo, isWatched: Bool) -> some View {
                 Button(isWatched ? "Mark as Unwatched" : "Mark as Watched") {
-                    #if VORTX_NATIVE_DATA_ENGINE
                     let target = PlaybackMutationTarget.capture(core: core)
                     let expected = detailTarget
                     let profileID = profiles.activeID
@@ -4429,9 +4426,6 @@ struct iOSDetailView: View {
                         isCurrent() ? "Couldn't update watched status. Please try again."
                                     : "Profile or title changed. Please try again."
                     })
-                    #else
-                    core.markVideoWatched(v, !isWatched, expected: detailTarget)
-                    #endif
                 }
                 .disabled(manualWatchedAction.isRunning)
                 #if !os(tvOS)
@@ -8002,7 +7996,6 @@ private struct iOSLibraryChip: View {
     var body: some View {
         let saved = core.detailInLibrary
         Button {
-            #if VORTX_NATIVE_DATA_ENGINE
             let target = PlaybackMutationTarget.capture(core: core)
             let profileID = profiles.activeID
             let meta = core.metaDetails?.meta
@@ -8023,13 +8016,6 @@ private struct iOSLibraryChip: View {
                 isCurrent() ? "Couldn't update Library. Please try again."
                             : "Profile or title changed. Please try again."
             })
-            #else
-            if saved {
-                core.removeDetailFromLibrary()   // removes from library + mirrors to external watchlists
-            } else {
-                core.addDetailToLibrary()
-            }
-            #endif
         } label: {
             Label(saved ? "In Library" : "Add to Library",
                   systemImage: saved ? "bookmark.fill" : "bookmark")

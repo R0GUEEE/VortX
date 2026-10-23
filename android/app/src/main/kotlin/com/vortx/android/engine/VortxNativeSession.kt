@@ -640,6 +640,13 @@ internal class VortxNativeSession private constructor(
     @Synchronized fun rawAccount(): ByteArray? = ownerHistory?.cloudAccount()
     @Synchronized fun accepts(owner: VortxNativeOwner): Boolean = !closed && !requiresRecovery() && isAccountCurrent() && read().owner == owner
 
+    /** One current owner/state capture, kept under Session through the caller's admission.
+     * Unlike read followed by owned, no monitor-release window needs a second full snapshot. */
+    @Synchronized internal fun <T> withCurrentRead(action: (VortxNativeRead) -> T): T {
+        check(!closed && !requiresRecovery()) { "Native owner changed" }
+        return action(read()) // Validates account, active profile and current revision while Session is held.
+    }
+
     /** The original raw account and authority are supplied by the authenticated gateway. */
     @Synchronized fun receiveOwnerHistory(account: NativeOwnerHistoryAccount, authority: NativeOwnerHistoryAuthority,
                                           historyBindings: NativeOwnerHistoryBindings, remoteHost: JSONObject?): Unit = owned(read().owner) {

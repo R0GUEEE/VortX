@@ -157,9 +157,7 @@ struct TraktLoginAttemptAuthority {
 /// only an opaque broker session and never receives Trakt's device credential. Trakt data-plane calls
 /// remain direct and continue to use the public client ID.
 actor TraktAuth {
-#if VORTX_NATIVE_DATA_ENGINE
     private var nativeCredentialGeneration = UUID()
-#endif
     static let shared = TraktAuth()
 
     // MARK: - Configuration (public client ID; empty ships a dormant, invisible feature)
@@ -929,7 +927,6 @@ actor TraktAuth {
                 guard !Task.isCancelled,
                       CredentialScopeRegistry.shared.isCurrent(capture),
                       loginAttempts.owns(code: session, generation: loginGeneration) else { return false }
-#if VORTX_NATIVE_DATA_ENGINE
                 guard let nativeIntent = await MainActor.run(body: { VortXSyncManager.shared.prepareNativeProviderMutation([
                     "traktAccess": .string(token.accessToken), "traktRefresh": .string(token.refreshToken),
                     "traktExpiry": .string(String(Int(token.expiresAt.timeIntervalSince1970)))], capture: capture) }) else { return false }
@@ -938,7 +935,6 @@ actor TraktAuth {
                     _ = await MainActor.run { VortXSyncManager.shared.abortNativeProviderMutation(nativeIntent, capture: capture) }
                     return false
                 }
-#endif
                 mutationAttempted = true
                 persisted = replaceCredentialsWithNewSession(
                     access: token.accessToken,
@@ -947,11 +943,9 @@ actor TraktAuth {
                     ownerCapture: capture,
                     ownerNamespace: capture.namespace
                 ) == .success
-#if VORTX_NATIVE_DATA_ENGINE
                 if persisted {
                     persisted = await MainActor.run { VortXSyncManager.shared.finishNativeProviderMutation(nativeIntent, capture: capture) }
                 }
-#endif
                 if persisted { loginAttempts.invalidate() }
                 return persisted
             }
@@ -1214,7 +1208,6 @@ actor TraktAuth {
                   token.expiresIn > 0 else { throw TraktAuthError.decoding }
             // A normal refresh rotates tokens inside the same authenticated account. Never rotate the local
             // session identity here: queued work and snapshots captured before refresh remain valid.
-#if VORTX_NATIVE_DATA_ENGINE
             let persisted = await performCredentialBoundary {
                 guard !Task.isCancelled, CredentialScopeRegistry.shared.isCurrent(capture),
                       currentSessionID(ownerNamespace: capture.namespace) == expectedSession else { return false }
@@ -1231,16 +1224,6 @@ actor TraktAuth {
                 return await MainActor.run { VortXSyncManager.shared.finishNativeProviderMutation(nativeIntent, capture: capture) }
             }
             guard persisted else { throw TraktAuthError.persistenceFailure }
-#else
-            guard CredentialScopeRegistry.shared.isCurrent(capture),
-                  currentSessionID(ownerNamespace: capture.namespace) == expectedSession else {
-                throw TraktAuthError.sessionChanged
-            }
-            try Task.checkCancellation()
-            guard storeRefreshedToken(token, ownerCapture: capture) else {
-                throw TraktAuthError.persistenceFailure
-            }
-#endif
             return token
         }
         guard response.status == "invalid_grant" else {
@@ -1366,9 +1349,7 @@ actor TraktAuth {
         guard let mutationLease = CredentialPublicationOutbox.beginMutation() else { return false }
         defer { CredentialPublicationOutbox.endMutation(mutationLease) }
         guard CredentialScopeRegistry.shared.isCurrent(capture) else { return false }
-#if VORTX_NATIVE_DATA_ENGINE
         nativeCredentialGeneration = UUID()
-#endif
         let resolvedNamespace = capture.namespace
         guard case let .authority(active) = readCredentialTupleForMutation(ownerNamespace: resolvedNamespace),
               active.values.count == 4,
@@ -1417,9 +1398,7 @@ actor TraktAuth {
               let mutationLease = CredentialPublicationOutbox.beginMutation() else { return .failure }
         defer { CredentialPublicationOutbox.endMutation(mutationLease) }
         guard CredentialScopeRegistry.shared.isCurrent(capture) else { return .failure }
-#if VORTX_NATIVE_DATA_ENGINE
         nativeCredentialGeneration = UUID()
-#endif
         guard Self.recoverCredentialAuthority(credentials: credentials, ownerNamespace: resolvedNamespace) else {
             return .failure
         }
@@ -1693,18 +1672,14 @@ actor TraktAuth {
         guard await acquirePublicationBoundary() else { return false }
         defer { CredentialPublicationOutbox.endBoundary() }
         guard CredentialScopeRegistry.shared.isCurrent(capture) else { return false }
-#if VORTX_NATIVE_DATA_ENGINE
         var nativeIntent: [String: VortxNativeProviderCredentials.Register]?
         if explicitNativeDisconnect {
             nativeIntent = await MainActor.run { VortXSyncManager.shared.prepareNativeProviderMutation([
                 "traktAccess": .null, "traktRefresh": .null, "traktExpiry": .null], capture: capture) }
             guard nativeIntent != nil, CredentialScopeRegistry.shared.isCurrent(capture) else { return false }
         }
-#endif
         let mutate = {
-#if VORTX_NATIVE_DATA_ENGINE
             self.nativeCredentialGeneration = UUID()
-#endif
             return CredentialTupleTransaction.clear(
             baseAccounts: self.tupleAccounts(ownerNamespace: resolvedNamespace),
             activePointer: TraktTokenSlots.active(resolvedNamespace),
@@ -1720,14 +1695,11 @@ actor TraktAuth {
         }
         guard mutationGuard.map({ $0(mutate) }) ?? mutate() else { return false }
         TraktAuthBoundary.publish(nil)
-#if VORTX_NATIVE_DATA_ENGINE
         if let nativeIntent {
             return await MainActor.run { VortXSyncManager.shared.finishNativeProviderMutation(nativeIntent, capture: capture) }
         }
-#endif
         return true
     }
-#if VORTX_NATIVE_DATA_ENGINE
     func certifiesNativePrepared(_ events: [String: VortxNativeProviderCredentials.Register], capture: CredentialScopeRegistry.Capture) -> Bool {
         guard ownerCapture() == capture else { return false }
         let keys = VortxNativeProviderCredentials.groups[0]
@@ -1752,7 +1724,6 @@ actor TraktAuth {
             })
         }
     }
-#endif
 
     private func acquirePublicationBoundary() async -> Bool {
         await CredentialPublicationOutbox.waitForBoundary() == .acquired

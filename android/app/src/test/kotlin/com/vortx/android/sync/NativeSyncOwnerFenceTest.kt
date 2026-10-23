@@ -64,7 +64,6 @@ class NativeSyncOwnerFenceTest {
         }
 
         init {
-            check(com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED)
             manager.installSyncTestSeam(session, 0, { method, _, body, token ->
                 assertEquals("fixture-token", token)
                 if (method == "GET") {

@@ -150,15 +150,8 @@ struct VortXiOSApp: App {
                         // fail-soft by construction (refresh never throws and keeps last-good on any error).
                         Task.detached(priority: .utility) { await RemoteConfig.shared.refreshIfForegroundDue() }
                         #if !VORTX_NO_EMBEDDED_SERVER && !os(macOS)
-                        // #130: after a long suspension iOS can tear down the server's bound listener while
-                        // node keeps ticking, so the server reads Offline until a manual restart.
-                        // recoverIfSuspended subsumes the old drift-latch probe (isOnline) and, on a
-                        // CONNECTION-REFUSED result while the process is alive, signals the in-node rebind; a
-                        // timeout is left alone (busy-but-alive). macOS is excluded: MacNodeServer rebinds 11470.
-                        Task.detached(priority: .utility) { await NodeServer.recoverIfSuspended() }
-                        // Phase 8: the flag-gated in-process engine server stops on background (below),
-                        // so foreground restarts it on a fresh ephemeral port; the player follows via
-                        // StremioServer.embeddedPort. No-op while `vortxNativeServer` is off.
+                        // The in-process engine server stops on background (below), so foreground restarts
+                        // it on a fresh ephemeral port; the player follows via StremioServer.embeddedPort.
                         VortxNativeServer.startIfNeeded()
                         #endif
                         Task {

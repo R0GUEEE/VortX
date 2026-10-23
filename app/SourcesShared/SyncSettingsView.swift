@@ -53,18 +53,8 @@ struct SyncSettingsView: View {
             // Native data uses the causal merge/restore path, never a legacy whole-document override.
             Button("Merge both (keep all profiles)") { resolveConflict { await sync.mergeBoth() ? .completed : .failed } }
             Button("Use account's data") { resolveConflict { await sync.useAccountData() } }
-            #if !VORTX_NATIVE_DATA_ENGINE
-            // keepThisDeviceOverridingAccount, not pushThisDevice: this prompt is only reached after the
-            // account's doc was positively READ, so the user is making an informed choice to overwrite it.
-            // That is the one push allowed past the #145 restore gate (an automatic push is not).
-            Button("Keep this device") { resolveConflict { await sync.keepThisDeviceOverridingAccount() ? .completed : .failed } }
-            #endif
         } message: {
-            #if VORTX_NATIVE_DATA_ENGINE
             Text("This account's profiles differ from this device. Merge both to keep every profile (recommended), or restore the account's data. Saved data is not overwritten by a legacy device backup.")
-            #else
-            Text("This account's profiles differ from this device. Merge both to keep every profile (recommended), or force one side.")
-            #endif
         }
         .task { await sync.refreshAccount() }
         .onReceive(NotificationCenter.default.publisher(for: VortXSyncManager.credentialScopeDidChangeNote)) { _ in

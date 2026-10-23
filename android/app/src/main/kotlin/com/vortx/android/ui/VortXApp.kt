@@ -582,7 +582,7 @@ fun VortXApp(
         var profileSelection by remember { mutableStateOf<ProfileSelectionPresentation?>(null) }
         profileSelection?.let { presentation ->
             val request = presentation.request
-            val handoff = remember(request, auth) { ProfileSelectionHandoff(auth, BuildConfig.NATIVE_ENGINE_ENABLED) }
+            val handoff = remember(request, auth) { ProfileSelectionHandoff(auth, native = true) }
             ProfileSelectionSurface(request, handoff,
                 onComplete = { profileSelection = null; showWhosWatching = false },
                 onChooseAgain = { profileSelection = null; showWhosWatching = true },

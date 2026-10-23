@@ -20,11 +20,9 @@ enum InfuseReturnCoordinator {
             return InfuseDeepLink.playURL(stream: stream, metadata: meta, startSeconds: startSeconds)
         }
         var start = startSeconds
-#if VORTX_NATIVE_DATA_ENGINE
         if start == nil {
             start = await CoreBridge.shared.nativeResumeSeconds(for: meta, target: .capture(core: CoreBridge.shared))
         }
-#endif
         let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let scheme = TopShelfSnapshot.urlScheme
         guard let success = InfuseReturnPolicy.callbackURL(scheme: scheme, token: token, succeeded: true),
@@ -80,7 +78,6 @@ enum InfuseReturnCoordinator {
     private static func applyOnce() -> Bool {
         let handoffs = InfuseReturnPolicy.pruned(load(), now: Date())
         guard handoffs.contains(where: { $0.returnedPositionSeconds != nil }) else { save(handoffs); return false }
-#if VORTX_NATIVE_DATA_ENGINE
         let core = CoreBridge.shared
         let target = PlaybackMutationTarget.capture(core: core)
         var waiting = false
@@ -98,11 +95,6 @@ enum InfuseReturnCoordinator {
         }
         save(remaining)
         return waiting
-#else
-        DiagnosticsLog.log("infuse", "return saved=false reason=native_engine_unavailable")
-        save(handoffs.filter { $0.returnedPositionSeconds == nil })
-        return false
-#endif
     }
 
     private static func scheduleRetry() {

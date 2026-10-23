@@ -61,7 +61,7 @@ internal class DebridCoordinator(
     private val keys: DebridKeys,
     private val appContext: android.content.Context? = null,
     private val usenetProviderStore: UsenetProviderStore? = null,
-    private val nativeUsenetEnabled: Boolean = com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED,
+    private val nativeUsenetEnabled: Boolean = true,
     nzbTransport: NativeNzbTransport? = null,
 ) {
     private val nativeNzbTransport by lazy { nzbTransport ?: NativeNzbTransport(serverBase = {

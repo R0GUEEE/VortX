@@ -28,6 +28,7 @@ import com.vortx.android.model.AuthState
 import com.vortx.android.profile.ProfileSelectionHandoff
 import com.vortx.android.profile.ProfileSelectionRequest
 import com.vortx.android.ui.screens.AccountContent
+import com.vortx.android.ui.screens.DiagnosticLogAction
 import com.vortx.android.ui.theme.VortXTheme
 import com.vortx.android.ui.viewmodel.AccountViewModel
 import com.vortx.android.ui.viewmodel.rememberReplacingViewModelStoreOwner
@@ -98,5 +99,7 @@ internal fun ProfileSelectionSurface(
             }
         }
         TextButton(onClick = onChooseAgain) { Text("Choose a profile") }
+        // This route is entered only after the picker's existing PIN admission.
+        DiagnosticLogAction(mayShare = request::allowsDiagnosticExport)
     }
 }

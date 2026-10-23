@@ -750,7 +750,7 @@ class HomeViewModel internal constructor(
     }
 
     private fun publishHome() {
-        if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED && renderedOwner == null) return
+        if (renderedOwner == null) return
         val hasClientRows = continueWatchingStatus != null || topPicksItems.isNotEmpty() || becauseYouWatchedRail != null ||
             traktWatchlist.isNotEmpty() || traktContinueWatchingItems.isNotEmpty() || simklWatchlist.isNotEmpty() || mediaServerRails.isNotEmpty() ||
             importedRails.isNotEmpty() || upcomingEpisodes.isNotEmpty() || upcomingMovies.isNotEmpty() ||
@@ -789,9 +789,7 @@ class HomeViewModel internal constructor(
         } ?: rows
         // Native admission is the final boundary even for Trakt/Simkl/editorial/server rails.
         // Their presentation items cannot manufacture certification lost before this layer.
-        val admitted = if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED)
-            renderedOwner?.let { repo.admitClientHomeRows(visibleRows, it).getOrNull() } ?: emptyList()
-        else visibleRows
+        val admitted = renderedOwner?.let { repo.admitClientHomeRows(visibleRows, it).getOrNull() } ?: emptyList()
         _state.value = UiState.Success(admitted)
     }
 
@@ -969,7 +967,7 @@ internal class DiscoverPaginationState {
 /// selection rendered the exact same rail -- the "Discover chips are inert" bug this session fixes.
 /// Every selection now re-dispatches the chip's own `request` JSON verbatim (never reconstructed), and
 /// filters + items come back from a SINGLE engine round-trip (see
-/// [com.vortx.android.engine.EngineStremioRepository.discoverResultFrom]).
+/// the engine repository's discover mapping).
 class DiscoverViewModel(
     private val repo: CatalogRepository,
     private val catalogPreferences: CatalogPreferencesStore = CatalogPreferencesStore.inMemory(),
@@ -1432,7 +1430,7 @@ class SearchViewModel(
     private companion object {
         const val SEARCH_DEBOUNCE_MS = 350L
 
-        /// The engine's stable Continue Watching row id (see EngineStremioRepository home builder), used to
+        /// The engine's stable Continue Watching row id (see the engine repository's Home builder), used to
         /// split the Home board into the Continue-Watching leg and the catalog leg for suggestion priority.
         const val CONTINUE_WATCHING_ROW_ID = "continue"
     }

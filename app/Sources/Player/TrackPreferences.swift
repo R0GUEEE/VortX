@@ -322,7 +322,7 @@ enum SettingsChangeLog {
 
     /// Brand prefixes that identify one of the app's own preference keys. Everything else in UserDefaults
     /// (framework and system state) is ignored so the `[settings]` channel stays a clean record of deliberate
-    /// preference writes. Covers `stremiox.*`, `vortx.*`, and the dotless `vortxNativeServer` / `vortxShadowRanking`.
+    /// preference writes. Covers the `stremiox` and `vortx` namespaces, including persisted older keys.
     private static let trackedPrefixes = ["stremiox", "vortx"]
 
     private static func isTracked(_ key: String) -> Bool {

@@ -33,7 +33,6 @@ class VortXSyncManagerBackupRevisionTest {
     private val owner = UserProfile(id = UserProfile.OWNER_ID, name = "Baseline", avatar = "star", isOwner = true)
     private val principal = SessionOwnerSnapshot.Account(account.id, 1)
     private fun bindings(): VortxRuntimeBindings {
-        org.junit.Assume.assumeTrue("native sync route", com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED)
         System.load(requireNotNull(System.getenv("VORTX_JNI_LIBRARY")))
         return object : VortxRuntimeBindings {
             override fun create(ownerId: String, ownerName: String) = VortxCore.nativeInitRuntime(JSONObject().put("ownerId", ownerId).put("ownerName", ownerName).toString())

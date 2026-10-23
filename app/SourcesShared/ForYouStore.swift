@@ -27,14 +27,10 @@ final class ForYouStore: ObservableObject {
     private struct InterestsEditAuthority {
         let session: ForYouInterestsEditSession
         let credential: CredentialScopeRegistry.Capture
-        #if VORTX_NATIVE_DATA_ENGINE
         let admission: CoreBridge.NativeWatchlistActionAdmission?
-        #endif
     }
     private var richCredentialCapture = CredentialScopeRegistry.shared.capture()
-    #if VORTX_NATIVE_DATA_ENGINE
     private var richPresentationTarget: CoreBridge.NativeXperienceTarget?
-    #endif
 
     private var subscriptions: Set<AnyCancellable> = []
 
@@ -46,9 +42,7 @@ final class ForYouStore: ObservableObject {
         VortXSyncManager.shared.$isSignedIn.dropFirst()
             .sink { [weak self] _ in self?.invalidateCurationContext() }.store(in: &subscriptions)
         var contextNotes = [VortXSyncManager.credentialScopeDidChangeNote]
-        #if VORTX_NATIVE_DATA_ENGINE
         contextNotes.append(CoreBridge.xperienceContextChangedNote)
-        #endif
         for name in contextNotes {
             // Native notifications may originate off-main after releasing their source locks.
             // Do not receive(on:) and leave the previous owner's data visible for another turn.
@@ -80,16 +74,11 @@ final class ForYouStore: ObservableObject {
             publish(profileID: active, interests: local.interests, collections: local.collections, ready: active != nil)
             return
         }
-        #if VORTX_NATIVE_DATA_ENGINE
         if let native = try? CoreBridge.shared.nativeForYou(), native.profileID == active {
             publish(profileID: native.profileID, interests: native.interests, collections: native.collections, ready: true)
         } else {
             publish(profileID: active, interests: nil, collections: [], ready: false)
         }
-        #else
-        let local = ForYouLocalStore.read(profileID: active)
-        publish(profileID: active, interests: local.interests, collections: local.collections, ready: active != nil)
-        #endif
     }
 
     /// Opens the interests picker for the active profile under the authority of this moment. The picker's draft
@@ -99,13 +88,9 @@ final class ForYouStore: ObservableObject {
         guard let profile = ProfileStore.shared.activeID, ready, profile == profileID else { throw CurationFailure.unavailable }
         let signedIn = VortXSyncManager.shared.isSignedIn
         let session = ForYouInterestsEditSession(profileID: profile, initial: interests, signedIn: signedIn)
-        #if VORTX_NATIVE_DATA_ENGINE
         let admission = signedIn ? CoreBridge.shared.captureNativeWatchlistActionAdmission() : nil
         interestsEdit = InterestsEditAuthority(session: session, credential: CredentialScopeRegistry.shared.capture(),
                                                admission: admission)
-        #else
-        interestsEdit = InterestsEditAuthority(session: session, credential: CredentialScopeRegistry.shared.capture())
-        #endif
         interestsLedger.open(session)
         interestsEditID = session.id
         return session
@@ -127,9 +112,7 @@ final class ForYouStore: ObservableObject {
               interestsLedger.admits(session, activeProfile: ProfileStore.shared.activeID,
                                      signedIn: VortXSyncManager.shared.isSignedIn,
                                      authorityCurrent: CredentialScopeRegistry.shared.isCurrent(edit.credential)) else { return false }
-        #if VORTX_NATIVE_DATA_ENGINE
         if let admission = edit.admission { return CoreBridge.shared.nativeWatchlistActionAdmissionIsCurrent(admission) }
-        #endif
         return true
     }
 
@@ -139,7 +122,6 @@ final class ForYouStore: ObservableObject {
         guard isCurrentInterestsEdit(session), let edit = interestsEdit else { throw CurationFailure.staleContext }
         let value = try ForYouSync.value(interests)
         try ForYouSync.validate(ForYouInterests.field, value: value)
-        #if VORTX_NATIVE_DATA_ENGINE
         if let admission = edit.admission {
             let core = CoreBridge.shared
             guard let target = await core.prepareNativeWatchlistActionTarget(admission) else { throw CurationFailure.staleContext }
@@ -151,7 +133,6 @@ final class ForYouStore: ObservableObject {
             reload()
             return
         }
-        #endif
         // Signed out: the original profile's local copy, validated and written with no suspension in between.
         try ForYouLocalStore.write(field: ForYouInterests.field, value: value, profileID: session.profileID)
         retireInterestsEdit(session)
@@ -169,7 +150,6 @@ final class ForYouStore: ObservableObject {
     private func write(_ field: String, value: VortxJSON) async throws {
         guard let profile = ProfileStore.shared.activeID else { throw VortxNativeError.closed }
         try ForYouSync.validate(field, value: value)
-        #if VORTX_NATIVE_DATA_ENGINE
         if VortXSyncManager.shared.isSignedIn {
             let core = CoreBridge.shared
             let admission = core.captureNativeWatchlistActionAdmission()
@@ -179,7 +159,6 @@ final class ForYouStore: ObservableObject {
             reload()
             return
         }
-        #endif
         try ForYouLocalStore.write(field: field, value: value, profileID: profile)
         NotificationCenter.default.post(name: Self.changedNote, object: nil)
     }
@@ -189,7 +168,6 @@ final class ForYouStore: ObservableObject {
         guard let profile = ProfileStore.shared.activeID, ready, profile == profileID,
               collections.contains(where: { $0.id == collection.id }) else { throw CurationFailure.unavailable }
         let registers: [String: VortxJSON]
-        #if VORTX_NATIVE_DATA_ENGINE
         let target: CoreBridge.NativeXperienceTarget?
         if VortXSyncManager.shared.isSignedIn {
             target = try CoreBridge.shared.captureNativeXperienceTarget()
@@ -198,15 +176,9 @@ final class ForYouStore: ObservableObject {
         } else {
             target = nil; registers = ForYouLocalStore.registers(profileID: profile)
         }
-        #else
-        guard !VortXSyncManager.shared.isSignedIn else { throw CurationFailure.unavailable }
-        registers = ForYouLocalStore.registers(profileID: profile)
-        #endif
         guard let legacyRegister = registers[collection.field], let legacy = legacyRegister["value"],
               let current = try? legacy.decode(SmartCollection.self), current == collection else {
-            #if VORTX_NATIVE_DATA_ENGINE
             if let target { CoreBridge.shared.retireNativeXperienceTarget(target) }
-            #endif
             throw CurationFailure.staleCollection
         }
         let companion = registers[CurationDocument.prefix + collection.id]
@@ -220,18 +192,11 @@ final class ForYouStore: ObservableObject {
                 }
             } else { document = try CurationDocument.make(for: collection, legacyValue: legacy) }
         } catch {
-            #if VORTX_NATIVE_DATA_ENGINE
             if let target { CoreBridge.shared.retireNativeXperienceTarget(target) }
-            #endif
             throw error
         }
-        #if VORTX_NATIVE_DATA_ENGINE
         let session = CurationEditSession(profileID: profile, collection: collection, document: document,
             legacyRegister: legacyRegister, companionRegister: companion, target: target)
-        #else
-        let session = CurationEditSession(profileID: profile, collection: collection, document: document,
-            legacyRegister: legacyRegister, companionRegister: companion)
-        #endif
         richEditSession = session
         return session
     }
@@ -240,15 +205,11 @@ final class ForYouStore: ObservableObject {
     }
     func isCurrentRichEdit(_ session: CurationEditSession) -> Bool {
         guard richEditSession?.id == session.id, ProfileStore.shared.activeID == session.profileID else { return false }
-        #if VORTX_NATIVE_DATA_ENGINE
         if let target = session.target { return CoreBridge.shared.nativeXperienceTargetIsCurrent(target) }
-        #endif
         return !VortXSyncManager.shared.isSignedIn
     }
     private func invalidateRichEdit(clearPresentation: Bool = true) {
-        #if VORTX_NATIVE_DATA_ENGINE
         if let target = richEditSession?.target { CoreBridge.shared.retireNativeXperienceTarget(target) }
-        #endif
         richEditSession = nil
         // Immediate privacy boundary; the next ordinary reload republishes the active profile.
         if clearPresentation { richCollections = [] }
@@ -261,7 +222,6 @@ final class ForYouStore: ObservableObject {
         }
         let edit = CurationNativeEdit(document: document, expectedRegister: session.companionRegister,
             legacyRegister: session.legacyRegister)
-        #if VORTX_NATIVE_DATA_ENGINE
         if let target = session.target {
             let core = CoreBridge.shared
             let validator = try await core.prepareNativeXperienceExportBudget(target: target)
@@ -275,10 +235,6 @@ final class ForYouStore: ObservableObject {
             guard !VortXSyncManager.shared.isSignedIn else { throw CurationFailure.staleContext }
             try ForYouLocalStore.writeRich(edit, profileID: session.profileID)
         }
-        #else
-        guard !VortXSyncManager.shared.isSignedIn else { throw CurationFailure.staleContext }
-        try ForYouLocalStore.writeRich(edit, profileID: session.profileID)
-        #endif
         retireRichEdit(session)
         reload()
         NotificationCenter.default.post(name: Self.changedNote, object: nil)
@@ -288,22 +244,18 @@ final class ForYouStore: ObservableObject {
         invalidateRichEdit()
         if let session = legacyEditSession { retireLegacyEdit(session) }
         retireInterestsEdits()
-        #if VORTX_NATIVE_DATA_ENGINE
         if let target = richPresentationTarget { CoreBridge.shared.retireNativeXperienceTarget(target) }
         richPresentationTarget = nil
-        #endif
         richCollections = []
     }
 
     private func checkCurationContext() {
         let credentialChanged = !CredentialScopeRegistry.shared.isCurrent(richCredentialCapture)
         var changed = credentialChanged
-        #if VORTX_NATIVE_DATA_ENGINE
         let core = CoreBridge.shared
         if let target = richPresentationTarget, !core.nativeXperienceTargetIsCurrent(target) { changed = true }
         if let target = richEditSession?.target, !core.nativeXperienceTargetIsCurrent(target) { changed = true }
         if let target = legacyEditSession?.target, !core.nativeXperienceTargetIsCurrent(target) { changed = true }
-        #endif
         if let edit = interestsEdit, !isCurrentInterestsEdit(edit.session) { changed = true }
         if changed {
             invalidateCurationContext()
@@ -322,49 +274,33 @@ final class ForYouStore: ObservableObject {
             throw CurationFailure.unavailable
         }
         let registers: [String: VortxJSON]
-        #if VORTX_NATIVE_DATA_ENGINE
         let target: CoreBridge.NativeXperienceTarget?
         if VortXSyncManager.shared.isSignedIn {
             target = try CoreBridge.shared.captureNativeXperienceTarget()
             do { registers = try CoreBridge.shared.nativeCurationRegisters(target: target!) }
             catch { CoreBridge.shared.retireNativeXperienceTarget(target!); throw error }
         } else { target = nil; registers = ForYouLocalStore.registers(profileID: profile) }
-        #else
-        guard !VortXSyncManager.shared.isSignedIn else { throw CurationFailure.unavailable }
-        registers = ForYouLocalStore.registers(profileID: profile)
-        #endif
         let expected = registers[collection.field]
         let valid: Bool
         if isNew { valid = expected == nil }
         else { valid = (try? expected?["value"]?.decode(SmartCollection.self)) == collection }
         guard valid else {
-            #if VORTX_NATIVE_DATA_ENGINE
             if let target { CoreBridge.shared.retireNativeXperienceTarget(target) }
-            #endif
             throw CurationFailure.staleCollection
         }
-        #if VORTX_NATIVE_DATA_ENGINE
         let session = CurationLegacyEditSession(profileID: profile, collection: collection, isNew: isNew,
             expectedRegister: expected, target: target)
-        #else
-        let session = CurationLegacyEditSession(profileID: profile, collection: collection, isNew: isNew,
-            expectedRegister: expected)
-        #endif
         legacyEditSession = session
         return session
     }
     func isCurrentLegacyEdit(_ session: CurationLegacyEditSession) -> Bool {
         guard legacyEditSession?.id == session.id, ProfileStore.shared.activeID == session.profileID else { return false }
-        #if VORTX_NATIVE_DATA_ENGINE
         if let target = session.target { return CoreBridge.shared.nativeXperienceTargetIsCurrent(target) }
-        #endif
         return !VortXSyncManager.shared.isSignedIn
     }
     func retireLegacyEdit(_ session: CurationLegacyEditSession) {
         guard legacyEditSession?.id == session.id else { return }
-        #if VORTX_NATIVE_DATA_ENGINE
         if let target = session.target { CoreBridge.shared.retireNativeXperienceTarget(target) }
-        #endif
         legacyEditSession = nil
     }
     func saveLegacy(_ collection: SmartCollection, session: CurationLegacyEditSession) async throws {
@@ -380,7 +316,6 @@ final class ForYouStore: ObservableObject {
     private func commitLegacy(_ edit: VortxNativeHostFieldEdit, session: CurationLegacyEditSession) async throws {
         try Task.checkCancellation()
         guard isCurrentLegacyEdit(session), edit.field == session.collection.field else { throw CurationFailure.staleContext }
-        #if VORTX_NATIVE_DATA_ENGINE
         if let target = session.target {
             let core = CoreBridge.shared
             let budget = try await core.prepareNativeXperienceExportBudget(target: target)
@@ -392,10 +327,6 @@ final class ForYouStore: ObservableObject {
             guard !VortXSyncManager.shared.isSignedIn else { throw CurationFailure.staleContext }
             try ForYouLocalStore.writeLegacy(edit, profileID: session.profileID)
         }
-        #else
-        guard !VortXSyncManager.shared.isSignedIn else { throw CurationFailure.staleContext }
-        try ForYouLocalStore.writeLegacy(edit, profileID: session.profileID)
-        #endif
         retireLegacyEdit(session)
         reload()
         NotificationCenter.default.post(name: Self.changedNote, object: nil)
@@ -408,7 +339,6 @@ final class ForYouStore: ObservableObject {
         if self.ready != ready { self.ready = ready }
         richCredentialCapture = CredentialScopeRegistry.shared.capture()
         let registers: [String: VortxJSON]
-        #if VORTX_NATIVE_DATA_ENGINE
         let core = CoreBridge.shared
         if let old = richPresentationTarget { core.retireNativeXperienceTarget(old) }
         richPresentationTarget = nil
@@ -423,9 +353,6 @@ final class ForYouStore: ObservableObject {
                 core.retireNativeXperienceTarget(target); richCollections = []; return
             }
         } else { registers = ForYouLocalStore.registers(profileID: profileID) }
-        #else
-        registers = ForYouLocalStore.registers(profileID: profileID)
-        #endif
         let rich = collections.map { CurationCollection.legacy($0,
             companion: CurationDocument.read(registers: registers, legacy: $0)) }
         if richCollections != rich { richCollections = rich }

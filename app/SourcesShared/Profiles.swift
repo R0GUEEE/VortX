@@ -258,7 +258,6 @@ final class ProfileStore: ObservableObject {
         return .init(owner: CredentialScopeRegistry.shared.capture(), session: LegacyWatchOwnership.session(),
                      profile: binding, slot: slot, token: token)
     }
-#if VORTX_NATIVE_DATA_ENGINE
     private var nativeProjectionTarget: PlaybackMutationTarget?
     private var nativePublishedPlayback: UserProfile.PlaybackPrefs?
     private var nativePublishedDiscovery: ProfileDiscoveryPreferences?
@@ -643,7 +642,6 @@ final class ProfileStore: ObservableObject {
             nativeProfileError = nil; return true
         } catch { CoreBridge.shared.reportNativeProfileFailure("open", error: error); nativeProfileError = "Couldn't open this profile. Tap again to try once more."; return false }
     }
-#endif
     /// The launch picker shows once per cold start, and only when there is a real choice to make.
     /// Settings re-opens it by flipping this back to false.
     @Published var pickedThisLaunch = false
@@ -698,13 +696,9 @@ final class ProfileStore: ObservableObject {
     /// remote Main reorder becomes visible without materializing a child-profile snapshot.
     static let activeAddonOrderOverrideKey = "stremiox.profile.addonOrderOverride"
     static func activeAddonOrder(accountOrder: [String]) -> [String] {
-        #if VORTX_NATIVE_DATA_ENGINE
         // Native descriptors already arrive in the kernel's account order. Never apply the older
         // account mirror (which also folded case-sensitive URL paths) over that authoritative input.
         return UserDefaults.standard.stringArray(forKey: activeAddonOrderOverrideKey) ?? []
-        #else
-        UserDefaults.standard.stringArray(forKey: activeAddonOrderOverrideKey) ?? accountOrder
-        #endif
     }
 
     /// Flat mirror of the active profile's Kids flag, same off-main pattern as `activeDisabledAddonsKey`,
@@ -790,20 +784,12 @@ final class ProfileStore: ObservableObject {
     /// The Keychain slot the rest of the app reads the session from right now. StremioAccount and
     /// CoreBridge resolve their token through this, so a profile switch re-points both at once.
     var activeKeychainAccount: String {
-#if VORTX_NATIVE_DATA_ENGINE
         return active.map(keychainAccount(for:)) ?? "vortx.native.streaming.unavailable.no-profile"
-#else
-        active.map(keychainAccount(for:)) ?? Self.primaryTokenAccount
-#endif
     }
 
     func keychainAccount(for profile: UserProfile) -> String {
-#if VORTX_NATIVE_DATA_ENGINE
         return CoreBridge.shared.nativeCredentialSlot(profileID: profile.id)
             ?? "vortx.native.streaming.unavailable." + profile.id.uuidString
-#else
-        return Self.legacyKeychainAccount(for: profile)
-#endif
     }
     static func legacyKeychainAccount(for profile: UserProfile) -> String {
         // The owner IS the primary account: it always reads the primary slot, no matter what the
@@ -902,59 +888,20 @@ final class ProfileStore: ObservableObject {
     /// stored token; `.needsSignIn` means the profile wants its own account but has no session yet.
     enum SwitchOutcome { case sameAccount, switchAccount(token: String), needsSignIn }
 
-    /// Make `profile` active: applies its theme immediately and reports the account work left.
+    /// Schedule selection against the captured native owner; its acknowledged receipt publishes the profile.
     @discardableResult
     func select(_ profile: UserProfile) -> SwitchOutcome {
-#if VORTX_NATIVE_DATA_ENGINE
         let target = CoreBridge.shared.captureNativePlaybackTarget()
-        Task { @MainActor in _ = await selectNative(profile, target: target) }; return .sameAccount
-#endif
-        // FIRST, before activeID moves: fold the live flat-key state into the OUTGOING profile. The
-        // flat keys are, by the documented invariant, the ACTIVE profile's state, but the 13 stream
-        // filters bind straight to the SourcePreferences singleton on both settings screens, so a
-        // viewer's filter edits can exist ONLY in the flat keys while the roster still carries nil
-        // (every pre-b176 roster does: the filter fields entered PlaybackPrefs with no re-seed).
-        // Without this capture, the resetUnset apply below would overwrite those live values with
-        // defaults PERMANENTLY, even when re-picking the SAME profile from the launch picker, and the
-        // wipe would sync account-wide. capturePlayback's equality guard keeps this a no-op when the
-        // roster already matches, and it safely does nothing when there is no active profile
-        // (remove()'s select-after-removal: the removed profile is already gone from the roster).
-        capturePlayback()
-        captureDiscovery()
-        // A same-profile selection may have just captured a live Settings edit. Apply that stored
-        // record, not the stale value that the picker passed before capture.
-        let profile = profiles.first(where: { $0.id == profile.id }) ?? profile
-        // Persist delayed progress against the outgoing profile before replacing the active watch dictionary.
-        flushScheduledWatchCacheSave()
-        let beforeAccount = active.map(keychainAccount(for:))
-        activeID = profile.id
-        CoreBridge.shared.activeProfileDidChange()
-        pickedThisLaunch = true
-        persist(touch: false)   // selection is per-device, not a roster edit
-        applyTheme(profile)
-        applyPlayback(profile, resetUnset: true)   // a switch resets unset filters to defaults, never inherits the old profile's
-        applyDiscovery(profile, resetUnset: true)
-        SourcePreferences.shared.reload()   // re-sync the singleton's @Published order on a switch
-        SourcePinStore.shared.reload()      // pinned sources are per-profile too
-        loadWatchCache()
-        refreshWatchFromServer()
-        let nowAccount = keychainAccount(for: profile)
-        if nowAccount == beforeAccount { return .sameAccount }
-        if let token = Keychain.string(nowAccount), !token.isEmpty { return .switchAccount(token: token) }
-        return .needsSignIn
+        Task { @MainActor in _ = await selectNative(profile, target: target) }
+        return .sameAccount
     }
 
     func add(_ profile: UserProfile) {
-#if VORTX_NATIVE_DATA_ENGINE
         let target = CoreBridge.shared.captureNativePlaybackTarget()
-        Task { @MainActor in _ = await saveNative(profile, creating: true, target: target) }; return
-#endif
-        profiles.append(profile)
-        persist()
+        Task { @MainActor in _ = await saveNative(profile, creating: true, target: target) }
     }
 
     func update(_ profile: UserProfile, editedPreferenceGroups: Set<NativePreferenceIntentStore.Group>? = nil) {
-#if VORTX_NATIVE_DATA_ENGINE
         let target = CoreBridge.shared.captureNativePlaybackTarget()
         // Capture synchronously: a process exit before the queued Task runs must not lose the
         // edit or force the next launch to guess an owner from account-only flat dirty flags.
@@ -968,22 +915,7 @@ final class ProfileStore: ObservableObject {
             nativeProfileError = "Couldn't save this profile. Your changes are still here. Tap Try again."
             return
         }
-        Task { @MainActor in _ = await saveNative(profile, creating: false, target: target, preferenceIntents: admission) }; return
-#endif
-        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
-        profiles[index] = profile
-        persist()
-        if profile.id == activeID {
-            applyTheme(profile)
-            applyPlayback(profile)
-            applyDiscovery(profile)
-        } else if profile.isOwner, let active, activeSharesMainAddons {
-            // Main edits must reach a currently visible inheriting secondary immediately.
-            applyAddonPreferences(active)
-            SourcePreferences.shared.reload()
-            notifyAddonPreferencesDidChange(profileID: active.id)
-            CoreBridge.shared.rebuildBoardRows()
-        }
+        Task { @MainActor in _ = await saveNative(profile, creating: false, target: target, preferenceIntents: admission) }
     }
 
     /// Flip an add-on on/off for the ACTIVE profile. A local per-profile overlay, NOT an account
@@ -1116,11 +1048,7 @@ final class ProfileStore: ObservableObject {
     @MainActor func setAddonOrder(_ urls: [String], for profileID: UUID) {
         guard var profile = active, profile.id == profileID else { return }
         if !activeSharesMainAddons {
-            #if VORTX_NATIVE_DATA_ENGINE
             CoreBridge.shared.reorderAddonsForActiveProfile(urls, profileID: profileID)
-            #else
-            VortXSyncManager.shared.applyInAppAddonOrder(urls)
-            #endif
             return
         }
         var preferences = addonPreferences(for: profile)
@@ -1131,32 +1059,11 @@ final class ProfileStore: ObservableObject {
         update(profile)
     }
 
-    /// Remove a non-owner profile (never the last one). Its private session key is deleted with it.
-    /// Authorization is based on the stored record, not caller-supplied flags. Returns the switch
-    /// outcome when the removed profile was the active one, nil otherwise.
+    /// Schedule removal against the captured native owner. The native transaction validates the stored profile.
     @discardableResult
     func remove(_ profile: UserProfile) -> SwitchOutcome? {
-#if VORTX_NATIVE_DATA_ENGINE
         let target = CoreBridge.shared.captureNativePlaybackTarget()
-        Task { @MainActor in _ = await removeNative(profile, target: target) }; return nil
-#endif
-        guard profiles.count > 1,
-              let target = profiles.first(where: { $0.id == profile.id }),
-              !target.isOwner,
-              target.id != UserProfile.ownerID else { return nil }
-        profiles.removeAll { $0.id == target.id }
-        if target.usesOwnAccount {
-#if VORTX_NATIVE_DATA_ENGINE
-            VortxNativeOwnAccountProducer.invalidate(slot: keychainAccount(for: target))
-#endif
-            Keychain.set(nil, for: keychainAccount(for: target))
-        }
-        UserDefaults.standard.removeObject(forKey: Self.watchCacheKey(target.id))
-        UserDefaults.standard.removeObject(forKey: Self.watchRemovalKey(target.id))
-        savePendingAccountLibraryAdds(pendingAccountLibraryAdds().filter { $0.profileID != target.id })
-        tombstone(target.id)   // durable cross-device delete; the union-merge can no longer resurrect it
-        persist()
-        if activeID == target.id, let first = profiles.first { return select(first) }
+        Task { @MainActor in _ = await removeNative(profile, target: target) }
         return nil
     }
 
@@ -1438,26 +1345,19 @@ final class ProfileStore: ObservableObject {
     func captureTheme() {
         guard var profile = active else { return }
         let tm = ThemeManager.shared
-#if VORTX_NATIVE_DATA_ENGINE
         let representedTheme = NativeThemeProjection(accentID: profile.accentID, oled: profile.oled, textScale: profile.textScale)
-#endif
         let changed = profile.accentID != tm.accentID || profile.oled != tm.oled || profile.textScale != tm.textScale
         profile.accentID = tm.accentID
         profile.oled = tm.oled
         profile.textScale = tm.textScale
-#if VORTX_NATIVE_DATA_ENGINE
         let reverting = nativePreferenceIsLocalRevert(profile, group: .theme)
         let unchangedProjection = nativePublishedTheme == representedTheme
             && nativePublishedTheme == currentNativeThemeProjection()
         guard nativePreferenceProjectionMatches(CoreBridge.shared.captureNativePlaybackTarget()),
               (changed && !unchangedProjection) || reverting else { return }
         update(profile, editedPreferenceGroups: [.theme])
-#else
-        guard changed else { return }; update(profile)
-#endif
     }
 
-#if VORTX_NATIVE_DATA_ENGINE
     private func nativePreferenceIsLocalRevert(_ profile: UserProfile, group: NativePreferenceIntentStore.Group) -> Bool {
         let target = CoreBridge.shared.captureNativePlaybackTarget()
         if Thread.isMainThread {
@@ -1465,7 +1365,6 @@ final class ProfileStore: ObservableObject {
         }
         return DispatchQueue.main.sync { VortXSyncManager.shared.nativePreferenceIsLocalRevert(profile, group: group, target: target) }
     }
-#endif
 
     // MARK: Per-profile playback preferences (languages + subtitle style)
 
@@ -1618,22 +1517,16 @@ final class ProfileStore: ObservableObject {
     func capturePlayback() {
         guard let profile = active else { return }
         var captured = profileCapturingPlayback(profile)
-#if VORTX_NATIVE_DATA_ENGINE
         if nativePlaybackProjectionRepresents(profile), nativePublishedPlayback == currentPlaybackPrefs() {
             // Returning to the unchanged effective projection restores its original nil/inherited
             // native representation; it does not manufacture explicit platform defaults.
             captured.playback = profile.playback; captured.addonPreferences = profile.addonPreferences
         }
-#endif
         let changed = captured.playback != profile.playback || captured.addonPreferences != profile.addonPreferences
-#if VORTX_NATIVE_DATA_ENGINE
         let reverting = nativePreferenceIsLocalRevert(captured, group: .playback)
         guard nativePreferenceProjectionMatches(CoreBridge.shared.captureNativePlaybackTarget()),
               changed || reverting else { return }
         update(captured, editedPreferenceGroups: [.playback])
-#else
-        guard changed else { return }; update(captured)
-#endif
     }
     private func profileCapturingPlayback(_ original: UserProfile) -> UserProfile {
         var profile = original
@@ -1673,9 +1566,6 @@ final class ProfileStore: ObservableObject {
     /// and provider caller already reads. A true profile switch clears every missing field so a
     /// new profile starts clean, while sync folds leave unknown old-roster fields untouched.
     private func applyDiscovery(_ profile: UserProfile, resetUnset: Bool = false) {
-        #if !VORTX_NATIVE_DATA_ENGINE
-        if resetUnset { ContinueWatchingPreferences.retireSelection() }
-        #endif
         let p = profile.discovery
         ProfileDiscoveryPreferencesStore.apply(p, resetUnset: resetUnset)
         // The singleton views cache their @Published copies, and the hub holds region/provider
@@ -1701,7 +1591,6 @@ final class ProfileStore: ObservableObject {
         guard let activeID,
               let index = profiles.firstIndex(where: { $0.id == activeID }) else { return }
         var now = currentDiscoveryPrefs()
-#if VORTX_NATIVE_DATA_ENGINE
         if continueWatchingEdited { continueWatchingMigration = nil }
         else if let witness = continueWatchingMigration,
                 witness.profileID == activeID, witness.target.stillOwnsCurrentContext(core: .shared),
@@ -1710,8 +1599,6 @@ final class ProfileStore: ObservableObject {
             // projection used while migration waits. Its acknowledged projection admits it later.
             now.continueWatchingSource = "trakt"
         }
-#endif
-#if VORTX_NATIVE_DATA_ENGINE
         var profile = profiles[index]
         profile.discovery = now
         if !continueWatchingEdited, nativeDiscoveryProjectionRepresents(profiles[index]), nativePublishedDiscovery == now {
@@ -1721,11 +1608,6 @@ final class ProfileStore: ObservableObject {
         guard nativePreferenceProjectionMatches(CoreBridge.shared.captureNativePlaybackTarget()),
               continueWatchingEdited || profiles[index].discovery != profile.discovery || reverting else { return }
         update(profile, editedPreferenceGroups: [.discovery])
-#else
-        guard profiles[index].discovery != now else { return }
-        profiles[index].discovery = now
-        persist()
-#endif
     }
 
     // MARK: Persistence
@@ -1875,41 +1757,7 @@ final class ProfileStore: ObservableObject {
     ///   3. Keeps the legacy two-way Stremio sync alive ONLY while the opt-in "also sync to Stremio" mirror
     ///      is on. By default the roster + overlays stay fresh through the VortX realtime syncDown / poll.
     func bootstrapSync() {
-#if VORTX_NATIVE_DATA_ENGINE
         return // Native imports use authenticated account-qualified source receipts, never this legacy repair.
-#else
-        guard let key = Keychain.string(Self.primaryTokenAccount), !key.isEmpty else { return }
-        let inspectionOwner = CredentialScopeRegistry.shared.capture()
-        let inspectionSession = LegacyWatchOwnership.session()
-        // The scan is of the primary account, not an own-account profile selected in the UI.
-        let inspectionNoticeOwner = currentLegacyNoticeOwner().flatMap {
-            $0.matchesCredential(slot: Self.primaryTokenAccount, token: key) ? $0 : nil
-        }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let recovery = await ProfileSync.prepare(authKey: key)
-            guard !Task.isCancelled, CredentialScopeRegistry.shared.isCurrent(inspectionOwner),
-                  LegacyWatchOwnership.session() == inspectionSession,
-                  Keychain.string(Self.primaryTokenAccount).map({ Data($0.utf8) }) == Data(key.utf8) else { return }
-            if let owner = inspectionNoticeOwner, self.currentLegacyNoticeOwner() == owner {
-                self.legacyHistoryNoticeState.inspected(recovery, owner: owner)
-            }
-            // A UUID-only historical payload is not verified current-account/profile
-            // authority. Keep it at its original remote location for safe recovery/export;
-            // do not guess a local destination from the currently selected roster.
-            guard ProfileSync.cloudAvailable == true else { return }   // Stremio custom collection unavailable
-            if !Self.stremioImportDone(authKey: key) {
-                await self.importProfilesFromStremio(authKey: key)
-            }
-            // Opt-in legacy Stremio mirror (default OFF): only when the user turns it on does the app keep
-            // two-way syncing the roster + overlay watch with the Stremio datastore. Off by default because
-            // VortX owns the data now, so there is nothing more to read from Stremio here.
-            if ProfileSync.alsoSyncToStremio {
-                await self.syncRosterWithStremio(authKey: key)
-                await MainActor.run { self.refreshWatchFromServer() }
-            }
-        }
-#endif
     }
 
     /// ONE-TIME migration of the legacy Stremio-datastore roster + per-profile overlay watch history into the
@@ -2236,22 +2084,7 @@ final class ProfileStore: ObservableObject {
     }
 
     private func schedulePushRoster() {
-#if VORTX_NATIVE_DATA_ENGINE
         return // The native account carrier owns roster changes; never mirror via the global legacy token.
-#else
-        pushRosterTask?.cancel()
-        // VortX authoritative: a roster edit already arms a debounced VortX syncUp (the persist() UserDefaults
-        // write fires the sync manager's observer), which carries the roster in doc.settings + doc.vortx.profiles.
-        // The legacy Stremio write is opt-in (default OFF), so it stays dormant unless the user turns on the mirror.
-        guard ProfileSync.alsoSyncToStremio else { return }
-        guard let key = Keychain.string(Self.primaryTokenAccount), !key.isEmpty else { return }
-        let snapshot = profiles
-        pushRosterTask = Task {
-            try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return }
-            await ProfileSync.pushRoster(snapshot, authKey: key)
-        }
-#endif
     }
 
     // MARK: Watch overlay (a non-owner profile's own history, synced through the account)
@@ -2402,11 +2235,7 @@ final class ProfileStore: ObservableObject {
     /// Episode ids the active overlay profile has watched for a title; drives the
     /// detail page's per-profile ticks.
     func watchedVideoIds(forMeta metaId: String) -> Set<String> {
-#if VORTX_NATIVE_DATA_ENGINE
         return Set((try? CoreBridge.shared.nativePlaybackSnapshot()?["watchedVideoIdsByTitle"]?[metaId]?.decode([String].self)) ?? [])
-#else
-        Set(watch[metaId]?.watchedVideoIds ?? [])
-#endif
     }
 
     /// Bulk watched toggle for the detail page's episode, season, and whole-series

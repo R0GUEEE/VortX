@@ -4,8 +4,8 @@ name: Build Android APK
 # SDK/JDK; this lane supplies the pinned private-engine packaging proof. It builds BOTH flavors when
 # an integration-branch push touches android/, verifies the native-only VortX .so for every shipped
 # ABI, and enforces the GPL licensing boundary: the Play-Store `play` flavor must never carry the GPLv3
-# libmpv native libs. The engine crates live in PRIVATE repos (moved out of the public tree in
-# 33ff9b5) and are fetched below at pinned commits; bumping an engine pin means editing this file,
+# libmpv native libs. The engine workspace lives in a PRIVATE repo (moved out of the public tree in
+# 33ff9b5) and is fetched below at a pinned commit; bumping the engine pin means editing this file,
 # which is itself a path trigger, so the old `core/**` path filters are gone (that dir no longer
 # exists in the public tree).
 #
@@ -79,38 +79,23 @@ jobs:
         run: /usr/bin/python3 -I scripts/acquire-android-mpv-component.py
 
       # ---- Private engine fetch (moved out of the public tree in 33ff9b5) --------------------------
-      # Native Android artifacts use libvortx_ffi.so only, built with jni,server,resource-host from
-      # the reviewed vortx-core pin. The stremiox-core checkout and full-SHA pin stay available for
-      # explicit non-native comparison builds, but native variants do not schedule cargoNdkBuild and
-      # Gradle excludes libstremiox_core.so from those packages.
+      # Android artifacts use libvortx_ffi.so only, built with jni,server,resource-host from the
+      # reviewed vortx-core pin.
       #
-      # Both fetches use actions/checkout (GitHub's own auth path: the token is injected through an
+      # The fetch uses actions/checkout (GitHub's own auth path: the token is injected through an
       # env-sourced local git config, never argv, and persist-credentials: false wipes it after the
-      # step), pinned to the exact commits the current build links. Requires the ENGINE_REPO_TOKEN
-      # secret (fine-grained PAT, Contents:read on both private repos; deploy keys are disabled by
-      # the VortXTV org). Both immutable source pins are checked; a missing VortX manifest/toolchain
-      # fails native builds closed, while the retained Stremio pin is not compiled in native mode.
+      # step), pinned to the exact commit the current build links. Requires the ENGINE_REPO_TOKEN
+      # secret (fine-grained PAT, Contents:read on the private repo; deploy keys are disabled by the
+      # VortXTV org). The immutable source pin is checked; a missing manifest/toolchain fails closed.
       - name: Preflight the engine token (fail closed)
         env:
           ENGINE_REPO_TOKEN: ${{ secrets.ENGINE_REPO_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "${ENGINE_REPO_TOKEN:-}" ]; then
-            echo "::error::ENGINE_REPO_TOKEN secret is not set; CI cannot fetch the private engine repos (VortXTV/stremiox-core + VortXTV/vortx-core)"
+            echo "::error::ENGINE_REPO_TOKEN secret is not set; CI cannot fetch the private engine repo (VortXTV/vortx-core)"
             exit 1
           fi
-
-      # stremiox-core is a STANDALONE crate (Cargo.toml at its repo root): check out straight into core/.
-      - name: Fetch stremiox-core (private, pinned)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: VortXTV/stremiox-core
-          # Same reviewed, immutable wrapper as both release lanes. Its lockfile resolves the
-          # published Git dependency; callable history exports are verified below for every ABI.
-          ref: 31c66611822043e089f5819ad232a5df93975873
-          token: ${{ secrets.ENGINE_REPO_TOKEN }}
-          path: core
-          persist-credentials: false
 
       # vortx-core is a MONOREPO whose engine workspace is its vortx-core/ SUBDIR (the engine manifest
       # sits at vortx-core/vortx-core/Cargo.toml inside the repo). Check out to a temp path, then
@@ -124,24 +109,19 @@ jobs:
           path: _vortx_core_src
           persist-credentials: false
 
-      - name: Promote the vortx-core workspace + record exact private source pins
+      - name: Promote the vortx-core workspace + record the exact private source pin
         run: |
           set -euo pipefail
           vortx_sha="$(git -C _vortx_core_src rev-parse HEAD^{commit})"
           test "$vortx_sha" = "a3169f338f3f05da4ad3adb39a1e557c3ddcac33" \
             || { echo "::error::vortx-core checkout does not match the reviewed private pin"; exit 1; }
-          stremio_sha="$(git -C core rev-parse HEAD^{commit})"
-          test "$stremio_sha" = "31c66611822043e089f5819ad232a5df93975873" \
-            || { echo "::error::stremiox-core checkout does not match its immutable pin"; exit 1; }
           echo "VORTX_ENGINE_SOURCE_SHA=$vortx_sha" >> "$GITHUB_ENV"
-          echo "STREMIOX_CORE_SOURCE_SHA=$stremio_sha" >> "$GITHUB_ENV"
           rm -rf vortx-core
           mv _vortx_core_src/vortx-core vortx-core
           rm -rf _vortx_core_src
-          test -f core/Cargo.toml       || { echo "::error::stremiox-core crate missing after checkout (core/Cargo.toml)"; exit 1; }
           test -f vortx-core/Cargo.toml || { echo "::error::vortx-core engine workspace missing after promote (vortx-core/Cargo.toml)"; exit 1; }
           test -d vortx-core/crates     || { echo "::error::vortx-core engine crates/ missing after promote (vortx-core/crates)"; exit 1; }
-          echo "pinned private sources: stremiox-core@$stremio_sha vortx-core@$vortx_sha (promoted monorepo subdir)"
+          echo "pinned private source: vortx-core@$vortx_sha (promoted monorepo subdir)"
 
       - name: Set up JDK 21
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
@@ -162,9 +142,8 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
 
-      # Native artifacts cross-compile vortx-ffi from the reviewed VortX workspace. The pinned NDK,
-      # Rust nightly Android targets and cargo-ndk are required for that output. The legacy Stremio
-      # source remains pinned for explicit non-native comparison builds but is not built here.
+      # Android artifacts cross-compile vortx-ffi from the reviewed VortX workspace. The pinned NDK,
+      # Rust nightly Android targets and cargo-ndk are required for that output.
       - name: Install Android NDK (must match ndkVersion in app/build.gradle.kts)
         run: |
           yes | sdkmanager "ndk;30.0.16248370"
@@ -176,11 +155,11 @@ jobs:
       # SHA-pinned (see the pin note above). Pinning drops the toolchain-from-ref-name convention
       # (@nightly), so the toolchain is passed explicitly.
       #
-      # Toolchain truth: rust-toolchain.toml IS the Rust-version authority, not this step. BOTH
-      # engine checkouts carry one (core/rust-toolchain.toml and the promoted
-      # vortx-core/rust-toolchain.toml, each `channel = "nightly-2026-07-19"` + rust-src; verified
-      # at the pinned engine commits), and rustup's directory-override rule means every cargo
-      # invocation inside those dirs resolves the toolchain through that file. This step is ONLY
+      # Toolchain truth: rust-toolchain.toml IS the Rust-version authority, not this step. The
+      # promoted engine checkout carries one (vortx-core/rust-toolchain.toml, `channel =
+      # "nightly-2026-07-19"` + rust-src; verified at the pinned engine commit), and rustup's
+      # directory-override rule means every cargo invocation inside that dir resolves the toolchain
+      # through that file. This step is ONLY
       # the installer that puts that DATED toolchain + the Android targets on the runner for those
       # files to select; it MUST name the same dated channel the engine toolchain files pin,
       # because the Android targets are installed per-toolchain. Drift fails closed, not silently:
@@ -205,9 +184,8 @@ jobs:
       # private targets. Public app-only edits can still reuse identical engine/dependency work.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: ${{ github.ref_name }}-native-${{ env.VORTX_ENGINE_SOURCE_SHA }}-${{ hashFiles('core/Cargo.*', 'core/rust-toolchain.toml', 'core/.cargo/**', 'core/src/**', 'core/include/**', 'vortx-core/Cargo.*', 'vortx-core/rust-toolchain.toml', 'vortx-core/.cargo/**', 'vortx-core/crates/**', 'android/app/build.gradle.kts') }}
+          key: ${{ github.ref_name }}-native-${{ env.VORTX_ENGINE_SOURCE_SHA }}-${{ hashFiles('vortx-core/Cargo.*', 'vortx-core/rust-toolchain.toml', 'vortx-core/.cargo/**', 'vortx-core/crates/**', 'android/app/build.gradle.kts') }}
           workspaces: |
-            core -> target
             vortx-core -> target-andx
 
       # Pinned EXACTLY: "^3" is a moving target (a new 3.x release would swap the build tool under
@@ -279,7 +257,6 @@ jobs:
           trap finish EXIT
           verify_inputs
           nice -n 15 ./gradlew :app:testPlayDebugUnitTest \
-            -Pvortx.nativeEngine=true -Pvortx.nativeResourceHost=true \
             -Pkotlin.compiler.execution.strategy=in-process \
             --init-script owner-history-hosted.init.gradle \
             --tests com.vortx.android.engine.NativeOwnerHistoryRuntimeTest \
@@ -308,18 +285,12 @@ jobs:
       # These are the SAME GitHub Actions secrets the Apple release CI uses (release-tvos.yml feeds them
       # into the Info.plist): TRAKT_CLIENT_ID, TRAKT_CLIENT_SECRET, SIMKL_CLIENT_ID, SIMKL_CLIENT_SECRET.
       # Absent secrets resolve to "" so the build still succeeds with the feature dormant (e.g. on a fork).
-      # Engine wiring (see the fetch block above for the gradle-contract citations):
-      #   STREMIOX_CORE_DIR      -> cargoNdkBuild's crate dir (explicit; don't lean on the legacy
-      #                             ../core fallback chain in build.gradle.kts:261-264).
-      #   VORTX_ENGINE_CORE_DIR  -> cargoNdkBuildVortxFfi's engine workspace (build.gradle.kts:382-385).
-      #   VORTX_REQUIRE_ENGINE=1 -> the selected Vortx FFI task fails closed on missing source, cargo,
-      #                             or per-ABI output, so native CI cannot package staged leftovers.
-      # Native selection is explicit at the Gradle invocation boundary. Passing both properties is
-      # required: the app BuildConfig and the vortx-ffi resource-host feature are derived from the
-      # same fail-closed contract in app/build.gradle.kts. VORTX_NATIVE_RESOURCE_HOST remains in
-      # env for the private-engine fetch/build diagnostics and backwards-compatible local tooling.
-      # Reproducibility: the selected Vortx cargo-ndk invocation passes --locked against the Cargo.lock
-      # at its exact private commit. The retained Stremio pin is not built in native mode.
+      # Engine wiring:
+      #   VORTX_ENGINE_CORE_DIR  -> cargoNdkBuildVortxFfi's engine workspace.
+      #   VORTX_REQUIRE_ENGINE=1 -> the Vortx FFI task fails closed on missing source, cargo, or
+      #                             per-ABI output, so CI cannot package staged leftovers.
+      # Reproducibility: the cargo-ndk invocation passes --locked against the Cargo.lock at the exact
+      # private commit.
       - name: Build debug APKs (full + play)
         working-directory: android
         env:
@@ -327,12 +298,9 @@ jobs:
           TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
           SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
           SIMKL_CLIENT_SECRET: ${{ secrets.SIMKL_CLIENT_SECRET }}
-          STREMIOX_CORE_DIR: ${{ github.workspace }}/core
           VORTX_ENGINE_CORE_DIR: ${{ github.workspace }}/vortx-core
           VORTX_REQUIRE_ENGINE: "1"
-          VORTX_NATIVE_RESOURCE_HOST: "1"
-          VORTX_NATIVE_ENGINE: "1"
-        run: ./gradlew assembleFullDebug assemblePlayDebug -Pvortx.nativeEngine=true -Pvortx.nativeResourceHost=true --no-daemon --stacktrace
+        run: ./gradlew assembleFullDebug assemblePlayDebug --no-daemon --stacktrace
 
       # Fail loud if either flavor did not produce an APK (a path drift or a silently-skipped variant
       # must fail the job, not pass with a missing artifact).
@@ -347,22 +315,19 @@ jobs:
           echo "full APK(s): ${full[*]}"
           echo "play APK(s): ${play[*]}"
 
-      # Native-only package proof: BuildConfig must select the Vortx repository, every APK must
-      # contain exactly one libvortx_ffi.so for each shipped ABI and no libstremiox_core.so, and the
-      # packaged bytes must match fresh src/main/jniLibs output after identical pinned llvm-strip
-      # normalization. The shared verifier checks ELF architecture, kernel/server JNI exports, and the
-      # resource-host ABI; it records the exact private source SHA, feature set, and normalized hashes.
-      # BuildConfig remains a separate pinned-dexdump check because it is DEX data, not ELF metadata.
-      - name: Verify native BuildConfig and native-only .so in every APK
+      # Native-only package proof: every APK must contain exactly one libvortx_ffi.so for each shipped
+      # ABI and no libstremiox_core.so, and the packaged bytes must match fresh src/main/jniLibs output
+      # after identical pinned llvm-strip normalization. The shared verifier checks ELF architecture,
+      # kernel/server JNI exports, and the resource-host ABI; it records the exact private source SHA,
+      # feature set, and normalized hashes.
+      - name: Verify native-only .so in every APK
         run: |
           set -euo pipefail
           shopt -s nullglob
           READELF="$ANDROID_HOME/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           STRIP="$ANDROID_HOME/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
-          DEXDUMP="$ANDROID_HOME/build-tools/36.0.0/dexdump"
           test -x "$READELF" || { echo "::error::pinned NDK llvm-readelf unavailable"; exit 1; }
           test -x "$STRIP" || { echo "::error::pinned NDK llvm-strip unavailable"; exit 1; }
-          test -x "$DEXDUMP" || { echo "::error::pinned Android build-tools dexdump unavailable"; exit 1; }
           full_apks=(android/app/build/outputs/apk/full/debug/*.apk)
           play_apks=(android/app/build/outputs/apk/play/debug/*.apk)
           if [ ${#full_apks[@]} -ne 1 ] || [ ${#play_apks[@]} -ne 1 ]; then
@@ -370,9 +335,6 @@ jobs:
             exit 1
           fi
           apks=("${full_apks[@]}" "${play_apks[@]}")
-          for apk in "${apks[@]}"; do
-            DEXDUMP="$DEXDUMP" bash scripts/verify-android-native-build-config.sh "$apk"
-          done
           READELF="$READELF" STRIP="$STRIP" bash scripts/verify-native-android-artifacts.sh \
             --native-only \
             --staged-dir android/app/src/main/jniLibs \
@@ -453,8 +415,8 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/signing/upload.jks"
           test -s "$RUNNER_TEMP/signing/upload.jks" || { echo "::error::decoded keystore is empty (bad ANDROID_KEYSTORE_BASE64)"; exit 1; }
 
-      # Build the signed release APK + AAB for the sideloaded `full` flavor. Same native-only engine
-      # wiring as the debug build above; both immutable private pins remain checked. The
+      # Build the signed release APK + AAB for the sideloaded `full` flavor. Same engine wiring as the
+      # debug build above; the immutable private pin remains checked. The
       # VORTX_* signing env vars are exactly what app/build.gradle.kts's signingSecret() reads; with all
       # four set, its release signingConfig activates and signs the outputs.
       - name: Build signed release (full flavor APK + AAB)
@@ -465,16 +427,13 @@ jobs:
           TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
           SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
           SIMKL_CLIENT_SECRET: ${{ secrets.SIMKL_CLIENT_SECRET }}
-          STREMIOX_CORE_DIR: ${{ github.workspace }}/core
           VORTX_ENGINE_CORE_DIR: ${{ github.workspace }}/vortx-core
           VORTX_REQUIRE_ENGINE: "1"
-          VORTX_NATIVE_RESOURCE_HOST: "1"
-          VORTX_NATIVE_ENGINE: "1"
           VORTX_KEYSTORE_PATH: ${{ runner.temp }}/signing/upload.jks
           VORTX_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           VORTX_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           VORTX_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: ./gradlew assembleFullRelease bundleFullRelease -Pvortx.nativeEngine=true -Pvortx.nativeResourceHost=true --no-daemon --stacktrace
+        run: ./gradlew assembleFullRelease bundleFullRelease --no-daemon --stacktrace
 
       # Signing-variable mapping assertion (fail-closed): prove the release build exports exactly
       # the four signing variables Gradle reads (build.gradle.kts:38-43), and Gradle maps exactly
@@ -551,23 +510,6 @@ jobs:
             bash scripts/verify-native-android-artifacts.sh \
               --native-only --staged-dir android/app/src/main/jniLibs \
               --source-sha "$VORTX_ENGINE_SOURCE_SHA" "${apks[@]}" "${bundles[@]}"
-
-      # The packaged .so gate above proves JNI/resource-host exports. This separate bytecode gate
-      # proves the signed APK/AAB selected the same native mode at compile time; a release with a
-      # resource-host library but BuildConfig=false would silently route the app through legacy
-      # repository seams and is not a native release.
-      - name: Verify native BuildConfig in signed release artifacts
-        if: steps.signing.outputs.ready == 'true'
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          apks=(android/app/build/outputs/apk/full/release/*.apk)
-          bundles=(android/app/build/outputs/bundle/fullRelease/*.aab)
-          DEXDUMP="$ANDROID_HOME/build-tools/36.0.0/dexdump"
-          test -x "$DEXDUMP" || { echo "::error::pinned Android build-tools dexdump unavailable"; exit 1; }
-          for artifact in "${apks[@]}" "${bundles[@]}"; do
-            DEXDUMP="$DEXDUMP" bash scripts/verify-android-native-build-config.sh "$artifact"
-          done
 
       - name: Upload signed release APK
         if: steps.signing.outputs.ready == 'true'

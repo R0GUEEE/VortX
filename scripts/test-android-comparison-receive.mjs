@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Execute the complete comparison syncDown and useAccountData methods extracted from actual source.
+// Default: current native-only receive boundary. Explicit pinned revision: retired comparison regression.
+// Historical comparison is evidence about that immutable revision only, not shipping behavior.
 // Storage, parsed projection, publication, native gateway and transport collaborators are synthetic.
 import assert from "node:assert/strict";
 import { readFile, writeFile, mkdir, mkdtemp, readdir } from "node:fs/promises";
@@ -8,6 +9,18 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 const repo = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const historicalRevision = "27d4d91747789ebc8192b751bf1e3ef7e1d0c224";
+if (!process.env.VORTX_SYNC_RECEIVE_REVISION) {
+  assert(process.env.VORTX_SYNC_RECEIVE_UNFIXED !== "1",
+      "Comparison reversal requires the explicit pinned historical revision, not current native source");
+  const result = spawnSync(process.execPath, [join(repo, "scripts/test-android-native-receive.mjs")],
+      { cwd: repo, stdio: "inherit", env: process.env });
+  assert.equal(result.status, 0, "Current native receive boundary failed");
+  process.exit(0);
+}
+assert.equal(process.env.VORTX_SYNC_RECEIVE_REVISION, historicalRevision,
+    "Retired comparison regression must use its reviewed immutable source revision");
+console.log("HISTORICAL ONLY: retired comparison implementation at", historicalRevision);
 const kotlin = process.env.VORTX_KOTLIN_LIB;
 const deps = process.env.VORTX_ANDROID_AUDIT_DEPS;
 const java = process.env.VORTX_TEST_JAVA || "java";
@@ -48,8 +61,14 @@ function extract(name, prefix) {
 }
 const down = extract("syncDown", "private suspend ");
 const use = extract("useAccountData", "suspend ");
+const historicalHelper = spawnSync("git", ["-C", repo, "show",
+  historicalRevision + ":android/app/src/main/kotlin/com/vortx/android/sync/NativeAccountAttempt.kt"], { encoding: "utf8" });
+assert.equal(historicalHelper.status, 0, "Pinned historical compatibility helper must resolve");
+const nativeAttemptSource = historicalHelper.stdout;
+const nativeAttempt = nativeAttemptSource.slice(nativeAttemptSource.indexOf("/**"));
+assert(nativeAttempt.includes("internal suspend fun runNativeAccountAttempt("), "Exact native compatibility helper required");
 console.log("Manager source SHA-256:", createHash("sha256").update(source).digest("hex"));
-console.log("Source mode:", process.env.VORTX_SYNC_RECEIVE_UNFIXED === "1" ? "current source with exact comparison correction reversed in memory" :
+console.log("Source mode:", process.env.VORTX_SYNC_RECEIVE_UNFIXED === "1" ? "pinned historical source with exact comparison correction reversed in memory" :
     process.env.VORTX_SYNC_RECEIVE_REVISION || "current worktree");
 const parent = join(repo, "android/app/build");
 await mkdir(parent, { recursive: true });
@@ -95,6 +114,7 @@ internal class FixtureLibraryGateway {
     fun captureAccountLibraryLease(): Int? = null
     fun ownerWatchedChanged(native: Int, admission: ((() -> Boolean) -> Boolean)) = true
 }
+${nativeAttempt}
 internal class FixtureReceiveManager {
     var generation = 0
     var signedIn = true
@@ -112,6 +132,10 @@ internal class FixtureReceiveManager {
     var lastVersion = 0L
     private var applyingRemote = false
     private val nativeSyncMutex = Mutex()
+    private val nativeWorkDispatcher = Dispatchers.Unconfined
+    private val nativeGateway: Any? = Any()
+    private fun markNativeAccountUnavailable(lease: SyncSessionLease, gateway: Any) {}
+    private fun clearNativeAccountUnavailable(lease: SyncSessionLease, gateway: Any) {}
     private val addonTombstones = FixtureTombstones()
     private val libraryTombstones = FixtureTombstones()
     private val ownerWatchedIntents = FixtureWatchedIntents()
@@ -120,6 +144,7 @@ internal class FixtureReceiveManager {
     private fun captureSyncLease() = if (signedIn) SyncSessionLease(generation) else null
     private fun isSyncLeaseCurrent(lease: SyncSessionLease) = signedIn && lease.generation == generation
     private suspend fun nativeSyncDown(lease: SyncSessionLease, force: Boolean, routineReceive: Boolean) = nativeReceived && isSyncLeaseCurrent(lease)
+    private suspend fun nativeSyncDown(lease: SyncSessionLease, gateway: Any, force: Boolean, routineReceive: Boolean) = nativeReceived && isSyncLeaseCurrent(lease)
     private fun retryPendingPushBeforePull(lease: SyncSessionLease) = pending
     private suspend fun pullSyncDocResult(lease: SyncSessionLease, allowOlderAddonTombstones: Boolean): SyncDocPull {
         gets++
@@ -210,11 +235,11 @@ const coroutines = jars.find(x => /^kotlinx-coroutines-core-jvm-.*\.jar$/.test(x
 assert(stdlib && coroutines);
 const cp = [join(kotlin, stdlib), join(kotlin, coroutines), join(deps, "kotlinx-coroutines-test-jvm-1.6.4.jar"), join(deps, "json-20240303.jar")].join(":");
 function run(args) {
-    const result = spawnSync(java, args, { cwd: repo, stdio: "inherit" });
+    const result = spawnSync(java, ["-XX:ActiveProcessorCount=1", ...args], { cwd: repo, stdio: "inherit" });
     assert.equal(result.status, 0, "Source-extracted comparison receive check failed");
 }
-run(["-Xmx768m", "-cp", join(kotlin, "*"), "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
-    "-no-stdlib", "-no-reflect", "-jvm-target", "17", "-classpath", cp,
+run(["-Xmx512m", "-cp", join(kotlin, "*"), "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
+    "-no-stdlib", "-no-reflect", "-jvm-target", "17", "-Xbackend-threads=1", "-classpath", cp,
     join(out, "ComparisonReceive.kt"), join(out, "BuildConfig.kt"), "-d", join(out, "classes")]);
-run(["-Xmx256m", "-cp", join(out, "classes") + ":" + cp, "com.vortx.android.sync.ComparisonReceiveKt"]);
+run(["-Xmx128m", "-cp", join(out, "classes") + ":" + cp, "com.vortx.android.sync.ComparisonReceiveKt"]);
 console.log("Retained generated comparison source and classes:", out);

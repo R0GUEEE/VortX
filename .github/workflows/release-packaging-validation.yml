@@ -70,7 +70,7 @@ jobs:
           yes | sdkmanager "ndk;30.0.16248370"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
 
-      - name: Prove native defaults and explicit comparison selection
+      - name: Prove the native-only build and rejection of removed engine selections
         run: bash scripts/test-android-native-selection.sh
 
       - name: Exercise signer parsing and strict verification fixtures
@@ -132,6 +132,9 @@ jobs:
           --tests com.vortx.android.sync.DurableSessionStateTest
           --tests com.vortx.android.sync.NativeAccountSyncTest
           --tests com.vortx.android.sync.VortXSessionOwnerTransitionContractTest
+          --tests com.vortx.android.diagnostics.DiagnosticShareOperationTest
+          --tests com.vortx.android.engine.NativeRetirementDispatchTest
+          --tests com.vortx.android.sync.NativeAccountAttemptTest
           --tests com.vortx.android.player.ExoPlayerEngineStatePolicyTest
           --tests com.vortx.android.player.PlaybackMetadataTest
           --tests 'com.vortx.android.engine.NativeOwnAccountSourcesTest.malformed own row is held without losing valid siblings or raw source bytes'
@@ -276,6 +279,9 @@ jobs:
       - name: Prove all-shell failure aggregation keeps every gate fail-closed
         run: node scripts/test-shell-validation-aggregation.mjs
 
+      - name: Test explicit watched-history retry and account readiness
+        run: bash scripts/test-native-watched-retry.sh "$GITHUB_WORKSPACE"
+
       # Pinned XcodeGen, identical version + checksum gate as release-tvos.yml so project
       # generation here observes the same generator the release lane uses.
       - name: Install pinned XcodeGen
@@ -294,18 +300,11 @@ jobs:
           "$workdir/xcodegen/bin/xcodegen" --version
           echo "$workdir/xcodegen/bin" >> "$GITHUB_PATH"
 
-      # Every dependency below is PUBLIC and checksum-pinned; none of these steps reads a secret.
-      # NodeMobile/server.js/fonts, the macOS node runtime, and the self-built MPVKit player stack
-      # are fetched exactly the way release-tvos.yml fetches them (same pins), so the only
-      # difference versus the protected lane is the ENGINE SOURCE: private repos cannot be checked
-      # out on a PR, so scripts/build-stub-engine-xcframeworks.sh generates CI-only fail-closed
-      # stand-ins that define the tracked ABI surface. This exercises compile/link/package for
-      # real; it does NOT exercise engine behavior (nothing can, secretlessly).
-      - name: Fetch server dependencies (NodeMobile, server.js, fonts)
+      # Public fonts and the player package use the protected lane's reviewed pins. The private
+      # engine and Mac daemon are represented by marked, fail-closed CI stand-ins only here.
+      # This checks real native Swift compile/link/package mechanics, not engine/server behavior.
+      - name: Fetch subtitle fonts
         run: ./scripts/fetch-server-deps.sh
-
-      - name: Fetch the macOS node runtime
-        run: ./app/scripts/fetch-node-macos.sh
 
       - name: Fetch MPVKit-DVFEL artifacts (public release asset, sha256-verified)
         env:
@@ -327,18 +326,25 @@ jobs:
       - name: Generate CI-only stub engine xcframeworks
         run: |
           ./scripts/build-stub-engine-xcframeworks.sh
-          test -f app/Vendor/StremioXCore.xcframework/STUB-CI-ONLY.txt || { echo "::error::StremioXCore stub marker missing"; exit 1; }
           test -f app/Vendor/VortxEngine.xcframework/STUB-CI-ONLY.txt || { echo "::error::VortxEngine stub marker missing"; exit 1; }
+          test -x app/Vendor/vortx-streaming-server || { echo "::error::CI-only Mac daemon is missing"; exit 1; }
+          test -f app/Vendor/vortx-streaming-server.STUB-CI-ONLY.txt || { echo "::error::CI-only Mac daemon marker missing"; exit 1; }
 
       - name: Generate the Xcode project
-        run: cd app && xcodegen generate
+        run: |
+          set -euo pipefail
+          cd app
+          # All-zero revision is an explicit CI-only sentinel; no private engine was fetched.
+          ruby ../scripts/generate-native-apple-project.rb \
+            --engine-revision 0000000000000000000000000000000000000000 \
+            --mpvkit "$PWD/Vendor/MPVKit-DVFEL" --output "$PWD/.native-ci-project.yml"
+          xcodegen generate --spec .native-ci-project.yml
 
       # Real compile/link/package per platform shell. Signing is disabled outright (no identity,
       # none needed for simulator or unsigned macOS builds). Each produced .app must carry the
       # expected bundle ID and a Mach-O executable whose engine symbols are RESOLVED (defined in
       # the linked binary), proving the link phase consumed the engine libraries.
-      # The legacy web-host `VortX` iOS target is deliberately not built here: it is the
-      # pre-native WebView shell kept until cutover, not one of the three native platform shells.
+      # All four native app targets are built, including both tvOS Lite simulator architectures.
       - name: Build and verify tvOS, iOS, and macOS shells
         run: |
           set -euo pipefail
@@ -370,12 +376,16 @@ jobs:
             local defined_symbols undefined_symbols
             defined_symbols="$(nm -gU "$executable_dir/$exe")"
             undefined_symbols="$(nm -u "$executable_dir/$exe")"
-            if ! grep -q '_stremiox_core_schema_version' <<< "$defined_symbols"; then
-              echo "::error::$scheme binary does not contain the linked engine symbol _stremiox_core_schema_version"; exit 1;
+            grep -Eq '[[:space:]][Tt][[:space:]]+_vortx_init_from_state_json$' <<< "$defined_symbols" \
+              || { echo "::error::$scheme binary lacks a defined native state-import symbol"; exit 1; }
+            grep -Eq '[[:space:]][Tt][[:space:]]+_vortx_resource_host_new$' <<< "$defined_symbols" \
+              || { echo "::error::$scheme binary lacks a defined native resource-host symbol"; exit 1; }
+            if [ "$require_engines" = "in-process" ]; then
+              grep -Eq '[[:space:]][Tt][[:space:]]+_vortx_server_start$' <<< "$defined_symbols" \
+                || { echo "::error::$scheme binary lacks a defined in-process server symbol"; exit 1; }
             fi
-            if [ "$require_engines" = "both" ]; then
-              grep -q '_vortx_init_runtime' <<< "$defined_symbols" \
-                || { echo "::error::$scheme binary does not contain the linked engine symbol _vortx_init_runtime"; exit 1; }
+            if grep -Eq '_stremiox_core_|_node_start' <<< "$defined_symbols"; then
+              echo "::error::$scheme binary retains removed engine/runtime symbols"; exit 1;
             fi
             if grep -Eq '_stremiox_core_|_vortx_' <<< "$undefined_symbols"; then
               echo "::error::$scheme binary still has unresolved engine symbols"; grep -E '_stremiox_core_|_vortx_' <<< "$undefined_symbols"; exit 1
@@ -396,12 +406,9 @@ jobs:
               shell_failures=$((shell_failures + 1))
             fi
           }
-          build_shell VortXTVLite   'generic/platform=tvOS Simulator' com.stremiox.tv.lite     "$RUNNER_TEMP/dd-tvlite" core-only
-          # The pinned NodeMobile tvOS simulator framework supports arm64 only, matching
-          # the protected release smoke lane. Lite has no NodeMobile and retains the
-          # independent Intel simulator link check against the universal engine stubs.
-          build_shell VortXTV       'generic/platform=tvOS Simulator' com.stremiox.tv         "$RUNNER_TEMP/dd-tv"     both arm64
-          build_shell VortXTVLite   'generic/platform=tvOS Simulator' com.stremiox.tv.lite    "$RUNNER_TEMP/dd-tvlite-x86" core-only x86_64
-          build_shell VortXiOSNative 'generic/platform=iOS Simulator'  com.stremiox.app.native "$RUNNER_TEMP/dd-ios"    both
-          build_shell VortXMac      'platform=macOS,arch=arm64'       com.stremiox.mac        "$RUNNER_TEMP/dd-mac"    core-only
+          build_shell VortXTVLite   'generic/platform=tvOS Simulator' com.stremiox.tv.lite     "$RUNNER_TEMP/dd-tvlite" native
+          build_shell VortXTV       'generic/platform=tvOS Simulator' com.stremiox.tv         "$RUNNER_TEMP/dd-tv"     in-process arm64
+          build_shell VortXTVLite   'generic/platform=tvOS Simulator' com.stremiox.tv.lite    "$RUNNER_TEMP/dd-tvlite-x86" native x86_64
+          build_shell VortXiOSNative 'generic/platform=iOS Simulator'  com.stremiox.app.native "$RUNNER_TEMP/dd-ios"    in-process
+          build_shell VortXMac      'platform=macOS,arch=arm64'       com.stremiox.mac        "$RUNNER_TEMP/dd-mac"    daemon
           [ "$shell_failures" -eq 0 ] || { echo "::error::$shell_failures shell checks failed"; exit 1; }

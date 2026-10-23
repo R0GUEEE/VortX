@@ -377,7 +377,7 @@ class VortxNativeSessionTest {
         val transport = Transport().also { it.failedCatalog = "broken" }
         VortxNativeSession.open(scope, "Owner", bindings, store, transport).use { session ->
             val repo = NativeCatalogRepository { session }
-            val stats = WatchStatsModel(File("build/never-read-legacy"), repo, nativeEnabled = true)
+            val stats = WatchStatsModel(repo)
             stats.load(); assertNull(stats.state.value.error)
             assertEquals("Fixture Series", repo.home().getOrThrow().last().items.single().name)
             val homeRow = repo.home().getOrThrow().last()

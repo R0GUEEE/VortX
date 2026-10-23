@@ -3,6 +3,128 @@ import SwiftUI
 import UIKit
 #endif
 
+/// Player-wide presentation tokens. Keep the large video scrim separate from the small control
+/// faces: thinning the backplate must not also thin the glyph's immediate contrast protection.
+enum VortXPlayerChromePolicy {
+    enum Platform: Equatable { case touch, desktop, television }
+
+    static func requiresContrast(reduceTransparency: Bool, highContrast: Bool,
+                                 glassEnabled: Bool) -> Bool {
+        reduceTransparency || highContrast || !glassEnabled
+    }
+
+    static func topScrimAlpha(for platform: Platform) -> Double {
+        switch platform {
+        case .touch: return 0.55
+        case .desktop: return 0.45
+        case .television: return 0
+        }
+    }
+
+    static func bottomScrimAlpha(for platform: Platform, requiresContrast: Bool) -> Double {
+        switch platform {
+        case .touch: return requiresContrast ? 0.75 : 0.38
+        case .desktop: return requiresContrast ? 0.38 : 0.24
+        case .television: return requiresContrast ? 0.90 : 0.58
+        }
+    }
+
+    static func backplateFillAlpha(requiresContrast: Bool) -> Double {
+        requiresContrast ? 0.28 : 0.16
+    }
+
+    static func backplateMaterialOpacity(requiresContrast: Bool) -> Double {
+        requiresContrast ? 1 : 0.42
+    }
+
+    /// Only the existing Crimson profile changes its player treatment. A lower neutral veil lets its
+    /// deeper tint read as red; the combined paint is slightly thinner than the previous face.
+    static func controlTintAlpha(active: Bool, crimson: Bool) -> Double {
+        crimson ? (active ? 0.68 : 0.52) : (active ? 0.62 : 0.46)
+    }
+
+    static func controlVeilAlpha(crimson: Bool) -> Double { crimson ? 0.48 : 0.58 }
+
+    /// Local timing-label ink only, independent of the thinner full-player scrim. Full-white time
+    /// labels keep a conservative SDR-white contrast bound without adding a long timing-row strip.
+    static func timeLabelFillAlpha(requiresContrast: Bool) -> Double { requiresContrast ? 1 : 0.62 }
+}
+
+/// The actual large video backplate, shared by touch, desktop and TV control routes. This adds no
+/// material/blur work: only the existing black gradient changes, with its old fallback alphas retained.
+struct VortXPlayerBackdrop: View {
+    let platform: VortXPlayerChromePolicy.Platform
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    @AppStorage(VisualEffects.glassKey) private var glassChoice = VisualEffects.auto
+
+    private var requiresContrast: Bool {
+        VortXPlayerChromePolicy.requiresContrast(
+            reduceTransparency: reduceTransparency, highContrast: contrast == .increased,
+            glassEnabled: VisualEffects.glass(stored: glassChoice, reduced: VisualEffects.reducedForAuto))
+    }
+
+    private var colors: [Color] {
+        let bottom = Color.black.opacity(VortXPlayerChromePolicy.bottomScrimAlpha(
+            for: platform, requiresContrast: requiresContrast))
+        if platform == .television { return [.clear, bottom] }
+        return [.black.opacity(VortXPlayerChromePolicy.topScrimAlpha(for: platform)), .clear, bottom]
+    }
+
+    var body: some View {
+        LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+/// Desktop's additional rounded bottom container. Geometry, edge light and shadow remain owned by
+/// the existing layout; accessibility and Effects-off keep a fully opaque face.
+private struct VortXPlayerBottomBackplateModifier: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    @AppStorage(VisualEffects.glassKey) private var glassChoice = VisualEffects.auto
+
+    func body(content: Content) -> some View {
+        let requiresContrast = VortXPlayerChromePolicy.requiresContrast(
+            reduceTransparency: reduceTransparency, highContrast: contrast == .increased,
+            glassEnabled: VisualEffects.glass(stored: glassChoice, reduced: VisualEffects.reducedForAuto))
+        content.modifier(VortXGlassModifier(
+            shape: RoundedRectangle(cornerRadius: 22, style: .continuous),
+            fillAlpha: VortXPlayerChromePolicy.backplateFillAlpha(requiresContrast: requiresContrast),
+            highlightTop: 0.14, shadow: .bar,
+            forceOpaque: requiresContrast,
+            materialOpacity: VortXPlayerChromePolicy.backplateMaterialOpacity(requiresContrast: requiresContrast),
+            tone: .scrim))
+    }
+}
+
+extension View {
+    func vortxPlayerBottomBackplate() -> some View { modifier(VortXPlayerBottomBackplateModifier()) }
+    func vortxPlayerTimeLabelProtection() -> some View { modifier(VortXPlayerTimeLabelProtectionModifier()) }
+}
+
+/// Local ink capsules hug only the bare timing labels. Background expansion never participates
+/// in layout, so the timeline's dimensions, transport targets and trickplay positions do not move.
+private struct VortXPlayerTimeLabelProtectionModifier: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    @AppStorage(VisualEffects.glassKey) private var glassChoice = VisualEffects.auto
+
+    func body(content: Content) -> some View {
+        let requiresContrast = VortXPlayerChromePolicy.requiresContrast(
+            reduceTransparency: reduceTransparency, highContrast: contrast == .increased,
+            glassEnabled: VisualEffects.glass(stored: glassChoice, reduced: VisualEffects.reducedForAuto))
+        content.background {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.black.opacity(VortXPlayerChromePolicy.timeLabelFillAlpha(requiresContrast: requiresContrast)))
+                .padding(.horizontal, -6).padding(.vertical, -2)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
 /// VortX "liquid glass": the warm-dark translucent material that is now VortX's ELEVATION LANGUAGE
 /// across the app's chrome. It began as the floating nav bar / pill material from the approved redesign
 /// mockups; it now also backs chips, rows, primary actions, panels, fields, toasts, on-poster badges,

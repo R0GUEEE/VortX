@@ -1507,11 +1507,7 @@ actor VortxNativeSession {
     /// This flag is not added to any build configuration by this proposal. It is independent
     /// from the SDK symbol flag; compiling an SDK alone does not activate host routing.
     nonisolated static var ownerHistoryRoutingEnabled: Bool {
-        #if VORTX_NATIVE_DATA_ENGINE && VORTX_OWNER_HISTORY_SESSION_ROUTING && VORTX_ENGINE_OWNER_HISTORY_BRIDGE
         true
-        #else
-        false
-        #endif
     }
     private final class OwnerHistorySourceAuthority: VortxMutationAuthority, @unchecked Sendable {
         let lease: VortxSessionLease
@@ -2699,7 +2695,6 @@ actor VortxNativeSession {
                     capture: capture, transaction: peer.transaction))
             } else {
                 let base = try ownerHistory.acknowledgedAccountBase(capture: capture)
-#if VORTX_NATIVE_DATA_ENGINE
                 let prepared = try await VortXSyncManager.shared.prepareOwnerHistoryLocalCheckpoint(
                     base: base, scope: scope, source: source)
                 let transaction: any OwnerHistoryCompleteCheckpointAuthority
@@ -2709,12 +2704,6 @@ actor VortxNativeSession {
                 try source.withActive {}
                 typedCapture = capture; typedTransaction = transaction
                 candidate = .owner(try ownerHistory.candidate(capture: capture, transaction: transaction))
-#else
-                // Ordinary/Lite shells have no account preparation factory or typed writer.
-                // Keep the generic route below unchanged; never fabricate an authority.
-                _ = base
-                throw OwnerHistoryRoutingFailure.activationDisabled
-#endif
             }
         } else {
             typedCapture = nil; typedTransaction = nil

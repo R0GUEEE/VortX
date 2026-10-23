@@ -84,6 +84,8 @@ import CryptoKit
         catch { print("FAIL: literal add-on manifest text blocked account preparation: \(error)"); exit(1) }
         do { try literalLegacyLibraryNames() }
         catch { print("FAIL: literal library title blocked account preparation: \(error)"); exit(1) }
+        do { try literalSeriesSourceAddonNames() }
+        catch { print("FAIL: literal series source add-on name blocked account preparation: \(error)"); exit(1) }
         let unchangedArchive = try JSONSerialization.jsonObject(with: VortxNativeBootstrapArchive.encode(document: data(["future": unchanged]))) as! [String: Any]
         check((unchangedArchive["hostDocument"] as! [String: String])["future"] == unchanged)
         let malformedBackup = try data(["format": "vortx-backup", "schema": 1, "payloadBase64": "opaque"]).base64EncodedString()
@@ -942,6 +944,172 @@ import CryptoKit
         } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
         check(messages == ["archive_inspection result=failed reason=opaque_preference field=/vortx/library/*/name carrier=plain_text_prefix"])
         print("Issue #262: typed legacy library labels, exact archive retention and unchanged-source credential/malformed controls passed")
+    }
+
+    static func literalSeriesSourceAddonNames() throws {
+        // The attachment identifies the field/carrier, not the raw customer name.
+        // These synthetic Choice-shaped values exercise the actual shipping inspector
+        // and SettingsBackup.encode serializer, including the retained archive paths.
+        typealias Object = [String: Any]
+        let profile = "00000000-0000-0000-0000-00000000A11C"
+        let preference = "stremiox.seriesSourceSticky." + profile
+        let series = "tt-fixture-series"
+        let label = "[Community] Fixture add-on"
+        func choice(_ addon: Any, extra: Object = [:]) -> Object {
+            var row: Object = ["addon": addon, "bingeGroup": "fixture-release", "ts": 125.375,
+                               "audioLanguage": "en", "resolution": 1080,
+                               "futureChoice": ["keep": true, "clock": 250.125]]
+            row.merge(extra) { _, replacement in replacement }
+            return row
+        }
+        func document(_ value: Any, key: String? = nil) throws -> Object {
+            let domain: Object = [key ?? preference: value, "future.preference": ["keep": "unchanged"],
+                                  "fixture.date": Date(timeIntervalSince1970: 42)]
+            let settings = try SettingsBackup.encode(domain: domain, bundleID: "fixture.bundle", app: "Fixture",
+                                                     now: Date(timeIntervalSince1970: 10))
+            return ["settings": settings.base64EncodedString(), "futureHost": ["keep": true],
+                    "ownAccountOverlayPending": ["fixture-pending": ["draft": "untouched"]]]
+        }
+        func domain(_ host: Object) throws -> Object {
+            let envelope = try JSONSerialization.jsonObject(with: Data(base64Encoded: host["settings"] as! String)!) as! Object
+            return try PropertyListSerialization.propertyList(from: Data(base64Encoded: envelope["payloadBase64"] as! String)!,
+                                                               options: [], format: nil) as! Object
+        }
+        func rows(_ host: Object, key: String? = nil) throws -> Object {
+            let values = try domain(host)
+            check(values[key ?? preference] is Data)
+            return try JSONSerialization.jsonObject(with: values[key ?? preference] as! Data) as! Object
+        }
+        func inspect(_ host: Object, expected: Object, key: String) throws {
+            check(try data(rows(host, key: key)) == data(expected))
+            let actual = (try rows(host, key: key))[series] as! Object
+            check(Data((actual["addon"] as! String).utf8) == Data(((expected[series] as! Object)["addon"] as! String).utf8))
+            let values = try domain(host)
+            check((values["future.preference"] as! [String: String])["keep"] == "unchanged")
+            check(values["fixture.date"] as? Date == Date(timeIntervalSince1970: 42))
+            check((host["futureHost"] as! [String: Bool])["keep"] == true)
+            check((host["ownAccountOverlayPending"] as! [String: [String: String]])["fixture-pending"]?["draft"] == "untouched")
+        }
+        for name in [label, "[RD+] Fixture", "{Public} Fixture", " \n[日本語] Fixture", "[true]", "[123]"] {
+            for key in [preference, "stremiox.seriesSourceSticky.default"] {
+                let expected: Object = [series: choice(name)]
+                let raw = try data(expected)
+                let input = try document(raw, key: key), original = try data(input)
+                let hash = SHA256.hash(data: original)
+                var diagnostics: [String] = []
+                let clean = try VortxNativeBootstrapArchive.credentialFreeDocument(input, diagnostics: { diagnostics.append($0) })
+                check(diagnostics.isEmpty)
+                try inspect(try JSONSerialization.jsonObject(with: clean) as! Object, expected: expected, key: key)
+                let archive = try VortxNativeBootstrapArchive.encode(document: original)
+                try VortxNativeBootstrapArchive.validate(archive)
+                let envelope = try JSONSerialization.jsonObject(with: archive) as! Object
+                check((envelope["excludedCredentialPaths"] as! [String]).isEmpty)
+                try inspect(envelope["hostDocument"] as! Object, expected: expected, key: key)
+                let retained = try VortxNativeBootstrapArchive.encode(document: data([:]), authenticatedSourceArchive: archive)
+                try VortxNativeBootstrapArchive.validate(retained)
+                try inspect((try JSONSerialization.jsonObject(with: retained) as! Object)["authenticatedSourceArchive"] as! Object,
+                            expected: expected, key: key)
+                // Recovery merging compares opaque host values exactly. A second fresh
+                // sanitizer pass may serialize the equivalent binary plist differently;
+                // it is not authority to replace that archived settings string.
+                var replacementHost = envelope["hostDocument"] as! Object
+                replacementHost["futureReplacement"] = ["keep": true]
+                let replaced = try VortxNativeBootstrapArchive.replacingHostDocument(in: archive, with: data(replacementHost))
+                try VortxNativeBootstrapArchive.validate(replaced)
+                let merged = try VortxNativeBootstrapArchive.mergingRecoveryEnvelope(archive, prior: replaced)
+                try VortxNativeBootstrapArchive.validate(merged)
+                let mergedHost = (try JSONSerialization.jsonObject(with: merged) as! Object)["hostDocument"] as! Object
+                check((mergedHost["futureReplacement"] as! [String: Bool])["keep"] == true)
+                try inspect((try JSONSerialization.jsonObject(with: merged) as! Object)["hostDocument"] as! Object,
+                            expected: expected, key: key)
+                check(try data(input) == original && SHA256.hash(data: original) == hash)
+                check((try domain(input))[key] as? Data == raw)
+            }
+        }
+        func refused(_ source: Object) throws {
+            let original = try data(source)
+            do {
+                _ = try VortxNativeBootstrapArchive.credentialFreeDocument(source)
+                preconditionFailure("Unrecognized or opaque series-choice carrier was admitted")
+            } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+            check(try data(source) == original)
+        }
+        let raw = try data([series: choice(label)])
+        for key in ["future.unrecognized.preference", "stremiox.seriesSourceSticky.fixture-profile",
+                    preference + ".undecodable", "stremiox.sourcePins." + profile] {
+            try refused(document(raw, key: key))
+        }
+        try refused(["future": [series: choice(label)]])
+        try refused(document([series: choice(label)])) // Data is the producer's carrier.
+        try refused(document(String(decoding: raw, as: UTF8.self)))
+        try refused(document(raw.base64EncodedString()))
+        try refused(document(PropertyListSerialization.data(fromPropertyList: [series: choice(label)], format: .binary, options: 0)))
+        var missingClock = choice(label); missingClock.removeValue(forKey: "ts")
+        try refused(document(data([series: missingClock])))
+        for invalid in [true as Any, "125.375" as Any] {
+            try refused(document(data([series: choice(label, extra: ["ts": invalid])])))
+        }
+        try refused(document(data([series: choice(label, extra: ["resolution": true])])))
+        try refused(document(data([series: choice(label, extra: ["bingeGroup": 5])])))
+        try refused(document(data([series: choice("Fixture", extra: ["bingeGroup": label])])))
+        try refused(document(data([series: choice("Fixture", extra: ["future": label])])))
+        try refused(document(data([series: choice("Fixture", extra: ["extension": ["addon": label]])])))
+        try refused(document(Data([0xff, 0, 1])))
+        let secretJSON = #"{"token":"fixture-hidden","keep":true}"#
+        let secretPlist = try PropertyListSerialization.data(fromPropertyList: ["password": "fixture-hidden", "keep": true], format: .binary, options: 0)
+        let malformed = ["[", "{", #"{"token":"unfinished"#, "[[Community]]", "[Community]no separator",
+                         "[" + String(repeating: "x", count: 65) + "] Fixture",
+                         "[Community] " + secretJSON, "[Community] \"quoted\"", "[Community] bplist00broken",
+                         "[Community] <?xml broken", "[true] trailing",
+                         Data(label.utf8).base64EncodedString(), Data([0x7b, 0xff, 0]).base64EncodedString()]
+        for name in malformed { try refused(document(data([series: choice(name)]))) }
+        for carrier in [Data(secretJSON.utf8).base64EncodedString(), secretPlist.base64EncodedString()] {
+            for padding in ["", "\u{FEFF}", String(repeating: " \u{2003}\n", count: 64) + "\u{FEFF}"] {
+                try refused(document(data([series: choice("[Community] " + padding + carrier)])))
+            }
+        }
+        let quotedLabel = String(decoding: try JSONSerialization.data(withJSONObject: label, options: [.fragmentsAllowed]), as: UTF8.self)
+        try refused(document(data([series: choice(quotedLabel)])))
+        // Valid nested carriers still follow credential exclusion, and never receive display context.
+        for name in [secretJSON, Data(secretJSON.utf8).base64EncodedString()] {
+            let input = try document(data([series: choice(name, extra: ["password": "fixture-sibling"])]))
+            let original = try data(input)
+            let archive = try VortxNativeBootstrapArchive.encode(document: original)
+            try VortxNativeBootstrapArchive.validate(archive)
+            let envelope = try JSONSerialization.jsonObject(with: archive) as! Object
+            let safe = (try rows(envelope["hostDocument"] as! Object))[series] as! Object
+            let nestedBytes = name == secretJSON ? Data((safe["addon"] as! String).utf8) : Data(base64Encoded: safe["addon"] as! String)!
+            let nested = try JSONSerialization.jsonObject(with: nestedBytes) as! Object
+            check(nested["token"] == nil && nested["keep"] as? Bool == true && safe["password"] == nil)
+            let paths = envelope["excludedCredentialPaths"] as! [String]
+            check(Set(paths) == ["/settings/payloadBase64/" + preference + "/" + series + "/addon/token",
+                                 "/settings/payloadBase64/" + preference + "/" + series + "/password"])
+            check(try data(input) == original)
+        }
+        do {
+            _ = try VortxNativeBootstrapArchive.credentialFreeDocument(document(data([series: choice(label, extra: ["futureCredentialBox": "fixture-hidden"])])))
+            preconditionFailure("Unknown credential carrier received display semantics")
+        } catch VortxNativeBootstrapArchive.Failure.ambiguousCredentialCarrier {}
+        let duplicates = [
+            #"{"tt-fixture-series":{"addon":"[Community] Fixture","ts":125.375,"future":{"token":"fixture-hidden"},"future":{"keep":true}}}"#,
+            #"{"tt-fixture-series":{"addon":"[Community] Fixture","ts":125.375,"future":{"keep":true},"future":{"token":"fixture-hidden"}}}"#,
+            #"{"tt-fixture-series":{"addon":"[Community] Fixture","ad\u0064on":"Fixture","ts":125.375}}"#
+        ]
+        for duplicate in duplicates {
+            let input = try document(Data(duplicate.utf8)), original = try data(input)
+            do {
+                _ = try VortxNativeBootstrapArchive.credentialFreeDocument(input)
+                preconditionFailure("Ambiguous series-choice JSON was admitted")
+            } catch VortxNativeBootstrapArchive.Failure.malformed {}
+            check(try data(input) == original)
+        }
+        var messages: [String] = []
+        do {
+            _ = try VortxNativeBootstrapArchive.credentialFreeDocument(document(data([series: choice("[private:token]")])), diagnostics: { messages.append($0) })
+            preconditionFailure("Malformed add-on label was admitted")
+        } catch VortxNativeBootstrapArchive.Failure.opaquePreference {}
+        check(messages == ["archive_inspection result=failed reason=opaque_preference field=/settings/payloadBase64/*/*/addon carrier=plain_text_prefix preference_family=series_source_choice"])
+        print("Series-choice display names: typed preference admission, exact field retention, unchanged source and opaque/credential controls passed")
     }
 
     static func archiveInspectionDiagnostics() throws {

@@ -68,25 +68,15 @@ final class MacNodeRestartStatus: Sendable {
     }
 }
 
-/// macOS streaming server. Runs Stremio's server.js (the torrent engine + /proxy + HLS) in a
-/// CHILD PROCESS, listening on http://127.0.0.1:11470, so TORRENT streams play on the Mac.
-///
-/// iOS/tvOS embed `nodejs-mobile` (node as a *library*, started in-process via `node_start`).
-/// nodejs-mobile has no macOS slice, so the Mac can't do that. Instead we bundle the ordinary
-/// standalone `node` executable (Resources/node-darwin-arm64, fetched by scripts/fetch-node-macos.sh)
-/// and spawn it with `Process`. This works because the Mac app is NOT sandboxed; it may launch
-/// child processes and bind loopback ports.
+/// macOS streaming server: the VortX engine's `vortx-streaming-server`, bundled from app/Vendor
+/// and run as a CHILD PROCESS listening on 127.0.0.1:11470 (all interfaces while LAN sharing is
+/// on). The Mac app is not sandboxed, so it may launch child processes and bind loopback ports;
+/// iOS/tvOS run the same server in-process instead (`VortxNativeServer`).
 ///
 /// This deliberately exposes the SAME API surface as the iOS/tvOS `NodeServer`
 /// (`startIfNeeded()`, `statusDescription`, `logTail(_:)`) under the same type name, so the shared
 /// call sites in VortXiOSApp / iOSSettingsView resolve to the right implementation per platform
-/// with no `#if os(macOS)` at the call site.
-///
-/// NATIVE ENGINE (flag-gated, default OFF): behind `vortxNativeServer` (UserDefaults), the same
-/// lifecycle spawns the native Rust streaming server (`vortx-streaming-server`, bundled from
-/// app/Vendor by scripts/build-mac-server.sh) instead of node + server.js. Same port (11470),
-/// same HTTP contract, same LAN-bind toggle; see spawnNative(binPath:). Native selection fails
-/// explicitly if its binary is missing. Legacy selection retains the Node path.
+/// with no `#if os(macOS)` at the call site. A missing server binary is reported explicitly.
 enum NodeServer {
     private struct QuitAttempt: Sendable {
         let id: UUID
@@ -155,9 +145,9 @@ enum NodeServer {
     private static let shareKey = "stremiox.mac.shareServerOnLAN"
 
     /// When ON, the bundled server binds 0.0.0.0 (all interfaces) so other devices on the LAN
-    /// (your Apple TV / phone) can use this Mac as their Stremio streaming server. When OFF
-    /// (the default), it binds loopback only (127.0.0.1), the original behaviour, invisible to
-    /// the network. Changing this restarts the node process so the new bind takes effect.
+    /// (your Apple TV / phone) can use this Mac as their streaming server. When OFF (the
+    /// default), it binds loopback only (127.0.0.1), invisible to the network. Changing this
+    /// restarts the server so the new bind takes effect.
     static var sharedOnLAN: Bool {
         get { UserDefaults.standard.bool(forKey: shareKey) }
         set {
@@ -203,49 +193,17 @@ enum NodeServer {
         return "http://\(ip):11470"
     }
 
-    // MARK: - Native server (flag-gated, default OFF)
+    // MARK: - Native server
 
-    /// UserDefaults key for the native-server opt-in. When ON and the bundled
-    /// `vortx-streaming-server` binary is present, startIfNeeded/restart spawn the native Rust
-    /// streaming server (rqbit-based, from the engine's crates/streaming-server) instead of
-    /// node + server.js. It serves the same contract on the same fixed 11470 (it landed with a
-    /// conformance golden against server.js), so everything downstream (StremioServer.embedded,
-    /// lanURL, the /proxy route) is unchanged. Default OFF: the shipping macOS path stays
-    /// node + server.js exactly as before this flag existed.
-    private static let nativeServerKey = "vortxNativeServer"
-
-    /// The opt-in. Absent key reads false (UserDefaults.bool), i.e. the node path. Flipping it
-    /// restarts the child so the engine swap takes effect without an app relaunch, the same
-    /// restart pattern as the LAN-sharing toggle above.
-    static var nativeServerEnabled: Bool {
-        get { NativeTransportPolicy.selectsNative(required: NativeTransportPolicy.isRequired,
-                                                  preference: UserDefaults.standard.bool(forKey: nativeServerKey)) }
-        set {
-            guard !NativeTransportPolicy.isRequired else { return }
-            guard newValue != nativeServerEnabled else { return }
-            UserDefaults.standard.set(newValue, forKey: nativeServerKey)
-            restart()
-        }
-    }
-
-    /// The bundled native server binary, or nil when scripts/build-mac-server.sh has not produced
-    /// it. Like the node binary it is a script-produced, gitignored artifact (app/Vendor/
-    /// vortx-streaming-server); project.yml embeds it into Resources copy-if-present, so a
-    /// checkout that never ran the script builds fine and simply has no native engine to offer.
+    /// The bundled server binary (a script-produced, gitignored artifact, app/Vendor/
+    /// vortx-streaming-server, embedded by the project's post-build step), or nil when missing.
     private static var nativeServerBinary: String? {
         Bundle.main.path(forResource: "vortx-streaming-server", ofType: nil)
     }
 
-    /// Native selection includes a missing native binary: that is unavailable, never a Node fallback.
-    private static var usingNativeServer: Bool { nativeServerEnabled }
-
-    /// Exposed for protocol routing; NNTP also requires an exact local capability check.
-    static var isUsingNativeServer: Bool { usingNativeServer }
-
     /// Publication requires this exact child to be running AND to have bound its socket. A stale
-    /// Node listener on 11470 cannot become the native endpoint while the child retries its bind.
+    /// listener on 11470 cannot become the endpoint while the child retries its bind.
     static var nativeBaseURL: String? {
-        guard usingNativeServer else { return nil }
         let now = ProcessInfo.processInfo.systemUptime
         let snapshot = runtime.withLock { state -> (Process, String, Int?, Bool)? in
             guard !state.shutdownRequested, let published = state.nativePublication else { return nil }
@@ -283,19 +241,10 @@ enum NodeServer {
         withExtendedLifetime(previous) {}
     }
 
-    /// Locate an ffmpeg/ffprobe pair the server can use for VideoToolbox transcoding. server.js
-    /// searches a fixed set of paths but NOT Homebrew's Apple-silicon prefix (/opt/homebrew/bin),
-    /// so on most Macs it finds nothing and transcoding silently no-ops. We probe the common
-    /// locations and, when found, hand the pair to node via FFMPEG_BIN / FFPROBE_BIN (the first
-    /// entries server.js honours). With ffmpeg present, server.js auto-detects the macOS
-    /// `videotoolbox` hw-accel profile on boot and uses h264_videotoolbox / hevc_videotoolbox.
+    /// Locate an ffmpeg/ffprobe pair for VideoToolbox transcoding. Only existence is checked
+    /// here (Settings hint and the engine-host transcode capability); nothing is executed.
     private static func ffmpegBinaries() -> (ffmpeg: String, ffprobe: String)? {
-        // SECURITY NOTE: we hand whichever ffmpeg/ffprobe we find here to node, which
-        // execs it for transcoding. There is no signature/ownership check, so we trust
-        // whatever sits at these paths. Homebrew prefixes are world-writable on many
-        // Macs, so we probe the system path (/usr/bin) FIRST and only fall back to a
-        // Homebrew-installed binary when the system has none (macOS ships no ffmpeg by
-        // default, so the Homebrew fallback is what actually enables transcoding).
+        // System path first: Homebrew prefixes are world-writable on many Macs.
         let prefixes = [
             "/usr/bin",            // system (preferred: not world-writable)
             "/opt/homebrew/bin",   // Homebrew, Apple silicon
@@ -312,33 +261,23 @@ enum NodeServer {
     }
 
     /// Whether VideoToolbox transcoding can run: a discoverable ffmpeg/ffprobe pair exists.
-    /// (server.js always carries the darwin `videotoolbox` profile and enables it by default.)
     static var canTranscode: Bool { ffmpegBinaries() != nil }
 
     /// Checked restart-only snapshot for UI readers; never joins the lifecycle queue or reads
     /// the unrelated started/exitCode state. A retained child's late exit changes this message.
     static var restartFailureDescription: String? { restartStatus.message }
 
-    /// One-line state for the Settings diagnostics (mirrors the iOS/tvOS NodeServer wording).
+    /// One-line state for the Settings diagnostics.
     static var statusDescription: String {
         if PlaybackSettings.torrentsDisabled { return "Disabled by Direct Links Only" }
         let status = runtime.withLock { ($0.started, $0.exitCode, $0.quitFailure) }
         if let failure = status.2 { return failure }
         if let message = restartFailureDescription { return message }
-        if usingNativeServer {
-            if nativeServerBinary == nil { return "Native streaming server is missing from this build." }
-            if !status.0 { return "Not started (native server)" }
-            if let code = status.1 { return "Native server exited with code \(code). Relaunch the app to restart it." }
-            if sharedOnLAN, let url = lanURL { return "Sharing on this network at \(url) (native server)" }
-            return "Native server process running"
-        }
-        if Bundle.main.path(forResource: "node-darwin-arm64", ofType: nil) == nil {
-            return "Not started (node binary missing from the bundle)"
-        }
-        if !status.0 { return "Not started (server.js missing from the bundle)" }
-        if let code = status.1 { return "Server exited with code \(code). Relaunch the app to restart it." }
-        if sharedOnLAN, let url = lanURL { return "Sharing on this network at \(url)" }
-        return "Server process running"
+        if nativeServerBinary == nil { return "Native streaming server is missing from this build." }
+        if !status.0 { return "Not started (native server)" }
+        if let code = status.1 { return "Native server exited with code \(code). Relaunch the app to restart it." }
+        if sharedOnLAN, let url = lanURL { return "Sharing on this network at \(url) (native server)" }
+        return "Native server process running"
     }
 
     /// The last lines of the server's own log (console output + crashes are teed to a file).
@@ -347,43 +286,29 @@ enum NodeServer {
         return text.split(separator: "\n").suffix(lines).map(String.init)
     }
 
-    /// Spawn the node server once. Idempotent. No-op if the node binary or server.js is missing,
-    /// or if the app is already shutting down (so a late call can't resurrect a killed server).
+    /// Spawn the server once. Idempotent. No-op if the server binary is missing (reported by
+    /// statusDescription) or if the app is already shutting down (so a late call can't resurrect
+    /// a killed server).
     static func startIfNeeded() {
         // Wire the shared diagnostics indirection so the VXProbe heartbeat + the diagnostics export can
         // surface this server's state without SourcesShared referencing a concrete NodeServer. Idempotent.
         ServerDiagnostics.register(status: { statusDescription }, logTail: { logTail($0) })
         queue.async {
             guard !started, !shutdownRequested else { return }
-            // Native selection is terminal here, including an unavailable bundle.
-            if nativeServerEnabled {
-                if let nativeBin = nativeServerBinary {
-                    reclaimStalePort()
-                    started = true
-                    spawnNative(binPath: nativeBin)
-                    return
-                }
+            guard let nativeBin = nativeServerBinary else {
                 DiagnosticsLog.log("server", "native streaming selected but server binary is missing")
                 return
             }
-            guard let nodeBin = Bundle.main.path(forResource: "node-darwin-arm64", ofType: nil) else {
-                NSLog("StremioX: node binary not found in bundle, streaming server disabled")
-                return
-            }
-            guard let serverJs = Bundle.main.path(forResource: "server", ofType: "js") else {
-                NSLog("StremioX: server.js not found in bundle, streaming server disabled")
-                return
-            }
             // A prior run that was force-killed / crashed before `stop()` could fire may have left a
-            // node child reparented to launchd, still holding 11470. Clear that stale orphan before we
-            // spawn, so this launch gets a free port instead of a server that can't bind.
+            // server child reparented to launchd, still holding 11470. Clear that stale orphan before
+            // we spawn, so this launch gets a free port instead of a server that can't bind.
             reclaimStalePort()
             started = true
-            spawn(nodeBin: nodeBin, scriptPath: serverJs)
+            spawnNative(binPath: nativeBin)
         }
     }
 
-    /// Terminate the running node process (if any) and relaunch it. Used when the LAN-sharing
+    /// Terminate the running server process (if any) and relaunch it. Used when the LAN-sharing
     /// toggle flips, so the new bind (loopback vs all-interfaces) takes effect without an app
     /// restart. No-op if the server was never eligible to start (missing binary / disabled) or if
     /// the app is shutting down. This is a RESTART, NOT a shutdown: it does NOT set
@@ -392,8 +317,6 @@ enum NodeServer {
         queue.async {
             guard !shutdownRequested, !PlaybackSettings.torrentsDisabled else { return }
             runtime.withLock { $0.quitFailure = nil }
-            // Reap whichever engine is running (node or native), then respawn per the flag, so
-            // both the LAN-bind toggle and the native-engine toggle swap in place.
             func reapCurrent() -> Bool {
                 publishNativeProcess(nil)
                 if let proc = process {
@@ -416,22 +339,14 @@ enum NodeServer {
                 restartStatus.clear()
                 return true
             }
-            if nativeServerEnabled {
-                guard reapCurrent() else { return }
-                started = false
-                guard let nativeBin = nativeServerBinary else {
-                    DiagnosticsLog.log("server", "native streaming selected but server binary is missing")
-                    return
-                }
-                started = true
-                spawnNative(binPath: nativeBin)
+            guard reapCurrent() else { return }
+            started = false
+            guard let nativeBin = nativeServerBinary else {
+                DiagnosticsLog.log("server", "native streaming selected but server binary is missing")
                 return
             }
-            guard let nodeBin = Bundle.main.path(forResource: "node-darwin-arm64", ofType: nil),
-                  let serverJs = Bundle.main.path(forResource: "server", ofType: "js") else { return }
-            guard reapCurrent() else { return }
             started = true
-            spawn(nodeBin: nodeBin, scriptPath: serverJs)
+            spawnNative(binPath: nativeBin)
         }
     }
 
@@ -570,17 +485,13 @@ enum NodeServer {
 
     // MARK: - Stale-port reclaim
 
-    /// Reclaim port 11470 if a STALE copy of OUR OWN streaming server (node or native) is still
-    /// holding it, e.g. a prior run that was force-killed / crashed before `stop()` could fire,
-    /// leaving the child reparented to launchd (PPID 1). The node preload's parent-death watchdog
-    /// stops new node orphans from forming; this clears any that predate it (or slipped through its
-    /// ~1s poll window) plus any native-server orphan (which has no watchdog). We match "ours"
-    /// narrowly, argv referencing the `stremiox-preload.js` we inject or the
-    /// `vortx-streaming-server` binary name, markers nothing else uses,
-    /// so an unrelated process that merely happens to hold the port is left untouched (we log it and
-    /// let server.js fail to bind, surfacing the exit in Settings, rather than killing a stranger).
-    /// SIGTERM first, escalate to SIGKILL, mirroring `stop()`. Cheap on the common path: a free port
-    /// costs one `lsof` that returns nothing.
+    /// Reclaim port 11470 if a STALE copy of OUR OWN streaming server is still holding it, e.g. a
+    /// prior run that was force-killed / crashed before `stop()` could fire, leaving the child
+    /// reparented to launchd (PPID 1). We match "ours" narrowly, by the `vortx-streaming-server`
+    /// binary name in its argv, so an unrelated process that merely happens to hold the port is
+    /// left untouched (the server then fails to bind and Settings surfaces the exit, rather than
+    /// killing a stranger). SIGTERM first, escalate to SIGKILL, mirroring `stop()`. Cheap on the
+    /// common path: a free port costs one `lsof` that returns nothing.
     private static func reclaimStalePort() {
         for pid in listeners(onPort: 11470) where isOurStreamingServer(pid) {
             NSLog("%@", "StremioX: reclaiming port 11470 from a stale streaming server (pid \(pid))")
@@ -599,14 +510,11 @@ enum NodeServer {
             .compactMap { pid_t(String($0).trimmingCharacters(in: .whitespaces)) }
     }
 
-    /// True if `pid` is one of OUR streaming servers: a node child (the `stremiox-preload.js`
-    /// marker we inject into its argv, which nothing else uses) or a native child (the
-    /// `vortx-streaming-server` binary name in its argv). Read via `ps -o command=`. Either
-    /// engine reclaims either engine's stale orphan, so an engine-flag flip between runs can
-    /// never leave the old engine squatting on 11470.
+    /// True if `pid` is OUR streaming server: the `vortx-streaming-server` binary name in its argv,
+    /// read via `ps -o command=`.
     private static func isOurStreamingServer(_ pid: pid_t) -> Bool {
         let command = runTool("/bin/ps", ["-o", "command=", "-p", String(pid)]) ?? ""
-        return command.contains("stremiox-preload.js") || command.contains("vortx-streaming-server")
+        return command.contains("vortx-streaming-server")
     }
 
     /// `kill(pid, 0)` probes for existence without delivering a signal: success ⇒ the process is alive.
@@ -632,139 +540,17 @@ enum NodeServer {
         return String(data: data, encoding: .utf8)
     }
 
-    private static func spawn(nodeBin: String, scriptPath: String) {
-        let home = serverHome
-        let serverData = (home as NSString).appendingPathComponent("stremio-server")
-        try? FileManager.default.createDirectory(atPath: serverData, withIntermediateDirectories: true)
-
-        // Tee console + uncaught errors to a log file (the server's own stdout/stderr are also
-        // redirected to it below). Lets a dead/misbehaving server explain itself in Settings.
-        //
-        // It also gates the bind address: server.js always calls `server.listen(port)` with no
-        // host, which Node interprets as 0.0.0.0 (every interface) -- i.e. ALWAYS LAN-reachable.
-        // We don't want that unless the user opted in. The preload monkeypatches
-        // net.Server.prototype.listen so that, when sharing is OFF, any host-less listen is
-        // pinned to 127.0.0.1 (loopback only, the original private behaviour). When sharing is
-        // ON we leave Node's default, so the Mac serves the whole LAN. The server still computes
-        // its own enginefs.baseUrl from ip.address(), which we surface in Settings as the LAN URL.
-        //
-        // Third, it installs a parent-death watchdog. `applicationWillTerminate` -> stop() only fires
-        // on a CLEAN quit; on a crash / Force Quit / SIGKILL the app dies without it, and Foundation
-        // does NOT signal this child, so it gets reparented to launchd and keeps holding 11470 forever
-        // (the orphaned-:11470 leak). The watchdog records our parent pid and exits the child the
-        // moment it changes, i.e. once we've been reparented, releasing the port within ~1s.
-        let bindHost = sharedOnLAN ? "0.0.0.0" : "127.0.0.1"
-        let preloadPath = (home as NSString).appendingPathComponent("stremiox-preload.js")
-        let preload = """
-        const fs=require('fs'),L=\(jsString(logPath));
-        const w=(t,a)=>{try{fs.appendFileSync(L,t+' '+Array.prototype.map.call(a,String).join(' ')+'\\n')}catch(e){}};
-        process.on('uncaughtException',function(e){w('[uncaught]',[e&&e.stack||e])});
-        process.on('unhandledRejection',function(e){w('[rej]',[e&&e.stack||e])});
-        try{
-          const net=require('net'),HOST=\(jsString(bindHost)),orig=net.Server.prototype.listen;
-          net.Server.prototype.listen=function(){
-            const a=Array.prototype.slice.call(arguments);
-            // Only rewrite the simple `listen(port[, cb])` form server.js uses for the HTTP(S)
-            // endpoints. If a host (string 2nd arg) or an options object is already given, leave it.
-            if(typeof a[0]==='number' && (a.length===1 || typeof a[1]==='function')){
-              const cb=a[1]; a[1]=HOST; if(cb)a[2]=cb;
-              w('[bind]',['listen',a[0],'->',HOST]);
-            }
-            return orig.apply(this,a);
-          };
-          w('[boot]',['mac preload active; bind='+HOST]);
-        }catch(e){w('[bind-err]',[e&&e.stack||e]);}
-        // parent-death watchdog (see the Swift note above): if the app dies WITHOUT calling stop()
-        // (crash / Force Quit / SIGKILL), Foundation reparents us to launchd and we'd keep holding
-        // 11470. Exit once our parent pid changes so the orphaned port is always released. .unref()
-        // keeps this poll timer from holding the process open on its own.
-        const PPID0=process.ppid;
-        setInterval(function(){if(process.ppid!==PPID0){w('[watchdog]',['parent gone; exiting']);process.exit(0);}},1000).unref();
-        """
-        try? preload.write(toFile: preloadPath, atomically: true, encoding: .utf8)
-
-        // Keep the tail of the previous boot's log instead of wiping it, so a crash that took the
-        // whole app down leaves its last lines readable after relaunch. Capped so it can't grow.
-        let prior = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
-        let keptTail = prior.count > 48_000 ? String(prior.suffix(48_000)) : prior
-        try? (keptTail + "\n===== BOOT =====\n").write(toFile: logPath, atomically: true, encoding: .utf8)
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: nodeBin)
-        proc.arguments = ["-r", preloadPath, scriptPath]
-        proc.currentDirectoryURL = URL(fileURLWithPath: home)
-
-        var env = ProcessInfo.processInfo.environment
-        env["HOME"] = home               // server reads HOME for its app-data path
-        env["APP_PATH"] = serverData      // torrent cache + settings
-        env["NO_CORS"] = "1"
-        // Disable Chromecast/DLNA discovery. The native Mac UI has no cast feature, and the
-        // server's SSDP multicast loop is pure overhead here. Matches the iOS/tvOS embed config.
-        env["CASTING_DISABLED"] = "1"
-        // More libuv workers for tracker DNS + the engine's disk/crypto (same rationale as iOS).
-        env["UV_THREADPOOL_SIZE"] = "16"
-        // Point the server at a real ffmpeg/ffprobe so HLS transcoding works and VideoToolbox
-        // hardware acceleration (h264_videotoolbox / hevc_videotoolbox) kicks in. server.js's
-        // built-in search misses Homebrew's Apple-silicon prefix, so without this it finds no
-        // ffmpeg and transcoding is a silent no-op. FFMPEG_BIN / FFPROBE_BIN are the first paths
-        // server.js consults. With ffmpeg present it auto-profiles the darwin `videotoolbox`
-        // hw-accel on boot (transcodeHardwareAccel defaults on) and uses the GPU encoders.
-        if let bins = ffmpegBinaries() {
-            env["FFMPEG_BIN"] = bins.ffmpeg
-            env["FFPROBE_BIN"] = bins.ffprobe
-            NSLog("%@", "StremioX: ffmpeg for transcoding: \(bins.ffmpeg) (VideoToolbox hw-accel)")
-        } else {
-            NSLog("StremioX: no ffmpeg found; HLS transcoding disabled (install via `brew install ffmpeg`)")
-        }
-        proc.environment = env
-
-        // Redirect the node process's own stdout/stderr to the same log file we tee console into.
-        if let fh = FileHandle(forWritingAtPath: logPath) {
-            fh.seekToEndOfFile()
-            proc.standardOutput = fh
-            proc.standardError = fh
-        }
-
-        // Fires on a background thread only for an UNEXPECTED exit (crash): stop()/restart() detach
-        // this handler before terminating, so an intentional kill never lands here. Route through
-        // the serial queue so the state write is race-free, and ignore it once shutdown began.
-        proc.terminationHandler = { p in
-            queue.async {
-                guard !shutdownRequested, process === p,
-                      !restartStatus.matches(owner: p) else { return }
-                exitCode = p.terminationStatus
-                NSLog("%@", "StremioX: node server exited rc=\(p.terminationStatus)")
-                // Mirror the unexpected exit into the EXPORTABLE diagnostics log so a server death is visible
-                // in the file the owner actually sends, not just the unified log.
-                DiagnosticsLog.log("server", "node child exited rc=\(p.terminationStatus) (unexpected; relaunch to restart)")
-            }
-        }
-
-        do {
-            NSLog("%@", "StremioX: starting node streaming server (bin=\(nodeBin), HOME=\(home))")
-            guard beginLaunch(proc) else { started = false; return }
-            try proc.run()
-        } catch {
-            if process === proc { process = nil }
-            started = false
-            NSLog("%@", "StremioX: failed to launch node server: \(error)")
-        }
-    }
-
-    /// Spawn the NATIVE Rust streaming server (`vortx-streaming-server`). Same child-process
-    /// lifecycle as the node path (spawn here, SIGTERM via stop()/restart(), crash surfaced by
-    /// the terminationHandler, stdout/stderr teed into the same Settings log), but none of the
-    /// node scaffolding: no preload monkeypatch (the bind host is a plain env var), no ffmpeg
-    /// discovery (the native server has no transcoding path to feed), and no parent-death
-    /// watchdog (it exits cleanly on SIGTERM; a crash orphan is cleared by reclaimStalePort on
-    /// the next launch, and its own deterministic 11470 bind retries instead of drifting ports).
+    /// Spawn the streaming server (`vortx-streaming-server`): spawn here, SIGTERM via
+    /// stop()/restart(), crash surfaced by the terminationHandler, stdout/stderr teed into the
+    /// Settings log. It exits cleanly on SIGTERM; a crash orphan is cleared by reclaimStalePort on
+    /// the next launch, and its deterministic 11470 bind retries instead of drifting ports.
     private static func spawnNative(binPath: String) {
         let home = serverHome
         let serverData = (home as NSString).appendingPathComponent("stremio-server")
         try? FileManager.default.createDirectory(atPath: serverData, withIntermediateDirectories: true)
 
-        // Same keep-the-tail log policy as the node path, so both engines explain themselves in
-        // Settings through the same file and a crash's last lines survive the relaunch.
+        // Keep the tail of the previous boot's log instead of wiping it, so a crash that took the
+        // whole app down leaves its last lines readable after relaunch. Capped so it can't grow.
         let prior = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
         let keptTail = prior.count > 48_000 ? String(prior.suffix(48_000)) : prior
         try? (keptTail + "\n===== BOOT (native) =====\n").write(toFile: logPath, atomically: true, encoding: .utf8)
@@ -775,12 +561,11 @@ enum NodeServer {
 
         // The native server's whole config is environment (see the engine's
         // crates/streaming-server/src/main.rs):
-        //   VORTX_SERVER_HOME  data root (settings.json + stremio-cache/), the same
-        //                      <AppSupport>/StremioX/stremio-server dir the node server uses
+        //   VORTX_SERVER_HOME  data root (settings.json + stremio-cache/) under
+        //                      <AppSupport>/StremioX/stremio-server
         //   VORTX_PORT_FILE    a unique per-launch bind receipt, read before publishing the endpoint
         //   VORTX_SERVER_PORT fixed 11470, overriding an inherited development port
-        //   VORTX_BIND         0.0.0.0 (LAN sharing ON) vs 127.0.0.1 (private, the default),
-        //                      replacing the node preload's listen() monkeypatch
+        //   VORTX_BIND         0.0.0.0 (LAN sharing ON) vs 127.0.0.1 (private, the default)
         //   VORTX_LAN_IP       the advertised /settings baseUrl host while sharing
         // It binds 11470 DETERMINISTICALLY (bounded retry, then exit nonzero; never drifts to
         // 11471+), so lanURL's fixed :11470 and StremioServer.embedded stay correct.
@@ -805,8 +590,8 @@ enum NodeServer {
             proc.standardError = fh
         }
 
-        // Same crash-surfacing contract as the node path: fires only for an UNEXPECTED exit
-        // (stop()/restart() detach it first), routed through the serial queue.
+        // Fires only for an UNEXPECTED exit (stop()/restart() detach it first), routed through
+        // the serial queue so the state write is race-free, and ignored once shutdown began.
         proc.terminationHandler = { p in
             queue.async {
                 guard !shutdownRequested, process === p,
@@ -843,11 +628,5 @@ enum NodeServer {
         try? FileManager.default.removeItem(atPath: path)
     }
 
-    /// JSON-encode a string for safe embedding in the preload JS literal.
-    private static func jsString(_ s: String) -> String {
-        let data = try? JSONSerialization.data(withJSONObject: [s])
-        let arr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]"
-        return String(arr.dropFirst().dropLast())   // unwrap the [ ... ] → the quoted string
-    }
 }
 #endif

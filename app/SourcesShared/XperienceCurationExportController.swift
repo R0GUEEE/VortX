@@ -63,9 +63,7 @@ import Foundation
 
     private static func appAuthorityContextChanges() -> AnyPublisher<Void, Never> {
         var notes = [VortXSyncManager.credentialScopeDidChangeNote]
-        #if VORTX_NATIVE_DATA_ENGINE
         notes.append(CoreBridge.xperienceContextChangedNote)
-        #endif
         return Publishers.MergeMany(notes.map { name in
             NotificationCenter.default.publisher(for: name).map { _ in () }.eraseToAnyPublisher()
         }).eraseToAnyPublisher()

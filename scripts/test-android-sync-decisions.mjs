@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// Compile source-extracted decisions with small synthetic collaborators. No complete Android build.
+// Compile current native-only source-extracted decisions with synthetic collaborators. No Android app build.
 // Exact manager/VM methods are extracted at execution time; no reimplementation of those methods.
 import assert from "node:assert/strict";
 import { readFile, writeFile, mkdir, mkdtemp, readdir } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 const repo = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const kotlin = process.env.VORTX_KOTLIN_LIB;
 const deps = process.env.VORTX_ANDROID_AUDIT_DEPS;
@@ -28,6 +29,10 @@ const settingTypes = backup.match(/    val SYNCABLE_SETTING_TYPES:[^]*?\n    \)/
 const settingEnum = backup.match(/    enum class SettingType[^\n]*/)?.[0];
 assert(profileKeys && settingTypes && settingEnum, "Expected current production setting ownership definitions");
 assert(use.includes(": Boolean") && reconcile.includes("() -> Boolean"), "Manager and VM must retain real outcome types");
+assert(![note, use, merge].some(text => text.includes("BuildConfig.NATIVE_ENGINE_ENABLED") || text.includes("onComparisonReceiveCompleted")),
+    "This lane checks native-only decisions, not the retired comparison implementation");
+console.log("Native-only manager SHA-256:", createHash("sha256").update(manager).digest("hex"));
+console.log("Account ViewModel SHA-256:", createHash("sha256").update(vm).digest("hex"));
 const parent = join(repo, "android/app/build");
 await mkdir(parent, { recursive: true });
 const out = await mkdtemp(join(parent, "sync-decisions."));
@@ -56,7 +61,6 @@ internal class FixtureManager {
     var armed = 0
     var recordEditSeen = false
     var receive = true
-    var comparisonReceiveComplete = true
     var push = true
     var pending = false
     var staleAfterReceive = false
@@ -77,10 +81,8 @@ internal class FixtureManager {
         check(isSyncLeaseCurrent(lease)); armed++; recordEditSeen = recordEdit
     }
     private fun retryPendingPushBeforePull(lease: FixtureLease): Boolean { check(isSyncLeaseCurrent(lease)); return pending }
-    private suspend fun syncDown(lease: FixtureLease, force: Boolean, onComparisonReceiveCompleted: () -> Unit = {}): Boolean {
+    private suspend fun syncDown(lease: FixtureLease, force: Boolean): Boolean {
         check(isSyncLeaseCurrent(lease)); check(force); gets++; if (staleAfterReceive) generation++
-        if (!com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED && comparisonReceiveComplete && isSyncLeaseCurrent(lease))
-            onComparisonReceiveCompleted()
         return receive
     }
     private suspend fun syncUp(lease: FixtureLease): Boolean { check(isSyncLeaseCurrent(lease)); puts++; return push }
@@ -135,13 +137,6 @@ fun main() = runBlocking {
         m.settings = mapOf("vortx.player.matchFrameRate" to true); m.changed()
         check(m.armed == 0 && m.dirty.isEmpty())
     }
-    case("comparison setting edits preserve old dirty behavior without native intent") {
-        com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED = false
-        try {
-            val m = FixtureManager(); m.settings = mapOf("vortx.player.matchFrameRate" to true); m.changed()
-            check(m.armed == 0 && m.dirty.isNotEmpty())
-        } finally { com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED = true }
-    }
     case("failed native receive never becomes a merge success by later push") {
         val m = FixtureManager(); m.receive = false
         check(!m.mergeBoth() && m.gets == 1 && m.puts == 0)
@@ -152,24 +147,10 @@ fun main() = runBlocking {
         val stale = FixtureManager(); stale.staleAfterReceive = true; check(!stale.mergeBoth() && stale.puts == 0)
         val pending = FixtureManager(); pending.pending = true; check(!pending.mergeBoth() && pending.gets == 0 && pending.puts == 0)
     }
-    case("comparison merge still permits no-field-change receive result") {
-        com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED = false
-        try { val m = FixtureManager(); m.receive = false; check(m.mergeBoth() && m.puts == 1) }
-        finally { com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED = true }
-    }
     case("use-account outcome retains receive failure and account fencing") {
         val fail = FixtureManager(); fail.receive = false; check(!fail.useAccountData())
         val good = FixtureManager(); check(good.useAccountData())
         val stale = FixtureManager(); stale.staleAfterReceive = true; check(!stale.useAccountData())
-    }
-    case("comparison account choice distinguishes completed no-op from failed receive") {
-        com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED = false
-        try {
-            val complete = FixtureManager(); complete.receive = false
-            check(complete.useAccountData())
-            val failed = FixtureManager(); failed.receive = false; failed.comparisonReceiveComplete = false
-            check(!failed.useAccountData())
-        } finally { com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED = true }
     }
     case("failed reconciliation stays visible and can retry") {
         val m = FixtureManager(); val v = FixtureViewModel(m)
@@ -206,20 +187,18 @@ fun main() = runBlocking {
 `;
 const fixturePath = join(out, "SyncDecisions.kt");
 await writeFile(fixturePath, fixture);
-const buildConfig = join(out, "BuildConfig.kt");
-await writeFile(buildConfig, "package com.vortx.android\nobject BuildConfig { var NATIVE_ENGINE_ENABLED = true }\n");
 const jars = await readdir(kotlin);
 const stdlib = jars.find(x => /^kotlin-stdlib-[0-9][^/]*\.jar$/.test(x));
 const coroutines = jars.find(x => /^kotlinx-coroutines-core-jvm-.*\.jar$/.test(x));
 assert(stdlib && coroutines, "Compiler distribution stdlib/coroutines jars required");
 const cp = [join(kotlin, stdlib), join(kotlin, coroutines)].join(":");
 function run(args) {
-  const result = spawnSync(java, args, { cwd: repo, stdio: "inherit" });
+  const result = spawnSync(java, ["-XX:ActiveProcessorCount=1", ...args], { cwd: repo, stdio: "inherit" });
   assert.equal(result.status, 0, "Standalone compiler or extracted JVM cases failed");
 }
-run(["-Xmx768m", "-cp", join(kotlin, "*"), "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
-  "-no-stdlib", "-no-reflect", "-jvm-target", "17", "-classpath", cp,
-  fixturePath, buildConfig, join(repo, "android/app/src/main/kotlin/com/vortx/android/sync/SettingsDirtyKeys.kt"),
+run(["-Xmx512m", "-cp", join(kotlin, "*"), "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
+  "-no-stdlib", "-no-reflect", "-jvm-target", "17", "-Xbackend-threads=1", "-classpath", cp,
+  fixturePath, join(repo, "android/app/src/main/kotlin/com/vortx/android/sync/SettingsDirtyKeys.kt"),
   "-d", join(out, "classes")]);
-run(["-Xmx256m", "-cp", join(out, "classes") + ":" + cp, "com.vortx.android.sync.SyncDecisionsKt"]);
+run(["-Xmx128m", "-cp", join(out, "classes") + ":" + cp, "com.vortx.android.sync.SyncDecisionsKt"]);
 console.log("Retained generated source and classes:", out);

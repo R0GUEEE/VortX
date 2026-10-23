@@ -321,7 +321,6 @@ struct CinemaQuickView: View {
         guard let type = watchlistType else { return }
         watchlistStatus = nil
         watchlistFailure = nil
-        #if VORTX_NATIVE_DATA_ENGINE
         // Capture the viewer at the tap. A normal in-flight sync can make the playback target
         // temporarily unavailable; it must not turn a watchlist action into a silent no-op.
         let admission = core.captureNativeWatchlistActionAdmission()
@@ -344,27 +343,6 @@ struct CinemaQuickView: View {
         }, onSuccess: {
             watchlistStatus = isWatchlisted ? "Added to Watchlist" : "Removed from Watchlist"
         })
-        #else
-        let target = PlaybackMutationTarget.capture(core: core)
-        let profileID = ProfileStore.shared.activeID
-        let isCurrent = {
-            ProfileStore.shared.activeID == profileID && target.stillOwnsCurrentContext(core: core)
-        }
-        watchlistAction.start(operation: {
-            guard isCurrent() else { return false }
-            do {
-                _ = try await LibraryAutoAdd.toggleWatchlistAcknowledged(
-                    id: item.id, type: type, name: item.name, poster: item.poster, target: target)
-                return isCurrent()
-            } catch { return false }
-        }, failureMessage: {
-            isCurrent() ? "Couldn't update Watchlist. Please try again." : "Profile changed. Please try again."
-        }, onSuccess: {
-            guard isCurrent() else { return }
-            refreshWatchlist()
-            watchlistStatus = isWatchlisted ? "Added to Watchlist" : "Removed from Watchlist"
-        })
-        #endif
         #endif
     }
 }

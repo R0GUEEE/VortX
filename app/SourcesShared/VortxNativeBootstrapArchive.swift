@@ -184,7 +184,32 @@ enum VortxNativeBootstrapArchive {
     private enum TextContext {
         case ordinary, addonManifest, addonDisplayText
         case settingsDomain, profileRosterData, profileRoster, profileRosterItem, profileName, profileAvatar
+        case seriesChoiceData, seriesChoices, seriesChoice, seriesAddonName
         case legacyHost, legacyVortx, legacyLibraryRows, legacyLibraryRow, libraryName
+    }
+    private static func isSeriesChoicePreference(_ key: String) -> Bool {
+        // SeriesSourceSticky.key writes only the active UUID, or the pre-roster default.
+        // In particular, an undecodable quarantine copy is not an active Choice store.
+        let prefix = "stremiox.seriesSourceSticky."
+        guard key.hasPrefix(prefix) else { return false }
+        let profile = String(key.dropFirst(prefix.count))
+        return profile == "default" || UUID(uuidString: profile) != nil
+    }
+    private static func isSeriesSourceChoice(_ object: [String: Any]) -> Bool {
+        // Match the JSONEncoder representation of SeriesSourceSticky.Choice without
+        // decoding/re-encoding the DTO: future fields must survive and remain inspected.
+        guard object["addon"] is String,
+              let ts = object["ts"] as? NSNumber, CFGetTypeID(ts) != CFBooleanGetTypeID(),
+              ts.doubleValue.isFinite else { return false }
+        for key in ["bingeGroup", "audioLanguage"] {
+            guard object[key] == nil || object[key] is NSNull || object[key] is String else { return false }
+        }
+        if let resolution = object["resolution"], !(resolution is NSNull) {
+            guard let number = resolution as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue.rounded(.towardZero) == number.doubleValue,
+                  Int(exactly: number.doubleValue) != nil else { return false }
+        }
+        return true
     }
     private static func isProfileRosterItem(_ object: [String: Any]) -> Bool {
         // ProfileStore.persist writes JSON Data containing UUID/name/avatar roster records.
@@ -203,9 +228,9 @@ enum VortxNativeBootstrapArchive {
               object["type"] is String, object["name"] is String else { return false }
         return true
     }
-    private static func hasLiteralLibraryLabel(_ text: String) -> Bool {
+    private static func hasLiteralTaggedDisplayLabel(_ text: String) -> Bool {
         guard hasLiteralDisplayLabel(text) else { return false }
-        // Unlike a carrier, a title may have a literal tag. Do not let that tag conceal
+        // A title or add-on display name may have a literal tag. Do not let it conceal
         // a JSON/plist/quoted carrier in the remainder, including a base64-encoded one.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let closing: Character = trimmed.first == "[" ? "]" : "}"
@@ -320,6 +345,15 @@ enum VortxNativeBootstrapArchive {
                     let context: TextContext
                     if textContext == .settingsDomain, key == "stremiox.profiles", object[key] is Data {
                         context = .profileRosterData
+                    } else if textContext == .settingsDomain, isSeriesChoicePreference(key), object[key] is Data {
+                        context = .seriesChoiceData
+                    } else if textContext == .seriesChoices,
+                              !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                              key.rangeOfCharacter(from: .controlCharacters) == nil,
+                              let choice = object[key] as? [String: Any], isSeriesSourceChoice(choice) {
+                        context = .seriesChoice
+                    } else if textContext == .seriesChoice, key == "addon", object[key] is String {
+                        context = .seriesAddonName
                     } else if textContext == .profileRosterItem, object[key] is String, key == "name" {
                         context = .profileName
                     } else if textContext == .legacyLibraryRow, object[key] is String, key == "name" {
@@ -360,7 +394,10 @@ enum VortxNativeBootstrapArchive {
             // both, preserving its Data type. Unknown binary payloads require reconciliation.
             if let object = try? decodeJSON(with: data) {
                 try requireUnambiguousJSON(data)
-                let context: TextContext = textContext == .profileRosterData && object is [Any] ? .profileRoster : .ordinary
+                let context: TextContext
+                if textContext == .profileRosterData && object is [Any] { context = .profileRoster }
+                else if textContext == .seriesChoiceData && object is [String: Any] { context = .seriesChoices }
+                else { context = .ordinary }
                 let safe = try sanitize(object, path: path, exclusions: &exclusions, depth: depth + 1,
                                         diagnostics: diagnostics, textContext: context)
                 // Always serialize only the inspected value. Foundation may collapse duplicate
@@ -406,7 +443,7 @@ enum VortxNativeBootstrapArchive {
            !(textContext == .addonDisplayText && hasLiteralDisplayLabel(text)),
            !((textContext == .profileName || textContext == .profileAvatar) && (text == "[" || text == "{")),
            !(textContext == .profileName && hasLiteralDisplayLabel(text)),
-           !(textContext == .libraryName && hasLiteralLibraryLabel(text)) {
+           !((textContext == .libraryName || textContext == .seriesAddonName) && hasLiteralTaggedDisplayLabel(text)) {
             throw rejected(.opaquePreference, path: path, diagnostics: diagnostics, carrier: .plainTextPrefix)
         }
         guard value is String || value is NSNumber || value is NSNull || value is Date else { throw rejected(.malformed, path: path, diagnostics: diagnostics) }

@@ -1,11 +1,10 @@
 name: Release apps (iOS + tvOS + macOS)
 
 # Builds the iOS + tvOS IPAs and the native macOS app from source on GitHub's
-# runners and hands the immutable bytes to the draft release lane (issue #7). The app sources, scripts,
-# NodeMobile + fonts (this repo's vendor release), and server.js (Stremio's CDN)
-# are public; the two ENGINE crates (stremiox-core, vortx-core) are PRIVATE.
-# (moved out of the public tree in 33ff9b5) and are fetched below at pinned
-# commits with the ENGINE_REPO_TOKEN secret. Bumping an engine pin means editing
+# runners and hands the immutable bytes to the draft release lane (issue #7). The app sources, scripts
+# and subtitle fonts (this repo's vendor release) are public; the ENGINE workspace (vortx-core) is
+# PRIVATE (moved out of the public tree in 33ff9b5) and is fetched below at a pinned
+# commit with the ENGINE_REPO_TOKEN secret. Bumping an engine pin means editing
 # this file, which is itself a path trigger, so the old `core/**` path filters
 # are gone (that dir no longer exists in the public tree).
 # The macOS app ships as a drag-to-install .dmg (ad-hoc signed, not notarized).
@@ -37,7 +36,7 @@ on:
         type: boolean
         default: false
       native_only:
-        description: "Use the reviewed native data/resource/streaming engines and omit legacy core/Node payloads. Set false only for an artifact-only legacy comparison; release targets are rejected in that mode."
+        description: "Kept for dispatch compatibility and must stay true: every build uses the VortX engine. Legacy comparison builds were removed, so false is rejected."
         required: false
         type: boolean
         default: true
@@ -202,8 +201,8 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 150
     env:
-      # Push events have no dispatch inputs. One effective value selects the native project AND
-      # every native input/app/archive proof; an explicit dispatch false remains a comparison lane.
+      # Push events have no dispatch inputs. The dispatch input is kept for compatibility with the
+      # release tooling; an explicit false is rejected before anything is fetched or built.
       VORTX_NATIVE_ONLY: ${{ github.event_name != 'workflow_dispatch' || inputs.native_only }}
       BUILD_SOURCE_SHA: ${{ inputs.recovery_source_commit || github.sha }}
       # Normal new app sources advance independently of admitted historical recovery cuts.
@@ -367,18 +366,11 @@ jobs:
             end' \
             > out/native-ci-dispatch.json
 
-      - name: Constrain legacy comparison to artifact-only builds
+      - name: Reject removed legacy comparison builds
         if: env.VORTX_NATIVE_ONLY != 'true'
-        env:
-          COMPARISON_RELEASE_TAG: ${{ inputs.release_tag }}
-          COMPARISON_RELEASE_ID: ${{ inputs.release_id }}
-          COMPARISON_PUBLISH: ${{ inputs.publish_release }}
         run: |
-          set -euo pipefail
-          [ -z "$COMPARISON_RELEASE_TAG" ] && [ -z "$COMPARISON_RELEASE_ID" ] && [ "$COMPARISON_PUBLISH" != "true" ] || {
-            echo "::error::Legacy comparison mode cannot target or publish a release"
-            exit 1
-          }
+          echo "::error::Legacy comparison builds were removed; dispatch with native_only=true"
+          exit 1
 
       - name: Constrain Full tvOS test mode to artifact-only builds
         if: inputs.tvos_test_only == true
@@ -393,34 +385,21 @@ jobs:
           }
 
       # ---- Private engine fetch (moved out of the public tree in 33ff9b5) --------------------------
-      # Apple builds BOTH engines: StremioXCore.xcframework from core/ AND VortxEngine.xcframework
-      # from vortx-core/. Pinned to the exact commits the current beta build links. Requires the
-      # ENGINE_REPO_TOKEN secret (fine-grained PAT, Contents:read on both private repos; deploy keys
-      # are disabled by the VortXTV org). Both fetches use actions/checkout (GitHub's own auth path:
-      # the token is injected through an env-sourced local git config, never argv, and
-      # persist-credentials: false wipes it after the step). Fails closed: an empty secret or a
-      # missing crate manifest kills the job (no silent build-without-engine).
+      # Apple builds VortxEngine.xcframework from vortx-core/, pinned to the exact commit the current
+      # beta build links. Requires the ENGINE_REPO_TOKEN secret (fine-grained PAT, Contents:read on the
+      # private repo; deploy keys are disabled by the VortXTV org). The fetch uses actions/checkout
+      # (GitHub's own auth path: the token is injected through an env-sourced local git config, never
+      # argv, and persist-credentials: false wipes it after the step). Fails closed: an empty secret or
+      # a missing crate manifest kills the job (no silent build-without-engine).
       - name: Preflight the engine token (fail closed)
         env:
           ENGINE_REPO_TOKEN: ${{ secrets.ENGINE_REPO_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "${ENGINE_REPO_TOKEN:-}" ]; then
-            echo "::error::ENGINE_REPO_TOKEN secret is not set; CI cannot fetch the private engine repos (VortXTV/stremiox-core + VortXTV/vortx-core)"
+            echo "::error::ENGINE_REPO_TOKEN secret is not set; CI cannot fetch the private engine repo (VortXTV/vortx-core)"
             exit 1
           fi
-
-      # stremiox-core is a STANDALONE crate (Cargo.toml at its repo root): check out straight into core/.
-      - name: Fetch stremiox-core (private, pinned)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: VortXTV/stremiox-core
-          # Shared Apple/Android wrapper pin. Retains the shipping add-on lifecycle fixes and adds
-          # independently reviewed owner-library receipts; locked native tests passed against its Git pin.
-          ref: 31c66611822043e089f5819ad232a5df93975873
-          token: ${{ secrets.ENGINE_REPO_TOKEN }}
-          path: core
-          persist-credentials: false
 
       # vortx-core is a FULL MONOREPO whose engine workspace is its vortx-core/ SUBDIR; a direct
       # checkout would nest the engine manifest at vortx-core/vortx-core/Cargo.toml. Check out to a
@@ -435,7 +414,7 @@ jobs:
           path: _vortx_core_src
           persist-credentials: false
 
-      - name: Promote the vortx-core engine workspace + verify both engines (fail closed)
+      - name: Promote the vortx-core engine workspace + verify it (fail closed)
         env:
           EXPECTED_NATIVE_REVISION: ${{ steps.native_source.outputs.revision }}
         run: |
@@ -447,10 +426,9 @@ jobs:
           rm -rf vortx-core
           mv _vortx_core_src/vortx-core vortx-core
           rm -rf _vortx_core_src
-          test -f core/Cargo.toml       || { echo "::error::stremiox-core crate missing after checkout (core/Cargo.toml)"; exit 1; }
           test -f vortx-core/Cargo.toml || { echo "::error::vortx-core engine workspace missing after promote (vortx-core/Cargo.toml)"; exit 1; }
           test -d vortx-core/crates     || { echo "::error::vortx-core engine crates/ missing after promote (vortx-core/crates)"; exit 1; }
-          echo "engines fetched: core@$(git -C core rev-parse --short HEAD) vortx-core@$NATIVE_REVISION (promoted from monorepo subdir)"
+          echo "engine fetched: vortx-core@$NATIVE_REVISION (promoted from monorepo subdir)"
 
       - name: Select the newest Xcode on the runner
         run: |
@@ -587,11 +565,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # Cache ONLY the public dependency downloads under ~/.cargo. The private-engine BUILD
-          # intermediates (core/target, vortx-core/target) are DELIBERATELY excluded: this cache
+          # intermediates (vortx-core/target) are DELIBERATELY excluded: this cache
           # carries a broad restore-keys prefix (cargo-<os>-) and its default-branch copy is
           # restorable from ANY ref in the repo, so caching compiled private-engine objects here
           # would let an untrusted-ref run (e.g. a future secretless PR workflow) restore them.
-          # The engines' compiled output lives only in the two xcframework caches below, which are
+          # The engine's compiled output lives only in the xcframework cache below, which is
           # exact-key-only (content-addressed to the private source via hashFiles, with NO
           # restore-keys fallback), so a run without the private source cannot reconstruct their key
           # and cannot restore them. Excluding the target dirs costs a recompile only on an
@@ -601,52 +579,28 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          # hashFiles runs when this step runs, i.e. AFTER the engine fetch above, so both engines'
-          # manifests exist and both feed the key (a vortx-core-only dep bump must roll the cache too).
-          key: cargo-${{ runner.os }}-${{ hashFiles('core/Cargo.lock', 'core/Cargo.toml', 'vortx-core/Cargo.lock', 'vortx-core/Cargo.toml') }}
+          # hashFiles runs when this step runs, i.e. AFTER the engine fetch above, so the engine's
+          # manifests exist and feed the key (an engine dep bump rolls the cache).
+          key: cargo-${{ runner.os }}-${{ hashFiles('vortx-core/Cargo.lock', 'vortx-core/Cargo.toml') }}
           restore-keys: cargo-${{ runner.os }}-
 
-      - name: Fetch server deps (NodeMobile, server.js, subtitle fonts)
+      - name: Fetch subtitle fonts
         run: ./scripts/fetch-server-deps.sh
 
-      - name: Fetch the macOS node runtime
-        # VortXMac bundles node + server.js as its streaming server. The binary is gitignored, so
-        # it must be fetched BEFORE xcodegen runs: xcodegen validates that the
-        # Resources/node-darwin-arm64 source path exists, and fails project generation if it's absent.
-        run: ./app/scripts/fetch-node-macos.sh
-
-      - name: Cache stremio-core xcframework
-        id: cache-core-xcframework
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          # Cache the xcframework AND its retained pre-localization archive under the SAME exact key,
-          # so a warm hit restores BOTH together: the localized macOS object's OSO/debug-map points at
-          # engine-prelocalize/StremioXCore/..., which must exist at the app's dsymutil time even when
-          # the build step below is skipped on the hit. Same exact-key-only, no-restore-keys posture as
-          # before (content-addressed to the private core source via hashFiles), so a run without the
-          # private source cannot reconstruct the key and cannot restore these engine-derived objects.
-          path: |
-            app/Vendor/StremioXCore.xcframework
-            app/Vendor/engine-prelocalize/StremioXCore
-          key: stremio-core-xcframework-${{ runner.os }}-${{ steps.toolchain.outputs.xcode_version }}-${{ steps.toolchain.outputs.tvos_sdk }}-${{ hashFiles('core/Cargo.lock', 'core/Cargo.toml', 'core/rust-toolchain.toml', 'core/src/**', 'core/include/**', 'scripts/build-core-xcframework.sh') }}
-
-      - name: Build the stremio-core xcframework
-        if: steps.cache-core-xcframework.outputs.cache-hit != 'true'
-        run: ./scripts/build-core-xcframework.sh
-
-      # Phase 7 (engine/apple-cutover): the vortx-core engine ABI the shadow-ranking bridge links
-      # (app/project.yml references Vendor/VortxEngine.xcframework on VortXiOSNative, so project
-      # generation + the iOS build need it present). Built from the vortx-core workspace in this
-      # checkout; VORTX_ENGINE_DIR can repoint the step if the engine workspace lives elsewhere.
-      # The step fails fast with a clear message if the checkout's vortx-core lacks crates/ffi.
+      # The VortX engine ABI every app target links (app/project.yml references
+      # Vendor/VortxEngine.xcframework, so project generation + every build need it present). Built from
+      # the vortx-core workspace in this checkout; VORTX_ENGINE_DIR can repoint the step if the engine
+      # workspace lives elsewhere. The step fails fast with a clear message if crates/ffi is missing.
       - name: Cache vortx-ffi xcframework
         id: cache-ffi-xcframework
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # Cache the xcframework AND its five retained pre-localization archives under the SAME exact
-          # key (see the core cache above for the full rationale): every FFI slice is localized, so all
-          # five engine-prelocalize/VortxEngine/<triple> archives must survive to the app's dsymutil
-          # time, including on a warm hit that skips the build step. Exact-key-only, no restore-keys.
+          # key, so a warm hit restores BOTH together: every FFI slice is localized, and the localized
+          # objects' OSO/debug-maps point at engine-prelocalize/VortxEngine/<triple>, which must survive
+          # to the app's dsymutil time even when the build step is skipped. Exact-key-only, no
+          # restore-keys (content-addressed to the private source via hashFiles), so a run without the
+          # private source cannot reconstruct the key and cannot restore these engine-derived objects.
           path: |
             app/Vendor/VortxEngine.xcframework
             app/Vendor/engine-prelocalize/VortxEngine
@@ -696,7 +650,6 @@ jobs:
           ./scripts/verify-apple-engine-artifacts.sh
 
       - name: Verify native account and episode ABI against the reviewed engine
-        if: env.VORTX_NATIVE_ONLY == 'true'
         run: |
           set -euo pipefail
           # Exercise the real C/Swift boundary with synthetic local account data only.
@@ -711,7 +664,7 @@ jobs:
 
       # The self-built player stack. `app/Vendor/MPVKit-DVFEL/artifacts/` is gitignored and reproducing it
       # needs a multi-hour nine-slice source build, so CI fetches the prebuilt xcframeworks the same way it
-      # fetches NodeMobile. Beta 9's release run failed without this: SwiftPM reported "does not contain a
+      # fetches the subtitle fonts. Beta 9's release run failed without this: SwiftPM reported "does not contain a
       # binary artifact" for all nine local binary targets, and it failed at the SIMULATOR smoke test, which
       # runs BEFORE the build, so nothing was produced at all.
       - name: Fetch the MPVKit-DVFEL artifacts (pinned, sha256-verified)
@@ -747,22 +700,15 @@ jobs:
           echo "MPVKit-DVFEL artifacts in place: $(ls "$DEST/artifacts" | wc -l | tr -d ' ') xcframeworks"
 
       - name: Generate the Xcode project
-        env:
-          NATIVE_ONLY: ${{ env.VORTX_NATIVE_ONLY }}
         run: |
           set -euo pipefail
           cd app
-          if [ "$NATIVE_ONLY" = true ]; then
-            ruby ../scripts/generate-native-apple-project.rb \
-              --engine-revision "$VORTX_ENGINE_SOURCE_REVISION" \
-              --mpvkit "$PWD/Vendor/MPVKit-DVFEL" --output "$PWD/.native-project.yml"
-            xcodegen generate --spec .native-project.yml
-          else
-            xcodegen generate
-          fi
+          ruby ../scripts/generate-native-apple-project.rb \
+            --engine-revision "$VORTX_ENGINE_SOURCE_REVISION" \
+            --mpvkit "$PWD/Vendor/MPVKit-DVFEL" --output "$PWD/.native-project.yml"
+          xcodegen generate --spec .native-project.yml
 
       - name: Capture exact native SDK and player inputs before app compilation
-        if: env.VORTX_NATIVE_ONLY == 'true'
         env:
           TVOS_TEST_ONLY: ${{ inputs.tvos_test_only }}
         run: |
@@ -868,8 +814,6 @@ jobs:
       # source as a Release simulator product and require it to remain alive after first launch.
       - name: Smoke-test tvOS launch in a simulator (fail closed)
         timeout-minutes: 20
-        env:
-          NATIVE_ONLY: ${{ env.VORTX_NATIVE_ONLY }}
         run: |
           set -euo pipefail
           BUNDLE_ID="com.stremiox.tv"
@@ -954,12 +898,10 @@ jobs:
             echo "::error::simulator build succeeded without the expected app at $SIM_APP"
             exit 1
           fi
-          if [ "$NATIVE_ONLY" = true ]; then
-            python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify --manifest out/native-build-inputs.json \
-              --app "$SIM_APP" --platform tvos-sim \
-              --link-map "$SMOKE_DERIVED/Build/Intermediates.noindex/VortX.build/Release-appletvsimulator/VortXTV.build/VortXTV-arm64.map" \
-              --receipt out/native-tvos-simulator.json
-          fi
+          python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify --manifest out/native-build-inputs.json \
+            --app "$SIM_APP" --platform tvos-sim \
+            --link-map "$SMOKE_DERIVED/Build/Intermediates.noindex/VortX.build/Release-appletvsimulator/VortXTV.build/VortXTV-arm64.map" \
+            --receipt out/native-tvos-simulator.json
 
           xcrun simctl shutdown "$SIM_UDID" >/dev/null 2>&1 || true
           xcrun simctl boot "$SIM_UDID"
@@ -1070,8 +1012,6 @@ jobs:
       # from the log, which is streamed in full via tee.
       - name: Gate iOS-simulator link + dSYM (fail closed)
         if: inputs.tvos_test_only != true
-        env:
-          NATIVE_ONLY: ${{ env.VORTX_NATIVE_ONLY }}
         run: |
           set -euo pipefail
           LOG="$RUNNER_TEMP/ios-sim-dsym.log"
@@ -1096,12 +1036,10 @@ jobs:
             echo "::error::iOS-simulator link/dSYM reintroduced a newer-minOS or missing-OSO warning (matches printed above)"
             exit 1
           fi
-          if [ "$NATIVE_ONLY" = true ]; then
-            python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify --manifest out/native-build-inputs.json \
-              --app app/build/ci-ios-sim/Build/Products/Release-iphonesimulator/VortXiOSNative.app --platform ios-sim \
-              --link-map app/build/ci-ios-sim/Build/Intermediates.noindex/VortX.build/Release-iphonesimulator/VortXiOSNative.build/VortXiOSNative-arm64.map \
-              --receipt out/native-ios-simulator.json
-          fi
+          python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify --manifest out/native-build-inputs.json \
+            --app app/build/ci-ios-sim/Build/Products/Release-iphonesimulator/VortXiOSNative.app --platform ios-sim \
+            --link-map app/build/ci-ios-sim/Build/Intermediates.noindex/VortX.build/Release-iphonesimulator/VortXiOSNative.build/VortXiOSNative-arm64.map \
+            --receipt out/native-ios-simulator.json
           # Reclaim the simulator build tree at once; the disk-tight IPA/DMG legs below do not need it.
           rm -rf app/build/ci-ios-sim
           echo "iOS-simulator link + dSYM gate passed: no newer-minOS, no missing-OSO"
@@ -1110,7 +1048,7 @@ jobs:
         if: inputs.tvos_test_only != true
         run: |
           # ARCHS=arm64 (not just destination arch): a macOS Release build otherwise compiles the universal
-          # ARCHS_STANDARD (arm64 + x86_64), and the StremioXCore.xcframework macOS slice is arm64-only, so the
+          # ARCHS_STANDARD (arm64 + x86_64), and the VortxEngine.xcframework macOS slice is arm64-only, so the
           # x86_64 leg fails to link ("Undefined symbols for architecture x86_64"). Force arm64 to match the
           # Apple Silicon runner and the local build recipe.
           xcodebuild -project app/VortX.xcodeproj -scheme VortXMac \
@@ -1134,7 +1072,6 @@ jobs:
           codesign --verify --deep --strict "$MAC_APP"
 
       - name: Verify exact native app selection and linked inputs
-        if: env.VORTX_NATIVE_ONLY == 'true'
         env:
           TVOS_TEST_ONLY: ${{ inputs.tvos_test_only }}
         run: |
@@ -1342,24 +1279,18 @@ jobs:
 
       - name: Package Full tvOS test IPA
         if: inputs.tvos_test_only == true
-        env:
-          NATIVE_ONLY: ${{ env.VORTX_NATIVE_ONLY }}
         run: |
           set -euo pipefail
           mkdir -p out/full/Payload
           mv app/build/ci/Build/Products/Release-appletvos/VortXTV.app out/full/Payload/
           (cd out/full && zip -qry ../VortX-tvOS-ci.ipa Payload)
           unzip -tqq out/VortX-tvOS-ci.ipa
-          if [ "$NATIVE_ONLY" = true ]; then
-            python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify-archive --app-receipt out/native-tvos.json \
-              --artifact out/VortX-tvOS-ci.ipa --platform tvos --receipt out/native-package-tvos.json
-          fi
+          python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify-archive --app-receipt out/native-tvos.json \
+            --artifact out/VortX-tvOS-ci.ipa --platform tvos --receipt out/native-package-tvos.json
           shasum -a 256 out/VortX-tvOS-ci.ipa | tee out/SHA256SUMS-ci.txt
 
       - name: Package the IPAs
         if: inputs.tvos_test_only != true
-        env:
-          NATIVE_ONLY: ${{ env.VORTX_NATIVE_ONLY }}
         run: |
           set -euo pipefail
           mkdir -p out/full/Payload out/lite/Payload out/ios/Payload
@@ -1374,7 +1305,7 @@ jobs:
           unzip -tqq out/VortX-iOS-ci.ipa
           # Reclaim disk before building the .dmg: the IPAs are zipped now, so the tvOS/iOS build
           # trees and the unzipped payloads are dead weight, and the macos-26 runner disk is
-          # tight (four MPVKit-GPL builds + node). Without this, `hdiutil create` failed with
+          # tight (four MPVKit-GPL builds). Without this, `hdiutil create` failed with
           # "No space left on device" on the macOS leg (the empty-asset release for v0.3.6).
           rm -rf out/full/Payload out/lite/Payload out/ios/Payload
           rm -rf app/build/ci app/build/ci-lite app/build/ci-ios
@@ -1391,16 +1322,14 @@ jobs:
           mv "$MAC_APP" "$DMG_STAGE/"
           ln -s /Applications "$DMG_STAGE/Applications"
           bash scripts/package-macos-dmg.sh "$DMG_STAGE" out/VortX-macOS-ci.dmg
-          if [ "$NATIVE_ONLY" = true ]; then
-            python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify-archive --app-receipt out/native-tvos.json \
-              --artifact out/VortX-tvOS-ci.ipa --platform tvos --receipt out/native-package-tvos.json
-            python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify-archive --app-receipt out/native-tvos-lite.json \
-              --artifact out/VortX-tvOS-lite-ci.ipa --platform tvos --receipt out/native-package-tvos-lite.json
-            python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify-archive --app-receipt out/native-ios.json \
-              --artifact out/VortX-iOS-ci.ipa --platform ios --receipt out/native-package-ios.json
-            python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify-archive --app-receipt out/native-macos.json \
-              --artifact out/VortX-macOS-ci.dmg --platform macos --receipt out/native-package-macos.json
-          fi
+          python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify-archive --app-receipt out/native-tvos.json \
+            --artifact out/VortX-tvOS-ci.ipa --platform tvos --receipt out/native-package-tvos.json
+          python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify-archive --app-receipt out/native-tvos-lite.json \
+            --artifact out/VortX-tvOS-lite-ci.ipa --platform tvos --receipt out/native-package-tvos-lite.json
+          python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify-archive --app-receipt out/native-ios.json \
+            --artifact out/VortX-iOS-ci.ipa --platform ios --receipt out/native-package-ios.json
+          python3 "$NATIVE_PACKAGE_VERIFIER_DIR"/verify-native-apple-package.py verify-archive --app-receipt out/native-macos.json \
+            --artifact out/VortX-macOS-ci.dmg --platform macos --receipt out/native-package-macos.json
           shasum -a 256 out/VortX-tvOS-ci.ipa out/VortX-tvOS-lite-ci.ipa out/VortX-iOS-ci.ipa out/VortX-macOS-ci.dmg | tee out/SHA256SUMS-ci.txt
 
       # Build the feed from the exact immutable tag checkout while this job still has read-only

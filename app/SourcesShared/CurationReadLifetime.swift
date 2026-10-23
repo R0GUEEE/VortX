@@ -43,9 +43,7 @@ import Combine
         // Remote host publications use the watchlist note as well as the explicit import note.
         var notes = [VortXSyncManager.credentialScopeDidChangeNote,
                      XperienceCollectionsStore.changedNote, LibraryAutoAdd.watchlistChangedNote]
-        #if VORTX_NATIVE_DATA_ENGINE
         notes.append(CoreBridge.xperienceContextChangedNote)
-        #endif
         return Publishers.MergeMany(notes.map { name in
             NotificationCenter.default.publisher(for: name).map { _ in () }.eraseToAnyPublisher()
         }).eraseToAnyPublisher()

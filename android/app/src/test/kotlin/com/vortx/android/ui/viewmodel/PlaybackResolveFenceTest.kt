@@ -83,7 +83,7 @@ class PlaybackResolveFenceTest {
             "/// Race the account-confirmed-cached",
         )
 
-        assertResolverUsesItsOwnLease(best, expectedPublicationCount = 6)
+        assertResolverUsesItsOwnLease(best, expectedPublicationCount = 2)
     }
 
     @Test
@@ -97,7 +97,7 @@ class PlaybackResolveFenceTest {
             "publishPlaybackResolve(differentLease",
         )
 
-        assertFalse(publicationsUseExactLease(oneDifferentLease, expectedPublicationCount = 6))
+        assertFalse(publicationsUseExactLease(oneDifferentLease, expectedPublicationCount = 2))
     }
 
     private fun assertResolverUsesItsOwnLease(body: String, expectedPublicationCount: Int) {

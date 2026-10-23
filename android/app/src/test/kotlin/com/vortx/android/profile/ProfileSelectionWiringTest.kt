@@ -45,6 +45,6 @@ class ProfileSelectionWiringTest {
         assertTrue(request.contains("store.selectionPending = true"))
         assertTrue(request.contains("store.selectionPending = false"))
         assertTrue(request.contains("checkNotNull(nativeAdmission)"))
-        assertTrue(request.contains("nativeAdmission?.invoke() != false"))
+        assertTrue(request.contains("store.activeID == selected.id && nativeAdmission()"))
     }
 }

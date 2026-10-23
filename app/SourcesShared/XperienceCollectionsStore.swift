@@ -3,9 +3,7 @@ import Foundation
 
 struct XperienceImportLease {
     fileprivate let identity = UUID()
-    #if VORTX_NATIVE_DATA_ENGINE
     fileprivate let target: CoreBridge.NativeXperienceTarget
-    #endif
 }
 
 /// Manual JSON/file import only. No account login, collections URL fetching, local plaintext
@@ -27,7 +25,6 @@ struct XperienceImportLease {
 
     init(core: CoreBridge = .shared) {
         self.core = core
-        #if VORTX_NATIVE_DATA_ENGINE
         // These events are hints only. Actual captured epochs and exact register snapshots decide
         // retirement, so an unrelated position update does not continually erase an open preview.
         for name in [Self.changedNote, LibraryAutoAdd.watchlistChangedNote, CoreBridge.xperienceContextChangedNote] {
@@ -38,20 +35,16 @@ struct XperienceImportLease {
         // an A->B->A sequence from the latest UUID.
         ProfileStore.shared.$activeID.dropFirst().sink { [weak self] _ in self?.invalidate() }.store(in: &subscriptions)
         VortXSyncManager.shared.$isSignedIn.dropFirst().sink { [weak self] _ in self?.invalidate() }.store(in: &subscriptions)
-        #endif
     }
     private func invalidate() {
-        #if VORTX_NATIVE_DATA_ENGINE
         // Revoke synchronously BEFORE presentation retirement. The Core method only flips the
         // original lifetime lock; it performs no Bridge/facade reads or publication under it.
         if let lease = observedLease { core.retireNativeXperienceTarget(lease.target) }
-        #endif
         observedLease = nil; observedRegisters = nil; pendingSave = nil; revision = UUID()
     }
     private func checkObservation() {
         guard let lease = observedLease else { return }
         guard isCurrent(lease) else { invalidate(); return }
-        #if VORTX_NATIVE_DATA_ENGINE
         guard let current = try? core.nativeXperienceSnapshot(target: lease.target).registers else { invalidate(); return }
         if XperienceExactEvidence.registers(current, observedRegisters) { return }
         if let pending = pendingSave, pending.nativeSubmitted, pending.leaseID == lease.identity,
@@ -63,41 +56,24 @@ struct XperienceImportLease {
             return
         }
         invalidate()
-        #endif
     }
     func capture() throws -> XperienceImportLease {
-        #if VORTX_NATIVE_DATA_ENGINE
         if observedLease != nil { invalidate() } // A superseding gesture retires the old worker authority too.
         let lease = XperienceImportLease(target: try core.captureNativeXperienceTarget())
         observedLease = lease
         observedRegisters = try core.nativeXperienceSnapshot(target: lease.target).registers
         return lease
-        #else
-        throw XperiencePersistenceFailure.unavailable
-        #endif
     }
     func isCurrent(_ lease: XperienceImportLease) -> Bool {
-        #if VORTX_NATIVE_DATA_ENGINE
         return observedLease?.identity == lease.identity && core.nativeXperienceTargetIsCurrent(lease.target)
-        #else
-        return false
-        #endif
     }
     func candidates(_ lease: XperienceImportLease) throws -> [XperienceAddonBinding.Candidate] {
-        #if VORTX_NATIVE_DATA_ENGINE
         guard isCurrent(lease) else { throw XperiencePersistenceFailure.staleContext }
         return try core.nativeXperienceSnapshot(target: lease.target).candidates
-        #else
-        throw XperiencePersistenceFailure.unavailable
-        #endif
     }
     func namespaces(_ lease: XperienceImportLease) throws -> [XperienceSavedNamespace] {
-        #if VORTX_NATIVE_DATA_ENGINE
         guard isCurrent(lease) else { throw XperiencePersistenceFailure.staleContext }
         return try XperienceSavedNamespace.readAll(core.nativeXperienceSnapshot(target: lease.target).registers)
-        #else
-        throw XperiencePersistenceFailure.unavailable
-        #endif
     }
     func append(document: XperienceCollections.Document, label: String,
                 bindings: [String: XperienceAddonBinding.Mapping], lease: XperienceImportLease) async throws -> XperienceSavedNamespace {
@@ -112,7 +88,6 @@ struct XperienceImportLease {
         try await commit(namespace.replacement(document: document, label: label, bindings: bindings), lease: lease)
     }
     private func commit(_ edit: XperienceImportNamespace.Edit, lease: XperienceImportLease) async throws -> XperienceSavedNamespace {
-        #if VORTX_NATIVE_DATA_ENGINE
         try Task.checkCancellation()
         guard isCurrent(lease) else { throw XperiencePersistenceFailure.staleContext }
         guard pendingSave == nil else { throw XperiencePersistenceFailure.busy }
@@ -141,8 +116,5 @@ struct XperienceImportLease {
         revision = UUID()
         NotificationCenter.default.post(name: Self.changedNote, object: nil)
         return saved
-        #else
-        throw XperiencePersistenceFailure.unavailable
-        #endif
     }
 }
