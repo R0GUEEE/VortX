@@ -558,7 +558,9 @@ struct CoreMetaDetails: Decodable {
         var ready: [(base: String, meta: CoreMetaItem)] = []
         let disabled = ProfileStore.activeDisabledAddons()
         for entry in metaItems where !disabled.contains(ProfileAddonPreferencesPolicy.identity(entry.request.base)) {
-            if let m = entry.content?.ready { ready.append((entry.request.base, m)) }
+            let display = entry.content?.ready
+                ?? (entry.content?.isLoading == true ? entry.retainedWhileLoading?.ready : nil)
+            if let m = display { ready.append((entry.request.base, m)) }
         }
         guard let first = ready.first else { return nil }
         let order = ProfileStore.activeAddonOrder(accountOrder: VortXSyncManager.appliedAddonOrder)
@@ -663,6 +665,8 @@ struct CoreMetaDetails: Decodable {
 struct CoreMetaEntry: Decodable {
     let request: CoreResourceRequest
     let content: CoreLoadable<CoreMetaItem>?
+    /// Same-owner display continuity only. `content` retains the actual request's freshness state.
+    let retainedWhileLoading: CoreLoadable<CoreMetaItem>?
 }
 
 struct CoreMetaItem: Decodable {

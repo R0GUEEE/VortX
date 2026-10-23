@@ -241,6 +241,27 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             return RegistryBinding(scope: session.scope, profileID: profile, generation: registryGeneration)
         }
     }
+    /// Accepted navigation may survive ordinary queued sync work, but never an unavailable
+    /// session or an acknowledged owner/resource replacement. No writes use this receipt.
+    struct AcceptedNavigationReceipt: Equatable, Sendable {
+        let owner: WatchlistBinding
+        let registry: RegistryBinding
+    }
+    func captureAcceptedNavigation(expected: WatchlistBinding) -> AcceptedNavigationReceipt? {
+        lock.withLock {
+            guard isAvailable, resourceRegistryValid,
+                  let owner = watchlistBinding, owner == expected else { return nil }
+            return .init(owner: owner, registry: .init(scope: session.scope, profileID: owner.profileID,
+                generation: registryGeneration))
+        }
+    }
+    func acceptedNavigationIsCurrent(_ receipt: AcceptedNavigationReceipt) -> Bool {
+        lock.withLock {
+            guard isAvailable, resourceRegistryValid, let owner = watchlistBinding else { return false }
+            let registry = RegistryBinding(scope: session.scope, profileID: owner.profileID, generation: registryGeneration)
+            return owner == receipt.owner && registry == receipt.registry
+        }
+    }
     /// One atomic, active-profile resource inventory. Ordinary queued progress/sync work is not a
     /// new owner; acknowledged registry/profile/account changes (including ABA) retire this receipt.
     func captureEpisodeSourceRegistry() -> (data: Data, isCurrent: @Sendable () -> Bool)? {
@@ -1136,9 +1157,26 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                 "metaItems": .array(addons.compactMap { try? loadingEntry($0, request) }),
                 "streams": .array(stream.map { path in addons.compactMap { try? loadingEntry($0, path) } } ?? []), "metaStreams": .array([])])
             guard let profile = string(values["native_state"]?["activeProfileId"]) else { return fail("missing_profile") }
-            return enqueue(field, initial: loading) { [self] publish in
-                [field: try await session.loadMeta(request: request, stream: stream, addons: addons,
-                    expectedProfileID: profile, onUpdate: publish)]
+            // Dispatch owns the lock: capture the preceding value and acknowledged owner together.
+            // A queued sync is not a new owner; committed identity changes retire these generations
+            // and the enqueue publication ticket, including profile/account/registry A -> B -> A.
+            let previous = values[field], account = accountEpoch
+            let profileGeneration = watchlistProfileGeneration, capturedRegistry = registryGeneration
+            let project: @Sendable (VortxJSON) -> VortxJSON = { [weak self] incoming in
+                guard let self else { return incoming }
+                return self.lock.withLock {
+                    let current = !self.closed && self.resourceRegistryValid
+                        && self.accountEpoch == account && self.watchlistProfileGeneration == profileGeneration
+                        && self.registryGeneration == capturedRegistry
+                        && self.values["native_state"]?["activeProfileId"] == .string(profile)
+                    return VortxMetaLoadingProjection.retainingReadyMetadata(previous: previous,
+                        incoming: incoming, ownerIsCurrent: current)
+                }
+            }
+            return enqueue(field, initial: project(loading)) { [self] publish in
+                let result = try await session.loadMeta(request: request, stream: stream, addons: addons,
+                    expectedProfileID: profile, onUpdate: { value in publish(project(value)) })
+                return [field: project(result)]
             }
         }
         if name == "Load", model == "CatalogWithFilters", field == "discover" {

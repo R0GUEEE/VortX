@@ -70,6 +70,75 @@ final class SourceListModel: ObservableObject, SourceIndexLifecycleParticipant {
     }
     var isSettled: Bool { settlement.isSettled }
 
+    // BEGIN RANDOM PLAY SOURCE RECEIPT
+    struct PlaybackReceipt: Equatable {
+        fileprivate let generation: Int
+        fileprivate let signature: Signature
+    }
+
+    /// The existing complete-set publication, not merely a non-empty list. Fresh epochs also reject
+    /// a contributor change BEFORE the trailing coalescer has rebuilt/published another list.
+    func playbackReceipt(pin: ResolvedPin?) -> PlaybackReceipt? {
+        guard isSettled, pendingSignature == nil, let signature = publishedSignature,
+              signature == currentPlaybackSignature(context: livePlaybackContext(pin: pin)) else { return nil }
+        return PlaybackReceipt(generation: generation, signature: signature)
+    }
+
+    func playbackReceiptIsCurrent(_ receipt: PlaybackReceipt, pin: ResolvedPin?) -> Bool {
+        playbackReceipt(pin: pin) == receipt
+    }
+
+    private func livePlaybackContext(pin: ResolvedPin?) -> Context {
+        var current = context
+        current.pin = pin
+        current.prefsSignature = SourcePreferences.shared.rankingSignature
+        current.sessionAudioLanguages = sessionAudioLanguages
+        current.isKids = ProfileStore.activeIsKids()
+        current.directLinksOnly = PlaybackSettings.directLinksOnly
+        current.disabledAddons = ProfileStore.activeDisabledAddons()
+        return current
+    }
+
+    private func currentPlaybackSignature(context ctx: Context) -> Signature? {
+        guard let core, let torbox, let singularity, let mediaServers, let debridCache else { return nil }
+        let cachedHashes = debridCache.cachedHashes
+        let tombstones = AddonTombstones.all()
+        let sticky: (addon: String?, bingeGroup: String?)? = ctx.streamId != nil && !ctx.metaId.isEmpty
+            ? SeriesSourceSticky.preference(for: ctx.metaId) : nil
+        // O(1)-ish signature: three epochs + one fold of the small inputs. No per-stream work.
+        var hasher = Hasher()
+        hasher.combine(ctx.metaId)
+        hasher.combine(ctx.streamId)
+        hasher.combine(ctx.auxiliaryTarget)
+        hasher.combine(ctx.mediaServerTarget)
+        hasher.combine(ctx.continuity)
+        hasher.combine(String(describing: ctx.pin))
+        hasher.combine(ctx.prefsSignature)
+        hasher.combine(ctx.sessionAudioLanguages)
+        hasher.combine(ctx.isKids)
+        hasher.combine(ctx.directLinksOnly)
+        hasher.combine(ctx.disabledAddons)
+        hasher.combine(cachedHashes)
+        hasher.combine(tombstones)
+        // A pick made in the player changes the rank without changing any epoch, so it has to be in the
+        // signature or the list would keep serving the pre-pick order until something else moved.
+        hasher.combine(sticky?.addon)
+        hasher.combine(sticky?.bingeGroup)
+        let signature = Signature(streamsEpoch: core.streamsEpoch,
+                                  torboxEpoch: torbox.epoch,
+                                  singularityEpoch: singularity.epoch,
+                                  mediaServerEpoch: mediaServers.epoch,
+                                  torboxSettlementEpoch: torbox.settlementEpoch,
+                                  singularitySettlementEpoch: singularity.settlementEpoch,
+                                  mediaServerSettlementEpoch: mediaServers.settlementEpoch,
+                                  jsProviderEpoch: jsProvider?.epoch ?? 0,
+                                  jsProviderSettlementEpoch: jsProvider?.settlementEpoch ?? 0,
+                                  settlementDeadlineExpired: settlementDeadlineExpired,
+                                  inputsHash: hasher.finalize())
+        return signature
+    }
+    // END RANDOM PLAY SOURCE RECEIPT
+
     // MARK: Context (the view-owned ranking inputs, set from body, equality-guarded)
 
     /// The small per-screen inputs the assembly needs from the view. Set via `setContext` from `body`
@@ -93,7 +162,7 @@ final class SourceListModel: ObservableObject, SourceIndexLifecycleParticipant {
 
     /// O(1) rebuild signature: epochs + one hash. Equal signature = the published output is already
     /// correct, skip the whole assembly.
-    private struct Signature: Equatable {
+    fileprivate struct Signature: Equatable {
         let streamsEpoch: Int
         let torboxEpoch: Int
         let singularityEpoch: Int
@@ -310,36 +379,7 @@ final class SourceListModel: ObservableObject, SourceIndexLifecycleParticipant {
         // Capture-free and lock-guarded inside, so it is safe to call from the detached rank.
         let providerPenalty: @Sendable (String) -> Bool = { ProviderHealth.penaltyActive(addonName: $0) }
 
-        // O(1)-ish signature: three epochs + one fold of the small inputs. No per-stream work.
-        var hasher = Hasher()
-        hasher.combine(ctx.metaId)
-        hasher.combine(ctx.streamId)
-        hasher.combine(ctx.auxiliaryTarget)
-        hasher.combine(ctx.mediaServerTarget)
-        hasher.combine(ctx.continuity)
-        hasher.combine(String(describing: ctx.pin))
-        hasher.combine(ctx.prefsSignature)
-        hasher.combine(ctx.sessionAudioLanguages)
-        hasher.combine(ctx.isKids)
-        hasher.combine(ctx.directLinksOnly)
-        hasher.combine(ctx.disabledAddons)
-        hasher.combine(cachedHashes)
-        hasher.combine(tombstones)
-        // A pick made in the player changes the rank without changing any epoch, so it has to be in the
-        // signature or the list would keep serving the pre-pick order until something else moved.
-        hasher.combine(sticky?.addon)
-        hasher.combine(sticky?.bingeGroup)
-        let signature = Signature(streamsEpoch: core.streamsEpoch,
-                                  torboxEpoch: torbox.epoch,
-                                  singularityEpoch: singularity.epoch,
-                                  mediaServerEpoch: mediaServers.epoch,
-                                  torboxSettlementEpoch: torbox.settlementEpoch,
-                                  singularitySettlementEpoch: singularity.settlementEpoch,
-                                  mediaServerSettlementEpoch: mediaServers.settlementEpoch,
-                                  jsProviderEpoch: jsProvider?.epoch ?? 0,
-                                  jsProviderSettlementEpoch: jsProvider?.settlementEpoch ?? 0,
-                                  settlementDeadlineExpired: settlementDeadlineExpired,
-                                  inputsHash: hasher.finalize())
+        guard let signature = currentPlaybackSignature(context: ctx) else { return }
         guard signature != publishedSignature, signature != pendingSignature else { return }
         pendingSignature = signature
         generation &+= 1

@@ -513,6 +513,39 @@ final class CoreBridge: ObservableObject {
     func nativeNavigationTargetIsCurrent(_ target: NativeNavigationTarget) -> Bool {
         nativeWatchlistTargetIsCurrent(target.owner)
     }
+    /// Read-only presentation ownership. Do not use this weaker busy-queue fence for a mutation
+    /// or pending playback admission: those still require PlaybackMutationTarget.
+    struct NativeAcceptedNavigationTarget {
+        fileprivate let navigation: NativeNavigationTarget
+        fileprivate let receipt: VortxNativeCoreFacade.AcceptedNavigationReceipt
+    }
+    @MainActor func captureNativeAcceptedNavigationTarget() -> NativeAcceptedNavigationTarget? {
+        // Capture outside the non-recursive bridge lock, then recheck under that lock before
+        // the facade atomically captures its acknowledged owner and resource registry.
+        guard let navigation = captureNativeNavigationTarget() else { return nil }
+        return nativeFacadeLock.withLock {
+            guard acceptedNavigationOwnerIsCurrent(navigation),
+                  let receipt = navigation.owner.facade.captureAcceptedNavigation(expected: navigation.owner.binding) else { return nil }
+            return .init(navigation: navigation, receipt: receipt)
+        }
+    }
+    @MainActor func nativeAcceptedNavigationTargetIsCurrent(_ target: NativeAcceptedNavigationTarget) -> Bool {
+        nativeFacadeLock.withLock {
+            acceptedNavigationOwnerIsCurrent(target.navigation)
+                && target.navigation.owner.facade.acceptedNavigationIsCurrent(target.receipt)
+        }
+    }
+    /// Called only under nativeFacadeLock; never recapture or substitute a current facade here.
+    @MainActor private func acceptedNavigationOwnerIsCurrent(_ navigation: NativeNavigationTarget) -> Bool {
+        let captured = navigation.owner
+        return nativeFacadeStorage === captured.facade
+            && nativeCredentialCapture == captured.owner.credential
+            && CredentialScopeRegistry.shared.isCurrent(captured.owner.credential)
+            && nativeInstallGeneration == captured.owner.sessionGeneration
+            && ProfileStore.shared.activeID == captured.owner.profileID
+            && nativePublishedAccountGeneration == captured.binding.accountGeneration
+            && captured.owner.accountGeneration == captured.binding.accountGeneration
+    }
     @MainActor func captureNativeWatchlistActionAdmission() -> NativeWatchlistActionAdmission {
         let target = captureNativeWatchlistTarget()
         let generation = nativeFacadeLock.withLock { nativeFacadeStorage == nil ? nil : nativeInstallGeneration }

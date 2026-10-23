@@ -322,6 +322,7 @@ struct iOSDetailView: View {
     /// movie, its settled ranked source set) is resident. Kept false by default so every existing route is
     /// unchanged; this never invents a URL or bypasses the detail/source-selection path.
     var autoPlayOnAppear: Bool = false
+    var randomPickPlayIntent: RandomPickPlayIntent? = nil
     /// Navigation-carried Trakt offset. It is consumed by the first content play only.
     var initialResumeSeconds: Double? = nil
     var initialVideoID: String? = nil
@@ -329,6 +330,14 @@ struct iOSDetailView: View {
     var initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil
     var initialTraktNextEpisodeOffer: TraktNextEpisodeOffer? = nil
     @State private var resumeHintOpenedAt = Date()
+
+    // BEGIN RANDOM PICK EPISODE STATE
+    @State private var randomEpisodeSession = RandomPickPolicy.Session()
+    @State private var randomEpisodePreview: RandomPickPolicy.Ticket?
+    @State private var randomEpisodeAccess: RandomPickUIAccess?
+    @State private var randomEpisodeSource: RandomPickPolicy.EpisodeSource?
+    @State private var randomEpisodeRoute: RandomPickEpisodeRoute?
+    // END RANDOM PICK EPISODE STATE
     @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var theme: ThemeManager   // observe textScale so Theme.Typography repaints live
@@ -585,13 +594,15 @@ struct iOSDetailView: View {
     // Driving both from one enum-typed item guarantees exactly one cover is ever attached, so Watch
     // always presents reliably. The player-cover variant sizes its content to fill the macOS window.
     @State private var presentation: Presentation?
-    @State private var preparing = false                 // movie Watch Now is resolving
+    @State private var preparation = PlaybackPreparationState()
+    private var preparing: Bool { preparation.isActive }
     @State private var autoPlayConsumed = false
     @State private var autoPlayEpisode: CoreVideo?
     /// Owns the explicit Cinema Quick Watch source-resolution task. It is cancelled when this route leaves
     /// the screen or its account/profile scope changes; an already accepted `presentation` is never cancelled
     /// merely because the detail view is covered by the player.
     @State private var quickWatchTask: Task<Void, Never>?
+    @State private var randomPickSourceReceipt: SourceListModel.PlaybackReceipt?
     @State private var quickWatchRouteGeneration = 0
     @State private var usenetPlaybackMessage: String?
     @State private var launchEnginePreference: PlayerEngineRouter.Override? = nil
@@ -939,11 +950,13 @@ struct iOSDetailView: View {
                             initialTraktSessionID: initialTraktSessionID,
                             initialContinueWatchingIntent: initialContinueWatchingIntent,
                             initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
-                            autoPlayOnAppear: true
+                            autoPlayOnAppear: true,
+                            randomPickPlayIntent: randomPickPlayIntent,
+                            suppressPreferenceAutoPlay: randomPickPlayIntent != nil
                         ),
                         isActive: Binding(
                             get: { self.autoPlayEpisode != nil },
-                            set: { active in if !active { self.autoPlayEpisode = nil } }
+                            set: { active in if !active { self.autoPlayEpisode = nil; randomPickPlayIntent?.revoke() } }
                         )
                     ) {
                         EmptyView()
@@ -1021,6 +1034,52 @@ struct iOSDetailView: View {
 
     private var detailLifecycle: some View {
         detailScene
+
+        // BEGIN RANDOM PICK EPISODE LIFECYCLE
+        .sheet(isPresented: randomEpisodePreviewPresented) {
+            if let ticket = randomEpisodePreview {
+                RandomPickPreviewCard(ticket: ticket,
+                    onOpen: { openRandomEpisode(ticket, autoPlay: false) },
+                    onPlay: { openRandomEpisode(ticket, autoPlay: true) },
+                    onPickAgain: { pickRandomEpisodeAgain(ticket) })
+                    .id(ticket.id)
+            }
+        }
+        .navigationDestination(isPresented: randomEpisodePresented) { randomEpisodeDestination }
+        .onReceive(profiles.$activeID) { profileID in
+            if let ticket = randomEpisodeSession.ticket, ticket.profileID != profileID { clearRandomEpisodePick() }
+        }
+        .onReceive(profiles.$profiles) { incoming in
+            if let route = randomEpisodeRoute {
+                if !(route.intent?.matchesPublishedProfiles(incoming, pickedThisLaunch: profiles.pickedThisLaunch)
+                    ?? route.access.matchesPublishedNavigationProfiles(incoming, pickedThisLaunch: profiles.pickedThisLaunch)) { clearRandomEpisodePick() }
+            } else if let access = randomEpisodeAccess,
+               !access.matchesPublishedProfiles(incoming, pickedThisLaunch: profiles.pickedThisLaunch) { clearRandomEpisodePick() }
+        }
+        .onReceive(profiles.$pickedThisLaunch) { picked in
+            if !picked, profiles.profiles.count > 1 { clearRandomEpisodePick() }
+        }
+        .onReceive(core.$revision) { _ in
+            if let route = randomEpisodeRoute {
+                if !(route.intent?.routeIsCurrent(core: core, profiles: profiles)
+                    ?? route.access.isNavigationCurrent(profiles: profiles, core: core)) { clearRandomEpisodePick() }
+            } else if let access = randomEpisodeAccess, !access.isCurrent(profiles: profiles, core: core) { clearRandomEpisodePick() }
+        }
+        .onReceive(core.$metaDetails) { details in
+            randomPickPlayIntent?.invalidateMetadata(details)
+            randomEpisodeRoute?.intent?.invalidateMetadata(details)
+            // The admitted episode page owns metadata/source changes after handoff.
+            guard randomEpisodePreview != nil, randomEpisodeRoute == nil,
+                  let source = randomEpisodeSource else { return }
+            let current = ResidentMeta.fenced(details?.meta, pageID: metaRequestID) { $0.id }
+            if current.map(RandomPickPolicy.EpisodeSource.init) != source { clearRandomEpisodePick() }
+        }
+        .onChange(of: metaRequestID) { _ in clearRandomEpisodePick() }
+        .onChange(of: effectiveType) { _ in clearRandomEpisodePick() }
+        // Page disappearance also happens when an accepted episode/player covers it.
+        // Only dismiss an uncommitted preview here; route pop clears the full receipt.
+        .onDisappear { if randomEpisodeRoute == nil { clearRandomEpisodePick() } }
+        // END RANDOM PICK EPISODE LIFECYCLE
         // Guard the meta load: the shared CoreBridge already holds this title's meta on an A -> back -> A
         // revisit, so re-loading it churns the engine and momentarily blanks the hero for no reason.
         .onAppear {
@@ -1093,7 +1152,8 @@ struct iOSDetailView: View {
         .onDisappear {
             ratingsGeneration = nil
             ratingsTask?.cancel(); ratingsTask = nil
-            cancelPendingQuickWatch()
+            // Forward the same pending grant to a series' accepted episode page.
+            cancelPendingQuickWatch(revokingRandomPlay: autoPlayEpisode == nil)
             torrentPrime?.cancel(); sourceRefreshDebounce?.cancel(); langChipsDebounce?.cancel()
         }
         .onChange(of: profiles.activeID) { _ in cancelPendingQuickWatch() }
@@ -1207,6 +1267,7 @@ struct iOSDetailView: View {
     ///   3) the ambient /clip mp4 (SHORT snippet) as a last resort so the button still plays something;
     ///   4) a transient "preparing" notice - never the full source-error screen.
     private func playTrailer() {
+        cancelPendingQuickWatch()
         guard let m = meta else { return }
         let title = "\(m.name) Trailer"
         let req = TrailerRequest.from(meta: m)
@@ -2464,6 +2525,104 @@ struct iOSDetailView: View {
     /// The episode the list opens on: one in progress, else the first unwatched from the episode last played
     /// onwards (so finishing a season moves on to the next), else the first unwatched anywhere, specials last.
     /// Nil once everything is watched.
+
+    // BEGIN RANDOM PICK EPISODE HELPERS
+    private var randomEpisodeScope: String { "detail:\(metaRequestID):\(effectiveType)" }
+
+    private func selectRandomEpisode() {
+        cancelPendingQuickWatch() // A new manual selection supersedes queued Library Play.
+        guard let currentMeta = meta else { clearRandomEpisodePick(); return }
+        guard let access = RandomPickUIAccess.capture(profiles: profiles, core: core) else { clearRandomEpisodePick(); return }
+        let candidates = RandomPickPolicy.eligibleEpisodes(currentMeta.videos ?? [], now: Date())
+        var generator = SystemRandomNumberGenerator()
+        randomEpisodeAccess = access
+        randomEpisodeSource = RandomPickPolicy.EpisodeSource(currentMeta)
+        randomEpisodePreview = randomEpisodeSession.select(
+            candidates.map { RandomPickPolicy.episodeRecord($0, type: currentMeta.type) },
+            profileID: profiles.activeID, scope: randomEpisodeScope, using: &generator)
+        if randomEpisodePreview == nil { clearRandomEpisodePick() }
+    }
+
+    private func currentRandomEpisode(_ origin: RandomPickPolicy.Ticket) -> (CoreMetaItem, CoreVideo)? {
+        guard randomEpisodeSession.ticket == origin else { return nil }
+        guard let currentMeta = meta,
+              RandomPickPolicy.EpisodeSource(currentMeta) == randomEpisodeSource else {
+            clearRandomEpisodePick(); return nil
+        }
+        let current = RandomPickPolicy.eligibleEpisodes(currentMeta.videos ?? [], now: Date())
+            .first { $0.id == origin.record.identity.id }
+        guard randomEpisodeSession.accepts(origin, profileID: profiles.activeID, scope: randomEpisodeScope,
+                ownerIsCurrent: randomEpisodeAccess?.isCurrent(profiles: profiles, core: core) == true,
+                currentRecord: current.map { RandomPickPolicy.episodeRecord($0, type: currentMeta.type) }),
+              let current else { clearRandomEpisodePick(); return nil }
+        return (currentMeta, current)
+    }
+
+    /// The full pool was admitted on the explicit action. Immutable source equality conserves
+    /// membership/ambiguity while queued playback only checks this selected record and date.
+    private func pendingRandomEpisodeOriginIsCurrent(_ origin: RandomPickPolicy.Ticket, video: CoreVideo,
+                                                     source: RandomPickPolicy.EpisodeSource) -> Bool {
+        guard randomEpisodeSession.ticket == origin, let currentMeta = meta,
+              RandomPickPolicy.EpisodeSource(currentMeta) == source,
+              RandomPickPolicy.eligibleEpisodes([video], now: Date()).contains(video) else { return false }
+        return randomEpisodeSession.accepts(origin, profileID: profiles.activeID, scope: randomEpisodeScope,
+            ownerIsCurrent: randomEpisodeAccess?.isCurrent(profiles: profiles, core: core) == true,
+            currentRecord: RandomPickPolicy.episodeRecord(video, type: currentMeta.type))
+    }
+
+    private func pickRandomEpisodeAgain(_ origin: RandomPickPolicy.Ticket) {
+        guard currentRandomEpisode(origin) != nil else { return }
+        selectRandomEpisode()
+    }
+
+    private func openRandomEpisode(_ origin: RandomPickPolicy.Ticket, autoPlay: Bool) {
+        guard let (currentMeta, current) = currentRandomEpisode(origin), let access = randomEpisodeAccess else { return }
+        randomEpisodeRoute?.intent?.revoke()
+        let intent = autoPlay ? RandomPickPlayIntent(ticketID: origin.id, access: access) {
+            randomEpisodeRoute?.ticket == origin && pendingRandomEpisodeOriginIsCurrent(origin, video: current, source: RandomPickPolicy.EpisodeSource(currentMeta))
+        } : nil
+        randomEpisodeRoute = RandomPickEpisodeRoute(ticket: origin, meta: currentMeta, video: current,
+            orderedEpisodes: (currentMeta.videos ?? []).orderedBySeasonEpisode, access: access, autoPlay: autoPlay, intent: intent)
+        if let intent, !intent.bind(meta: currentMeta, video: current, core: core, profiles: profiles) {
+            clearRandomEpisodePick(); return
+        }
+        randomEpisodePreview = nil
+    }
+
+    private var randomEpisodePreviewPresented: Binding<Bool> {
+        Binding(get: { randomEpisodePreview != nil }, set: { presented in
+            guard !presented else { return }
+            if randomEpisodeRoute == nil { clearRandomEpisodePick() }
+            else { randomEpisodePreview = nil }
+        })
+    }
+
+    private var randomEpisodePresented: Binding<Bool> {
+        Binding(get: { randomEpisodeRoute != nil }, set: { if !$0 { clearRandomEpisodePick() } })
+    }
+
+    @ViewBuilder private var randomEpisodeDestination: some View {
+        if let route = randomEpisodeRoute,
+           randomEpisodeSession.ticket == route.ticket, profiles.activeID == route.ticket.profileID,
+           (route.intent?.routeIsCurrent(core: core, profiles: profiles)
+            ?? route.access.isNavigationCurrent(profiles: profiles, core: core)) {
+            // This explicit action owns no parent Continue Watching/Trakt offer or offset.
+            iOSEpisodeStreams(meta: route.meta, video: route.video, season: route.video.season ?? 0,
+                              seasonEpisodes: route.orderedEpisodes, autoPlayOnAppear: route.autoPlay,
+                              randomPickPlayIntent: route.intent, suppressPreferenceAutoPlay: true)
+        }
+    }
+
+    private func clearRandomEpisodePick() {
+        randomEpisodeRoute?.intent?.revoke()
+        randomEpisodePreview = nil
+        randomEpisodeRoute = nil
+        randomEpisodeSource = nil
+        randomEpisodeAccess = nil
+        randomEpisodeSession.clear()
+    }
+    // END RANDOM PICK EPISODE HELPERS
+
     private func episodeListTarget(_ videos: [CoreVideo]) -> CoreVideo? {
         if initialTraktNextEpisodeOffer != nil { return seriesPrimaryEpisode(videos)?.video }
         let sorted = sortedEpisodes(videos)
@@ -3266,6 +3425,9 @@ struct iOSDetailView: View {
     }
 
     private func quickWatchScopeIsCurrent(_ scope: CinemaQuickWatchScope) -> Bool {
+        guard randomPickPlayIntent?.isCurrent(core: core, profiles: profiles) != false else { return false }
+        if randomPickPlayIntent != nil, let receipt = randomPickSourceReceipt,
+           !sourceList.playbackReceiptIsCurrent(receipt, pin: sourcePin) { return false }
         guard CinemaQuickWatchScopePolicy.accepts(
             scope,
             titleID: metaRequestID,
@@ -3280,15 +3442,35 @@ struct iOSDetailView: View {
         return presentation == nil
     }
 
+    /// No suspension is allowed between this one-shot admission and the following player assignment.
+    /// A rejected resolver result releases its native lease instead of escaping into playback.
+    private func admitRandomPickPlayback(quickWatchScope: CinemaQuickWatchScope?, ref: DebridPlaybackRef?) -> Bool {
+        guard let quickWatchScope else { randomPickPlayIntent?.revoke(); return true }
+        if randomPickPlayIntent != nil,
+           randomPickSourceReceipt.map({ sourceList.playbackReceiptIsCurrent($0, pin: sourcePin) }) != true {
+            randomPickPlayIntent?.revoke()
+            ref?.nativeUsenetLease?.close()
+            return false
+        }
+        guard quickWatchScopeIsCurrent(quickWatchScope),
+              randomPickPlayIntent?.consume(core: core, profiles: profiles) != false else {
+            ref?.nativeUsenetLease?.close()
+            return false
+        }
+        return true
+    }
+
     /// Cancel only unresolved Quick Watch work. A player/trailer already accepted into the presentation slot
     /// belongs to the player lifecycle and must survive the detail view's ordinary disappearance callback.
-    private func cancelPendingQuickWatch() {
+    private func cancelPendingQuickWatch(revokingRandomPlay: Bool = true) {
         guard presentation == nil else { return }
+        if revokingRandomPlay { randomPickPlayIntent?.revoke() }
+        randomPickSourceReceipt = nil
         quickWatchRouteGeneration &+= 1
         let hadTask = quickWatchTask != nil
         quickWatchTask?.cancel()
         quickWatchTask = nil
-        if hadTask { preparing = false }
+        if hadTask { preparation.cancel() }
         // An explicit request is one-shot. A profile/account boundary must not silently replay it under a
         // different owner when metadata or source settlement publishes another change later.
         if autoPlayOnAppear { autoPlayConsumed = true }
@@ -3297,9 +3479,15 @@ struct iOSDetailView: View {
     private func requestAutoPlayIfReady() {
         guard initialTraktNextEpisodeOffer == nil else { return }
         guard autoPlayOnAppear, !autoPlayConsumed, !LiveTypes.contains(type) else { return }
+        guard randomPickPlayIntent?.isCurrent(core: core, profiles: profiles) != false else { return }
         if isEpisodic {
             guard !metaUnavailable, let m = meta, autoPlayMetaMatchesRoute(m) else { return }
             guard let primary = m.videos.flatMap({ seriesPrimaryEpisode($0) }) else { return }
+            if let intent = randomPickPlayIntent,
+               !intent.bind(meta: m, video: primary.video, core: core, profiles: profiles) {
+                autoPlayConsumed = true
+                return
+            }
             autoPlayConsumed = true
             autoPlayEpisode = primary.video
         } else {
@@ -3307,6 +3495,11 @@ struct iOSDetailView: View {
             // settled source list and `moviePlaybackMeta` seed identity are already the normal hero Play path.
             if let m = meta {
                 guard !metaUnavailable, autoPlayMetaMatchesRoute(m) else { return }
+                if let intent = randomPickPlayIntent,
+                   !intent.bind(meta: m, video: nil, core: core, profiles: profiles) {
+                    autoPlayConsumed = true
+                    return
+                }
             }
             guard movieReady else { return }
             let scope = captureQuickWatchScope(titleType: meta?.type ?? type)
@@ -3445,13 +3638,19 @@ struct iOSDetailView: View {
         quickWatchScope: CinemaQuickWatchScope? = nil
     ) async {
         guard initialTraktNextEpisodeOffer == nil else { return }
+        if quickWatchScope == nil { cancelPendingQuickWatch() }
         // A4b: no longer gated on `meta != nil`, a hub-opened title with nil/mismatched Cinemeta meta still
         // has a resolved best stream (off the same groups the list renders) and plays off its seed identity.
         guard !preparing, let stream = movieBest else { return }
         if let quickWatchScope {
             guard quickWatchScopeIsCurrent(quickWatchScope) else { return }
         }
-        preparing = true; defer { preparing = false }
+        if quickWatchScope != nil, randomPickPlayIntent != nil {
+            guard let receipt = sourceList.playbackReceipt(pin: sourcePin) else { return }
+            randomPickSourceReceipt = receipt
+        }
+        let preparingAttempt = preparation.begin()
+        defer { preparation.finish(preparingAttempt) }
         // EXACT-SOURCE RESUME (owner requirement): if this title was last played through a specific debrid
         // source, play THAT source directly (reresolve a fresh link for the same file) instead of re-running
         // source selection across every add-on (the "Tried N sources / this source didn't load" failure). This
@@ -3484,6 +3683,7 @@ struct iOSDetailView: View {
                     resumeProposal,
                     currentSessionID: TraktAuth.storedSessionID
                 ) else { return }
+                guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: nil) else { return }
                 presentation = .player(PlayerLaunch(url: url, title: pm.name, headers: entry.headers,
                                                     resume: admittedResume.seconds ?? 0, meta: pm,
                                                     qualityText: entry.qualityText, bingeGroup: entry.bingeGroup,
@@ -3514,6 +3714,8 @@ struct iOSDetailView: View {
         if let win = await DebridCoordinator.shared.resolveFirstPlayable(
             candidates: candidates, cachedHashes: debridCache.cachedHashes,
             cachedUsenetURLs: debridCache.cachedUsenetURLs, labeledBest: stream) {
+            var didTransferPlayback = false
+            defer { if !didTransferPlayback { win.ref.nativeUsenetLease?.close() } }
             if let quickWatchScope {
                 guard quickWatchScopeIsCurrent(quickWatchScope) else { return }
             }
@@ -3532,6 +3734,8 @@ struct iOSDetailView: View {
                 resumeProposal,
                 currentSessionID: TraktAuth.storedSessionID
             ) else { return }
+            guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: win.ref) else { return }
+            didTransferPlayback = true
             presentation = .player(PlayerLaunch(url: win.ref.url, title: pm.name, headers: win.stream.requestHeaders,
                                                 resume: admittedResume.seconds ?? 0, meta: pm,
                                                 qualityText: StreamRanking.signature(win.stream),
@@ -3552,6 +3756,7 @@ struct iOSDetailView: View {
             DiagnosticsLog.log("usenet", "explicit play surface=movie \(UsenetPlaybackDiagnostics.outcome(result, startedAt: started))")
             if let quickWatchScope {
                 guard quickWatchScopeIsCurrent(quickWatchScope) else {
+                    if case .ready(let rejected) = result { rejected.nativeUsenetLease?.close() }
                     DiagnosticsLog.log("usenet", "explicit play surface=movie dropped reason=page_changed"); return
                 }
             }
@@ -3566,8 +3771,13 @@ struct iOSDetailView: View {
                 for: stream, confirmedCachedHashes: debridCache.cachedHashes,
                 confirmedUsenetURLs: debridCache.cachedUsenetURLs)
             if let quickWatchScope {
-                guard quickWatchScopeIsCurrent(quickWatchScope) else { return }
+                guard quickWatchScopeIsCurrent(quickWatchScope) else { ref?.nativeUsenetLease?.close(); return }
             }
+        }
+        var didTransferPlayback = false
+        var attemptPrime: Task<Void, Never>?
+        defer {
+            if !didTransferPlayback { ref?.nativeUsenetLease?.close(); attemptPrime?.cancel() }
         }
         guard let url = EpisodePlaybackIdentity.resolvedEpisodeMediaURL(
             isUsenet: stream.isUsenet, resolvedURL: ref?.url,
@@ -3575,6 +3785,7 @@ struct iOSDetailView: View {
         ) else { return }
         let prime = ref == nil
         if prime { primePlayback(stream) } else { core.loadEnginePlayer(for: stream) }
+        if prime { attemptPrime = torrentPrime }
         let pm = moviePlaybackMeta
         // fromStart: hand the player resume 0 so it starts at the beginning. The stored resume point is NOT
         // cleared here - it stays until normal playback progress overwrites it (D10: play-from-start, not reset).
@@ -3591,6 +3802,8 @@ struct iOSDetailView: View {
             resumeProposal,
             currentSessionID: TraktAuth.storedSessionID
         ) else { return }
+        guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: ref) else { return }
+        didTransferPlayback = true
         presentation = .player(PlayerLaunch(url: url, title: pm.name, headers: stream.requestHeaders,
                                             resume: admittedResume.seconds ?? 0, meta: pm,
                                             qualityText: StreamRanking.signature(stream),
@@ -3606,6 +3819,7 @@ struct iOSDetailView: View {
     /// dead trailer shows "Trailer unavailable" and never hops to content.
     private func playTrailerStream(_ stream: CoreStream) async {
         guard initialTraktNextEpisodeOffer == nil else { return }
+        cancelPendingQuickWatch()
         let name = "\(moviePlaybackMeta.name) Trailer"
         guard let launch = await iOSDetailView.resolveTrailerLaunch(for: stream, title: name) else { return }
         presentation = .trailerPlayer(url: launch.url, title: launch.title, audioSidecar: launch.audioSidecar)
@@ -3620,6 +3834,7 @@ struct iOSDetailView: View {
         enginePreference: PlayerEngineRouter.Override? = nil
     ) async {
         guard initialTraktNextEpisodeOffer == nil else { return }
+        cancelPendingQuickWatch()
         // #95: a tapped TRAILER row (a Streailer/YouTube `ytId` source) is NOT a content stream. Route it to
         // the trailer player (isTrailer:true, no meta) so a dead trailer shows "Trailer unavailable" and STOPS
         // instead of failing over to content and playing the actual movie. Content streams fall through below.
@@ -3630,7 +3845,8 @@ struct iOSDetailView: View {
         // A4b: no longer gated on `meta != nil`, a hub-opened title with nil meta still plays a tapped source
         // row off its seed identity (the source list itself renders without meta, so its rows must be playable).
         guard !preparing else { return }
-        preparing = true; defer { preparing = false }
+        let preparingAttempt = preparation.begin()
+        defer { preparation.finish(preparingAttempt) }
         // INSTANT FIRST-PLAY: cache-gate the manual resolve on the account-confirmed sets, so only a genuinely
         // cached tap runs the blocking resolve; a not-confirmed tap returns a nil ref with zero network and
         // primes+plays the embedded torrent instantly, exactly the pre-511c973 tap-to-play snap.
@@ -3893,7 +4109,8 @@ struct iOSDetailView: View {
         enginePreference: PlayerEngineRouter.Override? = nil
     ) async {
         guard !preparing, let m = meta else { return }
-        preparing = true; defer { preparing = false }
+        let preparingAttempt = preparation.begin()
+        defer { preparation.finish(preparingAttempt) }
         primePlayback(stream)
         let pm = PlaybackMeta(libraryId: m.id, videoId: m.id, type: type,
                               name: m.name, poster: m.poster, season: nil, episode: nil)
@@ -3964,6 +4181,10 @@ struct iOSDetailView: View {
                 HStack(alignment: .center, spacing: Theme.Space.sm) {
                     iOSRailHeader(eyebrow: "\(episodes(videos).count) episode\(episodes(videos).count == 1 ? "" : "s")",
                                   title: "Episodes")
+                    Button(action: selectRandomEpisode) {
+                        Label("Random episode", systemImage: "shuffle")
+                    }
+                    .buttonStyle(ChipButtonStyle())
                     #if !os(tvOS)
                     // Batch downloads (#119): whole current season, or a multi-select pass.
                     episodeDownloadMenu(videos)
@@ -4936,6 +5157,7 @@ struct iOSDetailView: View {
     /// Plays one extra the same way the Trailer button plays a trailer: device-direct first, then the /yt
     /// worker, then (Lite, no server) the embed.
     private func playExtra(_ video: TMDBClient.TitleVideo) {
+        cancelPendingQuickWatch()
         let label = "\(meta?.name ?? title) · \(video.name)"
         Task { @MainActor in
             if let resolved = await YouTubeDirectResolver.resolve(videoID: video.key, maxHeight: 1080) {
@@ -5189,6 +5411,8 @@ struct iOSEpisodeStreams: View {
     /// Set only by the Cinema quick-view route. It reuses this page's settled ranked Watch command; the
     /// ordinary episode-detail route remains source-list-first unless Smart Source Selection is enabled.
     var autoPlayOnAppear: Bool = false
+    var randomPickPlayIntent: RandomPickPlayIntent? = nil
+    var suppressPreferenceAutoPlay: Bool = false
     @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var account: StremioAccount
     @EnvironmentObject private var theme: ThemeManager
@@ -5228,7 +5452,8 @@ struct iOSEpisodeStreams: View {
     @State private var presentation: Presentation?
     @State private var playbackReturnReceipt = EpisodeReturnReceiptState<UUID, PlaybackMeta>()
     @State private var playbackReturnTarget: PlaybackNavigationOwner?
-    @State private var preparing = false
+    @State private var preparation = PlaybackPreparationState()
+    private var preparing: Bool { preparation.isActive }
     @State private var usenetPlaybackMessage: String?
     @State private var launchEnginePreference: PlayerEngineRouter.Override? = nil
     @State private var initialStartGate = OneShotResumeAdmissionGate<TraktSessionID>()
@@ -5240,6 +5465,7 @@ struct iOSEpisodeStreams: View {
     /// the same exact title/profile/episode admission fence and are cancelled before an unresolved task can
     /// present a player for a departed route.
     @State private var autoPickTask: Task<Void, Never>?
+    @State private var randomPickSourceReceipt: SourceListModel.PlaybackReceipt?
     @State private var quickWatchRouteGeneration = 0
     /// Owns this episode's source-list assembly + ranking OFF the SwiftUI render path (see
     /// `SourceListModel`): the body reads only the published output, scoped to this episode's stream
@@ -5349,6 +5575,11 @@ struct iOSEpisodeStreams: View {
         .onAppear {
             if initialTraktNextEpisodeOffer != nil,
                !episodeTargetIsCurrent(shownVideo, generation: episodeTargetGeneration) { return }
+            if autoPlayOnAppear, let intent = randomPickPlayIntent, intent.isPending,
+               !intent.bind(meta: meta, video: shownVideo, core: core, profiles: profiles) {
+                didAutoPick = true
+                return
+            }
             quickWatchRouteGeneration &+= 1
             // Wire the source-list model to this episode's sources (idempotent; see SourceListModel).
             sourceList.bind(core: core, torbox: torboxSearch, singularity: sourceIndex,
@@ -5367,7 +5598,7 @@ struct iOSEpisodeStreams: View {
             // waits for the exact settled ranked source set before resolving and presenting the player. A viewer
             // who backs out of the player lands on the full source list.
             if initialTraktNextEpisodeOffer == nil,
-               (autoPlayOnAppear || SourcePreferences.shared.autoPickBest), !didAutoPick {
+               (autoPlayOnAppear || (!suppressPreferenceAutoPlay && SourcePreferences.shared.autoPickBest)), !didAutoPick {
                 didAutoPick = true
                 let scope = captureQuickWatchScope(for: shownVideo)
                 let routeGeneration = quickWatchRouteGeneration
@@ -5385,6 +5616,7 @@ struct iOSEpisodeStreams: View {
         }
         .onChange(of: profiles.activeID) { _ in cancelPendingAutoPick() }
         .onChange(of: account.credentialBoundaryGeneration) { _ in cancelPendingAutoPick() }
+        .onReceive(core.$metaDetails) { randomPickPlayIntent?.invalidateMetadata($0) }
         // Debrid cache awareness for this episode's torrents + usenet: re-check as add-ons answer (de-duped
         // by hash set in refresh). Includes the TorBox search sources so those rows badge too. No-op with
         // no debrid key.
@@ -5552,6 +5784,9 @@ struct iOSEpisodeStreams: View {
     }
 
     private func quickWatchScopeIsCurrent(_ scope: CinemaQuickWatchScope) -> Bool {
+        guard randomPickPlayIntent?.isCurrent(core: core, profiles: profiles) != false else { return false }
+        if randomPickPlayIntent != nil, let receipt = randomPickSourceReceipt,
+           !sourceList.playbackReceiptIsCurrent(receipt, pin: sourcePin) { return false }
         guard CinemaQuickWatchScopePolicy.accepts(
             scope,
             titleID: meta.id,
@@ -5566,15 +5801,34 @@ struct iOSEpisodeStreams: View {
         return presentation == nil
     }
 
+    /// The episode's existing generation/scope is checked once more at the atomic player handoff.
+    private func admitRandomPickPlayback(quickWatchScope: CinemaQuickWatchScope?, ref: DebridPlaybackRef?) -> Bool {
+        guard let quickWatchScope else { randomPickPlayIntent?.revoke(); return true }
+        if randomPickPlayIntent != nil,
+           randomPickSourceReceipt.map({ sourceList.playbackReceiptIsCurrent($0, pin: sourcePin) }) != true {
+            randomPickPlayIntent?.revoke()
+            ref?.nativeUsenetLease?.close()
+            return false
+        }
+        guard quickWatchScopeIsCurrent(quickWatchScope),
+              randomPickPlayIntent?.consume(core: core, profiles: profiles) != false else {
+            ref?.nativeUsenetLease?.close()
+            return false
+        }
+        return true
+    }
+
     /// Cancel only unresolved source-selection work. Once the player presentation is accepted, the player
     /// owns that launch and the episode page's disappearance must not tear it down.
     private func cancelPendingAutoPick() {
         guard presentation == nil else { return }
+        randomPickPlayIntent?.revoke()
+        randomPickSourceReceipt = nil
         quickWatchRouteGeneration &+= 1
         let hadTask = autoPickTask != nil
         autoPickTask?.cancel()
         autoPickTask = nil
-        if hadTask { preparing = false }
+        if hadTask { preparation.cancel() }
         if autoPlayOnAppear { didAutoPick = true }
     }
 
@@ -5868,6 +6122,7 @@ struct iOSEpisodeStreams: View {
         _ stream: CoreStream,
         quickWatchScope: CinemaQuickWatchScope? = nil
     ) async {
+        if quickWatchScope == nil { cancelPendingAutoPick() }
         let target = shownVideo
         let targetGeneration = episodeTargetGeneration
         let name = "\(meta.name) Trailer"
@@ -5897,6 +6152,7 @@ struct iOSEpisodeStreams: View {
         sourceAddon: String? = nil,
         quickWatchScope: CinemaQuickWatchScope? = nil
     ) async {
+        if quickWatchScope == nil { cancelPendingAutoPick() }
         let target = shownVideo
         let targetGeneration = episodeTargetGeneration
         // #95: a tapped TRAILER row (a Streailer/YouTube `ytId` source) inside an episode source list is NOT a
@@ -5914,7 +6170,8 @@ struct iOSEpisodeStreams: View {
             }
             return
         }
-        preparing = true; defer { preparing = false }
+        let preparingAttempt = preparation.begin()
+        defer { preparation.finish(preparingAttempt) }
         let ep = debridHint(for: target)
         let ref: DebridPlaybackRef?
         let isTorrent: Bool
@@ -5924,6 +6181,7 @@ struct iOSEpisodeStreams: View {
             let result = await DebridCoordinator.shared.resolveExplicitUsenetPlayback(for: stream, episode: ep)
             DiagnosticsLog.log("usenet", "explicit play surface=episode \(UsenetPlaybackDiagnostics.outcome(result, startedAt: started))")
             guard episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else {
+                if case .ready(let rejected) = result { rejected.nativeUsenetLease?.close() }
                 DiagnosticsLog.log("usenet", "explicit play surface=episode dropped reason=page_changed"); return
             }
             switch result {
@@ -5937,6 +6195,11 @@ struct iOSEpisodeStreams: View {
         } else {
             (ref, isTorrent) = await playbackRef(for: stream, episode: ep)
         }
+        var didTransferPlayback = false
+        var attemptPrime: Task<Void, Never>?
+        defer {
+            if !didTransferPlayback { ref?.nativeUsenetLease?.close(); attemptPrime?.cancel() }
+        }
         guard presentation == nil,
               episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
         guard let playURL = EpisodePlaybackIdentity.resolvedEpisodeMediaURL(
@@ -5948,6 +6211,7 @@ struct iOSEpisodeStreams: View {
         // backoff loop running; the stored Task is also cancelled on view disappear. Debrid direct → no prime.
         torrentPrime?.cancel()
         torrentPrime = isTorrent ? prepareTorrentStream(stream) : nil
+        attemptPrime = torrentPrime
         let name = "\(meta.name)  ·  S\(target.season ?? season)E\(target.episodeNumber)"
         let pm = PlaybackMeta(libraryId: meta.id, videoId: target.id, type: "series",
                               name: meta.name, poster: target.thumbnail ?? meta.poster,
@@ -5971,6 +6235,8 @@ struct iOSEpisodeStreams: View {
             resumeProposal,
             currentSessionID: TraktAuth.storedSessionID
         ) else { return }
+        guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: ref) else { return }
+        didTransferPlayback = true
         presentation = .player(iOSDetailView.PlayerLaunch(url: playURL, title: name, headers: stream.requestHeaders,
                                             resume: admittedResume.seconds ?? 0, meta: pm,
                                             qualityText: StreamRanking.signature(stream),
@@ -5994,6 +6260,7 @@ struct iOSEpisodeStreams: View {
         labeledBest: CoreStream,
         quickWatchScope: CinemaQuickWatchScope? = nil
     ) async {
+        if quickWatchScope == nil { cancelPendingAutoPick() }
         let target = shownVideo
         let targetGeneration = episodeTargetGeneration
         guard !preparing,
@@ -6001,12 +6268,13 @@ struct iOSEpisodeStreams: View {
         // Hold `preparing` for the whole race so a second Watch tap can't launch a duplicate resolve. It is
         // RELEASED before the single-resolve fallback below, which sets its own guard (`play` early-returns
         // while `preparing`), so the fallback path is unchanged.
-        preparing = true
+        let preparingAttempt = preparation.begin()
         let ep = debridHint(for: target)
         if let ep, let win = await DebridCoordinator.shared.resolveFirstPlayable(
             candidates: candidates, episode: ep, cachedHashes: debridCache.cachedHashes,
             cachedUsenetURLs: debridCache.cachedUsenetURLs, labeledBest: labeledBest) {
-            defer { preparing = false }
+            var didTransferPlayback = false
+            defer { if !didTransferPlayback { win.ref.nativeUsenetLease?.close() }; preparation.finish(preparingAttempt) }
             guard presentation == nil,
                   episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
             lastBinge = win.stream.behaviorHints?.bingeGroup
@@ -6034,6 +6302,8 @@ struct iOSEpisodeStreams: View {
                 resumeProposal,
                 currentSessionID: TraktAuth.storedSessionID
             ) else { return }
+            guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: win.ref) else { return }
+            didTransferPlayback = true
             presentation = .player(iOSDetailView.PlayerLaunch(url: win.ref.url, title: name, headers: win.stream.requestHeaders,
                                                 resume: admittedResume.seconds ?? 0, meta: pm,
                                                 qualityText: StreamRanking.signature(win.stream),
@@ -6044,7 +6314,7 @@ struct iOSEpisodeStreams: View {
                                                 enginePreference: launchEnginePreference))
             return
         }
-        preparing = false   // release before the fallback, which re-guards on `preparing` inside `play`
+        preparation.finish(preparingAttempt) // Release only this race before the fallback's own claim.
         guard presentation == nil,
               episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
         // No acceptable parallel-cached winner (false-cached best, or every resolved leg a lower resolution
@@ -6071,13 +6341,18 @@ struct iOSEpisodeStreams: View {
         for _ in 0..<120 {
             guard !Task.isCancelled, presentation == nil,
                   episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
-            if sourceList.isSettled { break }
+            if sourceList.isSettled,
+               randomPickPlayIntent == nil || sourceList.playbackReceipt(pin: sourcePin) != nil { break }
             do { try await Task.sleep(for: .milliseconds(250)) }
             catch { return }
         }
         let groups = sourceList.groups
         guard sourceList.isSettled, let best = sourceList.best,
               episodeTargetIsCurrent(target, generation: targetGeneration, quickWatchScope: quickWatchScope) else { return }
+        if randomPickPlayIntent != nil {
+            guard let receipt = sourceList.playbackReceipt(pin: sourcePin) else { return }
+            randomPickSourceReceipt = receipt
+        }
         let sticky = SeriesSourceSticky.preference(for: meta.id)
         // Page auto-Watch launch pick: soft sticky so it re-ranks to the best available source for this
         // episode and only leans on the remembered pick to break ties between near-identical releases.

@@ -2577,6 +2577,13 @@ struct iOSLibraryView: View {
     /// Active client-side smart filters (Unwatched / In Progress / Watched / Short); empty = no filtering.
     /// Multi-select and AND-combined; applied on top of the type segment and the engine's sort.
     @State private var activeFilters: Set<LibrarySmartFilter> = []
+
+    // BEGIN RANDOM PICK LIBRARY STATE
+    @State private var randomLibrarySession = RandomPickPolicy.Session()
+    @State private var randomLibraryPreview: RandomPickPolicy.Ticket?
+    @State private var randomLibraryAccess: RandomPickUIAccess?
+    @State private var randomLibraryRoute: RandomPickLibraryRoute?
+    // END RANDOM PICK LIBRARY STATE
     /// The overlay profile's library is derived from an unbounded watch dictionary. Keep the bounded
     /// hero projection local to this view and refresh it from ProfileStore's published watch mutation,
     /// instead of sorting the entire dictionary while SwiftUI evaluates every body/signature pass.
@@ -2753,6 +2760,11 @@ struct iOSLibraryView: View {
                             // the predicates need, so they are evaluated on the source `CoreCWItem`s and the
                             // RailItem grid is then narrowed to the matching ids.
                             smartFilterBar(segmentedSource())
+                            Button(action: selectRandomLibraryItem) {
+                                Label("Random pick", systemImage: "shuffle")
+                            }
+                            .buttonStyle(ChipButtonStyle())
+                            .padding(.horizontal, Theme.Space.md)
                             PosterGrid(items: smartFiltered(segmented(libraryItems), pass: smartPassIDs(segmentedSource())),
                                        onTap: handleTap, onWatch: watchFromQuickView, menu: .library)
                         }
@@ -2780,6 +2792,7 @@ struct iOSLibraryView: View {
                 iOSDetailView(id: item.id, type: item.type, title: item.name,
                               seedBackdrop: item.backdrop, seedLogo: item.logo)
             }
+            .navigationDestination(isPresented: randomLibraryPresented) { randomLibraryDestination }
             .navigationDestination(for: CinemaDetailTarget.self) { target in
                 iOSDetailView(id: target.item.id, type: target.item.type, title: target.item.name,
                               seedBackdrop: target.item.backdrop, seedLogo: target.item.logo,
@@ -2800,6 +2813,53 @@ struct iOSLibraryView: View {
             #endif
             .onAppear { if core.library?.catalog.isEmpty != false { core.loadLibrary() } }
         }
+
+        // BEGIN RANDOM PICK LIBRARY LIFECYCLE
+        .sheet(isPresented: randomLibraryPreviewPresented) {
+            if let ticket = randomLibraryPreview {
+                RandomPickPreviewCard(ticket: ticket,
+                    onOpen: { openRandomLibraryItem(ticket, autoPlay: false) },
+                    onPlay: { openRandomLibraryItem(ticket, autoPlay: true) },
+                    onPickAgain: { pickRandomLibraryAgain(ticket) })
+                    .id(ticket.id)
+            }
+        }
+        .onReceive(profiles.$activeID) { profileID in
+            if let ticket = randomLibrarySession.ticket, ticket.profileID != profileID { clearRandomLibraryPick() }
+        }
+        .onReceive(profiles.$profiles) { incoming in
+            if let route = randomLibraryRoute {
+                if !(route.intent?.matchesPublishedProfiles(incoming, pickedThisLaunch: profiles.pickedThisLaunch)
+                    ?? route.access.matchesPublishedNavigationProfiles(incoming, pickedThisLaunch: profiles.pickedThisLaunch)) { clearRandomLibraryPick() }
+            } else if let access = randomLibraryAccess,
+               !access.matchesPublishedProfiles(incoming, pickedThisLaunch: profiles.pickedThisLaunch) { clearRandomLibraryPick() }
+        }
+        .onReceive(profiles.$pickedThisLaunch) { picked in
+            if !picked, profiles.profiles.count > 1 { clearRandomLibraryPick() }
+        }
+        .onChange(of: account.credentialBoundaryGeneration) { _ in clearRandomLibraryPick() }
+        .onChange(of: segment) { _ in clearRandomLibraryPick() }
+        .onChange(of: activeFilters) { _ in clearRandomLibraryPick() }
+        .onReceive(core.$revision) { _ in
+            if let route = randomLibraryRoute {
+                if !(route.intent?.routeIsCurrent(core: core, profiles: profiles)
+                    ?? route.access.isNavigationCurrent(profiles: profiles, core: core)) { clearRandomLibraryPick() }
+            } else if let access = randomLibraryAccess, !access.isCurrent(profiles: profiles, core: core) { clearRandomLibraryPick() }
+        }
+        .onReceive(core.$library) { library in
+            if core.usesNativeProfileState || profiles.activeUsesEngineHistory {
+                invalidateRandomLibraryRecord(in: library?.catalog ?? [])
+            }
+        }
+        .onReceive(profiles.$watch) { _ in
+            // Overlay watch publishes before its value changes. Revoke its preview immediately;
+            // an already-admitted detail destination owns its metadata/source lifecycle.
+            if !core.usesNativeProfileState, !profiles.activeUsesEngineHistory,
+               randomLibraryPreview != nil { clearRandomLibraryPick() }
+        }
+        .onChange(of: isActive) { active in if !active { clearRandomLibraryPick() } }
+        .onDisappear { if randomLibraryRoute == nil { clearRandomLibraryPick() } }
+        // END RANDOM PICK LIBRARY LIFECYCLE
         // Re-tapping the active Library tab pops any pushed detail/Downloads back to root (#22).
         .popToRootOnBump(TabScrollKeys.library, path: $path)
         // Quiet the ambient hero while this tab is hidden (mounted but opacity 0, so onDisappear never
@@ -2863,6 +2923,98 @@ struct iOSLibraryView: View {
         hero.noteInteraction()
         path.append(CinemaDetailTarget(item: FeaturedHeroItem.from(rail: item), autoPlay: true))
     }
+
+
+    // BEGIN RANDOM PICK LIBRARY HELPERS
+    private var randomLibraryScope: String {
+        "library:\(segment.rawValue):\(activeFilters.map(\.rawValue).sorted().joined(separator: ","))"
+    }
+
+    /// Runs on an explicit pick/revalidation, never as a body signature.
+    private func randomLibraryCandidates() -> [CoreCWItem] {
+        let items = segmentedSource()
+        let pass = smartPassIDs(items)
+        return RandomPickPolicy.eligibleLibraryItems(items.filter { pass?.contains($0.id) ?? true })
+    }
+
+    private func selectRandomLibraryItem() {
+        guard let access = RandomPickUIAccess.capture(profiles: profiles, core: core) else { clearRandomLibraryPick(); return }
+        let records = randomLibraryCandidates().map(RandomPickPolicy.libraryRecord)
+        var generator = SystemRandomNumberGenerator()
+        randomLibraryAccess = access
+        randomLibraryPreview = randomLibrarySession.select(records, profileID: profiles.activeID,
+                                                           scope: randomLibraryScope, using: &generator)
+        if randomLibraryPreview == nil { clearRandomLibraryPick() }
+    }
+
+    private func currentRandomLibraryItem(_ origin: RandomPickPolicy.Ticket) -> CoreCWItem? {
+        // An old sheet closure may not revoke or borrow the newer sheet's ticket.
+        guard randomLibrarySession.ticket == origin else { return nil }
+        let current = randomLibraryCandidates().first {
+            $0.id == origin.record.identity.id && $0.type == origin.record.identity.type
+        }
+        guard randomLibrarySession.accepts(origin, profileID: profiles.activeID, scope: randomLibraryScope,
+                ownerIsCurrent: randomLibraryAccess?.isCurrent(profiles: profiles, core: core) == true,
+                currentRecord: current.map(RandomPickPolicy.libraryRecord)) else {
+            clearRandomLibraryPick(); return nil
+        }
+        return current
+    }
+
+    private func pickRandomLibraryAgain(_ origin: RandomPickPolicy.Ticket) {
+        guard currentRandomLibraryItem(origin) != nil else { return }
+        selectRandomLibraryItem()
+    }
+
+    private func openRandomLibraryItem(_ origin: RandomPickPolicy.Ticket, autoPlay: Bool) {
+        guard let current = currentRandomLibraryItem(origin), let access = randomLibraryAccess else { return }
+        randomLibraryRoute?.intent?.revoke()
+        let intent = autoPlay ? RandomPickPlayIntent(ticketID: origin.id, access: access) {
+            randomLibraryRoute?.ticket == origin && currentRandomLibraryItem(origin) != nil
+        } : nil
+        randomLibraryRoute = RandomPickLibraryRoute(ticket: origin, item: current, access: access, autoPlay: autoPlay, intent: intent)
+        randomLibraryPreview = nil
+    }
+
+    private func invalidateRandomLibraryRecord(in items: [CoreCWItem]) {
+        // Inventory owns the pending preview, not the normal Detail route it already admitted.
+        guard randomLibraryPreview != nil, randomLibraryRoute == nil,
+              let ticket = randomLibrarySession.ticket else { return }
+        let current = items.first { $0.id == ticket.record.identity.id && $0.type == ticket.record.identity.type }
+        guard let current, !RandomPickPolicy.eligibleLibraryItems([current]).isEmpty,
+              RandomPickPolicy.libraryRecord(current) == ticket.record else { clearRandomLibraryPick(); return }
+    }
+
+    private var randomLibraryPreviewPresented: Binding<Bool> {
+        Binding(get: { randomLibraryPreview != nil }, set: { presented in
+            guard !presented else { return }
+            if randomLibraryRoute == nil { clearRandomLibraryPick() }
+            else { randomLibraryPreview = nil }
+        })
+    }
+
+    private var randomLibraryPresented: Binding<Bool> {
+        Binding(get: { randomLibraryRoute != nil }, set: { if !$0 { clearRandomLibraryPick() } })
+    }
+
+    @ViewBuilder private var randomLibraryDestination: some View {
+        if let route = randomLibraryRoute,
+           randomLibrarySession.ticket == route.ticket, profiles.activeID == route.ticket.profileID,
+           (route.intent?.routeIsCurrent(core: core, profiles: profiles)
+            ?? route.access.isNavigationCurrent(profiles: profiles, core: core)) {
+            iOSDetailView(id: route.item.id, type: route.item.type, title: route.item.name,
+                          autoPlayOnAppear: route.autoPlay, randomPickPlayIntent: route.intent)
+        }
+    }
+
+    private func clearRandomLibraryPick() {
+        randomLibraryRoute?.intent?.revoke()
+        randomLibraryPreview = nil
+        randomLibraryRoute = nil
+        randomLibraryAccess = nil
+        randomLibrarySession.clear()
+    }
+    // END RANDOM PICK LIBRARY HELPERS
 
     private func resumeLibraryContinueWatching(_ item: RailItem) {
         hero.noteInteraction()
