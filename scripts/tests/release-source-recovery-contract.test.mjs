@@ -8,7 +8,7 @@ import { test } from 'node:test';
 
 const workflow = readFileSync(new URL('../../.github/workflows/release-tvos.yml', import.meta.url), 'utf8');
 const source = '844782d29a93ae51991bfadc639d50bc3619d40b', code = 'a'.repeat(40), tag = 'v0.5.0-beta.1';
-const normalNative = 'a3169f338f3f05da4ad3adb39a1e557c3ddcac33';
+const normalNative = '2322e7feef3ba6c8feeae9bab764d595ff63617a';
 const historicalNative = '0c201563c6aa54eeb0545b55ad01582c0c3bcae3';
 const beta1RecordedNative = '7e3e68be5bf2b11c65d158c1823be94bd1608d1b';
 const playerDigest = '737073f587b4d78c0436d3dc08c40bfab72b26e3d3a3ac3eab11a7a3a1c288d1'; // immutable historical checkout only
@@ -286,6 +286,73 @@ function assertNativeWiring(text = workflow, android = androidWorkflows) {
     assert.match(lane, /^          key: .*\$\{\{ env\.VORTX_ENGINE_SOURCE_SHA \}\}.*hashFiles/m);
   }
 }
+
+function assertDesktopNativeSource(manifest, lock) {
+  const repository = 'https://github.com/VortXTV/vortx-core';
+  const expected = ['librqbit', 'vortx-archive', 'vortx-nntp', 'vortx-nzb', 'vortx-streaming-server'];
+  assert.match(normalNative, /^[0-9a-f]{40}$/, 'normal engine source must be a full immutable SHA');
+  const dependencies = manifest.match(/^vortx-streaming-server = .+\r?$/gm) ?? [];
+  assert.equal(dependencies.length, 1, 'Desktop must declare one engine dependency');
+  const dependency = dependencies[0].match(/^vortx-streaming-server = \{ git = "([^"]+)", rev = "([0-9a-f]{40})" \}\r?$/);
+  assert.ok(dependency, 'Desktop engine dependency must retain its explicit Git repository/full revision');
+  assert.equal(dependency[1], repository, 'Desktop engine repository changed');
+  assert.equal(dependency[2], normalNative, 'Desktop engine revision differs from native shipping lanes');
+  const expectedSource = 'git+' + repository + '?rev=' + normalNative + '#' + normalNative;
+  const observed = [];
+  for (const block of lock.split(/^\[\[package\]\]\r?$/m)) {
+    const names = [...block.matchAll(/^name = "([^"]+)"\r?$/gm)];
+    const sources = [...block.matchAll(/^source = "([^"]+)"\r?$/gm)];
+    const name = names[0]?.[1];
+    if (!expected.includes(name) && !name?.startsWith('vortx-') && !/vortx-core/i.test(block)) continue;
+    assert.equal(names.length, 1, 'Engine lock record must have one package identity');
+    assert(expected.includes(name), 'Unexpected private engine package: ' + name);
+    assert.equal(sources.length, 1, 'Engine lock record must have one Git source: ' + name);
+    assert.equal(sources[0][1], expectedSource, 'Engine lock repository/query/resolved commit differs: ' + name);
+    observed.push(name);
+  }
+  assert.deepEqual(observed.sort(), [...expected].sort(),
+    'Desktop engine lock roster must contain exactly the five reviewed packages');
+}
+
+test('Desktop manifest and all engine lock records match the native shipping source', () => {
+  assertDesktopNativeSource(
+    readFileSync(new URL('../../desktop/src-tauri/Cargo.toml', import.meta.url), 'utf8'),
+    readFileSync(new URL('../../desktop/src-tauri/Cargo.lock', import.meta.url), 'utf8'));
+});
+
+test('Desktop engine source invariant rejects actual pure pin and lock mutations', () => {
+  const repository = 'https://github.com/VortXTV/vortx-core';
+  const manifest = '[dependencies]\nvortx-streaming-server = { git = "' + repository + '", rev = "' + normalNative + '" }\n';
+  const record = name => '[[package]]\nname = "' + name + '"\nversion = "0.0.1"\nsource = "git+' +
+    repository + '?rev=' + normalNative + '#' + normalNative + '"\n\n';
+  const blocks = ['librqbit', 'vortx-archive', 'vortx-nntp', 'vortx-nzb', 'vortx-streaming-server'].map(record);
+  const lock = 'version = 4\n\n' + blocks.join('');
+  const oldPin = '39bc4e7e6d34be71e3bb6d4f6407f49a182b89b9';
+  const sourceLine = 'source = "git+' + repository + '?rev=' + normalNative + '#' + normalNative + '"';
+  assertDesktopNativeSource(manifest, lock);
+  const mutations = [
+    ['old manifest pin', manifest.replace(normalNative, oldPin), lock],
+    ['short manifest pin', manifest.replace(normalNative, normalNative.slice(0, 7)), lock],
+    ['wrong manifest repository', manifest.replace(repository, 'https://github.com/Other/vortx-core'), lock],
+    ['duplicate manifest dependency', manifest + manifest.split('\n')[1] + '\n', lock],
+    ['old query revision', manifest, lock.replace('?rev=' + normalNative, '?rev=' + oldPin)],
+    ['old resolved commit', manifest, lock.replace('#' + normalNative, '#' + oldPin)],
+    ['short query revision', manifest, lock.replace('?rev=' + normalNative, '?rev=' + normalNative.slice(0, 7))],
+    ['wrong lock repository', manifest, lock.replace(repository, repository + '-other')],
+    ['missing private package', manifest, lock.replace(blocks[0], '')],
+    ['duplicate private package', manifest, lock + blocks[0]],
+    ['registry rqbit beside the reviewed Git package', manifest, lock + '[[package]]\nname = "librqbit"\nversion = "8.1.1"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n'],
+    ['registry rqbit replacing the reviewed Git package', manifest, lock.replace(blocks[0], '[[package]]\nname = "librqbit"\nversion = "8.1.1"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n')],
+    ['unexpected private package', manifest, lock + record('vortx-extra')],
+    ['unexpected differently named engine package', manifest, lock + record('unexpected-private-engine')],
+    ['duplicate source field', manifest, lock.replace(sourceLine, sourceLine + '\n' + sourceLine)],
+    ['duplicate identity field', manifest, lock.replace('name = "vortx-archive"', 'name = "vortx-archive"\nname = "vortx-archive"')],
+  ];
+  for (const [name, changedManifest, changedLock] of mutations) {
+    assert(changedManifest !== manifest || changedLock !== lock, name + ': mutation must alter its input');
+    assert.throws(() => assertDesktopNativeSource(changedManifest, changedLock), name);
+  }
+});
 
 test('normal and historical native selection wiring rejects scoped workflow mutations', () => {
   assertNativeWiring();
