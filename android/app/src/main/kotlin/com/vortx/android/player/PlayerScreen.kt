@@ -37,6 +37,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -82,6 +83,10 @@ import com.vortx.android.model.StreamSource
 import com.vortx.android.model.TrackPreferencesStore
 import com.vortx.android.player.audio.AudioRouteMonitor
 import com.vortx.android.player.extras.KeepPlayingBackgroundSetting
+import com.vortx.android.player.subtitles.SubtitlePoolClient
+import com.vortx.android.player.subtitles.SubtitleTimingSession
+import com.vortx.android.player.subtitles.subtitlePoolPlaybackQuery
+import com.vortx.android.profile.ContinueWatchingOwnerGate
 import com.vortx.android.skip.AutoSkipCountdownDecision
 import com.vortx.android.skip.AutoSkipCountdownPolicy
 import com.vortx.android.skip.AutoSkipCountdownState
@@ -96,7 +101,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
@@ -344,8 +352,30 @@ fun PlayerScreen(
     var speed by remember(playbackSessionKey) { mutableStateOf(1.0f) }
     // Whether the "contribute a skip time" editor overlay is open. Reset per playback session.
     var showSkipEditor by remember(playbackSessionKey) { mutableStateOf(false) }
-    var subtitleDelaySeconds by remember(playbackSessionKey) {
-        mutableStateOf(SubtitleOffsetMemory.savedOffset(context, subtitleContentKey) ?: 0.0)
+    val savedSubtitleDelay = remember(playbackSessionKey) {
+        SubtitleOffsetMemory.savedOffset(context, subtitleContentKey)
+    }
+    var subtitleDelaySeconds by remember(playbackSessionKey) { mutableStateOf(savedSubtitleDelay ?: 0.0) }
+    val subtitleTiming = remember(playbackSessionKey) { SubtitleTimingSession(savedSubtitleDelay) }
+    DisposableEffect(subtitleTiming) { onDispose { subtitleTiming.retire() } }
+    val subtitleApplication = context.applicationContext as? VortXApplication
+    val subtitleSyncManager = subtitleApplication?.syncManager
+    val subtitleAccountAdmission = remember(playbackSessionKey) {
+        subtitleSyncManager?.captureLocalLibraryMutationAdmission()
+    }
+    val subtitleProfileRevision = remember(playbackSessionKey) { ContinueWatchingOwnerGate.serialized { it } }
+    val currentSubtitleSessionKey by rememberUpdatedState(playbackSessionKey)
+    fun withCurrentSubtitleOwner(action: () -> Boolean): Boolean {
+        if (subtitleApplication?.syncManager !== subtitleSyncManager) return false
+        val ownedAction: () -> Boolean = {
+            ContinueWatchingOwnerGate.serialized { revision ->
+                revision == subtitleProfileRevision && currentSubtitleSessionKey == playbackSessionKey &&
+                    !playerExitRequested && action()
+            }
+        }
+        // An existing manager without a captured owner is fail-closed. A local-only launch without
+        // any manager can still use manual timing; it never queries the signed-in pool.
+        return if (subtitleSyncManager == null) ownedAction() else subtitleAccountAdmission?.invoke(ownedAction) == true
     }
     var subtitleStyle by remember(playbackSessionKey) { mutableStateOf(SubtitleStyle.current(context)) }
     var audioDelaySeconds by remember(playbackSessionKey) { mutableStateOf(0.0) }
@@ -931,8 +961,11 @@ fun PlayerScreen(
     // Re-apply player-local controls when the live engine instance changes during a fail-soft demotion.
     // The new engine advertises its capabilities, so unsupported offsets remain honest no-ops.
     LaunchedEffect(engine) {
-        if (engine.subtitleDelayAvailable && subtitleDelaySeconds != 0.0) {
-            engine.setSubtitleDelay(subtitleDelaySeconds)
+        if (engine.subtitleDelayAvailable) {
+            withCurrentSubtitleOwner {
+                engine.setSubtitleDelay(subtitleDelaySeconds)
+                true
+            }
         }
         if (engine.audioDelayAvailable && audioDelaySeconds != 0.0) {
             engine.setAudioDelay(audioDelaySeconds)
@@ -1251,12 +1284,72 @@ fun PlayerScreen(
     // it on the live engine (mpv `sub-add` / the ExoPlayer side-loaded track rebuild) and
     // auto-selects it once the engine reports the grown track list.
     var addonSubtitles by remember(playbackSessionKey) { mutableStateOf<List<AddonSubtitle>>(emptyList()) }
+    var trackSelectionPhases by remember(playbackSessionKey, engine) { mutableStateOf(TrackSelectionPhases()) }
     val mountedAddonSubs = remember(playbackSessionKey, engine) { mutableSetOf<String>() }
     var pendingSubSelectAbove by remember(playbackSessionKey, engine) { mutableStateOf<Int?>(null) }
     fun mountAddonSubtitle(sub: AddonSubtitle) {
         if (mountedAddonSubs.add(sub.url)) {
             pendingSubSelectAbove = latestState.subtitleTracks.size
             engine.addExternalSubtitle(sub.url)
+        }
+    }
+    // Shared by phone and TV: pool IO is owned by the exact source/account/profile lifetime.
+    // Freeze the first real duration/release query rather than applying a duration-0 pool offset.
+    val subtitlePoolScope = rememberCoroutineScope()
+    val latestSubtitleEngine by rememberUpdatedState(engine)
+    val poolSignedIn = subtitleSyncManager?.isSignedIn == true
+    val poolThin = playerState.subtitleTracks.size + addonSubtitles.size < 2
+    val subtitlePoolQuery = remember(playbackSessionKey, playerState.durationMs > 0L) {
+        val filename = runCatching { java.net.URI(currentPlayable.url).path?.substringAfterLast('/') }
+            .getOrNull()?.takeIf { it.isNotBlank() }
+        val releaseName = filename ?: listOfNotNull(currentPlayable.mediaRef?.title ?: currentPlayable.title,
+            currentPlayable.mediaRef?.year?.toString()).joinToString(" ")
+        subtitlePoolPlaybackQuery(subtitleContentKey, playerState.durationMs, releaseName)
+    }
+    var pooledSubtitles by remember(playbackSessionKey) {
+        mutableStateOf(emptyList<SubtitlePoolClient.PooledSubtitle>())
+    }
+    var poolLoadingId by remember(playbackSessionKey, engine) { mutableStateOf<Int?>(null) }
+    fun admitCurrentSubtitleEngine(action: () -> Boolean): Boolean = withCurrentSubtitleOwner {
+        latestSubtitleEngine === engine && action()
+    }
+    LaunchedEffect(playbackSessionKey, engine, subtitlePoolQuery, poolThin, poolSignedIn) {
+        val query = subtitlePoolQuery ?: return@LaunchedEffect
+        val syncEnabled = com.vortx.android.config.RemoteConfig.isFeatureOn("subtitleSync",
+            com.vortx.android.config.RemoteConfigDefaults.FEATURE_SUBTITLE_SYNC)
+        if (!poolSignedIn || (!poolThin && !(engine.subtitleDelayAvailable && syncEnabled)) ||
+            !admitCurrentSubtitleEngine { true }) return@LaunchedEffect
+        val result = SubtitlePoolClient.fetchPooled(
+            contentKey = query.contentKey,
+            fingerprint = query.fingerprint,
+            isSignedIn = true,
+        )
+        currentCoroutineContext().ensureActive()
+        admitCurrentSubtitleEngine {
+            pooledSubtitles = if (poolThin) result.subs else emptyList()
+            true
+        }
+        // Offset and subtitle choices came from THIS captured query, not a mutable title lookup.
+        if (syncEnabled) subtitleTiming.applyCommunity(result.offsetMs, engine.subtitleDelayAvailable,
+            ::admitCurrentSubtitleEngine) { seconds ->
+            engine.setSubtitleDelay(seconds)
+            subtitleDelaySeconds = seconds
+        }
+    }
+    fun selectPooledSubtitle(sub: SubtitlePoolClient.PooledSubtitle) {
+        if (poolLoadingId != null || sub !in pooledSubtitles || !poolSignedIn ||
+            !admitCurrentSubtitleEngine { true }) return
+        showControls()
+        trackSelectionPhases = trackSelectionPhases.holdSubtitle()
+        poolLoadingId = sub.id
+        subtitlePoolScope.launch {
+            val local = SubtitlePoolClient.download(context, sub, isSignedIn = true)
+            currentCoroutineContext().ensureActive()
+            admitCurrentSubtitleEngine {
+                poolLoadingId = null
+                if (local != null) mountAddonSubtitle(AddonSubtitle("pool:${sub.id}", local, sub.lang, "Community"))
+                true
+            }
         }
     }
     LaunchedEffect(playbackSessionKey) {
@@ -1299,7 +1392,6 @@ fun PlayerScreen(
     val matchAudioSub = remember(playbackSessionKey) {
         TrackPreferencesStore(context, PerformanceMode.isConstrainedDevice(context)).matchAudioSub
     }
-    var trackSelectionPhases by remember(playbackSessionKey, engine) { mutableStateOf(TrackSelectionPhases()) }
     LaunchedEffect(playbackSessionKey, engine, playerState.audioTracks, playerState.subtitleTracks, trackSelectionPhases) {
         val audioTracks = latestState.audioTracks
         val subtitleTracks = latestState.subtitleTracks
@@ -1949,11 +2041,17 @@ fun PlayerScreen(
             subtitleDelaySeconds = subtitleDelaySeconds,
             onAdjustSubtitleDelay = { delta ->
                 showControls()
-                subtitleDelaySeconds = adjustedPlayerDelay(subtitleDelaySeconds, delta)
-                engine.setSubtitleDelay(subtitleDelaySeconds)
-                SubtitleOffsetMemory.save(context, subtitleDelaySeconds, subtitleContentKey)
+                subtitleTiming.applyManual(adjustedPlayerDelay(subtitleDelaySeconds, delta),
+                    engine.subtitleDelayAvailable, ::admitCurrentSubtitleEngine) { seconds ->
+                    engine.setSubtitleDelay(seconds)
+                    subtitleDelaySeconds = seconds
+                    SubtitleOffsetMemory.save(context, subtitleDelaySeconds, subtitleContentKey)
+                }
             },
             subtitleStyle = subtitleStyle,
+            pooledSubtitles = pooledSubtitles,
+            poolLoadingId = poolLoadingId,
+            onSelectPooledSubtitle = ::selectPooledSubtitle,
             onChangeSubtitleStyle = { next ->
                 showControls()
                 SubtitleStyle.save(context, next)

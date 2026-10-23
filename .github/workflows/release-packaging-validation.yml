@@ -145,6 +145,9 @@ jobs:
           --tests com.vortx.android.ui.profilepicker.ProfilePickerPresentationTest
           --tests com.vortx.android.ui.profilepicker.ProfilePickerArtworkStartupTest
           --tests com.vortx.android.iptv.LiveGuideTest
+          --tests com.vortx.android.player.subtitles.SubtitleTimingSessionTest
+          --tests com.vortx.android.player.SubtitleOffsetBoundaryTest
+          --tests com.vortx.android.player.SubtitleOffsetMemoryTest
           --tests 'com.vortx.android.engine.NativeOwnAccountSourcesTest.malformed own row is held without losing valid siblings or raw source bytes'
           --no-daemon --stacktrace
 
