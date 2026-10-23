@@ -4,6 +4,38 @@ Notable VortX changes, newest first. VortX is Apple TV first, with iPhone/iPad, 
 
 What is planned next is in [ROADMAP.md](ROADMAP.md). To request a feature or report a bug, start a [GitHub Discussion](https://github.com/VortXTV/VortX/discussions) or [open an issue](https://github.com/VortXTV/VortX/issues).
 
+## 0.5.6 - Native all the way, safer profiles and lighter playback
+
+Build **280** across Apple and Android. This brings the 0.5.6 beta repairs together, removes the old comparison engine and Node runtime from the native apps, and keeps your add-ons, profiles and saved data on the VortX engine. Stremio-compatible add-ons, optional Stremio account/library import and Cinemeta are still supported.
+
+### Fixed and improved
+
+- **Profiles, catalogs, episodes and sources.** Profile changes keep the current native callback stream alive, so fresh catalogs, seasons, episode lists and source results reach the screen. A late result from the old profile cannot overwrite the new one.
+- **Older accounts that would not open ([#262](https://github.com/VortXTV/VortX/issues/262), [#265](https://github.com/VortXTV/VortX/issues/265)).** Valid older display values, including sticky-series labels supplied by add-ons, are no longer mistaken for hidden credentials. Original saved bytes, unknown fields and pending changes are kept. An unreadable account is never treated as an empty one.
+- **Android sign-in and recovery ([#277](https://github.com/VortXTV/VortX/issues/277)).** Expensive key derivation and native sync run off the UI thread. Cancelled sign-ins release unclaimed key material, and native failures are contained without replacing the account with empty data. Profile saves, account publication and Continue Watching share a consistent ownership and lock order.
+- **Stremio library and watched history ([#267](https://github.com/VortXTV/VortX/issues/267)).** The native account path carries the owner's library and watched evidence as well as add-ons. Reconnects and delayed imports remain bound to the account and profile that started them; incomplete work stays retryable without discarding accepted data.
+- **Mac playback after pausing.** Recovery no longer leaves Play waiting behind an unfinished replacement or shows that replacement's temporary position. Skip Intro and Skip Credits stay above the controls when you move the mouse.
+- **Repeated playback recovery.** Seek recovery and mid-play recovery share a bounded allowance instead of reopening the same failing region indefinitely. An unfinished episode keeps its position; it is not marked watched or advanced to hide a failure. A remote source ending early remains a separate possible failure.
+- **Lighter glass on iPhone, iPad and Mac.** Player chrome is more transparent, with a deeper Crimson tint and local contrast protection around time labels. Reduce Transparency and Effects Off retain their readable fallbacks; controls stay in their existing positions.
+- **Apple TV controls and next-episode work.** Up reveals the controls before checking skip and Up Next prompts. Impossible or not-yet-due checks are rejected before building large episode inventories, and next-episode preparation remains bounded.
+- **Self-hosted add-ons.** User-selected LAN, localhost and Tailscale add-ons install, restore and receive requests normally on Apple and Android. Certificate checks, metadata-address exclusions and response limits stay in place.
+- **Top Shelf in Full TV.** The extension is part of the normal Full app installation. It follows the shared container actually granted to the signed app and extension, with bounded queue snapshots and refreshes for progress and artwork changes. The signer must still provision a matching shared capability for both targets; Lite does not include Top Shelf.
+- **Less background uploading.** Playback saves are batched while you watch and flushed sooner on pause or stop. History, Home and catalog operations avoid repeated work, and failed reads retain the last complete saved snapshot.
+- **Clearer recovery.** Watched-history Retry can restore a missing account session, Android diagnostics can be shared before entering Settings, and Trakt connection failures are classified without exposing credentials.
+
+### New and changed
+
+- **Richer Collections**, with nested groups, ordering, artwork and optional Xperience import/refresh inside the existing editor. A refresh cannot overwrite newer local edits.
+- **Playback badges**, with icons, current track information and the selected audio language. Apple TV Settings has focused categories and keeps search.
+- **Updated native player inputs.** Apple and Android Full use the reviewed custom mpv/libplacebo path with FFmpeg **9.0.2**. Android Play uses **Media3 1.11.1** and retains its GPL-free packaging boundary.
+- **Native-only app composition.** The retired comparison engine, Node runtime, `server.js` and legacy web-host target are removed from Apple and Android release paths. Optional Stremio integration and compatible community add-ons are not removed.
+
+### Installation and remaining work
+
+Update using the same platform and variant to preserve its identity and saved data. Apple IPAs require compatible sideload signing. The Apple-silicon Mac app is ad-hoc signed, not notarized. Android remains a technical preview, with Full MPV and Play Media3 variants for phones, tablets and Android TV.
+
+The full first-party Swift 6 migration, wider performance/audit work and every dependency upgrade are **not** claimed complete. Codec, HDR, audio-route and Top Shelf behaviour still depend on the device, source and signing capabilities. If an account or playback still fails, export diagnostics before deleting data, resetting credentials or reinstalling.
+
 ## 0.5.6 beta 5 - Mac playback fixes, self-hosted add-ons and lighter syncing
 
 Build **278** across Apple and Android. Beta 5 builds on beta 4 with Mac playback and player fixes, self-hosted
