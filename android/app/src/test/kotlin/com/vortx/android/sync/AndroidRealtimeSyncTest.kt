@@ -50,6 +50,7 @@ class AndroidRealtimeSyncTest {
         var provideMountToken = true
         var afterExport: (() -> Unit)? = null
         var reopenFails = false
+        var reopenError: LinkageError? = null
         var applyFails = false
         var ackFails = false
         var exportFails = false
@@ -60,7 +61,7 @@ class AndroidRealtimeSyncTest {
         override fun currentMountToken(account: SessionOwnerSnapshot.Account) =
             if (reopenFails || !provideMountToken) null else NativeAccountMountToken(mount, mountRevision)
         override suspend fun reopenCheckpoint(account: SessionOwnerSnapshot.Account, isCurrent: () -> Boolean): Boolean {
-            reopens++; check(isCurrent()); if (reopenFails) error("checkpoint unavailable"); return true
+            reopens++; check(isCurrent()); reopenError?.let { throw it }; if (reopenFails) error("checkpoint unavailable"); return true
         }
         override suspend fun applyDocument(account: SessionOwnerSnapshot.Account, document: JSONObject, isCurrent: () -> Boolean): Boolean {
             applied++; applyEntered?.complete(Unit); applyGate?.await()
@@ -267,6 +268,105 @@ class AndroidRealtimeSyncTest {
             } catch (actual: AssertionError) { assertSame(fatal, actual) }
             assertEquals(account, f.manager.account.value)
         } finally { channel.stop(); f.close() }
+    }
+
+    @Test fun submitPreloginExceptionKeepsSavedSessionAndClearsOnlyOriginalSecrets() = test {
+        val f = Fixture(testScheduler)
+        val saved = requireNotNull(f.manager.currentSession())
+        var requests = 0
+        f.manager.installSyncTestSeam(saved, 10, transport = { method, path, body, token ->
+            requests++
+            assertEquals("POST", method); assertEquals("/v1/auth/prelogin", path)
+            assertEquals("fixture-login", body?.getString("login")); assertNull(token)
+            throw IllegalStateException("https://fixture.invalid/private?token=fixture-private")
+        })
+        f.manager.installSessionRestoreTestSeam(saved)
+        val model = VortXAccountViewModel(f.manager)
+        try {
+            f.context.getSharedPreferences("fixture-retained", 0).edit().putString("saved", "keep").commit()
+            f.gateway.carrier.getJSONObject("facts").put("saved-library", true)
+            val retainedFacts = f.gateway.carrier.toString()
+            val retainedState = f.context.getSharedPreferences("vortx_sync_state", 0).all.toMap()
+            model.onLoginChange("fixture-login"); model.onPasswordChange("fixture password")
+            model.onTotpChange("123456"); model.onRecoveryInputChange("fixture recovery")
+            model.submit(); runCurrent()
+            assertEquals(1, requests)
+            assertEquals(VortXAccountFormState.Error(
+                "Could not complete this account action. Your saved data is preserved. Please try again.",
+            ), model.formState.value)
+            assertEquals("", model.password.value); assertEquals("", model.totp.value)
+            assertEquals("", model.recoveryInput.value); assertFalse(model.totpRequired.value)
+            assertFalse(model.syncing.value); assertFalse(f.realtime.isActive())
+            assertSame(saved, f.manager.currentSession()); assertEquals(account, model.account.value)
+            assertEquals(retainedFacts, f.gateway.carrier.toString())
+            assertEquals(retainedState, f.context.getSharedPreferences("vortx_sync_state", 0).all)
+            assertEquals("keep", f.context.getSharedPreferences("fixture-retained", 0).getString("saved", null))
+            assertEquals(0, f.gateway.applied); assertEquals(0, f.gateway.exports)
+        } finally { model.viewModelScope.cancel(); f.close() }
+    }
+
+    @Test fun deferredSubmitExceptionRetainsEditedFieldsAndCannotStartParallelAuth() = test {
+        val f = Fixture(testScheduler)
+        val saved = requireNotNull(f.manager.currentSession())
+        val release = CompletableDeferred<Unit>()
+        var requests = 0
+        f.manager.installSyncTestSeam(saved, 10, transport = { _, path, _, _ ->
+            requests++; assertEquals("/v1/auth/prelogin", path)
+            release.await()
+            throw IllegalStateException("fixture stale auth failure")
+        })
+        f.manager.installSessionRestoreTestSeam(saved)
+        val model = VortXAccountViewModel(f.manager)
+        try {
+            model.onLoginChange("original-login"); model.onPasswordChange("original password")
+            model.submit(); runCurrent()
+            assertEquals(1, requests); assertEquals(VortXAccountFormState.Submitting, model.formState.value)
+            model.onLoginChange("edited-login"); model.onPasswordChange("edited password")
+            model.onTotpChange("654321"); model.onRecoveryInputChange("edited recovery")
+            model.submit(); runCurrent()
+            assertEquals(1, requests) // An edit revokes cleanup, not the one-flight request guard.
+            release.complete(Unit); runCurrent()
+            assertEquals(VortXAccountFormState.Idle, model.formState.value)
+            assertEquals("edited-login", model.login.value); assertEquals("edited password", model.password.value)
+            assertEquals("654321", model.totp.value); assertEquals("edited recovery", model.recoveryInput.value)
+            assertFalse(model.syncing.value); assertSame(saved, f.manager.currentSession())
+            assertEquals(account, model.account.value); assertEquals(0, f.gateway.applied)
+            assertEquals(0, f.gateway.exports); assertFalse(f.realtime.isActive())
+        } finally { model.viewModelScope.cancel(); f.close() }
+    }
+
+    @Test fun submitCancellationRetainsExactCauseAndSavedSessionWithoutRetryError() = test {
+        val f = Fixture(testScheduler)
+        val saved = requireNotNull(f.manager.currentSession())
+        val release = CompletableDeferred<Unit>()
+        val cancelled = CancellationException("fixture auth cancellation")
+        var requests = 0
+        f.manager.installSyncTestSeam(saved, 10, transport = { _, path, _, _ ->
+            requests++; assertEquals("/v1/auth/prelogin", path)
+            release.await()
+            throw cancelled
+        })
+        f.manager.installSessionRestoreTestSeam(saved)
+        val model = VortXAccountViewModel(f.manager)
+        try {
+            model.onLoginChange("fixture-login"); model.onPasswordChange("fixture password")
+            model.onTotpChange("123456"); model.onRecoveryInputChange("fixture recovery")
+            val owner = requireNotNull(model.viewModelScope.coroutineContext[kotlinx.coroutines.Job])
+            val before = owner.children.toSet()
+            model.submit(); runCurrent()
+            val submission = owner.children.single { it !in before }
+            var completion: Throwable? = null
+            submission.invokeOnCompletion { completion = it }
+            assertEquals(1, requests); assertEquals(VortXAccountFormState.Submitting, model.formState.value)
+            release.complete(Unit); runCurrent()
+            assertTrue(submission.isCancelled); assertSame(cancelled, completion)
+            assertEquals(VortXAccountFormState.Idle, model.formState.value)
+            assertEquals("", model.password.value); assertEquals("", model.totp.value)
+            assertEquals("", model.recoveryInput.value); assertFalse(model.syncing.value)
+            assertSame(saved, f.manager.currentSession()); assertEquals(account, model.account.value)
+            assertNull(model.syncNotice.value); assertFalse(f.realtime.isActive())
+            assertEquals(0, f.gateway.applied); assertEquals(0, f.gateway.exports)
+        } finally { model.viewModelScope.cancel(); f.close() }
     }
 
     @Test fun postAuthRestoreExceptionKeepsSavedSessionClearsSecretsAndUsesFixedNotice() = test {
@@ -668,6 +768,90 @@ class AndroidRealtimeSyncTest {
             assertFalse(f.manager.syncDown()); assertEquals(10L, f.manager.lastAppliedVersion())
             f.context.rejectCommitKey = null
             assertTrue(f.manager.syncDown()); assertEquals(11L, f.manager.lastAppliedVersion())
+        } finally { f.close() }
+    }
+
+    @Test fun nativeReopenLinkageFailureRetainsStateNoticeUntilSuccessAndRejectsStaleNotice() = test {
+        val f = Fixture(testScheduler)
+        val expectedNotice = "The native engine is unavailable or incompatible. Your saved data and pending changes are preserved. Update VortX or export diagnostics, then retry sync."
+        try {
+            val saved = f.manager.currentSession()
+            val retainedState = f.context.getSharedPreferences("vortx_sync_state", 0).all.toMap()
+            val retainedFacts = f.gateway.carrier.toString()
+            f.gateway.reopenError = UnsatisfiedLinkError("fixture/private/checkpoint?token=fixture-private")
+            assertFalse(f.manager.syncDown())
+            assertEquals(expectedNotice, f.manager.syncProblem.value)
+            assertSame(saved, f.manager.currentSession()); assertEquals(account, f.manager.account.value)
+            assertEquals(10L, f.manager.lastAppliedVersion()); assertFalse(f.dirty())
+            assertEquals(retainedState, f.context.getSharedPreferences("vortx_sync_state", 0).all)
+            assertEquals(retainedFacts, f.gateway.carrier.toString())
+            assertEquals(0, f.gets); assertEquals(0, f.puts); assertEquals(0, f.gateway.applied)
+            f.gateway.reopenError = null; f.getFails = true
+            assertFalse(f.manager.syncDown())
+            assertEquals(expectedNotice, f.manager.syncProblem.value) // Ordinary failure cannot clear native failure.
+            f.getFails = false
+            assertTrue(f.manager.syncDown()); assertNull(f.manager.syncProblem.value)
+            assertSame(saved, f.manager.currentSession()); assertEquals(10L, f.manager.lastAppliedVersion())
+
+            val replacement = VortXSyncManager.Session("fixture-b",
+                account.copy(id = "00000000-0000-0000-0000-000000000999"), key)
+            f.gateway.afterExport = {
+                f.gateway.afterExport = null
+                f.manager.replaceSyncSessionTestSeam(replacement)
+                throw UnsatisfiedLinkError("fixture stale linkage")
+            }
+            assertFalse(f.manager.syncDown())
+            assertSame(replacement, f.manager.currentSession()); assertEquals(replacement.account, f.manager.account.value)
+            assertNull(f.manager.syncProblem.value) // An old lease cannot publish into the replacement account.
+        } finally { f.close() }
+    }
+
+    @Test fun staleNativeGatewayLinkageCannotMarkSameAccountReplacementUnavailable() = test {
+        val f = Fixture(testScheduler)
+        try {
+            val saved = f.manager.currentSession()
+            val retainedState = f.context.getSharedPreferences("vortx_sync_state", 0).all.toMap()
+            val retainedCloud = f.cloud.toString()
+            val replacement = Gateway()
+            f.gateway.afterExport = {
+                f.gateway.afterExport = null
+                f.manager.installNativeGatewayTestSeam(replacement, f.providers)
+                throw UnsatisfiedLinkError("fixture stale gateway/private?token=fixture-private")
+            }
+            assertFalse(f.manager.syncDown())
+            assertNull(f.manager.syncProblem.value)
+            assertSame(saved, f.manager.currentSession()); assertEquals(account, f.manager.account.value)
+            assertEquals(retainedState, f.context.getSharedPreferences("vortx_sync_state", 0).all)
+            assertEquals(retainedCloud, f.cloud.toString()); assertEquals(10L, f.manager.lastAppliedVersion())
+            assertFalse(f.dirty()); assertEquals(0, f.gets); assertEquals(0, f.puts)
+            assertEquals(1, f.gateway.exports); assertEquals(0, replacement.exports)
+            assertTrue(f.manager.syncDown()) // The same-session replacement remains retryable.
+            assertTrue(replacement.exports > 0); assertEquals(1, replacement.reopens)
+            assertNull(f.manager.syncProblem.value); assertSame(saved, f.manager.currentSession())
+            assertEquals(0, f.puts)
+        } finally { f.close() }
+    }
+
+    @Test fun queuedNativeExportLinkageFailureRetainsActualPendingEditsAndUnacknowledgedRevision() = test {
+        val f = Fixture(testScheduler)
+        try {
+            val saved = f.manager.currentSession()
+            f.settingsDirty(JSONObject().put("vortx.player.matchFrameRate", 120.0))
+            f.edit("queued-local-library")
+            val retainedSettings = f.settingsDirty().toString()
+            val retainedCloud = f.cloud.toString()
+            f.gateway.afterExport = { throw UnsatisfiedLinkError("fixture/private/export?token=fixture-private") }
+            assertTrue(f.dirty())
+            runCurrent(); advanceTimeBy(2_501); runCurrent()
+            assertTrue(f.gateway.exports > 0) // The actual debounced upload reached native export.
+            assertEquals("The native engine is unavailable or incompatible. Your saved data and pending changes are preserved. Update VortX or export diagnostics, then retry sync.",
+                f.manager.syncProblem.value)
+            assertSame(saved, f.manager.currentSession()); assertEquals(account, f.manager.account.value)
+            assertTrue(f.dirty()); assertEquals(retainedSettings, f.settingsDirty().toString())
+            assertEquals(10L, f.manager.lastAppliedVersion()); assertEquals(0, f.puts)
+            assertEquals(retainedCloud, f.cloud.toString())
+            assertTrue(f.gateway.carrier.getJSONObject("facts").getBoolean("queued-local-library"))
+            assertFalse(f.realtime.isActive())
         } finally { f.close() }
     }
 

@@ -22,10 +22,10 @@ runtime_cp="$stdlib:$annotations:$coroutines:$junit:$hamcrest"
 printf 'Host probe Kotlin2.2.10/coroutines1.10.2, not full Android composition\n'
 nice -n 15 "$java_bin" -XX:ActiveProcessorCount=1 -Xmx512m -cp "$compiler_cp" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
     -no-stdlib -no-reflect -jvm-target 17 -Xbackend-threads=1 -classpath "$runtime_cp" \
-    "$source/diagnostics/DiagnosticShareOperation.kt" "$source/engine/NativeRetirementDispatch.kt" \
-    "$tests/diagnostics/DiagnosticShareOperationTest.kt" "$tests/engine/NativeRetirementDispatchTest.kt" \
+    "$source/diagnostics/DiagnosticShareOperation.kt" "$source/engine/NativeRetirementDispatch.kt" "$source/sync/NativeAccountAttempt.kt" \
+    "$tests/diagnostics/DiagnosticShareOperationTest.kt" "$tests/engine/NativeRetirementDispatchTest.kt" "$tests/sync/NativeAccountAttemptTest.kt" \
     -d "$receipt/classes" 2>&1 | tee "$receipt/compiler.log"
 nice -n 15 "$java_bin" -XX:ActiveProcessorCount=1 -Xmx128m -cp "$receipt/classes:$runtime_cp" org.junit.runner.JUnitCore \
-    com.vortx.android.diagnostics.DiagnosticShareOperationTest com.vortx.android.engine.NativeRetirementDispatchTest \
+    com.vortx.android.diagnostics.DiagnosticShareOperationTest com.vortx.android.engine.NativeRetirementDispatchTest com.vortx.android.sync.NativeAccountAttemptTest \
     2>&1 | tee "$receipt/runtime.log"
 printf 'Retained actual-helper receipt: %s\n' "$receipt"

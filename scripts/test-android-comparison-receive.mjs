@@ -48,6 +48,9 @@ function extract(name, prefix) {
 }
 const down = extract("syncDown", "private suspend ");
 const use = extract("useAccountData", "suspend ");
+const nativeAttemptSource = await readFile(join(repo, "android/app/src/main/kotlin/com/vortx/android/sync/NativeAccountAttempt.kt"), "utf8");
+const nativeAttempt = nativeAttemptSource.slice(nativeAttemptSource.indexOf("/**"));
+assert(nativeAttempt.includes("internal suspend fun runNativeAccountAttempt("), "Exact native compatibility helper required");
 console.log("Manager source SHA-256:", createHash("sha256").update(source).digest("hex"));
 console.log("Source mode:", process.env.VORTX_SYNC_RECEIVE_UNFIXED === "1" ? "current source with exact comparison correction reversed in memory" :
     process.env.VORTX_SYNC_RECEIVE_REVISION || "current worktree");
@@ -95,6 +98,7 @@ internal class FixtureLibraryGateway {
     fun captureAccountLibraryLease(): Int? = null
     fun ownerWatchedChanged(native: Int, admission: ((() -> Boolean) -> Boolean)) = true
 }
+${nativeAttempt}
 internal class FixtureReceiveManager {
     var generation = 0
     var signedIn = true
@@ -112,6 +116,10 @@ internal class FixtureReceiveManager {
     var lastVersion = 0L
     private var applyingRemote = false
     private val nativeSyncMutex = Mutex()
+    private val nativeWorkDispatcher = Dispatchers.Unconfined
+    private val nativeGateway: Any? = Any()
+    private fun markNativeAccountUnavailable(lease: SyncSessionLease, gateway: Any) {}
+    private fun clearNativeAccountUnavailable(lease: SyncSessionLease, gateway: Any) {}
     private val addonTombstones = FixtureTombstones()
     private val libraryTombstones = FixtureTombstones()
     private val ownerWatchedIntents = FixtureWatchedIntents()
@@ -120,6 +128,7 @@ internal class FixtureReceiveManager {
     private fun captureSyncLease() = if (signedIn) SyncSessionLease(generation) else null
     private fun isSyncLeaseCurrent(lease: SyncSessionLease) = signedIn && lease.generation == generation
     private suspend fun nativeSyncDown(lease: SyncSessionLease, force: Boolean, routineReceive: Boolean) = nativeReceived && isSyncLeaseCurrent(lease)
+    private suspend fun nativeSyncDown(lease: SyncSessionLease, gateway: Any, force: Boolean, routineReceive: Boolean) = nativeReceived && isSyncLeaseCurrent(lease)
     private fun retryPendingPushBeforePull(lease: SyncSessionLease) = pending
     private suspend fun pullSyncDocResult(lease: SyncSessionLease, allowOlderAddonTombstones: Boolean): SyncDocPull {
         gets++

@@ -1049,7 +1049,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     )
 
     private val _syncProblem = MutableStateFlow<String?>(null)
-    /** A terminal writer incompatibility, surfaced by the existing account status line. */
+    /** Writer/engine incompatibility, surfaced by the existing account status line. */
     val syncProblem: StateFlow<String?> = _syncProblem.asStateFlow()
     @Volatile private var upgradeRequiredLease: SyncSessionLease? = null
 
@@ -1063,6 +1063,23 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         publishIfSyncLeaseCurrent(lease) {
             upgradeRequiredLease = lease
             _syncProblem.value = "Update VortX to keep syncing. Your changes are still on this device."
+        }
+    }
+
+    private fun markNativeAccountUnavailable(lease: SyncSessionLease, gateway: NativeAccountGateway) {
+        var firstNotice = false
+        publishIfSyncLeaseCurrent(lease) {
+            if (nativeGateway === gateway && !requiresUpgrade(lease)) {
+                firstNotice = _syncProblem.value != NATIVE_ACCOUNT_UNAVAILABLE
+                _syncProblem.value = NATIVE_ACCOUNT_UNAVAILABLE
+            }
+        }
+        if (firstNotice) DiagnosticsLog.log("native-account", "sync result=failed reason=native_linkage_unavailable")
+    }
+
+    private fun clearNativeAccountUnavailable(lease: SyncSessionLease, gateway: NativeAccountGateway) {
+        publishIfSyncLeaseCurrent(lease) {
+            if (nativeGateway === gateway && _syncProblem.value == NATIVE_ACCOUNT_UNAVAILABLE) _syncProblem.value = null
         }
     }
 
@@ -2101,7 +2118,12 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     private suspend fun syncUp(lease: SyncSessionLease): Boolean {
         if (!isSyncLeaseCurrent(lease) || requiresUpgrade(lease)) return false
         if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { withContext(nativeWorkDispatcher) {
-            nativeSyncMutex.withLock { nativeSyncUp(lease) }
+            nativeSyncMutex.withLock {
+                val gateway = nativeGateway ?: return@withLock false
+                runNativeAccountAttempt(onUnavailable = { markNativeAccountUnavailable(lease, gateway) }) {
+                    nativeSyncUp(lease, gateway)
+                }.also { if (it) clearNativeAccountUnavailable(lease, gateway) }
+            }
         } }
             catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
             catch (_: Exception) { false }
@@ -2124,8 +2146,8 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         return synced && isSyncLeaseCurrent(lease)
     }
 
-    private suspend fun nativeSyncDown(lease: SyncSessionLease, force: Boolean = false, routineReceive: Boolean = false): Boolean {
-        val gateway = nativeGateway ?: return false
+    private suspend fun nativeSyncDown(lease: SyncSessionLease, gateway: NativeAccountGateway, force: Boolean = false, routineReceive: Boolean = false): Boolean {
+        if (gateway !== nativeGateway) return false
         val account = SessionOwnerSnapshot.Account(lease.accountId, lease.ownerEpoch)
         if (force) nativeReceiveReceipt = null
         val conditionalVersion = if (routineReceive && !force) conditionalReceiveVersion(lease, gateway) else null
@@ -2148,7 +2170,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         }
         nativeReceiveReceipt = null
         if (pulled is SyncDocPull.Empty) {
-            return nativeSyncUp(lease)
+            return nativeSyncUp(lease, gateway)
         }
         val pull = pulled as? SyncDocPull.Doc ?: return false
         if (!isSyncLeaseCurrent(lease)) return false
@@ -2224,8 +2246,8 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
         }
     }
 
-    private suspend fun nativeSyncUp(lease: SyncSessionLease): Boolean {
-        val gateway = nativeGateway ?: return false
+    private suspend fun nativeSyncUp(lease: SyncSessionLease, gateway: NativeAccountGateway): Boolean {
+        if (gateway !== nativeGateway) return false
         val account = SessionOwnerSnapshot.Account(lease.accountId, lease.ownerEpoch)
         var pushedStamps: Map<String, Double> = emptyMap()
         var pushedPreferences: JSONObject? = null
@@ -2667,7 +2689,12 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
     ): Boolean {
         if (!isSyncLeaseCurrent(lease)) return false
         if (com.vortx.android.BuildConfig.NATIVE_ENGINE_ENABLED) return try { withContext(nativeWorkDispatcher) {
-            nativeSyncMutex.withLock { nativeSyncDown(lease, force, routineReceive) }
+            nativeSyncMutex.withLock {
+                val gateway = nativeGateway ?: return@withLock false
+                runNativeAccountAttempt(onUnavailable = { markNativeAccountUnavailable(lease, gateway) }) {
+                    nativeSyncDown(lease, gateway, force, routineReceive)
+                }.also { if (it) clearNativeAccountUnavailable(lease, gateway) }
+            }
         } }
             catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
             catch (_: Exception) { false }
@@ -3551,6 +3578,8 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
             "Secure storage is unavailable. Your VortX session was not changed. Please try again."
         private const val AUTH_SUPERSEDED =
             "This account action was superseded by a newer sign-in or sign-out."
+        private const val NATIVE_ACCOUNT_UNAVAILABLE =
+            "The native engine is unavailable or incompatible. Your saved data and pending changes are preserved. Update VortX or export diagnostics, then retry sync."
 
         /**
          * The v2 sync-document WRITE gate, held FALSE. Matches Apple `VortXSyncManager.writeSyncDocV2`

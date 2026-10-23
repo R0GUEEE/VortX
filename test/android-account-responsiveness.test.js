@@ -42,11 +42,16 @@ test("all auth flows preserve intent/adoption context and own temporary keys unt
 
 test("native sync uses only the worker dispatcher while retaining caller cancellation and mutex", () => {
     assert.match(source, /scope\.coroutineContext\[ContinuationInterceptor\] as\? CoroutineDispatcher \?: Dispatchers\.IO/);
-    for (const [signature, call] of [["    private suspend fun syncUp(lease:", "nativeSyncUp(lease)"],
-        ["    private suspend fun syncDown(\n", "nativeSyncDown(lease, force, routineReceive)"]]) {
+    for (const [signature, call] of [["    private suspend fun syncUp(lease:", "nativeSyncUp(lease, gateway)"],
+        ["    private suspend fun syncDown(\n", "nativeSyncDown(lease, gateway, force, routineReceive)"]]) {
         const body = method(signature);
         assert(body.includes("withContext(nativeWorkDispatcher)"));
-        assert(body.includes(`nativeSyncMutex.withLock { ${call} }`));
+        assert(body.includes("nativeSyncMutex.withLock {"));
+        assert(body.includes("val gateway = nativeGateway ?: return@withLock false"));
+        assert(body.includes(call));
+        assert(body.indexOf("withContext(nativeWorkDispatcher)") < body.indexOf("nativeSyncMutex.withLock {"));
+        assert(body.indexOf("nativeSyncMutex.withLock {") < body.indexOf("val gateway = nativeGateway"));
+        assert(body.indexOf("val gateway = nativeGateway") < body.indexOf(call));
         assert(!body.includes("withContext(scope.coroutineContext"));
         assert(body.includes("catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }"));
         assert(body.includes("if (!isSyncLeaseCurrent(lease)"));
