@@ -434,7 +434,7 @@ async function main() {
     }
     const flags = ['-O', '-whole-module-optimization', '-j', '1', '-num-threads', '1', '-swift-version', '6',
         '-parse-as-library', '-strict-concurrency=complete', '-warnings-as-errors', '-module-cache-path', path.join(directory, 'module-cache')];
-    if (ownerSource || ownerJSON || fifo || stage === 'session' || ownerRaw || ownerCold || traktNext || mpvTLS || playerMetadata) {
+    if (ownerSource || ownerJSON || fifo || stage === 'session' || stage === 'bootstrap' || ownerRaw || ownerCold || traktNext || mpvTLS || playerMetadata) {
         // Host-beta OS versions must not invent an unavailable standard-library target.
         // Use the same explicit macOS 14 fixture floor as the existing native test lanes.
         await run('sdk-path', ['/usr/bin/nice', '-n', '15', '/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-path'], 30_000, helper);
