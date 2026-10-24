@@ -53,6 +53,33 @@ final class CoreBridge: ObservableObject {
         true
     }
     private let nativeFacadeLock = NSLock()
+    private var nativeSubtitleDomain: UUID { nativePlaybackReadLifetime.subtitleDomain }
+    /// Only actual writer admission constructs this scalar proof, while B is held.
+    /// Facade capture joins its private profile generation under F before registration.
+    struct NativeSubtitleOwnerProof: Equatable, Sendable {
+        let domain: UUID
+        let installation: UUID
+        let credential: CredentialScopeRegistry.Capture
+        let sourceID: UUID
+        let profileID: UUID
+        let accountGeneration: UUID
+        fileprivate init(domain: UUID, installation: UUID, credential: CredentialScopeRegistry.Capture,
+                         sourceID: UUID, profileID: UUID, accountGeneration: UUID) {
+            self.domain = domain; self.installation = installation; self.credential = credential
+            self.sourceID = sourceID; self.profileID = profileID; self.accountGeneration = accountGeneration
+        }
+    }
+    @MainActor
+    func captureNativeSubtitleOwner(_ original: PlaybackMutationTarget) -> CredentialPublicationOutbox.SubtitleMountOwner? {
+        nativeFacadeLock.withLock {
+            guard case .native(let requested?) = original,
+                  currentNativePlaybackBinding() == requested,
+                  let facade = nativeFacadeStorage, let account = requested.accountGeneration else { return nil }
+            return facade.captureNativeSubtitleOwner(.init(domain: nativeSubtitleDomain,
+                installation: requested.sessionGeneration, credential: requested.credential,
+                sourceID: facade.sourceID, profileID: requested.profileID, accountGeneration: account))
+        }
+    }
     private let nativePlaybackReadLifetime = NativePlaybackReadLifetime()
     private let nativeMetadataAdmissionFence = VortxNativeMetadataAdmissionFence()
     private let nativeCallbackLifetime = NativeCallbackLifetime()
@@ -143,10 +170,21 @@ final class CoreBridge: ObservableObject {
     /// Retire inside B BEFORE any install/published-account/source replacement.
     /// Worker reads release this short scalar lock before touching F or mirrors.
     fileprivate final class NativePlaybackReadLifetime: Sendable {
+        let subtitleDomain = UUID()
         private let state = OSAllocatedUnfairLock(initialState: UUID())
         func capture() -> UUID { state.withLock { $0 } }
         func accepts(_ original: UUID) -> Bool { state.withLock { $0 == original } }
-        func retire() { state.withLock { $0 = UUID() } }
+        func retire() {
+            // Close admission before the following owner field replacement. This short
+            // synchronous helper does NOT delay that replacement until native drain;
+            // the async install/profile-FIFO paths own their explicit drain tickets.
+            let retirement = CredentialPublicationOutbox.beginSubtitleRetirement(domain: subtitleDomain)
+            state.withLock { $0 = UUID() }
+            Task {
+                await CredentialPublicationOutbox.waitForSubtitleRetirement(retirement)
+                CredentialPublicationOutbox.finishSubtitleRetirement(retirement)
+            }
+        }
     }
     /// A read predicate only, never FIFO/mutation/checkpoint/metadata authority.
     /// No CoreBridge reference, actor object or current singleton is retained.
@@ -989,6 +1027,10 @@ final class CoreBridge: ObservableObject {
                               capture: CredentialScopeRegistry.Capture, hostProfiles: [UserProfile] = [],
                               initialProfileID: UUID? = nil,
                               initialProfileSource: (any VortxMutationAuthority)? = nil) async throws {
+        let subtitleRetirement = CredentialPublicationOutbox.beginSubtitleRetirement(domain: nativeSubtitleDomain)
+        defer { CredentialPublicationOutbox.finishSubtitleRetirement(subtitleRetirement) }
+        await CredentialPublicationOutbox.waitForSubtitleRetirement(subtitleRetirement)
+        try Task.checkCancellation()
         _ = ProfileStore.shared
         activateNativePresentationBoundary()
         let installGeneration = UUID()
@@ -1064,11 +1106,14 @@ final class CoreBridge: ObservableObject {
     @MainActor
     func closeNativeSession() async {
         let old = nativeFacadeLock.withLock { nativeFacadeStorage }
-        revokeNativeSession()
+        let retirement = revokeNativeSession()
+        await CredentialPublicationOutbox.waitForSubtitleRetirement(retirement.subtitle)
+        CredentialPublicationOutbox.finishSubtitleRetirement(retirement.subtitle)
         await old?.shutdown()
     }
     @MainActor @discardableResult
     private func revokeNativeSession() -> NativeMetadataBoundaryRetirement {
+        let subtitleRetirement = CredentialPublicationOutbox.beginSubtitleRetirement(domain: nativeSubtitleDomain)
         // Capture the desired stored profile on its MainActor owner. Unlike UI
         // clear, the later async bootstrap requires a settled matching mirror.
         let originalProfileID = ProfileStore.shared.activeID
@@ -1100,7 +1145,7 @@ final class CoreBridge: ObservableObject {
             guard originalMetadataClearAuthorityIsCurrent(original) else { return nil }
             return clearNativePublishedState(authority: original)
         }
-        return .init(lifecycle: lifecycle, clear: completedClear)
+        return .init(lifecycle: lifecycle, clear: completedClear, subtitle: subtitleRetirement)
     }
     @MainActor private struct NativeMetadataClearOwner {
         let credential: CredentialScopeRegistry.Capture
@@ -1127,6 +1172,7 @@ final class CoreBridge: ObservableObject {
     @MainActor private struct NativeMetadataBoundaryRetirement {
         let lifecycle: NativeMetadataLifecycleAuthority
         let clear: NativeMetadataClearAuthority?
+        let subtitle: CredentialPublicationOutbox.SubtitleRetirement
     }
     @MainActor private func captureNativeMetadataClearOwner() -> NativeMetadataClearOwner {
         let credential = CredentialScopeRegistry.shared.capture(), epoch = capturePublicationToken().epoch
@@ -5293,9 +5339,9 @@ final class CoreBridge: ObservableObject {
     /// the prior profile before a new account switch or a same-account revalidation can begin.
     @MainActor func activeProfileDidChange() {
         let previous = nativeFacade
-        let lifecycle = revokeNativeSession().lifecycle
+        let retirement = revokeNativeSession()
         let continuation = NativeMetadataBootstrapContinuation(self)
-        Task { @MainActor in await continuation.restore(previous: previous, original: lifecycle) }
+        Task { @MainActor in await continuation.restore(previous: previous, original: retirement) }
         return
     }
 
@@ -6513,25 +6559,29 @@ extension CoreBridge {
     @MainActor private final class NativeMetadataBootstrapContinuation {
         private weak var core: CoreBridge?
         init(_ core: CoreBridge) { self.core = core }
-        func restore(previous: VortxNativeCoreFacade?, original: NativeMetadataLifecycleAuthority) async {
+        func restore(previous: VortxNativeCoreFacade?, original: NativeMetadataBoundaryRetirement) async {
+            await CredentialPublicationOutbox.waitForSubtitleRetirement(original.subtitle)
+            CredentialPublicationOutbox.finishSubtitleRetirement(original.subtitle)
             await previous?.shutdown()
-            guard let core, core.originalMetadataLifecycleIsCurrent(original) else { return }
-            _ = await VortXSyncManager.shared.restoreNativeCheckpoint(credentialCapture: original.owner.credential)
+            guard let core, core.originalMetadataLifecycleIsCurrent(original.lifecycle) else { return }
+            _ = await VortXSyncManager.shared.restoreNativeCheckpoint(credentialCapture: original.lifecycle.owner.credential)
         }
         func hydrate(previous: VortxNativeCoreFacade?, capture: CredentialScopeRegistry.Capture,
-                     original: NativeMetadataLifecycleAuthority) async {
+                     original: NativeMetadataBoundaryRetirement) async {
+            await CredentialPublicationOutbox.waitForSubtitleRetirement(original.subtitle)
+            CredentialPublicationOutbox.finishSubtitleRetirement(original.subtitle)
             await previous?.shutdown()
             guard let core, CredentialScopeRegistry.shared.isCurrent(capture),
-                  capture == original.owner.credential, core.originalMetadataLifecycleIsCurrent(original) else { return }
+                  capture == original.lifecycle.owner.credential, core.originalMetadataLifecycleIsCurrent(original.lifecycle) else { return }
             await VortXSyncManager.shared.hydrateEngineFromOwnedAddons(credentialCapture: capture)
         }
     }
     @MainActor private func receiveNativeCredentialBoundary() {
         let capture = CredentialScopeRegistry.shared.capture(), previous = nativeFacade
-        let lifecycle = revokeNativeSession().lifecycle
+        let retirement = revokeNativeSession()
         let continuation = NativeMetadataBootstrapContinuation(self)
         Task { @MainActor in
-            await continuation.hydrate(previous: previous, capture: capture, original: lifecycle)
+            await continuation.hydrate(previous: previous, capture: capture, original: retirement)
         }
     }
 }

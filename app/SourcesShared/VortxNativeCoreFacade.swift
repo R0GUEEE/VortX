@@ -172,7 +172,11 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     private var closed = false
     // A commit may have reached disk before readback failed. Keep the last acknowledged
     // projections readable, but only a new authenticated session may certify more writes.
-    private var checkpointReopenRequired = false
+    private var checkpointReopenRequired = false {
+        willSet {
+            if newValue && !checkpointReopenRequired { retireSubtitleOwnerAfterSynchronousChangeLocked() }
+        }
+    }
     // Installed only by private init, before exposure. Builders are pure local value capture;
     // the returned delivery, never the client callback, is invoked after the outermost F.
     private var sourceChangedDelivery: (@Sendable ([String], ChangeReceipt?) -> (@Sendable () -> Void)?)?
@@ -222,6 +226,35 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     private var pendingProfileTransitions = 0
     private var accountEpoch = UUID()
     private var watchlistProfileGeneration = UUID()
+    struct NativeSubtitleOwnerProof: Equatable, Sendable {
+        let bridge: CoreBridge.NativeSubtitleOwnerProof
+        let profileGeneration: UUID
+        fileprivate init(bridge: CoreBridge.NativeSubtitleOwnerProof, profileGeneration: UUID) {
+            self.bridge = bridge; self.profileGeneration = profileGeneration
+        }
+    }
+    /// Caller holds B. This joins the original Bridge installation to the actual acknowledged
+    /// profile generation under F, then registers using only scalar condition bookkeeping.
+    func captureNativeSubtitleOwner(_ original: CoreBridge.NativeSubtitleOwnerProof)
+        -> CredentialPublicationOutbox.SubtitleMountOwner? {
+        lock.withLock {
+            guard !closed, !checkpointReopenRequired, pendingProfileTransitions == 0,
+                  original.sourceID == sourceID, original.accountGeneration == accountEpoch,
+                  values["native_state"]?["activeProfileId"] == .string(original.profileID.uuidString),
+                  session.scope.account == original.credential.namespace else { return nil }
+            return CredentialPublicationOutbox.registerSubtitleOwner(.init(bridge: original,
+                profileGeneration: watchlistProfileGeneration))
+        }
+    }
+    /// Caller owns F; records retirement synchronously before any owner field changes.
+    /// Only scalar stamps enter the coordinator. Native work and its wakeups never need F.
+    private func retireSubtitleOwnerAfterSynchronousChangeLocked() {
+        let retirement = CredentialPublicationOutbox.beginSubtitleRetirement(domain: sourceID)
+        Task {
+            await CredentialPublicationOutbox.waitForSubtitleRetirement(retirement)
+            CredentialPublicationOutbox.finishSubtitleRetirement(retirement)
+        }
+    }
     private var sourceArchive: Data?
     private var ownerHistoryActive = false
     private var ownerHistoryACKGeneration = UUID()
@@ -452,16 +485,26 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             return (state, host, values["native_own_overlay_pending"] ?? .object([:]), accountEpoch)
         }
     }
-    func close() {
+    @discardableResult
+    func close() -> CredentialPublicationOutbox.SubtitleRetirement {
+        let subtitleRetirement = CredentialPublicationOutbox.beginSubtitleRetirement(domain: sourceID)
         lock.lock(); closed = true; mutationFIFO.close(); let old = Array(tasks.values); tasks.removeAll(); generations.removeAll(); resourceSelections.removeAll(); resourceValueTasks.removeAll(); latestChangeSequence.removeAll(); values.removeAll(); metadataLibraryMembership = VortxLibraryMembership(); addonInventories.removeAll(); addonConfirmation = nil; addonOperation = UUID(); lock.unlock()
         session.revoke()
-        old.forEach { $0.cancel() }; Task { await session.close() }
+        old.forEach { $0.cancel() }
+        Task {
+            await CredentialPublicationOutbox.waitForSubtitleRetirement(subtitleRetirement)
+            CredentialPublicationOutbox.finishSubtitleRetirement(subtitleRetirement)
+            await session.close()
+        }
+        return subtitleRetirement
     }
     func shutdown() async {
         if lock.withLock({ ownerHistoryActive }) {
             await withCheckedContinuation { continuation in flushPendingProgress { continuation.resume() } }
         }
-        close(); await session.close()
+        let retirement = close()
+        await CredentialPublicationOutbox.waitForSubtitleRetirement(retirement)
+        await session.close()
     }
     var registryBinding: RegistryBinding? {
         lock.withLock {
@@ -805,10 +848,22 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         let predecessor = tasks["native_state"]
         let ticket = UUID(); generations["native_state"] = ticket
         let profileTransition = forceProfileTransition || ["switch_profile", "delete_profile", "merge_native_sync", "patch_profile", "rebind_profile_account"].contains(type)
+        let subtitleOwnerTransition = profileTransition || legacyMaterial != nil || hostRemote != nil
+            || !websiteEvents.isEmpty || !websiteAddonEvents.isEmpty
+        let subtitleRetirement = subtitleOwnerTransition
+            ? CredentialPublicationOutbox.beginSubtitleRetirement(domain: sourceID) : nil
         if profileTransition { pendingProfileTransitions += 1 }
         // State intents are FIFO, never latest-wins: dropping one would lose progress/profile edits.
         tasks["native_state"] = Task { [weak self] in
             await predecessor?.value
+            if let subtitleRetirement {
+                await CredentialPublicationOutbox.waitForSubtitleRetirement(subtitleRetirement)
+            }
+            defer {
+                if let subtitleRetirement {
+                    CredentialPublicationOutbox.finishSubtitleRetirement(subtitleRetirement)
+                }
+            }
             defer { queueMember.finish() }
             guard let self else { completion?(.failure(VortxNativeError.closed)); return }
             var transitionReleased = false

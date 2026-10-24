@@ -6,7 +6,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { fork } = require('node:child_process');
+const { fork, spawnSync } = require('node:child_process');
 const xperienceInputs = require('../test/xperience-harness-inputs.cjs');
 const { extractDeclaration } = xperienceInputs;
 const root = path.resolve(__dirname, '..');
@@ -359,6 +359,15 @@ async function main() {
     // exact source once; no old test entry or production input is removed.
     sources = [...new Set(sources)];
     sources.forEach(capture);
+    let subtitleProofMode;
+    if (sources.includes('app/SourcesShared/CredentialScope.swift')) {
+        ['app/SourcesShared/CoreBridge.swift', 'app/SourcesShared/VortxNativeCoreFacade.swift',
+            'scripts/extract-subtitle-proof-hosts.cjs'].forEach(capture);
+        const hasBridge = sources.includes('app/SourcesShared/CoreBridge.swift');
+        const hasFacade = sources.includes('app/SourcesShared/VortxNativeCoreFacade.swift');
+        if (!(hasBridge && hasFacade)) subtitleProofMode = hasBridge ? 'facade-shell'
+            : hasFacade ? 'bridge-shell' : 'full-shells';
+    }
     fs.mkdirSync(path.join(root, 'app/build'), { recursive: true });
     directory = fs.mkdtempSync(path.join(root, `app/build/native-migration-${stage}.`));
     process.stdout.write(`Retained ${stage} source-unit receipts: ${directory}\n`);
@@ -417,7 +426,17 @@ async function main() {
             declarationTransformations: [], factoryExtraction: false
         }, null, 2) + '\n');
     }
-    write('compiler-inputs.sha256', inputs.map(file => `${digest(fs.readFileSync(file))}  ${path.relative(directory, file)}\n`).join(''));
+    if (subtitleProofMode) {
+        fs.mkdirSync(path.join(directory, 'generated'), { recursive: true });
+        const proofHost = path.join(directory, 'generated/NativeSubtitleProofHosts.swift');
+        const proofRun = spawnSync(process.execPath, [copies.get('scripts/extract-subtitle-proof-hosts.cjs'),
+            root, subtitleProofMode, proofHost], { cwd: root, encoding: 'utf8' });
+        if (proofRun.error || proofRun.status !== 0) throw new Error('Actual subtitle proof extraction failed: ' + (proofRun.stderr || proofRun.error));
+        inputs.push(proofHost);
+        write('subtitle-owner-proof-hosts.json', proofRun.stdout);
+    }
+    write('compiler-inputs.sha256', inputs.map(file => digest(fs.readFileSync(file)) + '  ' + path.relative(directory, file) + '\n').join(''));
+
     verifySources('source-precompile');
     const executable = path.join(directory, 'fixture');
     const helper = copies.get('scripts/native-migration-supervisor.cjs');

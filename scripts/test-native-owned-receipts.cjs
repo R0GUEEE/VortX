@@ -4,7 +4,7 @@
 // Whole actual Facade/Session/Runtime/resource inputs; real native C module+lib.
 // Runtime ABI/store/transport are the existing exact RAM Session fixture types.
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
-const { fork } = require('node:child_process');
+const { fork, spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const captured = new Map(), copies = new Map(), dependencies = new Map(), generated = new Map();
 let directory, active, interrupted = 0, phase = 'preflight', compile = 'not-run', runtime = 'not-run', scopeMode = 'unselected';
@@ -240,7 +240,7 @@ async function main() {
         'scripts/native-migration-supervisor.cjs',
         'test/xperience-harness-inputs.cjs', 'app/Tests/VortxNativeOwnedReceiptTests.swift',
         'test/native-metadata-dispatch-inputs.cjs', 'app/Tests/VortxNativeMetadataDispatchTests.swift',
-        'app/SourcesShared/CoreBridge.swift', 'app/SourcesShared/PlaybackMutationOwnershipPolicy.swift',
+        'app/SourcesShared/CoreBridge.swift', 'scripts/extract-subtitle-proof-hosts.cjs', 'app/SourcesShared/PlaybackMutationOwnershipPolicy.swift',
         'app/SourcesShared/BatchMetaSlotPolicy.swift',
         'app/Tests/VortxNativeSessionTests.swift', 'app/SourcesShared/Profiles.swift',
         'app/SourcesShared/ProfileDiscoveryPreferences.swift', 'app/SourcesShared/VortXSyncManager.swift'].forEach(capture);
@@ -290,10 +290,17 @@ async function main() {
         + exact('app/SourcesShared/ProfileDiscoveryPreferences.swift', 'struct ProfileDiscoveryPreferences:'));
     const carriers = ownerHistoryCarriers(capture('app/SourcesShared/VortXSyncManager.swift').toString('utf8'));
     const ownerCarriers = generate('generated/OwnerHistoryFixtureCarriers.swift', carriers.source);
+    const proofHost = path.join(directory, 'generated/NativeSubtitleProofHosts.swift');
+    fs.mkdirSync(path.dirname(proofHost), { recursive: true });
+    const proofRun = spawnSync(process.execPath, [copies.get('scripts/extract-subtitle-proof-hosts.cjs'),
+        root, 'bridge-extension', proofHost], { cwd: root, encoding: 'utf8' });
+    if (proofRun.error || proofRun.status !== 0) fail('Actual subtitle proof extraction failed: ' + (proofRun.stderr || proofRun.error));
+    const proofReceipt = JSON.parse(proofRun.stdout);
+    generated.set(proofHost, hash(fs.readFileSync(proofHost)));
     for (const item of carriers.declarations) extracted.push({ owner: 'app/SourcesShared/VortXSyncManager.swift',
         ownerSHA256: hash(capture('app/SourcesShared/VortXSyncManager.swift')), signature: item.signature,
         declarationSHA256: hash(Buffer.from(item.bytes)) });
-    write('extraction.json', JSON.stringify({ extracted, declarationTransformations: [],
+    write('extraction.json', JSON.stringify({ extracted, subtitleOwnerProofHosts: proofReceipt, declarationTransformations: [],
         metadataDispatch: { fullDispatchDeclaration: true,
             productionDeclarationTransformations: metadataPeer.declarationTransformations,
             shellOnly: metadataPeer.shellOnly, excluded: metadataPeer.excluded },
@@ -326,7 +333,7 @@ async function main() {
             '-target', 'arm64-apple-macosx14.0', '-module-cache-path', path.join(directory, 'module-cache'),
             '-I', sdk.includeRoot, '-D', 'VORTX_ENGINE_STATE_BRIDGE', '-D', 'VORTX_ENGINE_RESOURCE_HOST',
             '-D', 'VORTX_NATIVE_DATA_ENGINE', ...sources.map(file => copies.get(file)), fixture, profiles,
-            discovery, ownerCarriers], 600_000, helper, directory);
+            discovery, ownerCarriers, proofHost], 600_000, helper, directory);
         compile = 'typecheck-normal0'; runtime = 'not-run'; phase = 'typecheck-complete';
         process.stdout.write('Whole actual Facade/Session/FIFO strict6 typecheck completed with real committed header; NO link/runtime/SDK/app/Manager-adapter proof\n');
         return;
@@ -358,7 +365,7 @@ async function main() {
     if (unpinnedLoaderPaths.length) fail('Existing native library has unpinned non-system dependencies; no loader fallback');
     const sdkPath = (await run('macos-sdk', ['/usr/bin/nice', '-n', '15', '/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-path'], 30_000, helper)).trim();
     if (!path.isAbsolute(sdkPath) || /[\r\n]/.test(sdkPath) || !fs.statSync(sdkPath).isDirectory()) fail('Actual macOS SDK unavailable');
-    const inputs = [...sources.map(file => copies.get(file)), fixture, profiles, discovery, ownerCarriers];
+    const inputs = [...sources.map(file => copies.get(file)), fixture, profiles, discovery, ownerCarriers, proofHost];
     const executable = path.join(directory, 'native-owned-receipts');
     fs.mkdirSync(path.join(directory, 'module-cache'));
     const libraryDirectory = path.dirname(sdk.library);
