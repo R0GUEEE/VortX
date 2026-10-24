@@ -98,8 +98,9 @@ fi
   if [[ $# -gt 0 ]]; then
     printf '%s\n' 'return { _ in }'
   else
-    sed -n '/.onChange(of: curDebridRef?.nativeUsenetLease)/,/^        }/p' app/Sources/PlayerScreen.swift \
-      | sed '1s/.*{ \[/return { [/'
+    sed -n '/.onValueChange(of: curDebridRef?.nativeUsenetLease)/,/^        }/p' app/Sources/PlayerScreen.swift \
+      | sed '1c\
+return { [oldLease = curDebridRef?.nativeUsenetLease] newLease in'
   fi
   printf '%s\n' '}'
   for method in presentTerminalLoadFailure leavePlayback; do
@@ -112,16 +113,21 @@ fi
   done
   printf '%s\n' '}'
 } > "$nzb_operation_dir/hooks.swift"
-# TV and handheld hooks must remain byte-for-byte equivalent in lease behavior.
+# TV and handheld hooks must remain equivalent in lease behavior. Only the observed-value
+# header differs: the iOS16-compatible helper supplies the previous value explicitly on newer OSes.
 if [[ $# -eq 0 ]]; then
+  rg -Fq '.onValueChange(of: curDebridRef?.nativeUsenetLease) { oldLease, newLease in' app/Sources/PlayerScreen.swift
+  rg -Fq '.onChange(of: curDebridRef?.nativeUsenetLease) { [oldLease = curDebridRef?.nativeUsenetLease] newLease in' app/SourcesTV/TVPlayerView.swift
+  rg -Fq 'onChange(of: value, initial: false, action)' app/SourcesShared/ValueChangeObservation.swift
+  rg -Fq 'onChange(of: value) { [value] newValue in action(value, newValue) }' app/SourcesShared/ValueChangeObservation.swift
   for method in presentTerminalLoadFailure leavePlayback; do
     diff -u \
       <(sed -n "/func $method()/,/^    }/p" app/Sources/PlayerScreen.swift | sed -n '/nativeUsenetLease?.close()/p') \
       <(sed -n "/func $method()/,/^    }/p" app/SourcesTV/TVPlayerView.swift | sed -n '/nativeUsenetLease?.close()/p')
   done
   diff -u \
-    <(sed -n '/.onChange(of: curDebridRef?.nativeUsenetLease)/,/^        }/p' app/Sources/PlayerScreen.swift) \
-    <(sed -n '/.onChange(of: curDebridRef?.nativeUsenetLease)/,/^        }/p' app/SourcesTV/TVPlayerView.swift)
+    <(sed -n '/.onValueChange(of: curDebridRef?.nativeUsenetLease)/,/^        }/p' app/Sources/PlayerScreen.swift | sed '1d') \
+    <(sed -n '/.onChange(of: curDebridRef?.nativeUsenetLease)/,/^        }/p' app/SourcesTV/TVPlayerView.swift | sed '1d')
 fi
 xcrun swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors "${baseline_flag[@]}" \
   app/SourcesShared/NativeTransportPolicy.swift "$nzb_operation_dir/client.swift" \

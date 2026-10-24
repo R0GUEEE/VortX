@@ -184,7 +184,7 @@ private struct PlayerStyledSeekSlider: View {
                 onScrubChanged(target)
             }
             .onEnded { _ in finishDrag() })
-        .onChange(of: gestureActive) { active in
+        .onValueChange(of: gestureActive) { active in
             // SwiftUI also resets GestureState when a drag is cancelled by the system.
             if !active { finishDrag() }
         }
@@ -1142,7 +1142,7 @@ private struct PlayerTouchOptionsButton: View {
                 content()
                 #endif
             }
-            .onChange(of: presented, perform: onVisibilityChanged)
+            .onValueChange(of: presented, perform: onVisibilityChanged)
     }
 }
 
@@ -2165,21 +2165,21 @@ struct PlayerScreen: View {
         // whole movie (micro stutter + audio crackle on every stream).
         .onAppear { FullscreenPlaybackGate.shared.playerDidAppear(playbackGateToken); LoopbackPlaybackAssertion.begin(for: url) }
         // Panels and the failure screen list sources, so they follow every engine change.
-        .onChange(of: panel != nil || loadFailed) { listsSources in engineChanges.followAll(listsSources) }
+        .onValueChange(of: panel != nil || loadFailed) { listsSources in engineChanges.followAll(listsSources) }
         // A first frame, remote resume or dismissed dialog re-arms a visible bar. The original
         // one-shot timer could expire during loading/pausing and never run again until another tap.
-        .onChange(of: controlsAutoHideEligible) { _ in refreshControlsAutoHide() }
-        .onChange(of: core.streamsEpoch) { _ in
+        .onValueChange(of: controlsAutoHideEligible) { _ in refreshControlsAutoHide() }
+        .onValueChange(of: core.streamsEpoch) { _ in
             establishSubtitleTimingScopeIfAvailable()
             if appliedAutoTracks {
                 restoreSubtitleTimingOffsetIfReady()
                 applyCurrentSubtitleDelayIfReady(force: false)
             }
         }
-        .onChange(of: allEpisodeRefs) { _ in
+        .onValueChange(of: allEpisodeRefs) { _ in
             consumePendingManualEpisodeNavigationIfReady()
         }
-        .onChange(of: sourceSwitchGeneration) { _ in
+        .onValueChange(of: sourceSwitchGeneration) { _ in
             fetchSkipTimestamps()
             cancelDirectResumeInventoryRefresh()
             clearPendingManualEpisodeNavigation(reason: "source replacement")
@@ -2644,7 +2644,7 @@ struct PlayerScreen: View {
             observeMacFullScreen()
             #endif
         }
-        .onChange(of: curDebridRef?.nativeUsenetLease) { [oldLease = curDebridRef?.nativeUsenetLease] newLease in
+        .onValueChange(of: curDebridRef?.nativeUsenetLease) { oldLease, newLease in
             // Accepted source/episode replacement only; prewarm and engine remount keep this lease.
             if oldLease != newLease { oldLease?.close() }
         }
@@ -4187,14 +4187,31 @@ struct PlayerScreen: View {
     /// higher maxWidth), write it to a temp JPEG, and present the share sheet so the still can be saved or
     /// sent anywhere. iOS / Mac only - tvOS has no share sheet.
     private func grabFrame() {
-        coordinator.player?.captureFrameJPEGData(maxWidth: 2560) { data in
+        guard let player = coordinator.player, let originalLoad = player.activeLoadToken else { return }
+        let originalEngine = ObjectIdentifier(player)
+        let originalSource = sourceSwitchGeneration
+        let raw = recordMeta?.name ?? "VortX"
+        let base = raw.components(separatedBy: CharacterSet(charactersIn: "/:\\?%*|\"<>")).joined()
+        let name = "VortX-\(base.isEmpty ? "frame" : base)-\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString).jpg"
+        let target = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        player.captureFrameJPEGData(maxWidth: 2560) { data in
             guard let data else { return }
-            let raw = recordMeta?.name ?? "VortX"
-            let base = raw.components(separatedBy: CharacterSet(charactersIn: "/:\\?%*|\"<>")).joined()
-            let name = "VortX-\(base.isEmpty ? "frame" : base)-\(Int(Date().timeIntervalSince1970)).jpg"
-            let target = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-            guard (try? data.write(to: target)) != nil else { return }
-            DispatchQueue.main.async { self.grabbedFrame = GrabbedFrame(url: target) }
+            // Both engines deliver their legacy completion on the UI owner. File I/O
+            // belongs on utility, and a delayed capture must not present on another load.
+            DispatchQueue.global(qos: .utility).async {
+                guard (try? data.write(to: target, options: .atomic)) != nil else { return }
+                DispatchQueue.main.async {
+                    guard !playbackExited, sourceSwitchGeneration == originalSource,
+                          let current = coordinator.player,
+                          ObjectIdentifier(current) == originalEngine,
+                          current.activeLoadToken == originalLoad else {
+                        // Only this capture's unique, generated temporary file is retired.
+                        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: target) }
+                        return
+                    }
+                    self.grabbedFrame = GrabbedFrame(url: target)
+                }
+            }
         }
     }
 

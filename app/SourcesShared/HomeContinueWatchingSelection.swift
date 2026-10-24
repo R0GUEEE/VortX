@@ -44,6 +44,24 @@ enum HomeContinueWatchingSelection {
                 && preferenceEpoch == ContinueWatchingPreferences.selectionEpoch
         }
 
+        /// Native-only original-owner worker predicate. A missing native capture
+        /// is unavailable; it never upgrades a retained legacy target or owner.
+        func isCurrent(owner: CoreBridge.NativePlaybackReadCapability) -> Bool {
+            guard usesNativeProfileState, owner.owns(nativeTarget), owner.isCurrent(),
+                  let selection = ProfileSelectionRead.snapshot(),
+                  let profile = selection.activeProfile, selection.activeID == profile.id,
+                  profileID == profile.id, profile.id == owner.binding.profileID,
+                  profile.usesEngineHistory == usesEngineHistory,
+                  preferences == ContinueWatchingPreferences.current(),
+                  preferenceEpoch == ContinueWatchingPreferences.selectionEpoch,
+                  preferences.isSupported,
+                  preferences == ContinueWatchingPreferences.value(source: profile.continueWatchingSource,
+                      window: profile.continueWatchingWindow) else { return false }
+            return owner.isCurrent() && ProfileSelectionRead.snapshot() == selection
+                && preferences == ContinueWatchingPreferences.current()
+                && preferenceEpoch == ContinueWatchingPreferences.selectionEpoch
+        }
+
         /// Existing UI callsites retain their supplied owner. Worker callers use the overload
         /// above and never construct/access ProfileStore.shared from a provider or cache lock.
         @MainActor func isCurrent(core: CoreBridge, profiles: ProfileStore) -> Bool {
@@ -68,9 +86,11 @@ enum HomeContinueWatchingSelection {
         func unavailableReason(id: String, type: String, videoID: String?) -> String? {
             source == .simkl ? SIMKLContinueWatchingFold.unavailableReason(id: id, type: type, videoID: videoID) : nil
         }
+        @MainActor
         func permitsDetails(id: String, type: String, videoID: String?) -> Bool {
             isCurrent() && unavailableReason(id: id, type: type, videoID: videoID) == nil
         }
+        @MainActor
         func isCurrent(core: CoreBridge = .shared) -> Bool {
             guard context.isCurrent(core: core) else { return false }
             switch source {
@@ -79,6 +99,15 @@ enum HomeContinueWatchingSelection {
             case .simkl: return simklSessionID != nil && SIMKLAuth.storedSessionID == simklSessionID
             }
         }
+        func isCurrent(owner: CoreBridge.NativePlaybackReadCapability) -> Bool {
+            guard context.isCurrent(owner: owner) else { return false }
+            switch source {
+            case .local: return traktSessionID == nil && simklSessionID == nil
+            case .trakt: return traktSessionID != nil && TraktAuth.storedSessionID == traktSessionID
+            case .simkl: return simklSessionID != nil && SIMKLAuth.storedSessionID == simklSessionID
+            }
+        }
+
         @MainActor func isCurrent(core: CoreBridge, profiles: ProfileStore) -> Bool {
             guard let profile = profiles.active, profiles.activeID == profile.id,
                   profile.id == context.profileID,
@@ -90,6 +119,7 @@ enum HomeContinueWatchingSelection {
     /// Capture only immutable admission evidence. Unlike current(...), this does not assemble
     /// Home rows, visit profile overlays or acquire a provider cache while starting a refresh.
     /// A selected UUID without a matching roster member is unavailable, not an owner fallback.
+    @MainActor
     static func captureContext(core: CoreBridge = .shared) -> Context? {
         guard let selection = ProfileSelectionRead.snapshot(), let profile = selection.activeProfile,
               selection.activeID == profile.id else { return nil }
@@ -129,9 +159,15 @@ enum HomeContinueWatchingSelection {
     }
     @MainActor static func refreshCurrent(core: CoreBridge = .shared, profiles: ProfileStore? = nil) {
         let profiles = profiles ?? .shared
-        let snapshot = current(core: core, profiles: profiles)
-        if snapshot.context.preferences.source == .simkl { SIMKLContinueWatchingShadow.shared.refresh(context: snapshot.context) }
-        else if snapshot.context.preferences.source == .trakt { TraktPlaybackShadow.shared.refreshIfStale() }
+        guard let context = captureContext(core: core), context.isCurrent(core: core, profiles: profiles),
+              let target = context.nativeTarget,
+              let owner = core.captureNativePlaybackReadCapability(target),
+              context.isCurrent(owner: owner) else { return }
+        if context.preferences.source == .simkl {
+            SIMKLContinueWatchingShadow.shared.refresh(context: context, owner: owner)
+        } else if context.preferences.source == .trakt {
+            TraktPlaybackShadow.shared.refreshIfStale(context: context, owner: owner)
+        }
     }
 
     /// Only the visible Home task invokes this lane; ordinary source/settings refreshes do not.
@@ -176,6 +212,8 @@ enum HomeContinueWatchingSelection {
             return Snapshot(selection: unavailable, context: context)
         }
 
+        // One original provider read admission for this synchronous presentation assembly.
+        let providerOwner = context.nativeTarget.flatMap { core.captureNativePlaybackReadCapability($0) }
         // A native shared profile has its own core bucket too. Never fall back to its
         // retired legacy overlay, including while a native session is unavailable.
         let localItems = localItemsOverride ?? (context.usesNativeProfileState || context.usesEngineHistory
@@ -186,9 +224,13 @@ enum HomeContinueWatchingSelection {
             selection = .init(items: localItems, source: .local, sessionID: nil)
             if requested != .local { selection.status = "This profile uses Local / VortX history. A service rail needs this profile's own account." }
         } else if requested == .trakt {
+            guard let owner = providerOwner,
+                  context.isCurrent(owner: owner) else { return Snapshot(selection: unavailable, context: context) }
             selection = (shadow ?? .shared).continueWatchingSelection(
                 fallback: localItems,
-                libraryItems: core.library?.catalog ?? []
+                libraryItems: core.library?.catalog ?? [],
+                context: context,
+                owner: owner
             )
             if selection.source != .trakt {
                 selection = .init(items: [], source: .trakt, sessionID: TraktAuth.storedSessionID)
@@ -198,7 +240,9 @@ enum HomeContinueWatchingSelection {
             selection = .init(items: [], source: .simkl, sessionID: nil)
             if !SIMKLAuth.isConfigured { selection.status = "SIMKL is unavailable in this build." }
             else if let session = SIMKLAuth.storedSessionID {
-                let state = SIMKLContinueWatchingShadow.shared.snapshot(context: context, session: session)
+                guard let owner = providerOwner,
+                      context.isCurrent(owner: owner) else { return Snapshot(selection: unavailable, context: context) }
+                let state = SIMKLContinueWatchingShadow.shared.snapshot(context: context, session: session, owner: owner)
                 selection.simklSessionID = session
                 selection.items = state.items.map {
                     CoreCWItem(id: $0.id, type: $0.type, name: $0.name,
@@ -230,8 +274,13 @@ enum HomeContinueWatchingSelection {
             }
         }
         var result = Snapshot(selection: selection, context: context)
-        result.nextEpisodes = TraktHomeNextEpisodeProducer.shared.offers(
-            intent: result.intent, paused: selection.items, now: Date())
+        if let owner = providerOwner, context.isCurrent(owner: owner) {
+            result.nextEpisodes = TraktHomeNextEpisodeProducer.shared.offers(
+                intent: result.intent, owner: owner, paused: selection.items, now: Date())
+        }
+        if selection.source != .local, let owner = providerOwner, !context.isCurrent(owner: owner) {
+            return Snapshot(selection: unavailable, context: context)
+        }
         guard result.intent.isCurrent(core: core, profiles: profiles) else {
             // A deliberately unavailable/disconnected service has no action capability, but its
             // empty diagnostic is still useful presentation. Never grant this exception to rows,

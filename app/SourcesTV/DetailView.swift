@@ -227,7 +227,7 @@ struct DetailView: View {
                     ?? route.access.isNavigationCurrent(profiles: profiles, core: core)) { clearRandomEpisodePick() }
             } else if let access = randomEpisodeAccess, !access.isCurrent(profiles: profiles, core: core) { clearRandomEpisodePick() }
         }
-        .onReceive(core.$metaDetails) { details in
+        .onReceive(core.metaDetailsPublisher) { details in
             randomEpisodeRoute?.intent?.invalidateMetadata(details)
             // The admitted episode page owns metadata/source changes after handoff.
             guard randomEpisodePreview != nil, randomEpisodeRoute == nil,
@@ -251,7 +251,7 @@ struct DetailView: View {
                                    suppressPreferenceAutoPlay: true)
             }
         }
-        .onReceive(core.$metaDetails) { randomPlayIntent?.invalidateMetadata($0) }
+        .onReceive(core.metaDetailsPublisher) { randomPlayIntent?.invalidateMetadata($0) }
         .onDisappear {
             if randomSeriesPlayRoute == nil { randomPlayIntent?.revoke() }
         }
@@ -3827,7 +3827,7 @@ struct CoreStreamList: View {
         // Warm the Trakt playback shadow so the "Resume from <time>" chip decides off a cache rather than
         // blocking the page on a network call. Internally throttled, opt-in gated, and a no-op when Trakt is
         // unconfigured or disconnected, so it costs nothing for everyone else. Mirrors iOS iOSDetailView.
-        .onAppear { TraktPlaybackShadow.shared.refreshIfStale() }
+        .onAppear { TraktPlaybackShadow.shared.refreshIfStale(core: core) }
         .task {
             // Belt-and-suspenders over .defaultFocus (a hint tvOS drops when a sibling like the trailer chip
             // is laid out first): force the seat onto the Watch Now slot once, just after appear. One-shot
@@ -3860,7 +3860,7 @@ struct CoreStreamList: View {
             }
             intent.revoke()
         }
-        .onReceive(core.$metaDetails) { randomPlayIntent?.invalidateMetadata($0) }
+        .onReceive(core.metaDetailsPublisher) { randomPlayIntent?.invalidateMetadata($0) }
         .onChange(of: sourceFilter) { _ in randomPlayIntent?.revoke() }
         .onChange(of: sourcePin) { _ in randomPlayIntent?.revoke() }
         .onChange(of: sourceList.sessionAudioLanguages) { _ in randomPlayIntent?.revoke() }

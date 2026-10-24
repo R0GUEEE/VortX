@@ -661,40 +661,71 @@ private struct MacVideoPlayer: View {
             .onDisappear { model.stop(onProgress: onProgress) }
     }
 
+    @MainActor
     final class Model: ObservableObject {
         let player = AVPlayer()
         private var timeObserver: Any?
         private var statusObserver: NSKeyValueObservation?
         private var didResume = false
+        private var generation = UUID()
+        private var progressAction: ((Double, Double) -> Void)?
 
         func start(url: URL, headers: [String: String]?, resume: Double, onProgress: @escaping (Double, Double) -> Void) {
+            // A reused surface must retire its old callbacks before installing another item.
+            // KVO does not promise main-actor delivery; only the captured ready value crosses below.
+            let originalGeneration = UUID()
+            generation = originalGeneration
+            retireCurrent(onProgress: progressAction ?? { _, _ in })
+            // The final old progress action may synchronously replace this surface itself.
+            guard generation == originalGeneration else { return }
+            didResume = false
+            progressAction = onProgress
             let options = (headers?.isEmpty ?? true) ? nil : ["AVURLAssetHTTPHeaderFieldsKey": headers!]
             let item = AVPlayerItem(asset: AVURLAsset(url: url, options: options))
             player.replaceCurrentItem(with: item)
             player.allowsExternalPlayback = true
             statusObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-                guard let self, item.status == .readyToPlay, !self.didResume else { return }
-                self.didResume = true
-                if resume > 1 { self.player.seek(to: CMTime(seconds: resume, preferredTimescale: 600)) }
-                self.player.play()
+                let ready = item.status == .readyToPlay
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, ready, self.generation == originalGeneration, !self.didResume else { return }
+                    self.didResume = true
+                    if resume > 1 { self.player.seek(to: CMTime(seconds: resume, preferredTimescale: 600)) }
+                    self.player.play()
+                }
             }
             timeObserver = player.addPeriodicTimeObserver(
                 forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main
             ) { [weak self] time in
-                guard let self, let dur = self.player.currentItem?.duration.seconds, dur.isFinite, dur > 0 else { return }
-                onProgress(time.seconds, dur)
+                let seconds = time.seconds
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.generation == originalGeneration,
+                          let dur = self.player.currentItem?.duration.seconds, dur.isFinite, dur > 0 else { return }
+                    self.progressAction?(seconds, dur)
+                }
             }
         }
 
         func stop(onProgress: (Double, Double) -> Void) {
+            generation = UUID()
+            retireCurrent(onProgress: onProgress)
+        }
+
+        private func retireCurrent(onProgress: (Double, Double) -> Void) {
+            let finalProgress: (Double, Double)?
+            if let dur = player.currentItem?.duration.seconds, dur.isFinite, dur > 0 {
+                finalProgress = (player.currentTime().seconds, dur)
+            } else {
+                finalProgress = nil
+            }
             if let timeObserver { player.removeTimeObserver(timeObserver) }
             timeObserver = nil
             statusObserver?.invalidate(); statusObserver = nil
-            if let dur = player.currentItem?.duration.seconds, dur.isFinite, dur > 0 {
-                onProgress(player.currentTime().seconds, dur)
-            }
             player.pause()
             player.replaceCurrentItem(with: nil)
+            progressAction = nil
+            // Publish last: reentrant callbacks cannot flush or tear down the old item twice,
+            // nor can this old cleanup remove a replacement installed by that callback.
+            if let finalProgress { onProgress(finalProgress.0, finalProgress.1) }
         }
     }
 }

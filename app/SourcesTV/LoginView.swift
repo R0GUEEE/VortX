@@ -61,6 +61,7 @@ struct LoginView: View {
         }
     }
 
+    @MainActor
     private func handleStremioSignIn(signedIn: Bool) {
         guard signedIn, account.signInError == nil, !didHandleSignIn else { return }
         didHandleSignIn = true

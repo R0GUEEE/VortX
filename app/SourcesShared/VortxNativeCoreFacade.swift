@@ -121,6 +121,24 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             self.resources = resources; self.resourceValues = resourceValues
         }
     }
+    /// Original callback origin, captured before delivery or any executor hop.
+    /// The source reference is historical identity, not fresh admission authority.
+    struct SourceEvent: Sendable {
+        enum Kind: Sendable {
+            case changed(legacyFields: [String], receipt: ChangeReceipt?)
+            case mutationAccepted
+            case progressAccepted
+        }
+        let producer: VortxNativeCoreFacade
+        let sourceID: UUID
+        let kind: Kind
+        fileprivate init(producer: VortxNativeCoreFacade, kind: Kind) {
+            self.producer = producer
+            self.sourceID = producer.sourceID
+            self.kind = kind
+        }
+    }
+
     let sourceID = UUID()
     private static let presentationFields: Set<String> = ["ctx", "board", "search", "discover",
         "library", "meta_details", "local_search", "continue_watching_preview"]
@@ -155,6 +173,10 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     // A commit may have reached disk before readback failed. Keep the last acknowledged
     // projections readable, but only a new authenticated session may certify more writes.
     private var checkpointReopenRequired = false
+    // Installed only by private init, before exposure. Builders are pure local value capture;
+    // the returned delivery, never the client callback, is invoked after the outermost F.
+    private var sourceChangedDelivery: (@Sendable ([String], ChangeReceipt?) -> (@Sendable () -> Void)?)?
+    private var sourceAcceptedDelivery: (@Sendable (Bool) -> (@Sendable () -> Void)?)?
     private let ownedChange: (@Sendable (ChangeReceipt) -> Void)?
     private let changed: @Sendable ([String]) -> Void
     private let mutationAccepted: @Sendable () -> Void
@@ -304,11 +326,13 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     static func create(session: VortxNativeSession, registry: [VortxResourceAddon],
                        mutationAccepted: @escaping @Sendable () -> Void = {},
                        progressAccepted: (@Sendable () -> Void)? = nil,
+                       sourceEvent: (@Sendable (SourceEvent) -> Void)? = nil,
                        ownedChange: (@Sendable (ChangeReceipt) -> Void)? = nil,
                        changed: @escaping @Sendable ([String]) -> Void) async throws -> VortxNativeCoreFacade {
         guard Set(registry.map(\.id)).count == registry.count else { throw VortxNativeError.invalidResponse }
         let facade = VortxNativeCoreFacade(session: session, registry: registry, mutationAccepted: mutationAccepted,
-                                           progressAccepted: progressAccepted, ownedChange: ownedChange, changed: changed)
+                                           progressAccepted: progressAccepted, sourceEvent: sourceEvent,
+                                           ownedChange: ownedChange, changed: changed)
         let addonSnapshot = try await session.addonSnapshot()
         let state = addonSnapshot.state
         facade.addonInventories = addonSnapshot.inventories
@@ -321,12 +345,25 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         return facade
     }
     private init(session: VortxNativeSession, registry: [VortxResourceAddon], mutationAccepted: @escaping @Sendable () -> Void,
-                 progressAccepted: (@Sendable () -> Void)?, ownedChange: (@Sendable (ChangeReceipt) -> Void)?,
+                 progressAccepted: (@Sendable () -> Void)?, sourceEvent: (@Sendable (SourceEvent) -> Void)?,
+                 ownedChange: (@Sendable (ChangeReceipt) -> Void)?,
                  changed: @escaping @Sendable ([String]) -> Void) {
         let lock = VortxNativeFacadeLock()
         self.lock = lock; self.mutationFIFO = VortxNativeFIFOAdmission(lock: lock)
         self.session = session; self.registry = registry; self.changed = changed; self.mutationAccepted = mutationAccepted
         self.progressAccepted = progressAccepted; self.ownedChange = ownedChange
+        if let sourceEvent {
+            sourceChangedDelivery = { [weak self] fields, receipt in
+                guard let self else { return nil }
+                let event = SourceEvent(producer: self, kind: .changed(legacyFields: fields, receipt: receipt))
+                return { sourceEvent(event) }
+            }
+            sourceAcceptedDelivery = { [weak self] progressOnly in
+                guard let self else { return nil }
+                let event = SourceEvent(producer: self, kind: progressOnly ? .progressAccepted : .mutationAccepted)
+                return { sourceEvent(event) }
+            }
+        }
     }
     /// F is held by the publishing transaction. Host reads set recordingChanges=false;
     /// they never create a source callback or mark a retained value as freshly produced.
@@ -345,10 +382,25 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     /// already captured receipt at the original callback point after pending-profile release.
     private func stageChanged(_ legacyFields: [String], receipt: ChangeReceipt?) {
         guard receipt != nil || !legacyFields.isEmpty else { return }
-        let legacy = changed, owned = ownedChange
-        lock.afterOutermostUnlock {
-            if let receipt { owned?(receipt) }
-            if !legacyFields.isEmpty { legacy(legacyFields) }
+        lock.withLock {
+            let legacy = changed, owned = ownedChange
+            let source = sourceChangedDelivery?(legacyFields, receipt)
+            lock.afterOutermostUnlock {
+                source?()
+                if let receipt { owned?(receipt) }
+                if !legacyFields.isEmpty { legacy(legacyFields) }
+            }
+        }
+    }
+    /// Stage at the existing ACK callback point, after changed delivery has returned.
+    /// Do not add availability filtering: legacy ACK counts survive synchronous close/reentry.
+    private func stageAccepted(progressOnly: Bool, legacy: @escaping @Sendable () -> Void) {
+        lock.withLock {
+            let source = sourceAcceptedDelivery?(progressOnly)
+            lock.afterOutermostUnlock {
+                source?()
+                legacy()
+            }
         }
     }
     /// Original HOST initiation snapshot, not a callback upgrade or resource/write admission.
@@ -489,6 +541,24 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         }
     }
 
+    /// Join only ORIGINAL receipt values and their actual producing-task ticket.
+    /// Settlement requires a metadata marker; retained library overlays do not settle a phase.
+    /// A library caller must separately validate its original library marker/field sequence,
+    /// then recheck this original selection at the sink. Neither path captures a newer task.
+    func metadataSelection(for change: ChangeReceipt, expected: AcceptedNavigationReceipt,
+                           settlingResource: Bool = true) -> MetadataSelectionReceipt? {
+        lock.withLock {
+            guard !settlingResource || change.fields.contains("meta_details"),
+                  acceptsChange(change, field: "meta_details", settlingResource: settlingResource),
+                  acceptedNavigationIsCurrent(expected),
+                  let ticket = change.resourceValues["meta_details"],
+                  let value = change.values["meta_details"] else { return nil }
+            let selection = MetadataSelectionReceipt(navigation: expected,
+                facade: ObjectIdentifier(self), ticket: ticket, selection: value["selected"])
+            return metadataSelectionIsCurrent(selection) ? selection : nil
+        }
+    }
+
     /// Copy the immutable checked-Sendable value, not a UI model or Foundation Any
     /// graph. Consumer decoding is outside F; this API never admits a callback upgrade.
     /// A missing field is not an explicit null/unloaded receipt.
@@ -497,6 +567,54 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             guard metadataSelectionIsCurrent(receipt) else { return nil }
             return values["meta_details"]
         }
+    }
+
+    /// Linearize ONLY the already-prepared immutable presentation frame store
+    /// with the ORIGINAL source sequence/producing task. The trusted nonescaping
+    /// store performs a single eager plain reference swap; it sends nothing and
+    /// releases no last old payload reference while F is held. Source owner and
+    /// Bridge/M/proposal checks happen BEFORE entering here, never under F.
+    ///
+    /// Current first-party callers enter after actor admission, not from inside
+    /// an existing F transaction. No F callbacks are staged by this read/store
+    /// method. The changed/event notifications and subject fanout stay outside F.
+    @MainActor
+    func storeOriginalMetadataPresentationFrame(_ change: ChangeReceipt,
+        selection: MetadataSelectionReceipt, libraryOverlay: Bool,
+        storePreparedFrame: @MainActor () -> Void) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard change.sourceID == sourceID,
+              metadataSelectionIsCurrent(selection),
+              let joined = metadataSelection(for: change, expected: selection.navigation,
+                  settlingResource: !libraryOverlay),
+              joined == selection else { return false }
+        if libraryOverlay {
+            guard change.fields.contains("library"),
+                  acceptsChange(change, field: "library"),
+                  acceptsChange(change, field: "meta_details", settlingResource: false) else { return false }
+        } else {
+            guard change.fields.contains("meta_details"),
+                  acceptsChange(change, field: "meta_details", settlingResource: true) else { return false }
+        }
+        // SEALED CALL GRAPH REQUIREMENT: the only callee is the02b plain store,
+        // whose new/old frame boxes and all sidecars were prepared outside F.
+        storePreparedFrame()
+        return true
+    }
+
+    /// Explicit HOST effects (a spinner/clear or independent selected-task
+    /// contribution) carry their admitted selection, not a manufactured source
+    /// receipt. Native bytes may have advanced within that SAME task; a different
+    /// producing selection, registry, profile or source may not own this store.
+    @MainActor
+    func storeOriginalMetadataHostFrame(selection: MetadataSelectionReceipt,
+        storePreparedFrame: @MainActor () -> Void) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard metadataSelectionIsCurrent(selection) else { return false }
+        storePreparedFrame() // exact same sealed plain-frame-only call graph
+        return true
     }
 
     /// Capture the CURRENT original task for a HOST refresh, under the caller's
@@ -782,9 +900,9 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                     NSLog("[VortXNative] mutation=%@ result=acknowledged continueWatching=%ld savedLibrary=%ld", type, count, saved)
                 }
                 if type == "report_progress", hostEdits.isEmpty, !websiteChanged, let progressAccepted = self.progressAccepted {
-                    progressAccepted()
+                    self.stageAccepted(progressOnly: true, legacy: progressAccepted)
                 } else if !["get_state", "merge_native_sync", "bind_sync_scope"].contains(type) || !hostEdits.isEmpty || websiteChanged {
-                    self.mutationAccepted()
+                    self.stageAccepted(progressOnly: false, legacy: self.mutationAccepted)
                 }
                 completion?(.success(document))
             } catch VortxNativeError.checkpointUncertain {

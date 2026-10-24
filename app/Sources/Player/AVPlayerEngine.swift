@@ -7,6 +7,7 @@ import CoreMedia
 import CoreImage
 import ImageIO
 import UniformTypeIdentifiers
+import os
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -273,6 +274,170 @@ struct AVPlayerStallEpisodeState: Equatable {
 }
 
 // MARK: - AVPlayer engine
+
+// Objective-C does not promise a callback executor for this protocol. Only
+// immutable event values cross to the owner; the SDK controller and its restore
+// completion remain in the original callback's synchronous stack.
+private final class AVPlayerPiPDelegateBridge: NSObject, AVPictureInPictureControllerDelegate, Sendable {
+    enum Kind: Sendable {
+        case willStart
+        case didStart(possible: Bool, active: Bool)
+        case failedToStart(String)
+        case willStop
+        case didStop(possible: Bool, active: Bool)
+        case observed(possible: Bool, active: Bool)
+    }
+    struct Event: Sendable {
+        let controllerID: ObjectIdentifier
+        let generation: UInt64
+        let kind: Kind
+    }
+    private struct Reservation: Sendable {
+        let controllerID: ObjectIdentifier
+        let generation: UInt64
+        let ordinal: UInt64
+    }
+    private enum Phase: Sendable { case pending, active(UInt64), retired }
+    private struct State: Sendable {
+        var phase = Phase.pending
+        var lastReserved: UInt64 = 0
+        var nextDelivery: UInt64 = 1
+        var ready: [UInt64: Event] = [:]
+        var drainScheduled = false
+    }
+    private let controllerID: ObjectIdentifier
+    private let receive: @MainActor @Sendable (Event) -> Void
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    init(controllerID: ObjectIdentifier, receive: @escaping @MainActor @Sendable (Event) -> Void) {
+        self.controllerID = controllerID
+        self.receive = receive
+        super.init()
+    }
+
+    func activate(generation: UInt64) {
+        state.withLock {
+            guard case .pending = $0.phase else { return }
+            $0.phase = .active(generation)
+        }
+    }
+
+    func retire() {
+        state.withLock {
+            $0.phase = .retired
+            $0.ready.removeAll()
+        }
+    }
+
+    private func isActive(for controller: AVPictureInPictureController) -> Bool {
+        guard ObjectIdentifier(controller) == controllerID else { return false }
+        return state.withLock {
+            guard case .active = $0.phase else { return false }
+            return true
+        }
+    }
+
+    // Admission and ordinal reservation precede every SDK getter or error
+    // localization. A slower/reentrant payload cannot let a later event overtake it.
+    private func reserve(for controller: AVPictureInPictureController,
+                         expectedGeneration: UInt64?) -> Reservation? {
+        guard ObjectIdentifier(controller) == controllerID else { return nil }
+        return state.withLock {
+            guard case .active(let generation) = $0.phase,
+                  expectedGeneration == nil || expectedGeneration == generation,
+                  $0.lastReserved < UInt64.max else { return nil }
+            $0.lastReserved += 1
+            return Reservation(controllerID: controllerID, generation: generation, ordinal: $0.lastReserved)
+        }
+    }
+
+    private func commit(_ kind: Kind, reservation: Reservation) {
+        let event = Event(controllerID: reservation.controllerID, generation: reservation.generation, kind: kind)
+        let schedule = state.withLock {
+            guard case .active(let original) = $0.phase, original == reservation.generation,
+                  reservation.ordinal >= $0.nextDelivery,
+                  $0.ready[reservation.ordinal] == nil else { return false }
+            $0.ready[reservation.ordinal] = event
+            guard !$0.drainScheduled, $0.ready[$0.nextDelivery] != nil else { return false }
+            $0.drainScheduled = true
+            return true
+        }
+        if schedule { DispatchQueue.main.async { [self] in drain() } }
+    }
+
+    @MainActor private func drain() {
+        while let batch = state.withLock({ state -> [Event]? in
+            var batch: [Event] = []
+            while let event = state.ready.removeValue(forKey: state.nextDelivery) {
+                batch.append(event)
+                state.nextDelivery &+= 1
+            }
+            guard !batch.isEmpty else {
+                state.drainScheduled = false
+                return nil
+            }
+            return batch
+        }) {
+            // Only contiguous original reservations are delivered. No SDK work,
+            // owner callback, or completion executes while this lock is held.
+            for event in batch { receive(event) }
+        }
+    }
+
+    func observe(_ controller: AVPictureInPictureController, generation: UInt64) {
+        guard let original = reserve(for: controller, expectedGeneration: generation) else { return }
+        commit(.observed(possible: controller.isPictureInPicturePossible,
+                         active: controller.isPictureInPictureActive), reservation: original)
+    }
+
+    func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
+        guard let original = reserve(for: controller, expectedGeneration: nil) else { return }
+        commit(.willStart, reservation: original)
+    }
+
+    func pictureInPictureControllerDidStartPictureInPicture(_ controller: AVPictureInPictureController) {
+        guard let original = reserve(for: controller, expectedGeneration: nil) else { return }
+        commit(.didStart(possible: controller.isPictureInPicturePossible,
+                        active: controller.isPictureInPictureActive), reservation: original)
+    }
+
+    func pictureInPictureController(_ controller: AVPictureInPictureController,
+        failedToStartPictureInPictureWithError error: Error) {
+        guard let original = reserve(for: controller, expectedGeneration: nil) else { return }
+        commit(.failedToStart(error.localizedDescription), reservation: original)
+    }
+
+    func pictureInPictureControllerWillStopPictureInPicture(_ controller: AVPictureInPictureController) {
+        guard let original = reserve(for: controller, expectedGeneration: nil) else { return }
+        commit(.willStop, reservation: original)
+    }
+
+    func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
+        guard let original = reserve(for: controller, expectedGeneration: nil) else { return }
+        commit(.didStop(possible: controller.isPictureInPicturePossible,
+                       active: controller.isPictureInPictureActive), reservation: original)
+    }
+
+    func pictureInPictureController(_ controller: AVPictureInPictureController,
+        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+        // PlayerScreen remains mounted: answer from this original attachment,
+        // synchronously exactly once, after releasing the checked state lock.
+        let restored = isActive(for: controller)
+        completionHandler(restored)
+    }
+}
+
+// A main-actor owner for the existing non-Sendable PlayerEngine completion API.
+// The worker receives this owner, never the raw caller closure or UI controller.
+@MainActor private final class AVPlayerFrameCaptureCompletion {
+    private var callback: ((Data?) -> Void)?
+    init(_ callback: @escaping (Data?) -> Void) { self.callback = callback }
+    func deliver(_ data: Data?) {
+        let original = callback
+        callback = nil
+        original?(data)
+    }
+}
 
 /// AVFoundation implementation of `PlayerEngine`. It drives one `AVPlayer` and maps its KVO + a periodic
 /// time observer onto the SAME `MPVProperty` event keys the chrome already listens for, so the full
@@ -604,6 +769,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     private var remuxSubtitleInventoryRefreshTask: Task<Void, Never>?
     private var observations: [NSKeyValueObservation] = []
     private var pipController: AVPictureInPictureController?
+    private var pipDelegate: AVPlayerPiPDelegateBridge?
     private var pipObservations: [NSKeyValueObservation] = []
     private var pipState = AVPlayerPictureInPictureState()
     /// Published from the current AVPictureInPictureController only. The PlayerScreen child view observes the
@@ -4204,17 +4370,20 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         guard let pixelBuffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) else {
             completion(nil); return
         }
+        // CIImage retains this acquired frame as an immutable, lazy image graph.
+        // Only SDK-Sendable CIImage/CIContext cross the utility queue; no raw
+        // CVPixelBuffer, caller closure, or controller is transferred.
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
         let ctx = captureContext
-        // Downscale + JPEG-encode off the main thread; CVPixelBuffer and CIContext are safe to hand off.
+        let delivery = AVPlayerFrameCaptureCompletion(completion)
         DispatchQueue.global(qos: .utility).async {
-            let data = Self.encodeJPEG(from: pixelBuffer, maxWidth: maxWidth, context: ctx)
-            DispatchQueue.main.async { completion(data) }
+            let data = Self.encodeJPEG(from: image, maxWidth: maxWidth, context: ctx)
+            DispatchQueue.main.async { delivery.deliver(data) }
         }
     }
 
-    /// CVPixelBuffer (BGRA) -> downscaled JPEG via ImageIO (cross-platform; no UIKit/AppKit dependency).
-    private static func encodeJPEG(from pixelBuffer: CVPixelBuffer, maxWidth: CGFloat, context: CIContext) -> Data? {
-        let ci = CIImage(cvPixelBuffer: pixelBuffer)
+    /// Immutable BGRA image -> downscaled JPEG; rendering and encoding remain off-main.
+    nonisolated private static func encodeJPEG(from ci: CIImage, maxWidth: CGFloat, context: CIContext) -> Data? {
         let width = ci.extent.width
         guard width > 0, ci.extent.height > 0 else { return nil }
         let scale = min(1, maxWidth / width)
@@ -4255,7 +4424,11 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
             publishPictureInPictureState()
             return
         }
-        pictureInPictureController.delegate = self
+        let callback = AVPlayerPiPDelegateBridge(controllerID: ObjectIdentifier(pictureInPictureController)) { [weak self] event in
+            self?.receivePictureInPictureEvent(event)
+        }
+        pipDelegate = callback
+        pictureInPictureController.delegate = callback
         // Allow AVKit to enter PiP automatically when this inline layer backgrounds. Explicit starts still go
         // through startPictureInPicture(), so the manual button and automatic entry share the same state truth.
         #if os(iOS)
@@ -4266,8 +4439,10 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
             supported: true,
             possible: pictureInPictureController.isPictureInPicturePossible,
             active: pictureInPictureController.isPictureInPictureActive)
+        callback.activate(generation: generation)
         publishPictureInPictureState()
-        observePictureInPicture(pictureInPictureController, generation: generation)
+        guard pictureInPictureGeneration(for: pictureInPictureController) == generation else { return }
+        observePictureInPicture(pictureInPictureController, generation: generation, callback: callback)
     }
 
     /// Retire every KVO/delegate edge only when its owning engine or physical layer is going away. The old
@@ -4275,10 +4450,13 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     private func resetPictureInPictureController(for event: AVPlayerPictureInPictureOwnershipEvent) {
         guard event.invalidatesController else { return }
         let retiredController = pipController
+        let retiredDelegate = pipDelegate
+        retiredDelegate?.retire()
         let shouldStop = retiredController?.isPictureInPictureActive == true || pipState.isTransitioning
         pipObservations.forEach { $0.invalidate() }
         pipObservations.removeAll()
         retiredController?.delegate = nil
+        pipDelegate = nil
         pipController = nil
         pipState.invalidate()
         publishPictureInPictureState()
@@ -4315,31 +4493,18 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
 
     private func observePictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController,
-        generation: UInt64
+        generation: UInt64,
+        callback: AVPlayerPiPDelegateBridge
     ) {
         let possible = pictureInPictureController.observe(
             \.isPictureInPicturePossible,
-            options: [.initial, .new]) { [weak self] observedController, _ in
-                Task { @MainActor [weak self] in
-                    guard let self,
-                          let callbackGeneration = self.pictureInPictureGeneration(for: observedController),
-                          callbackGeneration == generation else { return }
-                    self.refreshPictureInPictureState(
-                        for: observedController,
-                        generation: generation)
-                }
+            options: [.initial, .new]) { [weak callback] observedController, _ in
+                callback?.observe(observedController, generation: generation)
             }
         let active = pictureInPictureController.observe(
             \.isPictureInPictureActive,
-            options: [.initial, .new]) { [weak self] observedController, _ in
-                Task { @MainActor [weak self] in
-                    guard let self,
-                          let callbackGeneration = self.pictureInPictureGeneration(for: observedController),
-                          callbackGeneration == generation else { return }
-                    self.refreshPictureInPictureState(
-                        for: observedController,
-                        generation: generation)
-                }
+            options: [.initial, .new]) { [weak callback] observedController, _ in
+                callback?.observe(observedController, generation: generation)
             }
         pipObservations.append(contentsOf: [possible, active])
     }
@@ -5741,6 +5906,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
 
     deinit {
         // stop() is the normal teardown; this is a safety net if the engine is released without it.
+        pipDelegate?.retire()
         replacementReadyDeadlineTask?.cancel()
         coldLocalRemuxPreparation?.cancel()
         coldLocalRemuxMountTask?.cancel()
@@ -5757,62 +5923,30 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     }
 }
 
-extension AVPlayerEngineController: AVPictureInPictureControllerDelegate {
-    func pictureInPictureControllerWillStartPictureInPicture(
-        _ pictureInPictureController: AVPictureInPictureController
-    ) {
-        guard let generation = pictureInPictureGeneration(for: pictureInPictureController),
-              pipState.willStart(generation: generation) else { return }
+extension AVPlayerEngineController {
+    private func receivePictureInPictureEvent(_ event: AVPlayerPiPDelegateBridge.Event) {
+        guard let controller = pipController,
+              ObjectIdentifier(controller) == event.controllerID,
+              let generation = pictureInPictureGeneration(for: controller),
+              generation == event.generation else { return }
+        switch event.kind {
+        case .willStart:
+            guard pipState.willStart(generation: generation) else { return }
+        case .didStart(let possible, let active):
+            guard pipState.didStart(possible: possible, active: active, generation: generation) else { return }
+        case .failedToStart(let description):
+            guard pipState.failStart(generation: generation) else { return }
+            publishPictureInPictureState()
+            DiagnosticsLog.log("avplayer", "PiP start failed: \(description)")
+            return
+        case .willStop:
+            guard pipState.willStop(generation: generation) else { return }
+        case .didStop(let possible, let active):
+            guard pipState.didStop(possible: possible, active: active, generation: generation) else { return }
+        case .observed(let possible, let active):
+            guard pipState.observe(possible: possible, active: active, generation: generation) else { return }
+        }
         publishPictureInPictureState()
-    }
-
-    func pictureInPictureControllerDidStartPictureInPicture(
-        _ pictureInPictureController: AVPictureInPictureController
-    ) {
-        guard let generation = pictureInPictureGeneration(for: pictureInPictureController) else { return }
-        guard pipState.didStart(
-            possible: pictureInPictureController.isPictureInPicturePossible,
-            active: pictureInPictureController.isPictureInPictureActive,
-            generation: generation) else { return }
-        publishPictureInPictureState()
-    }
-
-    func pictureInPictureController(
-        _ pictureInPictureController: AVPictureInPictureController,
-        failedToStartPictureInPictureWithError error: Error
-    ) {
-        guard let generation = pictureInPictureGeneration(for: pictureInPictureController),
-              pipState.failStart(generation: generation) else { return }
-        publishPictureInPictureState()
-        DiagnosticsLog.log("avplayer", "PiP start failed: \(error.localizedDescription)")
-    }
-
-    func pictureInPictureControllerWillStopPictureInPicture(
-        _ pictureInPictureController: AVPictureInPictureController
-    ) {
-        guard let generation = pictureInPictureGeneration(for: pictureInPictureController),
-              pipState.willStop(generation: generation) else { return }
-        publishPictureInPictureState()
-    }
-
-    func pictureInPictureControllerDidStopPictureInPicture(
-        _ pictureInPictureController: AVPictureInPictureController
-    ) {
-        guard let generation = pictureInPictureGeneration(for: pictureInPictureController) else { return }
-        guard pipState.didStop(
-            possible: pictureInPictureController.isPictureInPicturePossible,
-            active: pictureInPictureController.isPictureInPictureActive,
-            generation: generation) else { return }
-        publishPictureInPictureState()
-    }
-
-    func pictureInPictureController(
-        _ pictureInPictureController: AVPictureInPictureController,
-        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
-    ) {
-        // PlayerScreen remains mounted over the same layer, so there is no second UI to present. A retired
-        // controller must decline restoration rather than waking a replacement screen with stale state.
-        completionHandler(pictureInPictureGeneration(for: pictureInPictureController) != nil)
     }
 }
 #endif

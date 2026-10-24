@@ -339,6 +339,38 @@ struct CoreLocalSearchState: Decodable {
     let searchResults: [CoreSearchSuggestion]
 }
 
+// Checked value graph for native callback worker samples. All stored members are
+// scalars, immutable value models, or standard Sendable collections; Any stays UI-local.
+extension CoreCWPreview: Sendable {}
+extension CoreBoardState: Sendable {}
+extension CoreSearchSelected: Sendable {}
+extension CoreCatalogPage: Sendable {}
+extension CoreLocalSearchState: Sendable {}
+extension CoreSearchSuggestion: Sendable {}
+extension CoreCtx: Sendable {}
+extension CoreProfile: Sendable {}
+extension CoreDescriptor: Sendable {}
+extension CoreManifest: Sendable {}
+extension CoreManifestBehaviorHints: Sendable {}
+extension CoreManifestResource: Sendable {}
+extension CoreDescriptorFlags: Sendable {}
+extension CoreManifestCatalog: Sendable {}
+extension CoreBoardRow: Sendable {}
+extension CoreDiscover: Sendable {}
+extension CoreDiscoverSelectable: Sendable {}
+extension CoreSelectablePage: Sendable {}
+extension CoreSelectableType: Sendable {}
+extension CoreSelectableCatalog: Sendable {}
+extension CoreSelectableExtra: Sendable {}
+extension CoreSelectableExtraOption: Sendable {}
+extension CoreLibrary: Sendable {}
+extension CoreLibrarySelectable: Sendable {}
+extension CoreLibType: Sendable {}
+extension CoreLibSort: Sendable {}
+extension CoreRequest: Sendable {}
+extension CoreRequestPath: Sendable {}
+extension CoreLibraryRequest: Sendable {}
+
 struct CoreSearchSuggestion: Decodable, Identifiable {
     let id: String
     let name: String
@@ -1004,7 +1036,7 @@ struct PlayerTimePositionEvent: Sendable {
 
 /// Pure callback-provenance state used by the libmpv bridge and its standalone regressions. The controller
 /// serializes mutations with its own lock; this value only defines the fail-closed state transitions.
-struct PlayerLoadProvenanceState {
+struct PlayerLoadProvenanceState: Sendable {
     struct CommandResultField: Equatable {
         let key: String
         let int64Value: Int64?

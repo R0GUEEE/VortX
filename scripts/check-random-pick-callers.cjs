@@ -86,9 +86,10 @@ function contracts(files) {
       need(invalidate.includes('RandomPickPolicy.libraryRecord(current) == ticket.record else { clearRandomLibraryPick(); return }'), file + ': changed pending Library records still revoke');
       const remainder = source.replace(helpers, '');
       need(!remainder.includes('randomLibraryCandidates()'), file + ': pool only on actions');
-      need(lifecycle.includes('.onChange(of: segment)') && lifecycle.includes('.onChange(of: activeFilters)'), file + ': filter revocation');
+      const observer = file.includes('SourcesiOS') ? '.onValueChange' : '.onChange';
+      need(lifecycle.includes(observer + '(of: segment)') && lifecycle.includes(observer + '(of: activeFilters)'), file + ': filter revocation');
       need(!helpers.includes('sourceGeneration'), file + ': no full-history body signature');
-      if (file.includes('SourcesiOS')) need(lifecycle.includes('.onChange(of: isActive) { active in if !active { clearRandomLibraryPick() } }'), file + ': hidden mounted tab revokes');
+      if (file.includes('SourcesiOS')) need(lifecycle.includes('.onValueChange(of: isActive) { active in if !active { clearRandomLibraryPick() } }'), file + ': hidden mounted tab revokes');
     }
     for (const token of ['setNative', 'markWatched(', 'saveProgress(', 'recordProgress(', 'LastStreamStore.record', 'core.loadMeta(', 'URLSession']) need(!helpers.includes(token), file + ': pick helper must not mutate or resolve ' + token);
   }
@@ -199,7 +200,7 @@ const mutations = [
   ['app/SourcesShared/RandomPickPolicy.swift', 'ticket == origin', 'true', 'policy ignores selected generation'],
   ['app/SourcesShared/RandomPickPolicy.swift', 'ownerIsCurrent && currentRecord == origin.record', 'ownerIsCurrent', 'policy ignores coordinates/record'],
   ['app/SourcesiOS/iOSRootView.swift', '.sheet(isPresented: randomLibraryPreviewPresented)', '.sheet(item: $randomLibraryPreview)', 'Pick again replaces presented sheet'],
-  ['app/SourcesiOS/iOSRootView.swift', '.onChange(of: isActive) { active in if !active { clearRandomLibraryPick() } }', '', 'hidden mounted Library remains authorized'],
+  ['app/SourcesiOS/iOSRootView.swift', '.onValueChange(of: isActive) { active in if !active { clearRandomLibraryPick() } }', '', 'hidden mounted Library remains authorized'],
   ['app/SourcesShared/RandomPickUIAccess.swift', 'profiles.active == profile && target.stillOwnsCurrentContext(core: core)', 'target.stillOwnsCurrentContext(core: core)', 'changed Kids/PIN/roster fields'],
   ['app/SourcesShared/RandomPickUIAccess.swift', '!profiles.needsPicker && profiles.activeID', 'profiles.activeID', 'picker newly required'],
   ['app/SourcesiOS/iOSRootView.swift', 'access.matchesPublishedProfiles(incoming, pickedThisLaunch:', 'access.matchesPublishedProfiles(profiles.profiles, pickedThisLaunch:', 'willSet reads old roster'],

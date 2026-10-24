@@ -50,6 +50,13 @@ assert.match(source.facade, /private let lock: VortxNativeFacadeLock\b/);
 const initializer = declaration('facade', 'private init(session:');
 assert.match(initializer, /let lock = VortxNativeFacadeLock\(\)/);
 assert.match(initializer, /self\.lock = lock; self\.mutationFIFO = VortxNativeFIFOAdmission\(lock: lock\)/);
+const sourceEvent = declaration('facade', 'struct SourceEvent: Sendable {');
+assert.match(sourceEvent, /let producer: VortxNativeCoreFacade/);
+assert.match(sourceEvent, /self\.sourceID = producer\.sourceID/);
+assert(!sourceEvent.includes('@unchecked'), 'source carrier must add no unchecked conformance');
+assert.match(initializer, /sourceChangedDelivery = \{ \[weak self\] fields, receipt in\s*guard let self else \{ return nil \}\s*let event = SourceEvent\(producer: self, kind: \.changed\(legacyFields: fields, receipt: receipt\)\)/);
+assert.match(initializer, /sourceAcceptedDelivery = \{ \[weak self\] progressOnly in\s*guard let self else \{ return nil \}\s*let event = SourceEvent\(producer: self, kind: progressOnly \? \.progressAccepted : \.mutationAccepted\)/);
+assert.equal((initializer.match(/return \{ sourceEvent\(event\) \}/g) ?? []).length, 2, 'both builders return retained original envelopes without invoking the client');
 assert.match(source.fifo, /private let lock: any NSLocking & Sendable\b/);
 assert.match(source.fifo, /init\(lock: any NSLocking & Sendable\)/);
 const makeReceipt = declaration('facade', 'private func makeChangeReceipt(');
@@ -61,7 +68,14 @@ const stage = declaration('facade', 'private func stageChanged(');
 assert.match(stage, /private func stageChanged\(_ legacyFields: \[String\], receipt: ChangeReceipt\?\)/);
 assert.match(stage, /guard receipt != nil \|\| !legacyFields\.isEmpty else \{ return \}/);
 assert.match(stage, /let legacy = changed, owned = ownedChange/);
-assert.match(stage, /lock\.afterOutermostUnlock \{\s*if let receipt \{ owned\?\(receipt\) \}\s*if !legacyFields\.isEmpty \{ legacy\(legacyFields\) \}\s*\}/);
+assert.match(stage, /lock\.withLock \{\s*let legacy = changed, owned = ownedChange\s*let source = sourceChangedDelivery\?\(legacyFields, receipt\)/);
+assert.match(stage, /lock\.afterOutermostUnlock \{\s*source\?\(\)\s*if let receipt \{ owned\?\(receipt\) \}\s*if !legacyFields\.isEmpty \{ legacy\(legacyFields\) \}\s*\}/);
+const ackStage = declaration('facade', 'private func stageAccepted(');
+assert.match(ackStage, /lock\.withLock \{\s*let source = sourceAcceptedDelivery\?\(progressOnly\)/);
+assert.match(ackStage, /lock\.afterOutermostUnlock \{\s*source\?\(\)\s*legacy\(\)\s*\}/);
+assert(!/\b(?:closed|isAvailable)\b/.test(ackStage), 'historical ACK notifications must not gain a new availability filter');
+assert(!ackStage.includes('makeChangeReceipt(') && !/\bvalues\b/.test(ackStage), 'ACK source origin is not a current-state snapshot');
+assert(!stage.includes('SourceEvent('), 'the private original-producer builder owns typed carrier creation, not this RAM-worker seam');
 assert(!stage.includes('makeChangeReceipt('), 'delivery must use the original transaction receipt, never mint a replacement');
 assert(!/\bvalues\b/.test(stage), 'delivery must not rebuild an owned snapshot from current cache values');
 const publish = declaration('facade', 'private func publish(');
@@ -97,8 +111,12 @@ assert(mutation.includes('defer { if profileTransition && !transitionReleased { 
   'failure/cancellation fallback must retain the original unreleased-transition decrement');
 assert.equal((mutation.match(/pendingProfileTransitions -= 1/g) ?? []).length, 2,
   'normal ACK release and unreleased-transition fallback are both retained');
-assert(mutation.indexOf('self.mutationAccepted()', publicationGuard) > publicationGuard);
-assert(mutation.indexOf('completion?(.success(document))', publicationGuard) > publicationGuard);
+const progressACK = mutation.indexOf('self.stageAccepted(progressOnly: true, legacy: progressAccepted)', publicationGuard);
+const mutationACK = mutation.indexOf('self.stageAccepted(progressOnly: false, legacy: self.mutationAccepted)', publicationGuard);
+const completion = mutation.indexOf('completion?(.success(document))', publicationGuard);
+assert(progressACK > publicationGuard && mutationACK > publicationGuard && completion > progressACK && completion > mutationACK);
+assert(mutation.includes('if type == "report_progress", hostEdits.isEmpty, !websiteChanged, let progressAccepted = self.progressAccepted {'));
+assert(mutation.includes('} else if !["get_state", "merge_native_sync", "bind_sync_scope"].contains(type) || !hostEdits.isEmpty || websiteChanged {'));
 const declarations = [
   declaration('runtime', 'enum VortxNativeError:'),
   declaration('authority', 'protocol VortxMutationAuthority:'),
@@ -112,6 +130,7 @@ const receiptSupport = [
   property('facade', 'private var registryGeneration = UUID()'),
   property('facade', 'private var accountEpoch = UUID()'),
   property('facade', 'private var watchlistProfileGeneration = UUID()'),
+  property('facade', 'private var sourceChangedDelivery: (@Sendable ([String], ChangeReceipt?) -> (@Sendable () -> Void)?)?'),
   property('facade', 'private let ownedChange: (@Sendable (ChangeReceipt) -> Void)?'),
 ].join('\n\n');
 const workerMethods = [
@@ -131,17 +150,18 @@ combined = replaceOnce(combined, '// PRODUCTION_WORKER_METHODS', workerMethods);
 await writeFile(join(output, 'Combined.swift'), combined, { flag: 'wx' });
 await writeFile(join(output, 'FIFO.swift'), source.fifo, { flag: 'wx' });
 await writeFile(join(output, 'source-binding.json'), JSON.stringify({
-  format: 'vortx-facade-lock-worker-v2',
+  format: 'vortx-facade-lock-worker-v3',
   sourceHEAD: process.env.VORTX_FACADE_LOCK_SOURCE_HEAD ?? 'unprovided',
   wholeSourceHashes: Object.fromEntries(Object.entries(paths).map(([key, path]) => [path, hash(source[key])])),
   slices,
   generated: { combinedSHA256: hash(combined), fifoSHA256: hash(source.fifo) },
-  sourceOnlyProducerChecks: ['registryRebind', 'acknowledgedMutation'],
+  sourceOnlyProducerChecks: ['registryRebind', 'acknowledgedMutation', 'originalTypedSourceBuilders'],
   runtimeProducer: 'exact private publish, makeChangeReceipt and stageChanged in explicit RAM worker',
   boundary: [
     'Whole production FIFO and lock declarations; existing 14 FIFO XCTest cases unchanged',
-    'Nine synchronous lock/publication worker tests retained, with one additive owned/legacy timing assertion',
+    'Nine synchronous lock/publication worker tests retained; one checks generic source-delivery staging then owned/legacy timing',
     'Real nested ChangeReceipt and exact receipt support state/build/delivery declarations; no fake production receipt',
+    'Generic RAM source-delivery builder only; typed SourceEvent and original Facade construction are source contracts here, not executed producer identity proof',
     'No actual app facade, Session task chain, ABI, credential, source-lock release, live owner acceptance, durability or consumer freshness claim',
     'ACK original-transaction capture, pending-profile release and delivery ordering are source contracts, not executed ACK runtime',
     'Insertion order applies to one outer-lock queued batch; unlocked batches can interleave or reenter',

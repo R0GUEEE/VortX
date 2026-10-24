@@ -128,7 +128,7 @@ struct UserProfile {
 }
 enum CWScalarFixture {
     // Explicit impossible-state seam for negative controls; real publication stays coherent.
-    static func install(_ value: ProfileSelectionRead.Snapshot) {
+    @MainActor static func install(_ value: ProfileSelectionRead.Snapshot) {
         ProfileSelectionRead.beginMutation(); ProfileSelectionRead.endMutation(value)
     }
     static func member(_ id: UUID, owner: Bool = true, own: Bool = false, source: String? = "trakt",

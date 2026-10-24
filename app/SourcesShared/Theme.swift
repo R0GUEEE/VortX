@@ -13,24 +13,24 @@ enum Theme {
             Color(.sRGB, red: r, green: g, blue: b, opacity: 1)
         }
         // Chrome is user-themeable via ThemeManager (warm near-black by default, true black on OLED).
-        static var canvas: Color   { ThemeManager.shared.canvas }   // app background
-        static var surface1: Color { ThemeManager.shared.surface1 } // rows, cards, panels
-        static var surface2: Color { ThemeManager.shared.surface2 } // chips, controls
-        static var surface3: Color { ThemeManager.shared.surface3 } // hover / selected fill
-        static var hairline: Color { ThemeManager.shared.hairline } // dividers only
+        @MainActor static var canvas: Color   { ThemeManager.shared.canvas }   // app background
+        @MainActor static var surface1: Color { ThemeManager.shared.surface1 } // rows, cards, panels
+        @MainActor static var surface2: Color { ThemeManager.shared.surface2 } // chips, controls
+        @MainActor static var surface3: Color { ThemeManager.shared.surface3 } // hover / selected fill
+        @MainActor static var hairline: Color { ThemeManager.shared.hairline } // dividers only
         /// The translucent glass LIFT tone (see `ThemeManager.glassVeil`). Exposed here so the glass reads it
         /// through the same `Theme.Palette` door as the surfaces it is an elevation step of.
-        static var glassVeil: Color { ThemeManager.shared.glassVeil }
+        @MainActor static var glassVeil: Color { ThemeManager.shared.glassVeil }
         static let textPrimary   = rgb(0.965, 0.945, 0.914) // #F6F1E9
         static let textSecondary = rgb(0.737, 0.694, 0.631) // #BCB1A1
         static let textTertiary  = rgb(0.620, 0.580, 0.520) // #9E9485, raised from #8C8273 so 10-11pt text clears 4.5:1 on the warm canvas across all 8 accents
         // Accent is user-themeable via ThemeManager (8 curated accents). accentSoft / onAccent follow it.
-        static var accent: Color { ThemeManager.shared.accent }             // focus / selection / primary / progress
-        static var accentBright: Color { ThemeManager.shared.accentBright } // focus glow highlight
-        static var playerGlassAccent: Color { ThemeManager.shared.playerGlassAccent }
-        static var playerGlassUsesCrimson: Bool { ThemeManager.shared.playerGlassUsesCrimson }
-        static var accentSoft: Color { accent.opacity(0.18) }
-        static var onAccent: Color { ThemeManager.shared.onAccent } // accent-adaptive ink (was a fixed warm-brown that read orange on every accent)
+        @MainActor static var accent: Color { ThemeManager.shared.accent }             // focus / selection / primary / progress
+        @MainActor static var accentBright: Color { ThemeManager.shared.accentBright } // focus glow highlight
+        @MainActor static var playerGlassAccent: Color { ThemeManager.shared.playerGlassAccent }
+        @MainActor static var playerGlassUsesCrimson: Bool { ThemeManager.shared.playerGlassUsesCrimson }
+        @MainActor static var accentSoft: Color { accent.opacity(0.18) }
+        @MainActor static var onAccent: Color { ThemeManager.shared.onAccent } // accent-adaptive ink (was a fixed warm-brown that read orange on every accent)
         static let danger = rgb(0.871, 0.282, 0.337)            // #DE4856 destructive (log out, remove), a cooler red so it doesn't read as "leftover orange" next to a non-warm accent
         static let ok    = rgb(0.298, 0.769, 0.451)             // #4CC473 healthy/online status (add-on reachable), distinct from the gold accent
         static let warn  = rgb(0.949, 0.659, 0.231)            // #F2A83B caution/slow status, an amber that is not the brand gold
@@ -122,7 +122,7 @@ enum Theme {
     /// `@EnvironmentObject theme: ThemeManager` for its fonts to repaint live. On iOS/Mac the
     /// browse, detail, player, and Settings screens all declare it; tvOS screens already did, which
     /// is why text size worked there but not on iOS/Mac (#48).
-    enum Typography {
+    @MainActor enum Typography {
         // `scaled` only applies the user's LIVE App Text Size multiplier; the per-role BASE size is
         // chosen per platform below. tvOS keeps its 10-foot ramp verbatim. iOS / macOS (viewed at
         // arm's length) use a distinct base ramp with real hierarchy: the earlier approach multiplied

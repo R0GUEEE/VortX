@@ -1250,7 +1250,11 @@ enum DebridForm {
 enum DebridHTTP {
     /// Send a request and decode JSON, mapping 401/403 to `.invalidKey`, other non-2xx to `.providerError`,
     /// and decode failures to `.providerError`, the same contract `TorBoxResolver.send` uses.
-    static func decode<T: Decodable>(_ session: URLSession, _ req: URLRequest) async throws -> T {
+    // The provider's original resolver actor owns its response model's Decodable conformance.
+    // Inherit that executor across the URLSession suspension rather than transferring a possibly
+    // actor-isolated conformance to the generic executor. The caller remains off the UI actor.
+    static func decode<T: Decodable>(_ session: URLSession, _ req: URLRequest,
+                                     isolation: isolated (any Actor)? = #isolation) async throws -> T {
         let (data, response) = try await session.data(for: req)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 || code == 403 { throw DebridError.invalidKey }

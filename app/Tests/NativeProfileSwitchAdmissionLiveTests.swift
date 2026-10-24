@@ -290,7 +290,7 @@ final class SourcePinStore: @unchecked Sendable {
 }
 enum StreamRanking { static func invalidateCaches() {} }
 
-final class ProfileStore: @unchecked Sendable {
+@MainActor final class ProfileStore {
     static let shared = ProfileStore()
     var profiles: [UserProfile] = [] {
         willSet { ProfileSelectionRead.beginMutation() }
@@ -330,11 +330,11 @@ final class ProfileStore: @unchecked Sendable {
     var continueWatchingMigrationInFlight = false
     let continueWatchingLegacyAccount = CredentialScopeRegistry.shared.capture()
 
-    static let activeDisabledAddonsKey = "stremiox.profile.disabledAddons"
-    static let activeAddonOrderOverrideKey = "stremiox.profile.addonOrderOverride"
-    static let activeKidsKey = "stremiox.profile.isKids"
+    nonisolated static let activeDisabledAddonsKey = "stremiox.profile.disabledAddons"
+    nonisolated static let activeAddonOrderOverrideKey = "stremiox.profile.addonOrderOverride"
+    nonisolated static let activeKidsKey = "stremiox.profile.isKids"
 
-    static var nativePlaybackProjectionKeys: Set<String> {
+    nonisolated static var nativePlaybackProjectionKeys: Set<String> {
         [TrackPreferences.Key.audio, TrackPreferences.Key.subtitle, TrackPreferences.Key.forced,
          SubtitleStyle.Key.font, SubtitleStyle.Key.size, SubtitleStyle.Key.color, SubtitleStyle.Key.background,
          SubtitleStyle.Key.sizeScale, SubtitleStyle.Key.brightness, SourcePreferences.orderKey,
@@ -345,7 +345,7 @@ final class ProfileStore: @unchecked Sendable {
          SourcePreferences.excludeAV1Key, SourcePreferences.regexKey, SourcePreferences.preferKey,
          SourcePreferences.avoidBehaviorKey, SourcePreferences.autoPickBestKey]
     }
-    static let nativeThemeProjectionKeys: Set<String> = ["stremiox.theme.accent", "stremiox.theme.oled", "stremiox.theme.textScale"]
+    nonisolated static let nativeThemeProjectionKeys: Set<String> = ["stremiox.theme.accent", "stremiox.theme.oled", "stremiox.theme.textScale"]
 
     func persist(touch: Bool) {
         guard let data = try? JSONEncoder().encode(profiles) else { return }

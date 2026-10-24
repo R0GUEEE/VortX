@@ -276,7 +276,7 @@ func iOSResolveEpisodeStream(videoId: String, in videos: [CoreVideo], seriesId: 
 }
 
 private struct EpisodeTopOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    static let defaultValue: CGFloat = .greatestFiniteMagnitude
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
@@ -285,13 +285,13 @@ private struct EpisodeTopOffsetPreferenceKey: PreferenceKey {
 
 /// Where the episode grid ends in the page scroll, so the pinned season strip lets go once it has passed.
 private struct EpisodeBottomOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    static let defaultValue: CGFloat = .greatestFiniteMagnitude
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 /// The season poster strip's height, which the pinned copy takes over at the top of the page.
 private struct SeasonStripHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
@@ -1065,7 +1065,7 @@ struct iOSDetailView: View {
                     ?? route.access.isNavigationCurrent(profiles: profiles, core: core)) { clearRandomEpisodePick() }
             } else if let access = randomEpisodeAccess, !access.isCurrent(profiles: profiles, core: core) { clearRandomEpisodePick() }
         }
-        .onReceive(core.$metaDetails) { details in
+        .onReceive(core.metaDetailsPublisher) { details in
             randomPickPlayIntent?.invalidateMetadata(details)
             randomEpisodeRoute?.intent?.invalidateMetadata(details)
             // The admitted episode page owns metadata/source changes after handoff.
@@ -1074,8 +1074,8 @@ struct iOSDetailView: View {
             let current = ResidentMeta.fenced(details?.meta, pageID: metaRequestID) { $0.id }
             if current.map(RandomPickPolicy.EpisodeSource.init) != source { clearRandomEpisodePick() }
         }
-        .onChange(of: metaRequestID) { _ in clearRandomEpisodePick() }
-        .onChange(of: effectiveType) { _ in clearRandomEpisodePick() }
+        .onValueChange(of: metaRequestID) { _ in clearRandomEpisodePick() }
+        .onValueChange(of: effectiveType) { _ in clearRandomEpisodePick() }
         // Page disappearance also happens when an accepted episode/player covers it.
         // Only dismiss an uncommitted preview here; route pop clears the full receipt.
         .onDisappear { if randomEpisodeRoute == nil { clearRandomEpisodePick() } }
@@ -1119,13 +1119,13 @@ struct iOSDetailView: View {
         // hub's TMDB guess was wrong, meta.type now corrects it and the stream request re-fires under the type
         // the add-ons actually index the title under. The hasStreams guard keys on the effective streamId, so
         // this cannot loop.
-        .onChange(of: meta?.type) { _ in
+        .onValueChange(of: meta?.type) { _ in
             loadRatings()
             if effectiveType != "series" { loadMovieStreamsIfNeeded() }
             else { torboxSearch.clearResults(); sourceIndex.clearResults(); mediaServers.clearResults() }
         }
-        .onChange(of: currentRatingsRequest) { _ in loadRatings() }
-        .onChange(of: meta?.id) { _ in
+        .onValueChange(of: currentRatingsRequest) { _ in loadRatings() }
+        .onValueChange(of: meta?.id) { _ in
             if effectiveType != "series" { loadMovieStreamsIfNeeded() }
             else if let m = meta, let videos = m.videos {
                 // F5: opening a series schedules its next-episode alert (asks permission in context the
@@ -1141,8 +1141,8 @@ struct iOSDetailView: View {
             refreshLanguageChips()
             requestAutoPlayIfReady()
         }
-        .onChange(of: meta?.videos?.count) { _ in requestAutoPlayIfReady() }
-        .onChange(of: movieReady) { _ in requestAutoPlayIfReady() }
+        .onValueChange(of: meta?.videos?.count) { _ in requestAutoPlayIfReady() }
+        .onValueChange(of: movieReady) { _ in requestAutoPlayIfReady() }
         // Do NOT unloadMeta here. On iOS, pushing the per-episode page (iOSEpisodeStreams) fires THIS
         // detail page's onDisappear AFTER the episode page has already loaded its streams, so calling
         // unloadMeta would wipe `metaDetails` out from under the episode page (~0.3s later), leaving its
@@ -1156,26 +1156,26 @@ struct iOSDetailView: View {
             cancelPendingQuickWatch(revokingRandomPlay: autoPlayEpisode == nil)
             torrentPrime?.cancel(); sourceRefreshDebounce?.cancel(); langChipsDebounce?.cancel()
         }
-        .onChange(of: profiles.activeID) { _ in cancelPendingQuickWatch() }
-        .onChange(of: account.credentialBoundaryGeneration) { _ in cancelPendingQuickWatch() }
+        .onValueChange(of: profiles.activeID) { _ in cancelPendingQuickWatch() }
+        .onValueChange(of: account.credentialBoundaryGeneration) { _ in cancelPendingQuickWatch() }
         // Debrid cache awareness: as add-ons answer (the load count climbs), check which raw torrents the
         // user's debrid account has cached. `refresh` de-dups by the hash set, so this only hits a provider
         // when the torrents actually change; with no debrid key it returns an empty set and nothing renders.
         // Series load streams per-episode (iOSEpisodeStreams owns its own awareness); movie + live read here.
-        .onChange(of: core.streamLoadProgress().loaded) { _ in
+        .onValueChange(of: core.streamLoadProgress().loaded) { _ in
             if effectiveType != "series" { scheduleSourceRefresh() }
             refreshLanguageChips()   // recompute the "Also available in" chips as more sources answer (own debounce)
         }
         // The Singularity pool answers asynchronously, so re-run the debrid cache check when its streams
         // arrive: each pooled torrent infohash is checked against the user's own debrid, so it resolves
         // per-user instead of merely rendering.
-        .onChange(of: sourceIndex.streams.count) { _ in
+        .onValueChange(of: sourceIndex.streams.count) { _ in
             if effectiveType != "series" { scheduleSourceRefresh() }
         }
         // TorBox search-as-a-source: fetch the extra usenet/torrent sources once the meta's imdb id is
         // known (gated on a TorBox key inside `refresh`; de-duped by imdb id). Series episodes fetch in
         // their own episode view.
-        .onChange(of: meta?.id) { _ in
+        .onValueChange(of: meta?.id) { _ in
             if effectiveType != "series" {
                 AuxiliarySourcePipeline.refresh(
                     target: auxiliaryTarget, torBox: torboxSearch, sourceIndex: sourceIndex,
@@ -1200,7 +1200,7 @@ struct iOSDetailView: View {
         // Warm the Trakt playback shadow so the "Resume from <time>" chip can decide off a cache rather
         // than blocking the open on a network call. Internally throttled, opt-in gated, and a no-op when
         // Trakt is unconfigured or disconnected, so this costs nothing for everyone else.
-        .onAppear { TraktPlaybackShadow.shared.refreshIfStale() }
+        .onAppear { TraktPlaybackShadow.shared.refreshIfStale(core: core) }
     }
 
     var body: some View {
@@ -1470,7 +1470,7 @@ struct iOSDetailView: View {
                         Theme.Palette.canvas.opacity(0.94)
                             .overlay(alignment: .bottom) { Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1) }
                     }
-                    .onChange(of: season) { _ in
+                    .onValueChange(of: season) { _ in
                         withAnimation(reduceMotion ? nil : Theme.Motion.state) {
                             proxy.scrollTo(Self.seasonStripAnchor, anchor: .top)
                         }
@@ -4143,7 +4143,7 @@ struct iOSDetailView: View {
     @StateObject private var manualWatchedAction = ProfileMutationPresentation()
 
     private var episodeRailScope: String {
-        "\(profiles.activeID):\(account.credentialBoundaryGeneration):\(metaRequestID)"
+        "\(String(describing: profiles.activeID)):\(account.credentialBoundaryGeneration):\(metaRequestID)"
     }
 
     private var episodeRailHistoryReady: Bool {
@@ -4371,22 +4371,22 @@ struct iOSDetailView: View {
             // episode metadata changes after the list first appears, including same-count season/release
             // corrections. The existing guard preserves a valid manual selection.
             .onAppear { applyEpisodeSeason(seasons); publishSeriesWatchRollup() }
-            // Single-param onChange: the zero-/two-param forms are iOS 17+, target here is iOS 16.
-            .onChange(of: videos) { _ in
+            // The compatibility observer keeps this new-value action available at the iOS 16 floor.
+            .onValueChange(of: videos) { _ in
                 applyEpisodeSeason(Array(Set(videos.compactMap { $0.season })).sorted())
                 publishSeriesWatchRollup()
             }
-            .onChange(of: watched) { _ in
+            .onValueChange(of: watched) { _ in
                 publishSeriesWatchRollup()   // a mark flips the show-level badge (#143)
                 applyEpisodeSeason(seasons)  // the opening season waits for this history
             }
-            .onChange(of: episodeRailHistoryReady) { _ in applyEpisodeSeason(seasons) }
-            .onChange(of: season) { _ in
+            .onValueChange(of: episodeRailHistoryReady) { _ in applyEpisodeSeason(seasons) }
+            .onValueChange(of: season) { _ in
                 didApplySeason = true
                 episodeRailFirstVisible = 0   // the fresh season rail starts at its first episode
             }
             .onDisappear { manualWatchedAction.cancel() }
-            .onChange(of: episodeRailScope) { _ in manualWatchedAction.cancel() }
+            .onValueChange(of: episodeRailScope) { _ in manualWatchedAction.cancel() }
         }
     }
 
@@ -5620,16 +5620,16 @@ struct iOSEpisodeStreams: View {
             cancelPendingAutoPick()
             torrentPrime?.cancel(); sourceRefreshDebounce?.cancel()
         }
-        .onChange(of: profiles.activeID) { _ in cancelPendingAutoPick() }
-        .onChange(of: account.credentialBoundaryGeneration) { _ in cancelPendingAutoPick() }
-        .onReceive(core.$metaDetails) { randomPickPlayIntent?.invalidateMetadata($0) }
+        .onValueChange(of: profiles.activeID) { _ in cancelPendingAutoPick() }
+        .onValueChange(of: account.credentialBoundaryGeneration) { _ in cancelPendingAutoPick() }
+        .onReceive(core.metaDetailsPublisher) { randomPickPlayIntent?.invalidateMetadata($0) }
         // Debrid cache awareness for this episode's torrents + usenet: re-check as add-ons answer (de-duped
         // by hash set in refresh). Includes the TorBox search sources so those rows badge too. No-op with
         // no debrid key.
-        .onChange(of: core.streamLoadProgress(forStreamId: shownVideo.id).loaded) { _ in scheduleSourceRefresh() }
+        .onValueChange(of: core.streamLoadProgress(forStreamId: shownVideo.id).loaded) { _ in scheduleSourceRefresh() }
         // The Singularity pool answers asynchronously, so re-run the cache check when its streams arrive, so
         // pooled sources for this episode resolve per-user rather than only rendering.
-        .onChange(of: sourceIndex.streams.count) { _ in scheduleSourceRefresh() }
+        .onValueChange(of: sourceIndex.streams.count) { _ in scheduleSourceRefresh() }
         // Auxiliary sources are keyed to the exact episode. Each owner clears its prior publication
         // synchronously before starting the replacement request, and SourceListModel independently checks
         // the same content token before merging.
@@ -5642,7 +5642,7 @@ struct iOSEpisodeStreams: View {
                                  title: meta.name, publicationTarget: mediaServerTarget)
             refreshSourceIndex()
         }
-        .onChange(of: shownVideo.id) { _ in
+        .onValueChange(of: shownVideo.id) { _ in
             AuxiliarySourcePipeline.refresh(
                 target: episodeTarget, torBox: torboxSearch, sourceIndex: sourceIndex,
                 isSignedIn: VortXSyncManager.shared.isSignedIn
@@ -5655,7 +5655,7 @@ struct iOSEpisodeStreams: View {
         // Binge-desync fix #4 (Back target): when the player cover dismisses, continuous play may have
         // advanced past the episode this page was pushed for - follow the engine's resume episode so Back
         // lands on the CURRENT episode and Watch-Now plays it, not the launch episode.
-        .onChange(of: presentation?.id) { _ in
+        .onValueChange(of: presentation?.id) { _ in
             if case .player(let launch) = presentation {
                 beginPlaybackReturn(launch)
             } else if presentation == nil {
@@ -7591,15 +7591,15 @@ struct iOSSourceList: View {
         // Reset the render window when the list collapses (re-expanding starts fresh at the top) or the title
         // changes (a new title must not inherit the previous one's grown window). pinContext carries the metaId,
         // so it flips on a title change even while this view stays mounted across a navigation.
-        .onChange(of: showAllSources) { _ in if !showAllSources { renderLimit = Self.sourceWindowInitial } }
-        .onChange(of: pinContext) { _ in
+        .onValueChange(of: showAllSources) { _ in if !showAllSources { renderLimit = Self.sourceWindowInitial } }
+        .onValueChange(of: pinContext) { _ in
             renderLimit = Self.sourceWindowInitial
             sourceFilter = nil
             selectedSourceAddon = nil
             collapsed = []
         }
-        .onChange(of: sourceFilter) { selectedSourceAddon = $0 }
-        .onChange(of: quickFilters) { _ in renderLimit = Self.sourceWindowInitial }
+        .onValueChange(of: sourceFilter) { selectedSourceAddon = $0 }
+        .onValueChange(of: quickFilters) { _ in renderLimit = Self.sourceWindowInitial }
         .onAppear {
             if externalPlayerTargets.isEmpty {
                 externalPlayerTargets = ExternalPlayer.installed
@@ -7758,7 +7758,7 @@ struct iOSSourceList: View {
                 .onAppear {
                     proxy.scrollTo(sourceAddonTabAnchor(selectedSourceAddon), anchor: .center)
                 }
-                .onChange(of: selectedSourceAddon) { addon in
+                .onValueChange(of: selectedSourceAddon) { addon in
                     withAnimation(reduceMotion ? nil : Theme.Motion.state) {
                         proxy.scrollTo(sourceAddonTabAnchor(addon), anchor: .center)
                     }
@@ -7882,7 +7882,7 @@ struct iOSSourceList: View {
             .padding(.vertical, Theme.Space.xs)
             // Open the list in the sort the user last chose, and remember any change (per the Settings default).
             .onAppear { sortMode = SourceSort(key: SourcePreferences.shared.defaultSourceSort) }
-            .onChange(of: sortMode) { newValue in SourcePreferences.shared.defaultSourceSort = newValue.key }
+            .onValueChange(of: sortMode) { newValue in SourcePreferences.shared.defaultSourceSort = newValue.key }
         }
     }
 
@@ -8114,7 +8114,7 @@ struct iOSSourceList: View {
 /// deliberately excluded: they are recreated per parent eval but never change behavior. `groups`
 /// comes from `SourceListModel`'s published array, which stays the SAME instance until the model
 /// republishes, so the array compare is a buffer-identity fast path, not an element walk.
-extension iOSSourceList: Equatable {
+extension iOSSourceList: @MainActor Equatable {
     static func == (lhs: iOSSourceList, rhs: iOSSourceList) -> Bool {
         lhs.isSuspended == rhs.isSuspended
             && lhs.isEpisode == rhs.isEpisode
@@ -8325,8 +8325,8 @@ private struct iOSLibraryChip: View {
         .buttonStyle(ChipButtonStyle(selected: saved))
         .disabled(libraryAction.isRunning)
         .onDisappear { libraryAction.cancel() }
-        .onChange(of: profiles.activeID) { _ in libraryAction.cancel() }
-        .onChange(of: expectedType + ":" + expectedID) { _ in libraryAction.cancel() }
+        .onValueChange(of: profiles.activeID) { _ in libraryAction.cancel() }
+        .onValueChange(of: expectedType + ":" + expectedID) { _ in libraryAction.cancel() }
         if let error = libraryAction.errorMessage {
             Text(error).font(.caption).foregroundStyle(Theme.Palette.textSecondary)
         }
@@ -8374,11 +8374,11 @@ private struct iOSWatchlistChip: View {
             .disabled(watchlistAction.isRunning)
             .onAppear { isWatchlisted = LibraryAutoAdd.isWatchlisted(meta.id, type: meta.type) }
             .onDisappear { watchlistAction.cancel() }
-            .onChange(of: profiles.activeID) { _ in
+            .onValueChange(of: profiles.activeID) { _ in
                 watchlistAction.cancel()
                 isWatchlisted = LibraryAutoAdd.isWatchlisted(meta.id, type: meta.type)
             }
-            .onChange(of: meta.type + ":" + meta.id) { _ in
+            .onValueChange(of: meta.type + ":" + meta.id) { _ in
                 watchlistAction.cancel()
                 isWatchlisted = LibraryAutoAdd.isWatchlisted(meta.id, type: meta.type)
             }

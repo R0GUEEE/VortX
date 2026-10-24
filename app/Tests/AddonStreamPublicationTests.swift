@@ -4,7 +4,9 @@ import os
 
 // No app, account, Keychain, provider requests, stream start or native engine is used. The
 // production resource projection and complete CoreModels decode native-shaped in-memory fixtures.
-// The actual CoreBridge predicates, accepted-publication branch and assembly are extracted unchanged.
+// Actual CoreBridge predicates/assembly and complete Models remain unchanged.
+// Current lane: exact immutable frame owner, explicit RAM composition glue; not native pipeline admission.
+// Historical lane: the predecessor Published acceptance fragment and its negative controls.
 @main @MainActor private enum AddonStreamPublicationTests {
     static var checks = 0
     static var failures = 0
@@ -322,8 +324,8 @@ import os
     }
 
     static func errorSidecarReentryCases() throws {
-        // The fixture is a real ObservableObject with the actual Published metadata and signal
-        // declarations. Every reentry is a one-shot synchronous Combine callback, never a queue hop.
+        // A real ObservableObject uses exact current guarded frame (or historical Published
+        // declarations). Every reentry is a one-shot synchronous Combine callback, never a queue hop.
         func bytes(_ code: String, status: Int64? = nil, name: String? = nil) throws -> Data {
             var root = metadataWire()
             var failure: [String: VortxJSON] = ["code": .string(code)]
@@ -355,7 +357,7 @@ import os
             check(wakes == 1 && probe.streamAddonStates().first?.error == rateMessage,
                   "real Combine status signal wakes once for typed-equivalent timeout to HTTP 429")
             check(probe.metadataPublications == publications && probe.streamsEpoch == epoch,
-                  "real status-only Published wake does not republish typed err or rebuild sources")
+                  "real status-only observable wake does not republish typed err or rebuild sources")
         }
         do {
             let probe = AddonPublicationProbe(); try probe.acceptData(old)
@@ -426,6 +428,7 @@ import os
             // This intentionally says nothing about the outer typed setter's own writeback; that
             // broader receipt/actor join is separate. Only the status payload commit is fenced here.
         }
+#if !VORTX_GUARDED_METADATA_PRESENTATION
         do {
             let probe = AddonPublicationProbe(); try probe.acceptData(old)
             var fired = false
@@ -450,6 +453,7 @@ import os
             check(fired && !nestedFailed && probe.streamAddonStates().first?.error == rateMessage,
                   "negative control: missing post-signal fence overwrites newer nested status")
         }
+#endif
     }
 
     static func metadataValueTransferCases() async throws {
@@ -682,7 +686,7 @@ import os
         let tailElapsed = DispatchTime.now().uptimeNanoseconds - tailStart
         check(probe.streamsEpoch == initialEpoch + iterations, "3000-stream tail changes all publish through both actual comparisons")
         check(probe.groups().first?.streams.count == count, "3000-stream timing keeps every row")
-        print(String(format: "TIMING actual accepted branch streams=%d iterations=%d optimization=none equal_total_ms=%.3f equal_mean_ms=%.3f tail_total_ms=%.3f tail_mean_ms=%.3f",
+        print(String(format: "TIMING actual predicates/value acceptance streams=%d iterations=%d optimization=none equal_total_ms=%.3f equal_mean_ms=%.3f tail_total_ms=%.3f tail_mean_ms=%.3f",
             count, iterations, Double(equalElapsed) / 1_000_000, Double(equalElapsed) / Double(iterations) / 1_000_000,
             Double(tailElapsed) / 1_000_000, Double(tailElapsed) / Double(iterations) / 1_000_000))
     }
@@ -761,6 +765,9 @@ import os
         try libraryEventCases()
         try errorSidecarCases()
         try errorSidecarReentryCases()
+#if VORTX_GUARDED_METADATA_PRESENTATION
+        try AddonPublicationProbe.runGuardedMetadataCases(old: old, next: changedMetadata, check: check)
+#endif
         try await metadataValueTransferCases()
         try finiteLargeValueCases()
         finiteResumeTimecodeCases()

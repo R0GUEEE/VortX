@@ -57,6 +57,9 @@ private final class CurrentProjection {
     private var metadataLibraryMembership = VortxLibraryMembership()
     private var generations: [String: UUID] = [:]
     private var closed = false
+    // Exact optional generic production hook, left nil in this RAM projection fixture.
+    // No concrete Facade alias or typed source-event identity is manufactured here.
+    // PRODUCTION_SOURCE_CHANGED_DELIVERY
     private let ownedChange: (@Sendable (ChangeReceipt) -> Void)?
     private let changed: @Sendable ([String]) -> Void
     private func observeExternalMetadata(_ value: VortxJSON) {}

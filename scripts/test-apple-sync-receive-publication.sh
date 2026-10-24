@@ -31,6 +31,7 @@ receive_conservation_inputs=(
     "$receive_library" "$receive_headers/vortx_ffi.h" "$receive_headers/module.modulemap"
     scripts/test-apple-sync-receive-publication.sh scripts/native-watched-swift-inputs.sh
     scripts/xperience-observation-swift-inputs.sh test/xperience-harness-inputs.cjs
+    test/addon-guarded-presentation-inputs.cjs app/Tests/AppleHistoryFixture.swift test/mpv-bounded-child.mjs
     test/apple-sync-receive-publication.mjs app/Tests/AppleSyncReceivePublicationPeer.swift
     app/SourcesShared/Profiles.swift app/SourcesShared/CoreBridge.swift app/SourcesShared/VortXSyncManager.swift
     app/SourcesShared/ProfileDiscoveryPreferences.swift app/SourcesShared/CoreModels.swift
@@ -66,15 +67,21 @@ if [[ -n ${VORTX_RECEIVE_PRODUCTION_REF:-} ]]; then
         test "$(shasum -a 256 "$receive_source" | awk '{print $1}')" = "$receive_expected"
     done
 fi
-nice -n 15 xcrun swiftc -j 1 -num-threads 1 -whole-module-optimization -swift-version 6 -parse-as-library -strict-concurrency=complete -warnings-as-errors \
+receive_supervisor="$PWD/test/mpv-bounded-child.mjs"
+nice -n 15 node "$receive_supervisor" run 60 "$receive_dir/compile-process.json" -- \
+    /usr/bin/xcrun swiftc -j 1 -num-threads 1 -whole-module-optimization -swift-version 6 -parse-as-library -strict-concurrency=complete -warnings-as-errors \
     -D CREDENTIAL_RETRY_COORDINATOR_STANDALONE -D VORTX_NATIVE_DATA_ENGINE -D VORTX_ENGINE_STATE_BRIDGE -D VORTX_ENGINE_RESOURCE_HOST -I "$receive_headers" "${receive_inputs[@]}" \
     "$receive_library" -framework Security -framework SystemConfiguration -o "$receive_dir/receive-peer"
-nice -n 15 node test/apple-sync-receive-publication.mjs "$receive_dir/receive-peer" "$receive_dir"
+nice -n 15 node "$receive_supervisor" check "$receive_dir/compile-process.json" 0 normal-exit
+nice -n 15 node "$receive_supervisor" run 120 "$receive_dir/runtime-process.json" -- \
+    /usr/bin/env node test/apple-sync-receive-publication.mjs "$receive_dir/receive-peer" "$receive_dir"
+nice -n 15 node "$receive_supervisor" check "$receive_dir/runtime-process.json" 0 normal-exit
 test "$(shasum -a 256 "$receive_library" | awk '{print $1}')" = "$VORTX_SYNC_TEST_LIBRARY_SHA256"
 test "$(shasum -a 256 "$receive_headers/vortx_ffi.h" | awk '{print $1}')" = "$VORTX_SYNC_TEST_HEADER_SHA256"
 test "$(shasum -a 256 "$receive_headers/module.modulemap" | awk '{print $1}')" = "$receive_module_hash"
-receive_hash_inputs=("$receive_library" "$receive_headers/vortx_ffi.h" "$receive_headers/module.modulemap" "$receive_dir/receive-peer"
-    scripts/xperience-observation-swift-inputs.sh test/xperience-harness-inputs.cjs)
+# Final receipt includes EVERY input already conserved across compile/runtime,
+# including the runner, driver and whole peer, plus generated compiler inputs below.
+receive_hash_inputs=("${receive_conservation_inputs[@]}" "$receive_dir/receive-peer")
 for receive_source in "${receive_inputs[@]}"; do
     [[ "$receive_source" != *.swift ]] || receive_hash_inputs+=("$receive_source")
 done

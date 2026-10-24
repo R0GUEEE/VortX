@@ -151,7 +151,10 @@ enum StreamRanking {
     /// case and whitespace, drop blanks, then remove order/duplicate noise because the ranking treats them as a
     /// membership set rather than a priority list.
     private static func canonicalAudioLanguagePreference() -> [String] {
-        Array(Set(TrackPreferences.current.audioLanguages.compactMap { language in
+        canonicalAudioLanguagePreference(TrackPreferences.current.audioLanguages)
+    }
+    private static func canonicalAudioLanguagePreference(_ languages: [String]) -> [String] {
+        Array(Set(languages.compactMap { language in
             let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return normalized.isEmpty ? nil : normalized
         })).sorted()
@@ -457,6 +460,14 @@ enum StreamRanking {
         // the key and again in languageScore would cache the result under the wrong preference.
         let preferredAudioLanguages = canonicalAudioLanguagePreference()
         let preferences = ScorePreferences(SourcePreferences.reading)
+        return score(s, debridCachedHashes: debridCachedHashes,
+                     preferredAudioLanguages: preferredAudioLanguages, preferences: preferences)
+    }
+
+    /// Pure shared memo path. Both UI-live and explicit worker captures use the
+    /// same semantic key/computation; this helper never reads mutable preferences.
+    private static func score(_ s: CoreStream, debridCachedHashes: Set<String>,
+                              preferredAudioLanguages: [String], preferences: ScorePreferences) -> Int {
         // A coordinator-confirmed debrid cache hit adjusts the score, so it must NOT share a memo entry with
         // the same stream scored without the cached set (that would leak a hit-adjusted score into an empty-set
         // call and vice-versa). Earlier this BYPASSED the memo for cached hits, but that made every cached
@@ -956,9 +967,16 @@ enum StreamRanking {
     /// Whether a stream survives the user's keyword + safety filters (Settings > Streams). Default
     /// preferences pass everything, so this is a no-op until the user opts in.
     static func passesUserFilters(_ s: CoreStream, debridCachedHashes: Set<String> = []) -> Bool {
-        let prefs = SourcePreferences.reading
-        let preferredAudioLanguages = Set(canonicalAudioLanguagePreference())
-        let kids = ProfileStore.activeIsKids()
+        passesUserFilters(s, debridCachedHashes: debridCachedHashes,
+            preferences: SourcePreferences.reading,
+            preferredAudioLanguages: Set(canonicalAudioLanguagePreference()), kids: ProfileStore.activeIsKids())
+    }
+
+    /// Shared filter body. Snapshot callers never dispatch to a live preference
+    /// owner or profile; the protocol witness here is their immutable Snapshot.
+    private static func passesUserFilters(_ s: CoreStream, debridCachedHashes: Set<String>,
+                                          preferences prefs: SourcePrefsReading,
+                                          preferredAudioLanguages: Set<String>, kids: Bool) -> Bool {
         if !kids, prefs.noFiltersActive { return true }   // fast path: nothing opted in (and not a Kids profile)
         let text = qualityText(s)
         if kids {
@@ -1099,15 +1117,94 @@ enum StreamRanking {
     /// The best playable stream for each distinct resolution (4K, 1080p, …), best-first; feeds the
     /// "Watch in 4K" button's resolution dropdown.
     static func resolutionOptions(_ groups: [CoreStreamSourceGroup]) -> [(label: String, stream: CoreStream)] {
+        resolutionOptions(groups, scoring: { score($0) })
+    }
+    private static func resolutionOptions(_ groups: [CoreStreamSourceGroup],
+                                          scoring: (CoreStream) -> Int) -> [(label: String, stream: CoreStream)] {
         let playable = groups.flatMap { $0.streams }.filter { $0.playableURL != nil && !$0.isYouTubeTrailer }
         var bestByLabel: [String: CoreStream] = [:]
         for s in playable {
             let label = qualityLabel(s)
-            if let existing = bestByLabel[label], score(existing) >= score(s) { continue }
+            if let existing = bestByLabel[label], scoring(existing) >= scoring(s) { continue }
             bestByLabel[label] = s
         }
         return bestByLabel.map { (label: $0.key, stream: $0.value) }
-            .sorted { score($0.stream) > score($1.stream) }
+            .sorted { scoring($0.stream) > scoring($1.stream) }
+    }
+
+
+    /// Captured source-list worker inputs only. No UI payload or singleton gains
+    /// Sendable. TaskLocal/live getters are deliberately absent from this path.
+    struct WorkerPreferences: Sendable {
+        let source: SourcePreferences.Snapshot
+        let audioLanguages: [String]
+        let isKids: Bool
+    }
+
+    /// Exact SourceList presentation policy: ordinary (non-preserveChosenRelease)
+    /// ranking with no binge override, stickyAuthoritative=false. Existing UI and
+    /// binge/preload entry points retain their richer live policy unchanged.
+    static func capturedPresentation(_ input: [CoreStreamSourceGroup], preferences: WorkerPreferences,
+                                     continuity hint: String?, pin: ResolvedPin?,
+                                     sticky: (addon: String?, bingeGroup: String?)?,
+                                     providerPenalty: (@Sendable (String) -> Bool)?,
+                                     debridCachedHashes: Set<String>)
+        -> ([CoreStreamSourceGroup], CoreStream?, [String], [(label: String, stream: CoreStream)]) {
+        let prefs = preferences.source
+        let audio = canonicalAudioLanguagePreference(preferences.audioLanguages)
+        let scorePreferences = ScorePreferences(prefs)
+        let groups: [CoreStreamSourceGroup]
+        let playableInput = stripNonVideo(input)
+        if prefs.noFiltersActive && !preferences.isKids { groups = playableInput }
+        else {
+            groups = playableInput.compactMap { group in
+                let kept = group.streams.filter {
+                    passesUserFilters($0, debridCachedHashes: debridCachedHashes,
+                        preferences: prefs, preferredAudioLanguages: Set(audio), kids: preferences.isKids)
+                }
+                return kept.isEmpty ? nil : CoreStreamSourceGroup(id: group.id, addon: group.addon, streams: kept)
+            }
+        }
+        let ranked: [CoreStreamSourceGroup]
+        if prefs.useAddonOrder { ranked = groups }
+        else {
+            ranked = groups.map { group in
+                var scored: [(stream: CoreStream, score: Int, index: Int)] = []
+                for (index, stream) in group.streams.enumerated() {
+                    scored.append((stream, score(stream, debridCachedHashes: debridCachedHashes,
+                        preferredAudioLanguages: audio, preferences: scorePreferences)
+                        + pinBonus(stream, addon: group.addon, pin: pin), index))
+                }
+                scored.sort { $0.score != $1.score ? $0.score > $1.score : $0.index < $1.index }
+                return CoreStreamSourceGroup(id: group.id, addon: group.addon, streams: scored.map(\.stream))
+            }
+        }
+        let best: CoreStream?
+        if prefs.useAddonOrder {
+            if pin != nil, let hit = firstPinned(ranked, pin: pin) { best = hit }
+            else { best = ranked.flatMap(\.streams).first { $0.playableURL != nil && !$0.isYouTubeTrailer } }
+        } else {
+            best = playablePairs(ranked).max { lhs, rhs in
+                (score(lhs.stream, debridCachedHashes: debridCachedHashes,
+                    preferredAudioLanguages: audio, preferences: scorePreferences)
+                    + callerBonuses(lhs.stream, addon: lhs.addon, hint: hint, binge: nil,
+                        sticky: sticky, stickyAuthoritative: false)
+                    + pinBonus(lhs.stream, addon: lhs.addon, pin: pin)
+                    + healthPenalty(addon: lhs.addon, isUnhealthy: providerPenalty))
+                < (score(rhs.stream, debridCachedHashes: debridCachedHashes,
+                    preferredAudioLanguages: audio, preferences: scorePreferences)
+                    + callerBonuses(rhs.stream, addon: rhs.addon, hint: hint, binge: nil,
+                        sticky: sticky, stickyAuthoritative: false)
+                    + pinBonus(rhs.stream, addon: rhs.addon, pin: pin)
+                    + healthPenalty(addon: rhs.addon, isUnhealthy: providerPenalty))
+            }?.stream
+        }
+        // Preserve the old resolutionOptions(groups) behavior: its score() call
+        // used an empty cache set even when the main source rank used cache hits.
+        let resolutions = resolutionOptions(ranked, scoring: {
+            score($0, debridCachedHashes: [], preferredAudioLanguages: audio, preferences: scorePreferences)
+        })
+        return (ranked, best, tiers(ranked), resolutions)
     }
 
     /// The stream's resolution as a comparable tier number (4000 / 2160 / 1080 / 720 / …), the same

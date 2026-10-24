@@ -1,6 +1,7 @@
 #if os(iOS) || os(tvOS) || os(macOS)
 import Foundation
 import Network
+import os
 
 /// Serves the DV-for-MKV streaming remux (`VortXMKVRemuxStream`) to AVPlayer as LOCAL HLS from 127.0.0.1
 /// (b166). AVFoundation does not support a growing fragmented MP4 as a plain progressive asset: on the old
@@ -941,12 +942,12 @@ final class VortXRemuxHLSServer: @unchecked Sendable {
                 self?.accept(connection)
             }
             let ready = DispatchSemaphore(value: 0)
-            let portLock = NSLock()
-            var boundPort: UInt16 = 0
+            let boundPort = OSAllocatedUnfairLock(initialState: UInt16(0))
             newListener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    portLock.lock(); boundPort = newListener.port?.rawValue ?? 0; portLock.unlock()
+                    let port = newListener.port?.rawValue ?? 0
+                    boundPort.withLock { $0 = port }
                     ready.signal()
                 case .failed, .cancelled:
                     self.retireListenerOnce()
@@ -957,7 +958,7 @@ final class VortXRemuxHLSServer: @unchecked Sendable {
             }
             newListener.start(queue: queue)
             _ = ready.wait(timeout: .now() + 2)
-            portLock.lock(); let bound = boundPort; portLock.unlock()
+            let bound = boundPort.withLock { $0 }
             guard bound != 0 else {
                 newListener.cancel()
                 DiagnosticsLog.log("dv", "hls server failed to bind (no port)")

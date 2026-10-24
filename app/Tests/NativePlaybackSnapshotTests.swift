@@ -28,7 +28,7 @@ struct FixtureSelectionProfile {
     let usesOwnAccount: Bool
     var discovery: Discovery? = nil
 }
-final class ProfileStore: @unchecked Sendable {
+@MainActor final class ProfileStore {
     static let shared = ProfileStore()
     var profiles: [FixtureSelectionProfile] = [] {
         willSet { ProfileSelectionRead.beginMutation() }

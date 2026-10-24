@@ -48,6 +48,7 @@ NODE
   if [[ -f "$publication_test_dir/generated-before.sha256" ]]; then
     shasum -a 256 "$publication_test_dir/Collaborators.swift" \
       "$publication_test_dir/ProductionResourceValues.swift" "$publication_test_dir/ProductionPublication.swift" \
+      "$publication_test_dir/guarded-mode.txt" "$publication_test_dir/guarded-extraction.json" \
       > "$publication_test_dir/generated-after.sha256"
     [[ $? -eq 0 ]] || publication_exit=3
     cmp -s "$publication_test_dir/generated-before.sha256" "$publication_test_dir/generated-after.sha256" || publication_exit=3
@@ -58,7 +59,7 @@ NODE
   printf 'phase=%s\nscope=whole-models-extracted-publication-resource-values-RAM-not-native-session-or-app\n' \
     "$publication_phase" >> "$publication_test_dir/status.txt"
   shasum -a 256 "$publication_test_dir/status.txt"
-  for publication_artifact in input-manifest.json Collaborators.swift ProductionResourceValues.swift ProductionPublication.swift compiler.log test.log addon-stream-publication; do
+  for publication_artifact in input-manifest.json Collaborators.swift ProductionResourceValues.swift ProductionPublication.swift guarded-mode.txt guarded-extraction.json library-caller-contract.txt error-sidecar-source-contract.txt extractor-tests.log compiler.log test.log addon-stream-publication; do
     if [[ -f "$publication_test_dir/$publication_artifact" ]]; then
       shasum -a 256 "$publication_test_dir/$publication_artifact"
     fi
@@ -80,9 +81,14 @@ const inputs = ['app/SourcesShared/CoreBridge.swift', 'app/SourcesShared/CoreMod
   'app/Tests/BingeSourceMemoryRaceContractTests.swift', 'app/SourcesShared/VortxNativeRuntime.swift',
   'app/SourcesShared/ContinueWatchingDedupe.swift', ...names.map(name => `app/SourcesShared/${name}.swift`),
   'app/Tests/AddonStreamPublicationTests.swift', 'scripts/test-addon-stream-publication.sh',
-  'test/mpv-bounded-child.mjs'];
+  'test/mpv-bounded-child.mjs', 'test/addon-guarded-presentation-inputs.cjs',
+  'test/addon-guarded-presentation-inputs.test.cjs',
+  'test/metadata-frame-source-contracts.cjs', 'app/SourcesShared/VortxNativeCoreFacade.swift',
+  'app/Tests/GuardedMetadataPresentationCases.swift'];
 // Operational harness bytes are always the ones executing now, even for a historical model ref.
-const harness = new Set(['scripts/test-addon-stream-publication.sh', 'test/mpv-bounded-child.mjs']);
+const harness = new Set(['scripts/test-addon-stream-publication.sh', 'test/mpv-bounded-child.mjs',
+  'test/addon-guarded-presentation-inputs.cjs', 'test/addon-guarded-presentation-inputs.test.cjs',
+  'test/metadata-frame-source-contracts.cjs', 'app/Tests/GuardedMetadataPresentationCases.swift']);
 const origin = name => ref === 'working-tree' || harness.has(name) ? 'working-tree' : ref;
 // Capture every input ONCE. Compiler and source checks use only conserved bytes.
 const captured = new Map(inputs.map(name => [name, origin(name) === 'working-tree'
@@ -139,6 +145,38 @@ const resourceMarkers = ['indirect enum VortxJSON: Codable, Equatable, Sendable 
 // transport/lease execution is compiled or mocked by this pure host fixture.
 fs.writeFileSync(`${out}/ProductionResourceValues.swift`, 'import Foundation\n'
   + resourceMarkers.map(marker => block(bridge, marker)).join('\n'));
+const guarded = core.includes('private final class MetadataPresentation');
+fs.writeFileSync(out + '/guarded-mode.txt', guarded ? '1\n' : '0\n');
+if (guarded) {
+  // Load the operational helper FROM THE CAPTURED INPUT, never a second live read.
+  const helper = {exports:{}};
+  Function('module', 'exports', read('test/addon-guarded-presentation-inputs.cjs'))(helper, helper.exports);
+  const slices = [];
+  const extracted = helper.exports.guardedPublication(core,
+    read('app/Tests/GuardedMetadataPresentationCases.swift'), slices);
+  const contractHelper = {exports:{}};
+  Function('module', 'exports', read('test/metadata-frame-source-contracts.cjs'))(contractHelper, contractHelper.exports);
+  const sourceContract = contractHelper.exports.frameSourceContracts(core,
+    read('app/SourcesShared/VortxNativeCoreFacade.swift'), helper.exports.exact, slices);
+  if (sourceContract.ok !== true) throw Error('Current frame source contract failed: ' + JSON.stringify(sourceContract));
+  fs.writeFileSync(out + '/ProductionPublication.swift',
+    'import Foundation\nimport CoreFoundation\nimport Combine\nimport os\n'
+    + declarations.join('\n') + '\n' + extracted.source);
+  const hash = text => crypto.createHash('sha256').update(text).digest('hex');
+  fs.writeFileSync(out + '/guarded-extraction.json', JSON.stringify({
+    sourceContract, productionTransformations:extracted.productionTransformations,
+    negativeControlTransformations:extracted.negativeControlTransformations,
+    fixtureOnly:extracted.fixtureOnly,
+    slices:slices.map(({bytes, ...entry}) => ({...entry, bytes:Buffer.byteLength(bytes), sha256:hash(bytes)})),
+    scope:'real-Models-and-exact-source-linearized-frame-owner-RAM-not-original-native-pipeline-runtime'
+  }, null, 2) + '\n');
+  fs.writeFileSync(out + '/library-caller-contract.txt',
+    'Current owned library overlay source contract; quiet value/epoch cases retained. Not native owner runtime.\n');
+  fs.writeFileSync(out + '/error-sidecar-source-contract.txt',
+    'Current source-linearized immutable frame/same-buffer/nil-phase/source-task-ABA/pending-clear contracts; remove-one negatives. Exact frame owner executes separately; real F/source runtime is NOT claimed.\n');
+} else {
+  fs.writeFileSync(out + '/guarded-extraction.json',
+    JSON.stringify({scope:'historical-Published-path-no-current-owner-proof'}) + '\n');
 const hasLibraryMerge = core.includes('private static func libraryMetaDetailsUpdate(');
 if (!hasLibraryMerge && ref === 'working-tree') throw new Error('Missing current library overlay merge');
 const hasStatusProjection = core.includes('private static func streamAddonStatusProjection(');
@@ -292,17 +330,29 @@ if (hasStatusProjection) {
 } else {
   fs.writeFileSync(`${out}/error-sidecar-source-contract.txt`, 'Historical source predates accepted status projection; no new sidecar/reentry result claimed\n');
 }
+}
 // Models and tests compile directly from input snapshots; no source declaration,
 // date formatter, protocol annotation or test assertion is edited during prepare.
 NODE
 shasum -a 256 "$publication_test_dir/Collaborators.swift" \
   "$publication_test_dir/ProductionResourceValues.swift" "$publication_test_dir/ProductionPublication.swift" \
+      "$publication_test_dir/guarded-mode.txt" "$publication_test_dir/guarded-extraction.json" \
   > "$publication_test_dir/generated-before.sha256"
 git -C "$PWD" rev-parse HEAD > "$publication_test_dir/source-head.txt"
 if ((publication_prepare_only)); then
   publication_phase=prepared
   printf 'Prepared exact frozen source; no compiler or executable run\n'
   exit 0
+fi
+publication_phase=extractor-tests
+publication_node=$(node -p 'process.execPath')
+nice -n 15 node "$publication_supervisor" run 15 "$publication_test_dir/extractor-tests-process.json" -- \
+  "$publication_node" --test "$publication_test_dir/inputs/test/addon-guarded-presentation-inputs.test.cjs" \
+  > "$publication_test_dir/extractor-tests.log" 2>&1
+nice -n 15 node "$publication_supervisor" check "$publication_test_dir/extractor-tests-process.json" 0 normal-exit
+publication_guarded_flags=()
+if [[ "$(<"$publication_test_dir/guarded-mode.txt")" == 1 ]]; then
+  publication_guarded_flags=(-D VORTX_GUARDED_METADATA_PRESENTATION)
 fi
 publication_phase=compile
 mkdir "$publication_test_dir/module-cache"
@@ -311,7 +361,7 @@ nice -n 15 node "$publication_supervisor" run 60 "$publication_test_dir/compile-
   /usr/bin/xcrun swiftc -parse-as-library -warnings-as-errors -whole-module-optimization \
   -swift-version "$publication_swift_version" -strict-concurrency=complete -j 1 -num-threads 1 \
   -module-cache-path "$publication_test_dir/module-cache" \
-  -D VORTX_NATIVE_DATA_ENGINE \
+  -D VORTX_NATIVE_DATA_ENGINE "${publication_guarded_flags[@]}" \
   "$publication_test_dir/Collaborators.swift" \
   "$publication_test_dir/inputs/app/SourcesShared/CoreModels.swift" \
   "$publication_test_dir/ProductionPublication.swift" \

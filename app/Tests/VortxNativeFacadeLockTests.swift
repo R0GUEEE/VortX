@@ -51,11 +51,13 @@ private final class FacadePublishWorker: @unchecked Sendable {
     private var externalMetadataReceipts: [Data: (Data, UUID)] = [:]
     private var externalMetadataObservation = UUID()
 
-    init(ownedChange: (@Sendable (ChangeReceipt) -> Void)? = nil,
+    init(sourceChangedDelivery: (@Sendable ([String], ChangeReceipt?) -> (@Sendable () -> Void)?)? = nil,
+         ownedChange: (@Sendable (ChangeReceipt) -> Void)? = nil,
          changed: @escaping @Sendable ([String]) -> Void) {
         let boundary = VortxNativeFacadeLock()
         lock = boundary; fifo = VortxNativeFIFOAdmission(lock: boundary); self.changed = changed
         self.ownedChange = ownedChange
+        self.sourceChangedDelivery = sourceChangedDelivery
         // Explicit RAM acknowledged identity, solely so the REAL receipt builder can run.
         values["native_state"] = .object(["activeProfileId": .string("fixture-profile")])
     }
@@ -138,7 +140,14 @@ final class VortxNativeFacadeLockTests: XCTestCase {
 
     func testActualPublishSortsFieldsAndPublishesBeforeCallback() {
         let events = LockEvents(), ownedEvents = LockEvents(), box = LockBox<FacadePublishWorker?>(nil)
-        let worker = FacadePublishWorker(ownedChange: { receipt in
+        // This is the generic staging seam, not a fake typed Facade source envelope.
+        let worker = FacadePublishWorker(sourceChangedDelivery: { fields, receipt in
+            ownedEvents.record("staged")
+            return {
+                let held = box.value!
+                ownedEvents.record("source-\(fields.joined(separator: ","))-original-\(receipt?.fields == fields)-worker-\(LockWorkerProbe.acquire(held.lock))")
+            }
+        }, ownedChange: { receipt in
             let held = box.value!
             ownedEvents.record("owned-\(receipt.fields.joined(separator: ","))-worker-\(LockWorkerProbe.acquire(held.lock))")
         }) { fields in
@@ -151,11 +160,15 @@ final class VortxNativeFacadeLockTests: XCTestCase {
         box.set(worker)
         defer { box.set(nil) }
         let ticket = worker.arm("board")
-        worker.publishForFixture(["z": .integer(2), "a": .integer(1)], field: "board", ticket: ticket)
+        worker.lock.withLock {
+            worker.publishForFixture(["z": .integer(2), "a": .integer(1)], field: "board", ticket: ticket)
+            XCTAssertEqual(ownedEvents.values, ["staged"], "builder captures before the original outer F drains")
+        }
         events.record("return")
         XCTAssertEqual(events.values, ["a,z", "visible-true", "worker-true", "return"])
-        XCTAssertEqual(ownedEvents.values, ["owned-a,z-worker-true", "legacy"],
-                       "real receipt delivery is synchronous, after F, and before the legacy callback")
+        XCTAssertEqual(ownedEvents.values,
+                       ["staged", "source-a,z-original-true-worker-true", "owned-a,z-worker-true", "legacy"],
+                       "captured generic source delivery precedes owned and legacy, all after outermost F")
     }
 
     func testThrowingNestedTransactionsDrainFIFOAfterUnlock() {

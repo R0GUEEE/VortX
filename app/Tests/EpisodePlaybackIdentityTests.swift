@@ -477,8 +477,9 @@ private struct EpisodePlaybackIdentityTests {
                && !tvDetail.contains(".onChange(of: videos.count)"),
                "TV cached rows and watched rollup refresh on episode content, not only count")
         let phoneDetail = source("SourcesiOS/iOSDetailView.swift")
-        expect(phoneDetail.contains(".onChange(of: videos) { _ in")
-               && !phoneDetail.contains(".onChange(of: videos.count)"),
+        expect(phoneDetail.contains(".onValueChange(of: videos) { _ in")
+               && !phoneDetail.contains(".onChange(of: videos.count)")
+               && !phoneDetail.contains(".onValueChange(of: videos.count)"),
                "phone and Mac season validity and watched rollup observe episode content")
         expect(!blankAnime.hasSamePresentation(as: metadata(["videos": []])), "changed episode inventory republishes")
         expect(!blankAnime.hasSamePresentation(as: metadata(["trailerStreams": [["ytId": "abcdefghijk"]]])),
