@@ -1,5 +1,28 @@
 #import <AVFoundation/AVFoundation.h>
 
+#include <TargetConditionals.h>
+
+#if TARGET_OS_TV
+#include <Security/SecItem.h>
+
+// Explicit tvOS SDK compatibility exception, not a nondeprecated API migration.
+// Security's public Fail constant preserves noninteractive failures, while its
+// recommended LAContext.interactionNotAllowed replacement is unavailable here.
+// Never substitute default Allow, silent Skip, or a previously authenticated context.
+// Only this original constant initializer is excepted from deprecation diagnostics;
+// every other warning, availability check and warnings-as-errors policy remains active.
+static inline CFStringRef _Nonnull VortXTVKeychainAuthenticationUIFailCompatibilityValue(void)
+    CF_RETURNS_NOT_RETAINED;
+
+static inline CFStringRef _Nonnull VortXTVKeychainAuthenticationUIFailCompatibilityValue(void) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    const CFStringRef value = kSecUseAuthenticationUIFail;
+#pragma clang diagnostic pop
+    return value;
+}
+#endif
+
 // C11-atomic cancellation/progress bridge for the noncapturing FFmpeg remux callback.
 #include "VortXRemuxInputProbe.h"
 
@@ -46,6 +69,6 @@ void VortXInstallToolbarCrashGuard(void);
 @interface AVDisplayCriteria ()
 @property(readonly) int videoDynamicRange;
 @property(readonly, nonatomic) float refreshRate;
-- (instancetype)initWithRefreshRate:(float)refreshRate videoDynamicRange:(int)videoDynamicRange;
+- (instancetype _Null_unspecified)initWithRefreshRate:(float)refreshRate videoDynamicRange:(int)videoDynamicRange;
 @end
 #endif

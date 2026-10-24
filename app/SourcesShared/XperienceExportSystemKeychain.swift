@@ -26,10 +26,11 @@ enum XperienceExportSystemKeychain {
             kSecAttrSynchronizable as String: false
         ]
         #if os(tvOS)
-        // Security deprecates this flag, but its LAContext.interactionNotAllowed replacement
-        // is unavailable on tvOS. Keep fail-without-UI until supported parity exists;
-        // Skip can misreport protected items as missing, and omitting the policy allows UI.
-        value[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        // Explicit TV-only SDK compatibility exception, not a completed API migration.
+        // The typed C boundary returns the original public Fail constant because the
+        // recommended LAContext.interactionNotAllowed replacement is unavailable here.
+        // Preserve protected-item failures; never silently Skip or permit default Allow.
+        value[kSecUseAuthenticationUI as String] = VortXTVKeychainAuthenticationUIFailCompatibilityValue()
         #else
         // Fresh per query: never reuse a previously authenticated context across operations.
         let context = LAContext()
