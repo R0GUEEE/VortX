@@ -1624,6 +1624,8 @@ struct PlayerScreen: View {
     @State private var macIsFullScreen = false
     /// Observers for the fullscreen-state notifications, torn down on disappear.
     @State private var macFullScreenObservers: [NSObjectProtocol] = []
+    /// Revokes already-enqueued native callbacks before observers are removed or a new presentation starts.
+    @State private var macFullScreenObservationID: UUID?
     /// Whether the player's window was ALREADY in native fullscreen when the player opened. If so the app
     /// was fullscreen for browsing (the user's own choice) and we leave it that way on teardown; if not, a
     /// fullscreen the PLAYER itself entered is dropped on close so the viewer lands back in windowed browse.
@@ -11178,36 +11180,35 @@ struct PlayerScreen: View {
         let alreadyFullScreen = window?.styleMask.contains(.fullScreen) ?? false
         macIsFullScreen = alreadyFullScreen
         macWasFullScreenAtOpen = alreadyFullScreen
+        let observationID = UUID()
+        macFullScreenObservationID = observationID
+        let windowID = window.map(ObjectIdentifier.init)
+        let receive: @MainActor @Sendable (Bool) -> Void = { fullScreen in
+            guard macFullScreenObservationID == observationID, !playbackExited else { return }
+            macIsFullScreen = fullScreen
+            // AppKit fullscreen re-hosts the backing on entry AND exit. Re-assert the current player's
+            // EDR tags only while this original window observation is still installed; no second hop
+            // can outlive the accepted observation and act on a replacement presentation.
+            (coordinator.player as? MPVMetalViewController)?.resyncDynamicRangeForWindowChange()
+        }
         let nc = NotificationCenter.default
-        // Scope the observers to the player's own window via `object:` so an auxiliary window's fullscreen
-        // transition (a Settings or About window) does not flip the player glyph. When the window is not yet
-        // resolvable (object nil observes all windows), the closure's identity check is the fallback guard.
+        // Keep the original window filter. Only scalar identity and the owned receiver cross the
+        // nonisolated NotificationCenter callback; no NSWindow/Notification is transferred to the turn.
         let enter = nc.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { note in
-            guard window == nil || (note.object as? NSWindow) === window else { return }
-            macIsFullScreen = true
-            // HDR/DV EDR survives fullscreen: AppKit native fullscreen re-hosts the content in a NEW
-            // fullscreen window/backing, which drops the mpv Metal layer's EDR activation + colorspace
-            // association, so PQ/HLG pixels presented as SDR (washed out) until a new file/gamma change.
-            // These notifications fire AFTER the window/backing swap completes, the correct moment to
-            // re-tag the colorspace and re-assert wantsExtendedDynamicRangeContent on the new backing.
-            // mpv lane only; AVPlayerLayer is EDR-native and needs nothing.
-            Task { @MainActor in
-                (coordinator.player as? MPVMetalViewController)?.resyncDynamicRangeForWindowChange()
-            }
+            let eventWindowID = (note.object as? NSWindow).map(ObjectIdentifier.init)
+            guard windowID == nil || eventWindowID == windowID else { return }
+            DispatchQueue.main.async { receive(true) }
         }
         let exit = nc.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { note in
-            guard window == nil || (note.object as? NSWindow) === window else { return }
-            macIsFullScreen = false
-            // Same re-sync on the way OUT: exiting fullscreen swaps back to the original window/backing,
-            // which loses the EDR activation the same way (see the enter handler above).
-            Task { @MainActor in
-                (coordinator.player as? MPVMetalViewController)?.resyncDynamicRangeForWindowChange()
-            }
+            let eventWindowID = (note.object as? NSWindow).map(ObjectIdentifier.init)
+            guard windowID == nil || eventWindowID == windowID else { return }
+            DispatchQueue.main.async { receive(false) }
         }
         macFullScreenObservers = [enter, exit]
     }
 
     private func unobserveMacFullScreen() {
+        macFullScreenObservationID = nil
         for token in macFullScreenObservers { NotificationCenter.default.removeObserver(token) }
         macFullScreenObservers = []
     }

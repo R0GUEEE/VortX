@@ -933,13 +933,17 @@ struct iOSDetailView: View {
                     .transition(reduceMotion ? .identity : .opacity.combined(with: .scale(scale: 0.9)))
                 }
                 #endif
+                }
+                .overlay(alignment: .top) { pinnedSeasonStrip(proxy: proxy) }
                 #if !os(tvOS)
-                // Shell quick-view playback uses this ordinary detail destination rather than inventing a
-                // source URL. Movies call the same ranked Play path as the hero CTA; series push the normal
-                // per-episode source-selection screen once their authoritative episode inventory arrives.
-                if let autoPlayEpisode, let m = meta {
-                    NavigationLink(
-                        destination: iOSEpisodeStreams(
+                // Shell quick-view playback uses the ordinary episode destination. Register it on
+                // the stable scroll container, not a conditionally present hidden NavigationLink.
+                .navigationDestination(isPresented: Binding(
+                    get: { self.autoPlayEpisode != nil },
+                    set: { active in if !active { self.autoPlayEpisode = nil; randomPickPlayIntent?.revoke() } }
+                )) {
+                    if let autoPlayEpisode, let m = meta {
+                        iOSEpisodeStreams(
                             meta: m,
                             video: autoPlayEpisode,
                             season: autoPlayEpisode.season ?? season,
@@ -953,21 +957,10 @@ struct iOSDetailView: View {
                             autoPlayOnAppear: true,
                             randomPickPlayIntent: randomPickPlayIntent,
                             suppressPreferenceAutoPlay: randomPickPlayIntent != nil
-                        ),
-                        isActive: Binding(
-                            get: { self.autoPlayEpisode != nil },
-                            set: { active in if !active { self.autoPlayEpisode = nil; randomPickPlayIntent?.revoke() } }
                         )
-                    ) {
-                        EmptyView()
                     }
-                    .frame(width: 0, height: 0)
-                    .hidden()
-                    .accessibilityHidden(true)
                 }
                 #endif
-                }
-                .overlay(alignment: .top) { pinnedSeasonStrip(proxy: proxy) }
                 .onPreferenceChange(EpisodeTopOffsetPreferenceKey.self) { episodeTopOffset = $0 }
                 .onPreferenceChange(EpisodeBottomOffsetPreferenceKey.self) { episodeBottomOffset = $0 }
                 .onPreferenceChange(SeasonStripHeightPreferenceKey.self) { seasonStripHeight = $0 }

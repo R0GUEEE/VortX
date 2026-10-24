@@ -18,8 +18,8 @@ function block(source, anchor) {
 require('./extract-source-quick-filter-models.cjs');
 process.stdout.write(block(prefs, 'enum SourceType: String, CaseIterable, Codable, Sendable {'));
 process.stdout.write(block(prefs, 'protocol SourcePrefsReading {'));
-const weights = prefs.match(/^    fileprivate static let tierWeights = .+$/m);
-const local = prefs.match(/^    @TaskLocal static var readingOverride: Snapshot\?$/m);
+const weights = prefs.match(/^    fileprivate nonisolated static let tierWeights = .+$/m);
+const local = prefs.match(/^    @TaskLocal nonisolated static var readingOverride: Snapshot\?$/m);
 if (!weights || !local) throw Error('missing current snapshot dependencies');
 process.stdout.write('enum SourcePreferences {\n' + weights[0].replace('fileprivate ', '') + '\n' +
   block(prefs, 'struct Snapshot: SourcePrefsReading, Sendable {') + local[0] + '\n' +

@@ -244,7 +244,7 @@ final class FeaturedHeroModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: Self.heroRotateInterval)
                 guard !Task.isCancelled else { return }
-                await self?.advanceIfNotHeld()
+                self?.advanceIfNotHeld()
             }
         }
     }
@@ -347,7 +347,7 @@ final class FeaturedHeroModel: ObservableObject {
         resumeTask = Task { [weak self] in
             try? await Task.sleep(for: Self.heroResumeAfter)
             guard !Task.isCancelled else { return }
-            await self?.releaseInteractionHold()
+            self?.releaseInteractionHold()
         }
     }
 

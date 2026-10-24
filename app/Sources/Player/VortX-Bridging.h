@@ -3,6 +3,9 @@
 // C11-atomic cancellation/progress bridge for the noncapturing FFmpeg remux callback.
 #include "VortXRemuxInputProbe.h"
 
+// Process-lifetime C-owned crash signal state; no Swift executes on a fatal signal.
+#include "VortXCrashSignal.h"
+
 // Network shares over SMB: the libsmbclient calls the share browser makes (see the header for why these are
 // declared rather than imported). Quoted path relative to this header, like the QuickJS bridge below.
 #include "../../SourcesShared/SMB/VortXSMBShim.h"

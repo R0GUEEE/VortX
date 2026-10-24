@@ -16,13 +16,17 @@ import UIKit       // UIApplication.beginBackgroundTask for the on-background sy
 /// root); an `@ObservedObject` whose value is read in body does, because SwiftUI re-renders a reappearing
 /// view when a tracked dependency changed while it was covered. Small + dedicated so views observing it do
 /// not also re-render on VortXSyncManager's unrelated account/sign-in @Published churn.
+@MainActor
 final class AddonOrderObserver: ObservableObject {
     static let shared = AddonOrderObserver()
     @Published private(set) var revision = 0
     private init() {
-        // queue: .main -> the block (and the @Published mutation) run on the main thread, which SwiftUI requires.
         NotificationCenter.default.addObserver(forName: VortXSyncManager.addonOrderChangedNote, object: nil, queue: .main) { [weak self] _ in
-            self?.revision &+= 1
+            // NotificationCenter's block is not actor-isolated. Only this wake counter crosses to
+            // the main executor; the original order write and synchronous notification stay unchanged.
+            DispatchQueue.main.async { [weak self] in
+                self?.revision &+= 1
+            }
         }
     }
 }
@@ -2103,11 +2107,11 @@ final class VortXSyncManager: ObservableObject {
     /// converged priority order. Read by ownedAddons(from:) as the ordering spine when a pulled doc does not
     /// itself carry addonOrder, so a device that hydrates after (but not during) an order change still lands
     /// the converged order. Empty means "no shared order yet" (fall back to the descriptor spine).
-    private static let kAddonOrderKey = "vortx.sync.appliedAddonOrder"
+    nonisolated private static let kAddonOrderKey = "vortx.sync.appliedAddonOrder"
     /// Upper bound on the persisted order length. A real account has a few dozen add-ons; this only exists so a
     /// malicious/garbage synced `doc.addonOrder` can't balloon UserDefaults. Applied in the setter, which is the
     /// single chokepoint for both the in-app reorder and the syncDown apply.
-    private static let maxAddonOrderEntries = 1024
+    nonisolated private static let maxAddonOrderEntries = 1024
     /// `nonisolated`: it only touches thread-safe `UserDefaults` (and Sendable `let` backing constants), so
     /// nonisolated read sites like `CoreMetaDetails.meta` (the #144 detail-language pick, a plain Decodable
     /// evaluated off the main actor) can consult the shared order without an actor hop. All existing
@@ -2119,7 +2123,7 @@ final class VortXSyncManager: ObservableObject {
     /// Posted (main thread) whenever the shared add-on order changes: an in-app Reorder drag or a remote
     /// pull that carried a newer order. Views showing the add-on list observe it to re-sort live, since
     /// appliedAddonOrder is a plain UserDefaults static (not @Published) and gives SwiftUI no other signal.
-    static let addonOrderChangedNote = Notification.Name("vortx.addonOrderChanged")
+    nonisolated static let addonOrderChangedNote = Notification.Name("vortx.addonOrderChanged")
     /// Posted after the process-wide VortX credential namespace changes. CoreBridge uses this
     /// non-secret generation receipt to retire queued engine history before a new owner hydrates.
     static let credentialScopeDidChangeNote = Notification.Name("vortx.credentialScopeDidChange")
@@ -2347,12 +2351,24 @@ final class VortXSyncManager: ObservableObject {
         // synced doc.apiKeys mirror here and re-adopts that token instead of signing this device out.
         Task { @MainActor in
             await TraktAuth.shared.setSyncedTokenProvider {
-                guard let keys = (await VortXSyncManager.shared.pullSyncDoc())?["apiKeys"] as? [String: String],
-                      let access = keys["traktAccess"], let refresh = keys["traktRefresh"],
-                      !access.isEmpty, !refresh.isEmpty else { return nil }
-                return (access, refresh, Int(keys["traktExpiry"] ?? "") ?? 0)
+                let capture = CredentialScopeRegistry.shared.capture()
+                return await VortXSyncManager.shared.syncedTraktCredentials(credentialCapture: capture)
             }
         }
+    }
+
+    /// A credential lookup does not decide backup ownership or seed an empty account. Keep the untyped
+    /// decrypted document on its main owner and return only the tuple under the original ingress capture.
+    private func syncedTraktCredentials(
+        credentialCapture capture: CredentialScopeRegistry.Capture
+    ) async -> (access: String, refresh: String, expiryUnix: Int)? {
+        guard isCurrent(capture),
+              let document = await pullCredentialLookupDocument(credentialCapture: capture),
+              isCurrent(capture),
+              let keys = document["apiKeys"] as? [String: String],
+              let access = keys["traktAccess"], let refresh = keys["traktRefresh"],
+              !access.isEmpty, !refresh.isEmpty else { return nil }
+        return (access, refresh, Int(keys["traktExpiry"] ?? "") ?? 0)
     }
 
     // MARK: - Keychain persistence
@@ -3138,6 +3154,14 @@ final class VortXSyncManager: ObservableObject {
     @available(*, deprecated, message: "nil conflates 'no backup yet' with 'pull failed'; use pullSyncDocResult() (or a tri-state wrapper like accountHasSyncData/rosterConflictWithAccount) so a network blip is never misread as an empty account")
     func pullSyncDoc(credentialCapture suppliedCapture: CredentialScopeRegistry.Capture? = nil) async -> [String: Any]? {
         let capture = suppliedCapture ?? credentialAuthority.capture()
+        return await pullCredentialLookupDocument(credentialCapture: capture)
+    }
+
+    /// Behavior-preserving read for credential fallback only. Unlike the strict backup/merge pull below,
+    /// this does not establish a durable backup-seen floor or make a seed/push decision.
+    private func pullCredentialLookupDocument(
+        credentialCapture capture: CredentialScopeRegistry.Capture
+    ) async -> [String: Any]? {
         guard isCurrent(capture), dataKey != nil else { return nil }
         let (code, json) = await request("GET", "/v1/backup", auth: true, credentialCapture: capture)
         guard isCurrent(capture) else { return nil }
@@ -6488,7 +6512,7 @@ extension VortXSyncManager {
                       CoreBridge.shared.nativePlaybackTargetIsCurrent(finalAccepted.target) else { return false }
                 do {
                     try finalAccepted.read.acknowledged.originalRead.withActive {}
-                    return try VortxNativeProviderCredentials.withStoreLock {
+                    return VortxNativeProviderCredentials.withStoreLock {
                         guard case .value(let provider) = Keychain.confirmedString(providerSlot),
                               case .value(let actor) = Keychain.confirmedString(actorSlot) else { return false }
                         return provider.utf8.elementsEqual(secure.0.utf8) && actor.utf8.elementsEqual(secure.1.utf8)

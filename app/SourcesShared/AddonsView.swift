@@ -39,9 +39,9 @@ final class AddonHealthStore: ObservableObject {
     private var lastProbe: Date?
     private init() {}
 
-    private static let okThresholdMs = 1500
-    private static let timeout: TimeInterval = 6
-    private static let rateLimit: TimeInterval = 20
+    nonisolated private static let okThresholdMs = 1500
+    nonisolated private static let timeout: TimeInterval = 6
+    nonisolated private static let rateLimit: TimeInterval = 20
 
     /// Probe every add-on concurrently. Debounced to once per `rateLimit` seconds unless `force`.
     func probe(_ transportUrls: [String], force: Bool = false) {
