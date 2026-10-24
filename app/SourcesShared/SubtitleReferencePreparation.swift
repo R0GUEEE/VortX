@@ -34,6 +34,8 @@ enum SubtitleReferencePreparation {
         let originalReferenceWindow: SubtitleEmbeddedExtractor.TimingWindow
         let actualIndexedStartSeconds: Double
         let file: SubtitleReferenceNativeQuery.RetimedFile
+        /// Already prepared on the worker. Final admission must not reparse, sort or discard cues.
+        let presentation: SubtitleReferencePresentation.Prepared
         let inputBytesRead: Int64
         let packetsRead: Int
     }
@@ -45,6 +47,7 @@ enum SubtitleReferencePreparation {
         case extraction(SubtitleEmbeddedExtractor.TimingWindowFailure)
         case originalExtractionMismatch
         case nativeUnavailableOrRejected
+        case presentation(SubtitleReferencePresentation.Failure)
     }
 
     /// Blocking utility-worker operation. No owner lock, MainActor hop, user callback, player seek,
@@ -119,6 +122,11 @@ enum SubtitleReferencePreparation {
             originalJob: request.identity.originalJob
         ) else { return .failure(.nativeUnavailableOrRejected) }
         guard !request.cancellation.isCancelled else { return .failure(.cancelled) }
+        let presentation: SubtitleReferencePresentation.Prepared
+        do { presentation = try SubtitleReferencePresentation.prepare(file) }
+        catch let failure as SubtitleReferencePresentation.Failure { return .failure(.presentation(failure)) }
+        catch { return .failure(.invalidRequest) }
+        guard !request.cancellation.isCancelled else { return .failure(.cancelled) }
         do { try request.source.validateUnchanged() }
         catch let error as SubtitleEmbeddedExtractor.TimingWindowFailure { return .failure(.extraction(error)) }
         catch { return .failure(.invalidRequest) }
@@ -128,7 +136,8 @@ enum SubtitleReferencePreparation {
             originalTimestampOriginSeconds: result.originalTimestampOriginSeconds,
             originalReferenceWindow: result.window,
             actualIndexedStartSeconds: result.actualIndexedStartSeconds,
-            file: file, inputBytesRead: result.inputBytesRead, packetsRead: result.packetsRead
+            file: file, presentation: presentation,
+            inputBytesRead: result.inputBytesRead, packetsRead: result.packetsRead
         ))
     }
 }

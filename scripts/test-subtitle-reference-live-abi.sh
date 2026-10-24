@@ -13,7 +13,9 @@ inputs=(
     "$0" "$header" "$library"
     app/SourcesShared/VortxNativeRuntime.swift
     app/SourcesShared/SubtitleReferenceNativeQuery.swift
+    app/SourcesShared/SubtitleReferencePresentation.swift
     app/Tests/SubtitleReferenceNativeDefaultCAdapterTests.swift
+    app/Tests/SubtitleReferencePresentationTests.swift
 )
 shasum -a 256 "${inputs[@]}" > "$query_dir/inputs.sha256"
 cp "$header" "$query_dir/vortx_ffi.h"
@@ -27,10 +29,15 @@ nice -n 15 xcrun swiftc -parse-as-library -swift-version 6 \
     -module-cache-path "$query_dir/module-cache" -I "$query_dir" \
     app/SourcesShared/VortxNativeRuntime.swift \
     app/SourcesShared/SubtitleReferenceNativeQuery.swift \
+    app/SourcesShared/SubtitleReferencePresentation.swift \
     app/Tests/SubtitleReferenceNativeDefaultCAdapterTests.swift \
+    app/Tests/SubtitleReferencePresentationTests.swift \
     "$library" -o "$query_dir/default-c-query"
-DYLD_LIBRARY_PATH="$(dirname "$library"):$(dirname "$library")/deps" \
-    nice -n 15 "$query_dir/default-c-query"
+# Set the selected-library environment after the system scheduling launcher; protected
+# macOS launchers may remove inherited DYLD variables. Optional trace is retained by the operator.
+runtime_env=("DYLD_LIBRARY_PATH=$(dirname "$library"):$(dirname "$library")/deps")
+if [[ "${VORTX_FFI_DYLD_TRACE:-}" == 1 ]]; then runtime_env+=("DYLD_PRINT_LIBRARIES=1"); fi
+nice -n 15 /usr/bin/env "${runtime_env[@]}" "$query_dir/default-c-query"
 shasum -a 256 --check "$query_dir/inputs.sha256"
 cmp "$header" "$query_dir/vortx_ffi.h"
 shasum -a 256 "$query_dir/default-c-query" "$query_dir/module.modulemap" \

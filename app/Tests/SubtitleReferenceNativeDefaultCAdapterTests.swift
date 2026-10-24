@@ -340,6 +340,76 @@ quoted \"words\" & second line
         // Byte equality against a separately authored complete SRT checks every output cue's
         // index, text, start and end time. This fixture's cues all lie inside the scoring window.
         try require(result.srt == expectedRetimedSRT, "full retimed cue/text/time golden mismatch")
+        try require(result.cues.count == 24, "owned complete cue count mismatch")
+        for (index, cue) in result.cues.enumerated() {
+            try require(cue.startMs == reference[index].startMs,
+                        "owned cue start mismatch at \(index)")
+            try require(cue.endMs == reference[index].startMs + 1_200,
+                        "owned cue end mismatch at \(index)")
+            try require(cue.text == "外部 \(index)\nquoted \\\"words\\\" & second line",
+                        "owned cue text mismatch at \(index)")
+        }
+    }
+
+    private static func requireCompleteOutsideWindowOutput() throws {
+        // Only the first 900 seconds determine the correction. All four additional dialogue
+        // cues are an hour into the file and overlap. Keep their input duration within
+        // the native query's two-minute budget; neither query nor presentation may drop them.
+        let tail = """
+        25
+        01:00:00,000 --> 01:01:50,000
+        <b>Long tail 0</b>
+        第二行 & literal text
+
+        26
+        01:00:00,010 --> 01:01:51,000
+        <i>Long tail 1</i>
+
+        27
+        01:00:00,020 --> 01:01:52,000
+        Long tail 2
+
+        28
+        01:00:00,030 --> 01:01:53,000
+        Long tail 3
+        """ + "\n\n"
+        let expectedTail = """
+        25
+        01:00:02,750 --> 01:01:52,750
+        <b>Long tail 0</b>
+        第二行 & literal text
+
+        26
+        01:00:02,760 --> 01:01:53,750
+        <i>Long tail 1</i>
+
+        27
+        01:00:02,770 --> 01:01:54,750
+        Long tail 2
+
+        28
+        01:00:02,780 --> 01:01:55,750
+        Long tail 3
+        """ + "\n\n"
+        guard let result = SubtitleReferenceNativeQuery.align(
+            externalSRT: externalSRT + Data(tail.utf8), reference: reference, originalJob: job
+        ) else { throw Failure.check("outside-window full-file alignment returned nil") }
+        try require(result.offsetMs == 2_750 && result.driftPpm == 0 && result.confidence == 1_000,
+                    "outside-window cues changed scoring-window correction")
+        try require(result.srt == expectedRetimedSRT + Data(expectedTail.utf8),
+                    "outside-window full-file golden mismatch")
+        try require(result.cues.count == 28, "outside-window complete owned cue count mismatch")
+        let expectedTexts = ["<b>Long tail 0</b>\n第二行 & literal text",
+                             "<i>Long tail 1</i>", "Long tail 2", "Long tail 3"]
+        for index in 0..<4 {
+            let cue = result.cues[index + 24]
+            try require(cue.startMs == 3_602_750 + UInt64(index * 10),
+                        "outside-window owned start mismatch at \(index)")
+            try require(cue.endMs == 3_712_750 + UInt64(index * 1_000),
+                        "outside-window owned end mismatch at \(index)")
+            try require(cue.text == expectedTexts[index],
+                        "outside-window markup/multiline text mismatch at \(index)")
+        }
     }
 
     static func main() async {
@@ -349,10 +419,12 @@ quoted \"words\" & second line
             let worker: Task<Void, Error> = Task.detached(priority: .utility) {
                 try Self.requireLocalRefusals()
                 try Self.requirePositiveDefaultC()
+                try Self.requireCompleteOutsideWindowOutput()
                 try Self.requireUnknownKindRefusalOnDefaultC()
+                try SubtitleReferencePresentationTests.run()
             }
             try await worker.value
-            print("PASS genuine default-C subtitle reference alignment; 24-cue full-file golden; drift=0")
+            print("PASS genuine default-C subtitle reference alignment; original 24-cue and outside-window 28-cue full-file goldens; drift=0")
         } catch {
             FileHandle.standardError.write(Data("FAIL subtitle reference default-C acceptance: \(error)\n".utf8))
             exit(EXIT_FAILURE)

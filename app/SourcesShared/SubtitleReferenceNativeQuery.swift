@@ -25,6 +25,9 @@ enum SubtitleReferenceNativeQuery {
     struct RetimedFile: Sendable {
         let originalJob: UUID
         let srt: Data
+        /// The exact validated complete output. Render preparation must consume these owned values,
+        /// not round-trip through the ordinary permissive parser (which drops unsupported cues).
+        let cues: [RetimedCue]
         let offsetMs: Int64
         let driftPpm: Int32
         let confidence: UInt16
@@ -111,7 +114,7 @@ enum SubtitleReferenceNativeQuery {
               (1...40_000_000).contains(reply.result.workUsed),
               (1...12_000).contains(reply.result.cues.count),
               let srt = serialize(reply.result.cues) else { return nil }
-        return RetimedFile(originalJob: originalJob, srt: srt, offsetMs: correction.offsetMs,
+        return RetimedFile(originalJob: originalJob, srt: srt, cues: reply.result.cues, offsetMs: correction.offsetMs,
             driftPpm: correction.driftPpm, confidence: correction.confidence)
     }
 
