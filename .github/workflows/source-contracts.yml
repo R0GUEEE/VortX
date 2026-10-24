@@ -14,6 +14,8 @@ on:
       - "scripts/test-native-library-projection-perf.sh"
       - "scripts/test-avplayer-recovery-settlement.sh"
       - "scripts/test-player-skip-chrome.sh"
+      - "scripts/test-apple-playback-profile-lifecycle.sh"
+      - "scripts/test-landscape-backdrop-cache.sh"
       - "scripts/test-tv-search-collections.sh"
       - "scripts/test-addon-selfhosted.sh"
       - "scripts/test-apple-parity-contracts.sh"
@@ -81,6 +83,8 @@ on:
       - "scripts/test-native-library-projection-perf.sh"
       - "scripts/test-avplayer-recovery-settlement.sh"
       - "scripts/test-player-skip-chrome.sh"
+      - "scripts/test-apple-playback-profile-lifecycle.sh"
+      - "scripts/test-landscape-backdrop-cache.sh"
       - "scripts/test-tv-search-collections.sh"
       - "scripts/test-addon-selfhosted.sh"
       - "scripts/test-apple-parity-contracts.sh"
@@ -168,6 +172,8 @@ jobs:
       - run: bash scripts/test-cinema-rail-layout.sh
       - run: bash scripts/test-avplayer-recovery-settlement.sh
       - run: bash scripts/test-player-skip-chrome.sh
+      - run: bash scripts/test-apple-playback-profile-lifecycle.sh
+      - run: bash scripts/test-landscape-backdrop-cache.sh
       - run: bash scripts/test-tv-search-collections.sh
       - run: bash scripts/test-addon-selfhosted.sh
       - run: bash scripts/test-episode-source-isolation.sh
