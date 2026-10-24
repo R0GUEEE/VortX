@@ -707,6 +707,7 @@ jobs:
             --engine-revision "$VORTX_ENGINE_SOURCE_REVISION" \
             --mpvkit "$PWD/Vendor/MPVKit-DVFEL" --output "$PWD/.native-project.yml"
           xcodegen generate --spec .native-project.yml
+          ruby ../scripts/native-apple-swift6-policy.rb VortX.xcodeproj native
 
       - name: Capture exact native SDK and player inputs before app compilation
         env:

@@ -373,6 +373,7 @@ jobs:
             --engine-revision 0000000000000000000000000000000000000000 \
             --mpvkit "$PWD/Vendor/MPVKit-DVFEL" --output "$PWD/.native-ci-project.yml"
           xcodegen generate --spec .native-ci-project.yml
+          ruby ../scripts/native-apple-swift6-policy.rb VortX.xcodeproj native
 
       # Real compile/link/package per platform shell. Signing is disabled outright (no identity,
       # none needed for simulator or unsigned macOS builds). Each produced .app must carry the
