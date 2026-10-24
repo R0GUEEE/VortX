@@ -497,10 +497,12 @@ private final class AVPlayerModel: NSObject, ObservableObject {
     private func observePiP(_ pip: AVPictureInPictureController?) {
         guard let pip else { return }
         let possible = pip.observe(\.isPictureInPicturePossible, options: [.new]) { [weak self] pip, _ in
-            Task { @MainActor in self?.isPiPPossible = pip.isPictureInPicturePossible }
+            let isPossible = pip.isPictureInPicturePossible
+            Task { @MainActor in self?.isPiPPossible = isPossible }
         }
         let active = pip.observe(\.isPictureInPictureActive, options: [.new]) { [weak self] pip, _ in
-            Task { @MainActor in self?.isPiPActive = pip.isPictureInPictureActive }
+            let isActive = pip.isPictureInPictureActive
+            Task { @MainActor in self?.isPiPActive = isActive }
         }
         observations.append(contentsOf: [possible, active])
     }
