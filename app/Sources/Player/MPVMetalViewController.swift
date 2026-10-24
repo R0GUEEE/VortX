@@ -1206,7 +1206,10 @@ final class MPVMetalViewController: PlatformViewController {
 #if os(macOS)
         checkError(mpv_set_option_string(mpv, "input-media-keys", "yes"))
 #endif
-        checkError(mpv_set_option(mpv, "wid", MPV_FORMAT_INT64, &metalLayer))
+        // mpv expects an int64_t containing the layer address, not a pointer to a Swift reference.
+        // The controller continues to own the layer; this borrowed handle transfers no ownership.
+        var windowID = Int64(Int(bitPattern: Unmanaged.passUnretained(metalLayer).toOpaque()))
+        checkError(mpv_set_option(mpv, "wid", MPV_FORMAT_INT64, &windowID))
         checkError(mpv_set_option_string(mpv, "subs-match-os-language", "yes"))
         checkError(mpv_set_option_string(mpv, "subs-fallback", "yes"))
         // Point libass at the bundled fonts for non-Latin subtitle rendering. Every target ships
