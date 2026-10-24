@@ -55,7 +55,7 @@ native_live_inputs=("${native_live_unique[@]}")
 for native_live_input in "${native_live_inputs[@]}"; do
     [[ "$native_live_input" == -lz ]] || shasum -a 256 "$native_live_input" >> "$native_live_dir/carrier-sources.sha256"
 done
-nice -n 15 xcrun swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors \
+nice -n 15 xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
     -j 1 -num-threads 1 -whole-module-optimization \
     -sdk "$(xcrun --sdk macosx --show-sdk-path)" -target "$(uname -m)-apple-macosx14.0" \
     -module-cache-path "$native_live_dir/module-cache" \

@@ -114,6 +114,7 @@ build_slice() { # <triple> <sdk> <kernel|server>
     echo "- vortx-ffi $1 ($3)"
     # --locked: the engine workspace tracks Cargo.lock, so a drifted dependency resolution FAILS
     # the build here instead of silently linking a different graph than CI proved.
+    CARGO_PROFILE_RELEASE_PANIC=abort \
     SDKROOT="$(xcrun --sdk "$2" --show-sdk-path)" \
         cargo +nightly-2026-07-19 build --locked $BUILDSTD --manifest-path "$ENGINE_DIR/Cargo.toml" \
         -p vortx-ffi $features --release --target "$1"
