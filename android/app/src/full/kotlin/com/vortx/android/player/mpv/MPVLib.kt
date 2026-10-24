@@ -61,6 +61,9 @@ class MPVLib private constructor(private val delegate: MpvSeam) {
 
     fun init() = delegate.init()
 
+    fun bindOriginalOwner(liveness: java.util.concurrent.atomic.AtomicBoolean): Boolean =
+        delegate.bindOriginalOwner(liveness)
+
     fun destroy() {
         delegate.removeObserver(delegateObserver)
         synchronized(observers) { observers.clear() }

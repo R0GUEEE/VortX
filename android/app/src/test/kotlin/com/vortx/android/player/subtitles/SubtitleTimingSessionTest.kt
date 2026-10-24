@@ -104,7 +104,10 @@ class SubtitleTimingSessionTest {
             "onDispose { subtitleTiming.retire() }",
             "captureLocalLibraryMutationAdmission()",
             "ContinueWatchingOwnerGate.serialized",
-            "revision == subtitleProfileRevision && currentSubtitleSessionKey == playbackSessionKey",
+            "val original = originalPlaybackOwner ?: return false",
+            "currentSubtitleSessionKey == playbackSessionKey &&",
+            "!playerExitRequested && original.isActive && action()",
+            "subtitleAccountAdmission?.invoke(validateAndMutateState)",
             "latestSubtitleEngine === engine && action()",
             "subtitlePoolPlaybackQuery(subtitleContentKey, playerState.durationMs, releaseName)",
             "contentKey = query.contentKey",
@@ -119,6 +122,7 @@ class SubtitleTimingSessionTest {
         )
         fun wired(value: String) = required.all(value::contains)
         assertTrue(wired(screen))
+        assertFalse(screen.contains("revision == subtitleProfileRevision && currentSubtitleSessionKey == playbackSessionKey"))
         required.forEach { needle -> assertFalse("Removal must break actual caller contract: $needle",
             wired(screen.replace(needle, "REMOVED"))) }
         assertFalse(chrome.contains("SubtitlePoolClient.fetch"))

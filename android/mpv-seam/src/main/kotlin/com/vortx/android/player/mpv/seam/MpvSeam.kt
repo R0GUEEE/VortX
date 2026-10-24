@@ -66,6 +66,10 @@ class MpvSeam private constructor() {
     }
     private external fun nativeInit(instance: Long)
 
+    /** No callout: the existing handle gate reads this original one-way cell at each lease admission. */
+    fun bindOriginalOwner(liveness: java.util.concurrent.atomic.AtomicBoolean): Boolean =
+        handleGate?.bindOriginalOwner(liveness) == true
+
     fun destroy() {
         val gate = handleGate ?: return
         // Close admission synchronously so no observer/thread can race in after destroy. With no active

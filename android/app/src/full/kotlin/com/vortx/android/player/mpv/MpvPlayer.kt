@@ -40,6 +40,7 @@ import com.vortx.android.player.SessionAudioRouteRequest
 import com.vortx.android.player.SubtitleStyle
 import com.vortx.android.player.PlayerSubtitleSelection
 import com.vortx.android.player.SubtitleSelectionAuthority
+import com.vortx.android.player.PlaybackOwnerToken
 import com.vortx.android.player.VideoScaleMode
 import com.vortx.android.player.normalizedExternalSubtitles
 import com.vortx.android.player.recoverNativeFailure
@@ -193,6 +194,14 @@ class MpvPlayer private constructor(
     // All mutation/retirement and final local-file/native property admission use the EXISTING gate.
     // The receipt helper itself performs no IO/callback and holds no lock across a native call.
     private val subtitleSelections = SubtitleSelectionAuthority()
+    private var originalPlaybackOwner: PlaybackOwnerToken? = null
+
+    override fun bindPlaybackOwner(original: PlaybackOwnerToken): Boolean =
+        synchronized(subtitleGenerationGate) {
+            if (released.get() || originalPlaybackOwner != null) return@synchronized false
+            originalPlaybackOwner = original
+            mpv.bindOriginalOwner(original.nativeLiveness) && original.isActive
+        }
     // Metadata only; all access is under subtitleGenerationGate, not the terminal/audio locks.
     private val metadataLoadIdentity = MpvMetadataLoadIdentity()
     private var startupSampleBudget = StartupSampleBudget(0L)
@@ -420,9 +429,9 @@ class MpvPlayer private constructor(
     }
 
     override fun load(playable: Playable) {
-        if (released.get()) return
+        if (released.get() || originalPlaybackOwner?.isActive != true) return
         val (loadGeneration, initialSubtitleSelection) = synchronized(subtitleGenerationGate) {
-            if (released.get()) return
+            if (released.get() || originalPlaybackOwner?.isActive != true) return
             val generation = subtitleLoadGeneration.incrementAndGet()
             val original = subtitleSelections.beginSource(generation) ?: return
             metadataLoadIdentity.begin(generation)
@@ -645,7 +654,7 @@ class MpvPlayer private constructor(
 
     override fun selectSubtitleTrack(id: Int?) {
         synchronized(subtitleGenerationGate) {
-            if (released.get() || subtitleSelections.beginChoice() == null) return
+            if (released.get() || originalPlaybackOwner?.isActive != true || subtitleSelections.beginChoice() == null) return
             mpv.setPropertyString(PROP_SID, id?.toString() ?: "no")
         }
     }
@@ -656,16 +665,16 @@ class MpvPlayer private constructor(
     }
 
     override fun beginSubtitleSelection(): PlayerSubtitleSelection? = synchronized(subtitleGenerationGate) {
-        if (released.get()) null else subtitleSelections.beginChoice()
+        if (released.get() || originalPlaybackOwner?.isActive != true) null else subtitleSelections.beginChoice()
     }
     override fun captureSubtitleSelection(): PlayerSubtitleSelection? = synchronized(subtitleGenerationGate) {
-        if (released.get()) null else subtitleSelections.capture()
+        if (released.get() || originalPlaybackOwner?.isActive != true) null else subtitleSelections.capture()
     }
     override fun isSubtitleSelectionCurrent(request: PlayerSubtitleSelection): Boolean =
         synchronized(subtitleGenerationGate) { isSubtitleSelectionCurrentLocked(request) }
 
     private fun isSubtitleSelectionCurrentLocked(request: PlayerSubtitleSelection): Boolean =
-        !released.get() && subtitleSelections.isCurrent(request) &&
+        !released.get() && originalPlaybackOwner?.isActive == true && subtitleSelections.isCurrent(request) &&
             request.sourceContext == subtitleLoadGeneration.get()
 
     override fun selectSubtitleTrack(id: Int?, request: PlayerSubtitleSelection): Boolean =
@@ -814,7 +823,7 @@ class MpvPlayer private constructor(
 
     override fun setSubtitleDelay(seconds: Double) {
         synchronized(subtitleGenerationGate) {
-            if (released.get()) return
+            if (released.get() || originalPlaybackOwner?.isActive != true) return
             mpv.setPropertyString(PROP_SUB_DELAY, seconds.toString())
         }
     }
@@ -832,7 +841,7 @@ class MpvPlayer private constructor(
     /// `setSecondarySubtitleTrack`.
     override fun setSecondarySubtitleTrack(id: Int?) {
         synchronized(subtitleGenerationGate) {
-            if (released.get() || subtitleSelections.beginChoice() == null) return
+            if (released.get() || originalPlaybackOwner?.isActive != true || subtitleSelections.beginChoice() == null) return
             mpv.setPropertyString(PROP_SECONDARY_SID, id?.takeIf { it >= 0 }?.toString() ?: "no")
         }
     }

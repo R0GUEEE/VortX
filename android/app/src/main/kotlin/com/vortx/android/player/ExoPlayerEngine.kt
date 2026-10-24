@@ -100,6 +100,13 @@ class ExoPlayerEngine(context: Context) : PlayerEngine {
     private class PendingSidecar(val formatId: String, val original: PlayerSubtitleSelection)
     private var pendingSidecar: PendingSidecar? = null
     private var subtitleReleased = false
+    private var originalPlaybackOwner: PlaybackOwnerToken? = null
+
+    override fun bindPlaybackOwner(original: PlaybackOwnerToken): Boolean {
+        if (subtitleReleased || originalPlaybackOwner != null || Looper.myLooper() !== player.applicationLooper) return false
+        originalPlaybackOwner = original
+        return original.isActive
+    }
     override val state: StateFlow<PlayerState> = _state.asStateFlow()
     override val audioOutputModeAvailable: Boolean = false
 
@@ -324,7 +331,7 @@ class ExoPlayerEngine(context: Context) : PlayerEngine {
     private fun encodeTrackId(group: Int, track: Int): Int = group * 1000 + track
 
     override fun load(playable: Playable) {
-        if (subtitleReleased || Looper.myLooper() !== player.applicationLooper ||
+        if (subtitleReleased || originalPlaybackOwner?.isActive != true || Looper.myLooper() !== player.applicationLooper ||
             subtitleSelections.beginSource() == null) return
         pendingSidecar = null
         sidecarIdentities.reset()
@@ -332,6 +339,7 @@ class ExoPlayerEngine(context: Context) : PlayerEngine {
     }
 
     private fun load(playable: Playable, playWhenReady: Boolean, remountPositionMs: Long? = null) {
+        if (subtitleReleased || originalPlaybackOwner?.isActive != true) return
         val priorPresentation = _state.value.startupEvidence
         val metadataLoad = metadataInputs.begin()
         val presentation = if (remountPositionMs != null && priorPresentation != PlaybackStartupEvidence.AWAITING &&
@@ -473,10 +481,10 @@ class ExoPlayerEngine(context: Context) : PlayerEngine {
         )
     }
 
-    override fun play() { player.play() }
-    override fun pause() { player.pause() }
-    override fun togglePause() { if (player.isPlaying) player.pause() else player.play() }
-    override fun seekTo(positionMs: Long) { player.seekTo(positionMs.coerceAtLeast(0L)) }
+    override fun play() { if (originalPlaybackOwner?.isActive == true) player.play() }
+    override fun pause() { if (originalPlaybackOwner?.isActive == true) player.pause() }
+    override fun togglePause() { if (originalPlaybackOwner?.isActive == true) { if (player.isPlaying) player.pause() else player.play() } }
+    override fun seekTo(positionMs: Long) { if (originalPlaybackOwner?.isActive == true) player.seekTo(positionMs.coerceAtLeast(0L)) }
 
     override fun seekBy(deltaMs: Long) {
         // Native relative seek off the player's OWN currentPosition (the sampled state can lag a poll
@@ -535,14 +543,14 @@ class ExoPlayerEngine(context: Context) : PlayerEngine {
     }
 
     override fun beginSubtitleSelection(): PlayerSubtitleSelection? {
-        if (subtitleReleased || Looper.myLooper() !== player.applicationLooper) return null
+        if (subtitleReleased || originalPlaybackOwner?.isActive != true || Looper.myLooper() !== player.applicationLooper) return null
         pendingSidecar = null
         return subtitleSelections.beginChoice()
     }
     override fun captureSubtitleSelection(): PlayerSubtitleSelection? =
-        if (!subtitleReleased && Looper.myLooper() === player.applicationLooper) subtitleSelections.capture() else null
+        if (!subtitleReleased && originalPlaybackOwner?.isActive == true && Looper.myLooper() === player.applicationLooper) subtitleSelections.capture() else null
     override fun isSubtitleSelectionCurrent(request: PlayerSubtitleSelection): Boolean =
-        !subtitleReleased && Looper.myLooper() === player.applicationLooper && subtitleSelections.isCurrent(request)
+        !subtitleReleased && originalPlaybackOwner?.isActive == true && Looper.myLooper() === player.applicationLooper && subtitleSelections.isCurrent(request)
 
     override fun selectSubtitleTrack(id: Int?, request: PlayerSubtitleSelection): Boolean {
         if (!isSubtitleSelectionCurrent(request)) return false

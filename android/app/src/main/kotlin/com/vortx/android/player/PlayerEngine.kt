@@ -27,6 +27,9 @@ interface PlayerEngine {
     /// (position 0, duration 0, paused false, no tracks) until the engine loads the file.
     val state: StateFlow<PlayerState>
 
+    /** Bind ONCE before any load. A retired original owner requires a NEW engine, never rebinding. */
+    fun bindPlaybackOwner(original: PlaybackOwnerToken): Boolean = false
+
     /** True only when this engine can shift subtitle presentation time while playback is live. */
     val subtitleDelayAvailable: Boolean get() = false
 
