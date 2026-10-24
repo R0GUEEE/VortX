@@ -28,6 +28,7 @@ sed -n '1,/^\/\/\/ The profile roster and the active selection\./{ /^\/\/\/ The 
 shasum -a 256 scripts/native-watched-swift-inputs.sh scripts/native-owner-history-fixture-inputs.sh \
     test/xperience-harness-inputs.cjs scripts/extract-subtitle-proof-hosts.cjs \
     app/SourcesShared/CoreBridge.swift app/SourcesShared/Profiles.swift \
+    app/SourcesShared/LegacyWatchOwnership.swift \
     app/SourcesShared/ProfileDiscoveryPreferences.swift "$0" app/SourcesShared/VortXSyncManager.swift > "$native_live_dir/carrier-sources.sha256"
 node test/xperience-harness-inputs.cjs --owner-history-carriers "$native_live_dir"
 node scripts/extract-subtitle-proof-hosts.cjs "$PWD" bridge-shell "$native_live_dir/NativeSubtitleProofHosts.swift" > "$native_live_dir/native-subtitle-proof-hosts.json"

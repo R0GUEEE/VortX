@@ -16,9 +16,12 @@ const read = name => fs.readFileSync(path.join(root, name), 'utf8');
 const credential = read('app/SourcesShared/CredentialScope.swift');
 const bridge = read('app/SourcesShared/CoreBridge.swift');
 const facade = read('app/SourcesShared/VortxNativeCoreFacade.swift');
+const legacy = read('app/SourcesShared/LegacyWatchOwnership.swift');
+const epochAnchor = 'static func applicationEpochIsCurrent(_ expected: UUID) -> Bool {';
+if (legacy.indexOf(epochAnchor) < 0 || legacy.indexOf(epochAnchor, legacy.indexOf(epochAnchor) + epochAnchor.length) >= 0) throw Error('actual application epoch predicate missing or ambiguous');
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 const inputs = Object.fromEntries([
-  ['CredentialScope.swift', credential], ['CoreBridge.swift', bridge], ['VortxNativeCoreFacade.swift', facade]
+  ['CredentialScope.swift', credential], ['CoreBridge.swift', bridge], ['VortxNativeCoreFacade.swift', facade], ['LegacyWatchOwnership.swift', legacy]
 ].map(([name, value]) => [name, sha(value)]));
 const selections = {};
 function once(source, marker) {
@@ -44,6 +47,11 @@ const bridgeCapture = section(bridge, '    @MainActor\n    func captureNativeSub
 const bridgeRetire = section(bridge, '    fileprivate final class NativePlaybackReadLifetime:', '\n    /// A read predicate only, never FIFO/mutation/checkpoint/metadata authority.');
 const facadeProof = section(facade, '    struct NativeSubtitleOwnerProof:', '\n    private var sourceArchive: Data?');
 const fifo = section(facade, '        let profileTransition = forceProfileTransition', '\n        // State intents are FIFO');
+const originalTransitionTypes = 'let transitionTypes: Set<String> = ["switch_profile", "delete_profile", "merge_native_sync", "patch_profile", "rebind_profile_account"]';
+once(facade, originalTransitionTypes);
+const originalProfileTransition = 'let profileTransition = forceProfileTransition || ["switch_profile", "delete_profile", "merge_native_sync", "patch_profile", "rebind_profile_account"].contains(type)';
+once(facade, originalProfileTransition);
+for (const marker of ['let subtitleOwnerTransition = profileTransition || forceSubtitleOwnerTransition\n            || ["add_profile", "bind_sync_scope"].contains(type) || ownerOperation != nil', 'forceSubtitleOwnerTransition: true,']) once(facade, marker);
 const drain = '            if let subtitleRetirement {\n                await CredentialPublicationOutbox.waitForSubtitleRetirement(subtitleRetirement)\n            }';
 once(facade, drain);
 once(facade, 'defer {\n                if let subtitleRetirement {\n                    CredentialPublicationOutbox.finishSubtitleRetirement(subtitleRetirement)');
@@ -71,11 +79,12 @@ final class CoreBridge {
 ${bridgeProof}
 ${bridgeCapture}
 ${bridgeRetire}
- @MainActor static func fixture() -> (CoreBridge, PlaybackMutationTarget, VortxNativeCoreFacade) {
+ @MainActor static func fixture() -> (CoreBridge, PlaybackMutationTarget, VortxNativeCoreFacade, UUID) {
+  guard let applicationEpoch = LegacyWatchOwnership.captureApplicationEpoch() else { fatalError("initial application epoch unavailable") }
   let core = CoreBridge(), capture = CredentialScopeRegistry.shared.capture()
   let facade = VortxNativeCoreFacade(capture: capture)
   let binding = FixtureBinding(credential: capture, sessionGeneration: UUID(), profileID: facade.profileID, accountGeneration: facade.accountEpoch)
-  core.binding = binding; core.nativeFacadeStorage = facade; return (core, .native(binding), facade)
+  core.binding = binding; core.nativeFacadeStorage = facade; return (core, .native(binding), facade, applicationEpoch)
  }
  @MainActor func retireActualBridgeLifetime() { nativePlaybackReadLifetime.retire() }
 }
@@ -99,7 +108,7 @@ extension CredentialPublicationOutbox {
 }
 `;
 fs.mkdirSync(output);
-const generated = [['ActualSubtitleOwnerFixture.swift', fixture], ['ActualFIFOAdmission.swift.txt', fifo]];
+const generated = [['ActualSubtitleOwnerFixture.swift', fixture], ['ActualLegacyWatchOwnership.swift', legacy], ['ActualFIFOAdmission.swift.txt', fifo]];
 for (const [name, contents] of generated) fs.writeFileSync(path.join(output, name), contents, { flag: 'wx' });
 const outputs = Object.fromEntries(generated.map(([name, contents]) => [name, sha(contents)]));
 fs.writeFileSync(path.join(output, 'extraction.json'), JSON.stringify({ schema: 1, status: 'READY', inputs, selections, outputs, runtime: 'UNRUN', fullFacadeFIFOComposition: 'UNRUN', fifo: 'source-order assertion only' }, null, 2) + '\n', { flag: 'wx' });

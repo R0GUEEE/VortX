@@ -63,21 +63,27 @@ final class CoreBridge: ObservableObject {
         let sourceID: UUID
         let profileID: UUID
         let accountGeneration: UUID
+        let originalApplicationEpoch: UUID
         fileprivate init(domain: UUID, installation: UUID, credential: CredentialScopeRegistry.Capture,
-                         sourceID: UUID, profileID: UUID, accountGeneration: UUID) {
+                         sourceID: UUID, profileID: UUID, accountGeneration: UUID,
+                         originalApplicationEpoch: UUID) {
             self.domain = domain; self.installation = installation; self.credential = credential
             self.sourceID = sourceID; self.profileID = profileID; self.accountGeneration = accountGeneration
+            self.originalApplicationEpoch = originalApplicationEpoch
         }
     }
     @MainActor
-    func captureNativeSubtitleOwner(_ original: PlaybackMutationTarget) -> CredentialPublicationOutbox.SubtitleMountOwner? {
+    func captureNativeSubtitleOwner(_ original: PlaybackMutationTarget,
+                                    originalApplicationEpoch: UUID) -> CredentialPublicationOutbox.SubtitleMountOwner? {
         nativeFacadeLock.withLock {
             guard case .native(let requested?) = original,
+                  LegacyWatchOwnership.applicationEpochIsCurrent(originalApplicationEpoch),
                   currentNativePlaybackBinding() == requested,
                   let facade = nativeFacadeStorage, let account = requested.accountGeneration else { return nil }
             return facade.captureNativeSubtitleOwner(.init(domain: nativeSubtitleDomain,
                 installation: requested.sessionGeneration, credential: requested.credential,
-                sourceID: facade.sourceID, profileID: requested.profileID, accountGeneration: account))
+                sourceID: facade.sourceID, profileID: requested.profileID, accountGeneration: account,
+                originalApplicationEpoch: originalApplicationEpoch))
         }
     }
     private let nativePlaybackReadLifetime = NativePlaybackReadLifetime()

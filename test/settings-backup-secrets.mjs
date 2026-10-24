@@ -25,6 +25,7 @@ if (proofRun.error || proofRun.status !== 0) throw new Error('Actual subtitle pr
 writeFileSync(proofHostReceipt, proofRun.stdout);
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const proofOwners = [proofComposer, join(root, 'app/SourcesShared/CoreBridge.swift'),
+  join(root, 'app/SourcesShared/LegacyWatchOwnership.swift'),
   join(root, 'app/SourcesShared/VortxNativeCoreFacade.swift')];
 const inputs = [backupPath, testPath, ...sharedInputs, ...proofOwners, proofHostPath, proofHostReceipt].map(path => ({
   path, sha256: digest(readFileSync(path)),

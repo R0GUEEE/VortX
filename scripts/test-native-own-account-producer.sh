@@ -53,6 +53,7 @@ if [[ -n "${VORTX_FFI_LIBRARY:-}" ]]; then
     node scripts/extract-subtitle-proof-hosts.cjs "$PWD" bridge-shell "$own_source_dir/NativeSubtitleBridgeProofHosts.swift" > "$own_source_dir/native-subtitle-bridge-proof-hosts.json"
     shasum -a 256 "$0" scripts/extract-subtitle-proof-hosts.cjs app/SourcesShared/CoreBridge.swift \
         app/SourcesShared/CredentialScope.swift app/SourcesShared/VortxNativeCoreFacade.swift \
+        app/SourcesShared/LegacyWatchOwnership.swift \
         "$own_source_dir/NativeSubtitleBridgeProofHosts.swift" "$own_source_dir/native-subtitle-bridge-proof-hosts.json" \
         > "$own_source_dir/native-subtitle-bridge-proof-inputs.sha256"
     xcrun swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors -j 1 -num-threads 1 \

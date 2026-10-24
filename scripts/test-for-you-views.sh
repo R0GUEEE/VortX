@@ -10,6 +10,7 @@ trap 'rm -rf "$dir"' EXIT
 proof_dir=$(mktemp -d app/build/native-subtitle-proofs.XXXXXX)
 node scripts/extract-subtitle-proof-hosts.cjs "$PWD" bridge-extension-facade-shell "$proof_dir/NativeSubtitleProofHosts.swift" > "$proof_dir/native-subtitle-proof-hosts.json"
 shasum -a 256 "$0" scripts/extract-subtitle-proof-hosts.cjs app/SourcesShared/CoreBridge.swift \
+  app/SourcesShared/LegacyWatchOwnership.swift \
   app/SourcesShared/VortxNativeCoreFacade.swift "$proof_dir/NativeSubtitleProofHosts.swift" \
   "$proof_dir/native-subtitle-proof-hosts.json" > "$proof_dir/subtitle-proof-inputs.sha256"
 {

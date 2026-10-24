@@ -362,6 +362,7 @@ async function main() {
     let subtitleProofMode;
     if (sources.includes('app/SourcesShared/CredentialScope.swift')) {
         ['app/SourcesShared/CoreBridge.swift', 'app/SourcesShared/VortxNativeCoreFacade.swift',
+            'app/SourcesShared/LegacyWatchOwnership.swift',
             'scripts/extract-subtitle-proof-hosts.cjs'].forEach(capture);
         const hasBridge = sources.includes('app/SourcesShared/CoreBridge.swift');
         const hasFacade = sources.includes('app/SourcesShared/VortxNativeCoreFacade.swift');

@@ -330,6 +330,10 @@ enum CredentialPublicationOutbox {
               CredentialScopeRegistry.shared.isCurrent(record.proof.bridge.credential) else { return nil }
         let domains: Set<UUID> = [record.proof.bridge.domain, record.proof.bridge.sourceID]
         guard !coordination.subtitleRetirements.values.contains(where: { domains.contains($0.domain) }) else { return nil }
+        // This is the final denying predicate while C is held. A successful E read is
+        // admission's linearization point; the reserved effect below is its predecessor
+        // even if E retires immediately afterward. Every native successor drains C.
+        guard LegacyWatchOwnership.applicationEpochIsCurrent(record.proof.bridge.originalApplicationEpoch) else { return nil }
         coordination.nextLeaseID &+= 1
         let lease = SubtitleEffectLease(id: coordination.nextLeaseID, epoch: coordination.epoch, ownerID: owner.id)
         coordination.mutations[lease.id] = MutationRecord(threadID: threadID)

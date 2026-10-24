@@ -815,6 +815,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                                  websiteEvents: [VortxJSON] = [], websiteAddonEvents: [VortxJSON] = [], websiteBaseline: VortxNativeProfileEditHost.Baselines = [:],
                                  sourceAuthority: (any VortxMutationAuthority)? = nil, authenticatedSourceArchive: Data? = nil,
                                  fifoMember: VortxNativeFIFOAdmission.Member? = nil, forceProfileTransition: Bool = false,
+                                 forceSubtitleOwnerTransition: Bool = false,
                                  forceProgress: Bool = false,
                                  ownerOperation: (@Sendable () async throws -> Void)? = nil,
                                  completion: (@Sendable (Result<VortxJSON, Error>) -> Void)? = nil) -> Bool {
@@ -848,7 +849,11 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         let predecessor = tasks["native_state"]
         let ticket = UUID(); generations["native_state"] = ticket
         let profileTransition = forceProfileTransition || ["switch_profile", "delete_profile", "merge_native_sync", "patch_profile", "rebind_profile_account"].contains(type)
-        let subtitleOwnerTransition = profileTransition || legacyMaterial != nil || hostRemote != nil
+        // Separate from pendingProfileTransitions: add/bind and typed owner-route work
+        // can replace accepted ownership without changing the selected profile.
+        let subtitleOwnerTransition = profileTransition || forceSubtitleOwnerTransition
+            || ["add_profile", "bind_sync_scope"].contains(type) || ownerOperation != nil
+            || legacyMaterial != nil || hostRemote != nil
             || !websiteEvents.isEmpty || !websiteAddonEvents.isEmpty
         let subtitleRetirement = subtitleOwnerTransition
             ? CredentialPublicationOutbox.beginSubtitleRetirement(domain: sourceID) : nil
@@ -2158,6 +2163,11 @@ extension VortxNativeCoreFacade {
                         guard enqueueMutation(type: type, raw: "", actions: actions,
                             checkpointValidator: checkpointValidator,
                             fifoMember: member, forceProfileTransition: transition,
+                            // Captured raw types have no enforced non-owner subset. Drain
+                            // without rejecting valid reducer operations or widening the
+                            // original profile-pending classifier. Direct progress and
+                            // resource paths do not pass through this adapter.
+                            forceSubtitleOwnerTransition: true,
                             completion: { continuation.resume(with: $0) }) else {
                             member.finish()
                             continuation.resume(throwing: VortxNativeError.closed)

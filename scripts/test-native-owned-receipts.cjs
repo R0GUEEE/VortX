@@ -241,6 +241,7 @@ async function main() {
         'test/xperience-harness-inputs.cjs', 'app/Tests/VortxNativeOwnedReceiptTests.swift',
         'test/native-metadata-dispatch-inputs.cjs', 'app/Tests/VortxNativeMetadataDispatchTests.swift',
         'app/SourcesShared/CoreBridge.swift', 'scripts/extract-subtitle-proof-hosts.cjs', 'app/SourcesShared/PlaybackMutationOwnershipPolicy.swift',
+        'app/SourcesShared/LegacyWatchOwnership.swift',
         'app/SourcesShared/BatchMetaSlotPolicy.swift',
         'app/Tests/VortxNativeSessionTests.swift', 'app/SourcesShared/Profiles.swift',
         'app/SourcesShared/ProfileDiscoveryPreferences.swift', 'app/SourcesShared/VortXSyncManager.swift'].forEach(capture);

@@ -51,13 +51,13 @@ bounded_run() {
  active_pid=$!; [[ "$interrupt_status" -eq 0 ]] || signal_supervisor "$interrupt_signal"; wait_supervisor
 }
 normal_exit() { nice -n 15 "$node_bin" "$supervisor" check "$1" "$2" normal-exit; }
-sources=(app/SourcesShared/CredentialScope.swift app/SourcesShared/CoreBridge.swift app/SourcesShared/VortxNativeCoreFacade.swift app/Tests/SubtitleMountOwnerTests.swift test/subtitle-mount-owner-fixture.cjs scripts/test-subtitle-mount-owner.sh test/mpv-bounded-child.mjs)
+sources=(app/SourcesShared/CredentialScope.swift app/SourcesShared/CoreBridge.swift app/SourcesShared/VortxNativeCoreFacade.swift app/SourcesShared/LegacyWatchOwnership.swift app/Tests/SubtitleMountOwnerTests.swift test/subtitle-mount-owner-fixture.cjs scripts/test-subtitle-mount-owner.sh test/mpv-bounded-child.mjs)
 shasum -a 256 "${sources[@]}" > "$run_dir/source-conservation.sha256"
 bounded_run 30 "$run_dir/extract.supervisor.json" "$node_bin" "$repo_root/test/subtitle-mount-owner-fixture.cjs" "$repo_root" "$run_dir/extracted" || fail 'extraction failed; inspect retained receipt/log'
 normal_exit "$run_dir/extract.supervisor.json" 0
 shasum -a 256 --check "$run_dir/source-conservation.sha256"
-inputs=("$run_dir/extracted/ActualSubtitleOwnerFixture.swift" app/Tests/SubtitleMountOwnerTests.swift)
-evidence=("$run_dir/extracted/ActualSubtitleOwnerFixture.swift" "$run_dir/extracted/ActualFIFOAdmission.swift.txt" app/Tests/SubtitleMountOwnerTests.swift)
+inputs=("$run_dir/extracted/ActualSubtitleOwnerFixture.swift" "$run_dir/extracted/ActualLegacyWatchOwnership.swift" app/Tests/SubtitleMountOwnerTests.swift)
+evidence=("$run_dir/extracted/ActualSubtitleOwnerFixture.swift" "$run_dir/extracted/ActualLegacyWatchOwnership.swift" "$run_dir/extracted/ActualFIFOAdmission.swift.txt" app/Tests/SubtitleMountOwnerTests.swift)
 shasum -a 256 "${evidence[@]}" > "$run_dir/generated-inputs.sha256"
 bounded_run 240 "$run_dir/compile.supervisor.json" /usr/bin/xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete -warnings-as-errors -whole-module-optimization \
  -j 1 -num-threads 1 -sdk "$host_sdk" -target "$host_target" -module-cache-path "$run_dir/module-cache" "${inputs[@]}" -o "$run_dir/subtitle-mount-owner-tests" || fail 'compile failed; inspect retained receipt/log'
