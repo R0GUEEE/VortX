@@ -239,6 +239,9 @@ async function main() {
     ['scripts/test-native-owned-receipts.sh', 'scripts/test-native-owned-receipts.cjs',
         'scripts/native-migration-supervisor.cjs',
         'test/xperience-harness-inputs.cjs', 'app/Tests/VortxNativeOwnedReceiptTests.swift',
+        'test/native-metadata-dispatch-inputs.cjs', 'app/Tests/VortxNativeMetadataDispatchTests.swift',
+        'app/SourcesShared/CoreBridge.swift', 'app/SourcesShared/PlaybackMutationOwnershipPolicy.swift',
+        'app/SourcesShared/BatchMetaSlotPolicy.swift',
         'app/Tests/VortxNativeSessionTests.swift', 'app/SourcesShared/Profiles.swift',
         'app/SourcesShared/ProfileDiscoveryPreferences.swift', 'app/SourcesShared/VortXSyncManager.swift'].forEach(capture);
     const sdk = settings.typecheckOnly ? pinCurrentHeader(settings) : pinSDK(settings);
@@ -249,6 +252,7 @@ async function main() {
         'app/SourcesShared/VortxNativeHostPreferences.swift', 'app/SourcesShared/VortxNativeSession.swift',
         'app/SourcesShared/VortxNativeCoreFacade.swift', 'app/SourcesShared/VortxNativePreviouslyWatched.swift',
         'app/SourcesShared/ProfileAddonPreferences.swift', 'app/SourcesShared/VortxProfileOverlayWitness.swift',
+        'app/SourcesShared/PlaybackMutationOwnershipPolicy.swift', 'app/SourcesShared/BatchMetaSlotPolicy.swift',
         'app/SourcesShared/VortxNativeProfileEditHost.swift', ...watched.files, ...history.files])];
     sources.forEach(capture);
     const facade = capture('app/SourcesShared/VortxNativeCoreFacade.swift').toString('utf8');
@@ -264,9 +268,21 @@ async function main() {
         extracted.push({ owner, ownerSHA256: hash(capture(owner)), signature, declarationSHA256: hash(Buffer.from(bytes)) });
         return bytes;
     }
+    const { metadataDispatchPeer } = require(copies.get('test/native-metadata-dispatch-inputs.cjs'));
+    const metadataPeer = metadataDispatchPeer(
+        capture('app/SourcesShared/CoreBridge.swift').toString('utf8'),
+        capture('app/SourcesShared/Profiles.swift').toString('utf8'),
+        capture('app/SourcesShared/VortxNativeCoreFacade.swift').toString('utf8'),
+        extractDeclaration);
+    for (const item of metadataPeer.declarations) extracted.push({
+        owner: item.owner, ownerSHA256: hash(capture(item.owner)), signature: item.signature,
+        declarationSHA256: hash(Buffer.from(item.bytes))
+    });
     const fixture = generate('generated/OwnedReceiptFixture.swift', 'import Foundation\nimport CryptoKit\nimport os\n\n'
         + ['private final class SessionABI:', 'private final class SessionStore:', 'private final class SessionTransport:']
             .map(marker => exact('app/Tests/VortxNativeSessionTests.swift', marker)).join('\n\n')
+        + '\n\n' + metadataPeer.source
+        + '\n\n' + capture('app/Tests/VortxNativeMetadataDispatchTests.swift').toString('utf8')
         + '\n\n' + capture('app/Tests/VortxNativeOwnedReceiptTests.swift').toString('utf8'));
     const profiles = generate('generated/UserProfile.swift', 'import Foundation\nimport CryptoKit\n'
         + exact('app/SourcesShared/Profiles.swift', 'struct UserProfile:'));
@@ -278,7 +294,10 @@ async function main() {
         ownerSHA256: hash(capture('app/SourcesShared/VortXSyncManager.swift')), signature: item.signature,
         declarationSHA256: hash(Buffer.from(item.bytes)) });
     write('extraction.json', JSON.stringify({ extracted, declarationTransformations: [],
-        scope: 'Whole actual Facade/FIFO/Session/Runtime/resource + real existing C module/lib; exact RAM fixture declarations in same file; no production method extraction or native symbol mocks' }, null, 2) + '\n');
+        metadataDispatch: { fullDispatchDeclaration: true,
+            productionDeclarationTransformations: metadataPeer.declarationTransformations,
+            shellOnly: metadataPeer.shellOnly, excluded: metadataPeer.excluded },
+        scope: 'Whole actual Facade/FIFO/Session/Runtime/resource and exact extracted dispatch/helpers in RAM Bridge storage peer; genuine committed header or explicitly gated existing module/lib; no actual CoreBridge lifecycle/Manager/UI or native symbol mocks' }, null, 2) + '\n');
     write('inputs.json', JSON.stringify({ sources: [...captured].map(([file, bytes]) => ({ file, bytes: bytes.length, sha256: hash(bytes) })),
         dependencies: [...dependencies].map(([file, sha256]) => ({ file, sha256 })),
         generated: [...generated].map(([file, sha256]) => ({ file: path.relative(directory, file), sha256 })) }, null, 2) + '\n');
@@ -361,6 +380,8 @@ async function main() {
         `DYLD_LIBRARY_PATH=${libraryDirectory}`, 'DYLD_FALLBACK_LIBRARY_PATH=', 'DYLD_FRAMEWORK_PATH=', 'DYLD_PRINT_LIBRARIES=1',
         executable], 120_000, helper, directory);
     if (!/Native owned receipts: [1-9][0-9]* checks PASS;/.test(log)) fail('Runtime lacks explicit completed assertion receipt', 1);
+    if (!/Native metadata dispatch: [1-9][0-9]* checks PASS;/.test(log))
+        fail('Runtime lacks explicit completed metadata-dispatch assertion receipt', 1);
     const nativeLoads = log.split(/\r?\n/).filter(line => line.startsWith('dyld[') && line.includes('libvortx_ffi.dylib'));
     const loadedPaths = nativeLoads.map(line => /^dyld\[[0-9]+\]:\s+(?:<[^>\r\n]+>\s+)?(\/[^\r\n]+)$/.exec(line)?.[1]);
     const pinnedRealPath = fs.realpathSync(sdk.library);
@@ -370,7 +391,8 @@ async function main() {
     write('loaded-native-library.json', JSON.stringify({ observedPaths: loadedPaths, canonicalPath: pinnedRealPath, path: sdk.library,
         sha256: hash(fs.readFileSync(sdk.library)), pinned: true }, null, 2) + '\n');
     runtime = 'normal0'; phase = 'complete';
-    process.stdout.write(log.split(/\r?\n/).filter(line => line.startsWith('Native owned receipts:')).join('\n') + '\n');
+    process.stdout.write(log.split(/\r?\n/).filter(line => line.startsWith('Native owned receipts:')
+        || line.startsWith('Native metadata dispatch:')).join('\n') + '\n');
 }
 (async () => {
     let status = 0;

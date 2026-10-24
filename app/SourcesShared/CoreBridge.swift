@@ -52,6 +52,7 @@ final class CoreBridge: ObservableObject {
         true
     }
     private let nativeFacadeLock = NSLock()
+    private let nativeMetadataAdmissionFence = VortxNativeMetadataAdmissionFence()
     private var nativeFacadeStorage: VortxNativeCoreFacade?
     private var nativeCredentialCapture: CredentialScopeRegistry.Capture?
     private var nativeInstallGeneration = UUID()
@@ -392,7 +393,12 @@ final class CoreBridge: ObservableObject {
             }.map(\.id)
             VortXSyncManager.shared.updateNativeOwnAccountAvailability(missing: missing, profiles: profiles, capture: capture)
         }
-        nativeFacadeLock.withLock { nativePublishedAccountGeneration = snapshot.generation }
+        nativeFacadeLock.withLock {
+            if nativePublishedAccountGeneration != snapshot.generation {
+                nativeMetadataAdmissionFence.retireInstallation()
+            }
+            nativePublishedAccountGeneration = snapshot.generation
+        }
         if shouldReloadCredentials {
             VortxNativeCredentialSelectionRelay.shared.publish {
                 projection.stillOwnsCurrentContext(core: self)
@@ -515,6 +521,23 @@ final class CoreBridge: ObservableObject {
     }
     func nativeNavigationTargetIsCurrent(_ target: NativeNavigationTarget) -> Bool {
         nativeWatchlistTargetIsCurrent(target.owner)
+    }
+    private struct NativeMetadataDispatchAdmission {
+        let navigation: NativeNavigationTarget
+        let receipt: VortxNativeCoreFacade.AcceptedNavigationReceipt
+        let installation: UUID
+    }
+    private func captureNativeMetadataDispatchAdmission() -> NativeMetadataDispatchAdmission? {
+        let installation = nativeMetadataAdmissionFence.captureInstallation()
+        guard let navigation = captureNativeNavigationTarget(),
+              nativeWatchlistTargetIsCurrent(navigation.owner),
+              let receipt = navigation.owner.facade.captureAcceptedNavigation(expected: navigation.owner.binding),
+              nativeWatchlistTargetIsCurrent(navigation.owner) else { return nil }
+        return .init(navigation: navigation, receipt: receipt, installation: installation)
+    }
+    private func nativeMetadataDispatchAdmissionIsCurrent(_ admission: NativeMetadataDispatchAdmission) -> Bool {
+        nativeWatchlistTargetIsCurrent(admission.navigation.owner)
+            && admission.navigation.owner.facade.acceptedNavigationIsCurrent(admission.receipt)
     }
     /// Read-only presentation ownership. Do not use this weaker busy-queue fence for a mutation
     /// or pending playback admission: those still require PlaybackMutationTarget.
@@ -832,7 +855,10 @@ final class CoreBridge: ObservableObject {
               facade.registryBinding?.scope.ownerProfileID != id.uuidString else { throw VortxNativeError.closed }
         try await facade.mutateProfiles([.object(["type": .string("delete_profile"), "id": .string(id.uuidString)])], hostEdits: [], expectedProfileID: binding.profileID.uuidString, expectedAccountGeneration: epoch)
         guard CredentialScopeRegistry.shared.isCurrent(binding.credential), nativeFacade === facade else { throw VortxNativeError.superseded }
-        nativeFacadeLock.withLock { nativeInstallGeneration = UUID() }
+        nativeFacadeLock.withLock {
+            nativeMetadataAdmissionFence.retireInstallation()
+            nativeInstallGeneration = UUID()
+        }
         try refreshNativeProfiles()
         loadBoard(); loadLibrary()
     }
@@ -846,7 +872,10 @@ final class CoreBridge: ObservableObject {
         try await facade.mutateProfiles([action], hostEdits: [], expectedProfileID: binding.profileID.uuidString, expectedAccountGeneration: epoch)
         guard CredentialScopeRegistry.shared.isCurrent(binding.credential),
               nativeFacadeLock.withLock({ nativeFacadeStorage === facade && nativeInstallGeneration == binding.sessionGeneration }) else { throw VortxNativeError.superseded }
-        nativeFacadeLock.withLock { nativeInstallGeneration = UUID() }
+        nativeFacadeLock.withLock {
+            nativeMetadataAdmissionFence.retireInstallation()
+            nativeInstallGeneration = UUID()
+        }
         invalidatePublicationEpoch(); clearNativePublishedState()
         try refreshNativeProfiles()
         refreshAddons(capturedPublicationToken: capturePublicationToken())
@@ -871,6 +900,7 @@ final class CoreBridge: ObservableObject {
                               initialProfileSource: (any VortxMutationAuthority)? = nil) async throws {
         let installGeneration = UUID()
         nativeFacadeLock.withLock {
+            nativeMetadataAdmissionFence.retireInstallation()
             nativeInstallGeneration = installGeneration
             nativeCallbackGeneration = installGeneration
         }
@@ -933,13 +963,19 @@ final class CoreBridge: ObservableObject {
         } catch { facade.close(); throw error }
         let result = nativeFacadeLock.withLock { () -> (Bool, VortxNativeCoreFacade?) in
             guard CredentialScopeRegistry.shared.isCurrent(capture), nativeInstallGeneration == installGeneration else { return (false, nil) }
+            nativeMetadataAdmissionFence.retireInstallation()
             let old = nativeFacadeStorage; nativeFacadeStorage = facade; nativeCredentialCapture = capture; return (true, old)
         }
         guard result.0 else { facade.close(); throw VortxNativeError.superseded }
         result.1?.close()
         nativeAccountEditRequests.removeAll()
         nativePublishedCredentialSlot = nil
-        nativeFacadeLock.withLock { nativePublishedAccountGeneration = nil }
+        nativeFacadeLock.withLock {
+            if nativePublishedAccountGeneration != nil {
+                nativeMetadataAdmissionFence.retireInstallation()
+            }
+            nativePublishedAccountGeneration = nil
+        }
         nativeProfileBaseline = hostProfiles
         try refreshNativeProfiles()
         // Native ctx is descriptor-only: never synthesize a Stremio login/token receipt.
@@ -957,8 +993,10 @@ final class CoreBridge: ObservableObject {
         // Owner/profile selection is published on main. Complete the revoke and UI clear in
         // that same turn, before any cloud/bootstrap suspension can expose the new owner.
         if !Thread.isMainThread { DispatchQueue.main.sync { self.revokeNativeSession() }; return }
+        let originalMetadataClearRequest = metaLoadTargetLock.withLock { nativeMetaRequestGeneration }
         VortxNativeSession.revokeAllForOwnerBoundary()
         let old = nativeFacadeLock.withLock {
+            nativeMetadataAdmissionFence.retireInstallation()
             nativeInstallGeneration = UUID()
             nativeCallbackGeneration = UUID()
             let old = nativeFacadeStorage; nativeFacadeStorage = nil; nativeCredentialCapture = nil; return old
@@ -966,13 +1004,20 @@ final class CoreBridge: ObservableObject {
         old?.close()
         nativeAccountEditRequests.removeAll()
         nativePublishedCredentialSlot = nil
-        nativeFacadeLock.withLock { nativePublishedAccountGeneration = nil }
+        nativeFacadeLock.withLock {
+            if nativePublishedAccountGeneration != nil {
+                nativeMetadataAdmissionFence.retireInstallation()
+            }
+            nativePublishedAccountGeneration = nil
+        }
         invalidatePublicationEpoch()
-        clearNativePublishedState()
+        clearNativePublishedState(expectedMetadataRequest: originalMetadataClearRequest)
         NotificationCenter.default.post(name: Self.xperienceContextChangedNote, object: nil)
     }
-    private func clearNativePublishedState() {
+    private func clearNativePublishedState(expectedMetadataRequest: UUID? = nil) {
         dispatchPrecondition(condition: .onQueue(.main))
+        let originalMetadataClearRequest = expectedMetadataRequest
+            ?? metaLoadTargetLock.withLock { nativeMetaRequestGeneration }
         boardRebuildWork?.cancel(); boardRebuildWork = nil
         metaDetailsWork?.cancel(); metaDetailsWork = nil
         continueWatching = []; boardRows = []; library = nil; metaDetails = nil; discover = nil
@@ -984,8 +1029,11 @@ final class CoreBridge: ObservableObject {
         boardCatalogTotal = 0; boardPageInFlight = false; boardRowPageInFlight = [:]; boardRowExhausted = []
         deferredBoardRowPages = []; deferredBoardRangeDepth = nil
         metaLoadTargetLock.withLock {
-            requestedMetaLoadTarget = nil
-            nativeMetaRequestAction = nil
+            guard nativeMetaRequestGeneration == originalMetadataClearRequest else { return }
+            let request = UUID()
+            requestedMetaLoadTarget = nil; nativeMetaRequestAction = nil
+            nativeMetaRequestGeneration = request
+            nativeMetadataAdmissionFence.replaceRequest(request)
         }
         pendingEpisodeWatched = [:]; refindRequest = nil; cancelAppleCWMetaRefresh()
         invalidateNZBIndexerResults(); streamsEpoch &+= 1
@@ -5352,24 +5400,67 @@ final class CoreBridge: ObservableObject {
         let payload: [String: Any] = ["field": field ?? NSNull(), "action": action]
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else { return false }
-        beforeDispatch?()
-        // Track every metadata dispatch, including re-find and CW refresh, at the shared boundary.
-        // This is request ownership only: consumers still fence the published selection separately.
-        if field == "meta_details", topLevelAction == "Load",
-           let args = action["args"] as? [String: Any], args["model"] as? String == "MetaDetails",
-           let model = args["args"] as? [String: Any], let meta = model["metaPath"] as? [String: Any],
-           let id = meta["id"] as? String {
-            let streamID = (model["streamPath"] as? [String: Any])?["id"] as? String
-            metaLoadTargetLock.withLock {
-                requestedMetaLoadTarget = MetaLoadTarget(metaID: id, streamID: streamID)
-                nativeMetaRequestAction = try? JSONSerialization.data(withJSONObject: action)
-                nativeMetaRequestGeneration = UUID()
-                nativeMetaRequestScope = .init(credential: CredentialScopeRegistry.shared.capture(), profileID: ProfileStore.shared.activeID)
+        let isMetadataNavigation = field == "meta_details" &&
+            (topLevelAction == "Unload" || (topLevelAction == "Load"
+                && (action["args"] as? [String: Any])?["model"] as? String == "MetaDetails"))
+        if isMetadataNavigation {
+            // Freeze the raw action and original owner/source before the optional
+            // synchronous hook. A nested newer request must remain authoritative.
+            guard let actionData = try? JSONSerialization.data(withJSONObject: action),
+                  let nativeAction = try? JSONDecoder().decode(VortxJSON.self, from: actionData) else { return false }
+            let originalCredential = CredentialScopeRegistry.shared.capture()
+            let originalProfile = ProfileSelectionRead.snapshot()?.activeID
+            let admission = captureNativeMetadataDispatchAdmission()
+            let request = UUID()
+            let args = action["args"] as? [String: Any]
+            let model = args?["args"] as? [String: Any]
+            let meta = model?["metaPath"] as? [String: Any]
+            let stream = model?["streamPath"] as? [String: Any]
+            guard topLevelAction != "Load" || meta?["id"] is String else {
+                VXProbe.log("engine", "dispatch \(Self.actionName(action))\(field.map { " -> \($0)" } ?? "")")
+                NSLog("[CoreBridge] native action rejected: %@", "invalid_meta_path")
+                return false
             }
-        } else if topLevelAction == "Unload", field == "meta_details" || field == nil {
+            // Between close and install, retain the original pending scope for replay.
             metaLoadTargetLock.withLock {
-                requestedMetaLoadTarget = nil
-                nativeMetaRequestAction = nil; nativeMetaRequestGeneration = UUID()
+                requestedMetaLoadTarget = topLevelAction == "Load" ? (meta?["id"] as? String).map {
+                    MetaLoadTarget(metaID: $0, streamID: stream?["id"] as? String)
+                } : nil
+                nativeMetaRequestAction = topLevelAction == "Load" ? actionData : nil
+                nativeMetaRequestGeneration = request
+                nativeMetadataAdmissionFence.replaceRequest(request)
+                if topLevelAction == "Load" {
+                    nativeMetaRequestScope = .init(credential: originalCredential, profileID: originalProfile)
+                }
+            }
+            VXProbe.log("engine", "dispatch \(Self.actionName(action))\(field.map { " -> \($0)" } ?? "")")
+            beforeDispatch?()
+            guard metaLoadTargetLock.withLock({ nativeMetaRequestGeneration == request }),
+                  CredentialScopeRegistry.shared.isCurrent(originalCredential),
+                  ProfileSelectionRead.snapshot()?.activeID == originalProfile,
+                  let admission, admission.navigation.owner.owner.credential == originalCredential,
+                  admission.navigation.owner.owner.profileID == originalProfile,
+                  nativeMetadataDispatchAdmissionIsCurrent(admission) else { return false }
+            let facade = admission.navigation.owner.facade
+            let original = VortxNativeMetadataAdmissionFence.Stamp(
+                installation: admission.installation, request: request)
+            guard let selection = facade.dispatchMetadata(nativeAction, expected: admission.receipt,
+                admissionFence: nativeMetadataAdmissionFence, original: original) else {
+                NSLog("[CoreBridge] native action rejected: %@", facade.lastFailure ?? "unbound")
+                return false
+            }
+            guard metaLoadTargetLock.withLock({ nativeMetaRequestGeneration == request }),
+                  nativeMetadataDispatchAdmissionIsCurrent(admission),
+                  facade.metadataSelectionIsCurrent(selection) else { return false }
+            return true
+        }
+        beforeDispatch?()
+        if topLevelAction == "Unload", field == nil {
+            metaLoadTargetLock.withLock {
+                let request = UUID()
+                requestedMetaLoadTarget = nil; nativeMetaRequestAction = nil
+                nativeMetaRequestGeneration = request
+                nativeMetadataAdmissionFence.replaceRequest(request)
             }
         }
         // [engine] narrate every dispatched action (its name + the field it targets) so the log shows

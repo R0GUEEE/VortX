@@ -199,6 +199,7 @@ private final class OwnedReceiptRecorder: Sendable {
         check(!facade.acceptsChange(beforeClose) && !facade.metadataSelectionIsCurrent(b), "close retires receipts")
         check(facade.captureHostChange(fields: ["library"]) == nil, "closed facade has no host snapshot")
         check(recorder.preparations == 0, "generic dispatch/resource/ACK/profile/close never invokes owner preparation")
+        _ = try await VortxNativeMetadataDispatchTests.run()
         print("Native owned receipts: \(checks) checks PASS; real Facade/Session/FIFO, RAM external boundaries; no global FIFO, Bridge actor, native C execution or app proof")
     }
 }

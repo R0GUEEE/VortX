@@ -67,6 +67,32 @@ final class VortxNativeFacadeLock: NSLocking, Sendable {
     }
 }
 
+/// Original Bridge installation/request stamps checked in the same Facade transaction
+/// as metadata insertion. Retiring either stamp never calls the Facade under this lock.
+final class VortxNativeMetadataAdmissionFence: Sendable {
+    struct Stamp: Sendable {
+        let installation: UUID
+        let request: UUID
+    }
+    private struct State: Sendable {
+        var installation = UUID()
+        var request = UUID()
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    func captureInstallation() -> UUID { state.withLock { $0.installation } }
+    func retireInstallation() { state.withLock { $0.installation = UUID() } }
+    func replaceRequest(_ request: UUID) { state.withLock { $0.request = request } }
+    fileprivate func withCurrent<Result: Sendable>(_ stamp: Stamp,
+        _ operation: @Sendable () -> Result) -> Result? {
+        state.withLock { state in
+            guard state.installation == stamp.installation, state.request == stamp.request else { return nil }
+            // Only local metadata insertion runs here. Cancellation and callbacks
+            // are staged until the outer Facade transaction has released both locks.
+            return operation()
+        }
+    }
+}
+
 /// Compatibility entry point for CoreBridge's existing Load/Unload wire. It never initializes or
 /// calls Stremio. Unsupported actions return false and record a non-sensitive diagnostic code.
 /// Account migration/key acquisition remain explicit prerequisites to constructing the session.
@@ -441,6 +467,17 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                      selection: values["meta_details"]?["selected"])
     }
 
+    func dispatchMetadata(_ action: VortxJSON, expected: AcceptedNavigationReceipt,
+        admissionFence: VortxNativeMetadataAdmissionFence,
+        original: VortxNativeMetadataAdmissionFence.Stamp) -> MetadataSelectionReceipt? {
+        lock.lock(); defer { lock.unlock() }
+        // F -> witness, never F -> Bridge/request locks. Recursive inner unlocks
+        // cannot drain; the witness releases before this outer F drains callouts.
+        return admissionFence.withCurrent(original) {
+            dispatchMetadata(action, expected: expected)
+        } ?? nil
+    }
+
     /// Current-task check, not merely a matching title. In particular a same-title
     /// episode replacement has another ticket even if its selected metaPath matches.
     func metadataSelectionIsCurrent(_ receipt: MetadataSelectionReceipt) -> Bool {
@@ -546,7 +583,11 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     private func begin(_ field: String, replacingSelection: Bool = true) -> UUID? {
         lock.lock(); defer { lock.unlock() }; guard !closed else { return nil }
         if replacingSelection || resourceSelections[field] == nil { resourceSelections[field] = UUID() }
-        let ticket = UUID(); tasks[field]?.cancel(); generations[field] = ticket; failure = nil; return ticket
+        let ticket = UUID()
+        let previous = tasks.removeValue(forKey: field)
+        generations[field] = ticket; failure = nil
+        if let previous { lock.afterOutermostUnlock { previous.cancel() } }
+        return ticket
     }
     private func publish(_ fields: [String: VortxJSON], field: String, ticket: UUID) {
         lock.lock()
@@ -598,7 +639,9 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
             }
         }
         lock.lock()
-        if closed || generations[field] != ticket { task.cancel() } else { tasks[field] = task }
+        if closed || generations[field] != ticket {
+            lock.afterOutermostUnlock { task.cancel() }
+        } else { tasks[field] = task }
         lock.unlock(); return true
     }
     private func enqueueMutation(type: String, raw: String, legacyMaterial: Data? = nil,
