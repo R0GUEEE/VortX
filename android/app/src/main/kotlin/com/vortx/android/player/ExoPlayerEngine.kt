@@ -511,7 +511,7 @@ class ExoPlayerEngine(context: Context) : PlayerEngine {
     override fun addExternalSubtitle(url: String) {
         val base = lastPlayable ?: return
         if (normalizedExternalSubtitles(base).any { it.url == url }) return
-        val updated = base.copy(externalSubtitles = base.externalSubtitles + url)
+        val updated = withAdditionalExternalSubtitle(base, url)
         // Sidecars replace the Media3 item, not the viewer's intent. Capture before setMediaSource resets
         // state; preserve even a zero/sub-five-second position instead of replaying the old resume target.
         val intent = ExoSubtitleRemountIntent(player.currentPosition.coerceAtLeast(0L), player.playWhenReady)
@@ -799,6 +799,11 @@ internal fun normalizedExternalSubtitles(playable: Playable): List<com.vortx.and
     playable.externalSubtitleTracks.ifEmpty {
         playable.externalSubtitles.map { com.vortx.android.model.ExternalSubtitle(url = it) }
     }
+
+/** Preserve typed credentials and legacy sidecars; appending only the ignored legacy field loses tracks. */
+internal fun withAdditionalExternalSubtitle(playable: Playable, url: String): Playable =
+    playable.copy(externalSubtitles = emptyList(),
+        externalSubtitleTracks = normalizedExternalSubtitles(playable) + com.vortx.android.model.ExternalSubtitle(url = url))
 
 internal data class ExternalSubtitleMimeDecision(
     val mimeType: String? = null,
