@@ -1086,9 +1086,9 @@ bash -n "$REPO_ROOT/scripts/package-macos-dmg.sh"
 
 # Keep the shared settings deployment floor and release-feed commit identity explicit.
 require_grep "shared settings availability fixture runs before app packaging" \
-    'app/Tests/ServerConfigViewAvailabilityTests.swift app/SourcesShared/ServerConfigView.swift' "$APPLE_RELEASE_WF"
-require_grep "shared settings fixture targets supported iOS 16" \
-    'swiftc -typecheck -swift-version 5 -target arm64-apple-ios16.0' "$APPLE_RELEASE_WF"
+    'app/Tests/ServerConfigViewAvailabilityTests.swift app/SourcesShared/ValueChangeObservation.swift app/SourcesShared/ServerConfigView.swift' "$APPLE_RELEASE_WF"
+require_grep "shared settings fixture uses strict Swift 6 at supported iOS 16" \
+    'swiftc -typecheck -swift-version 6 -strict-concurrency=complete -warnings-as-errors -j 1 -num-threads 1 -target arm64-apple-ios16.0' "$APPLE_RELEASE_WF"
 require_grep "release feed commits retain Mamaclapper authorship" \
     'author:\{name:"Mamaclapper",email:"mamaclapper@users.noreply.github.com"\}' "$APPLE_RELEASE_WF"
 require_grep "release feed commits retain Mamaclapper committer identity" \

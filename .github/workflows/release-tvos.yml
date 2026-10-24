@@ -728,9 +728,9 @@ jobs:
       - name: Check shared server settings at the iOS 16 deployment target
         if: inputs.tvos_test_only != true
         run: |
-          xcrun swiftc -typecheck -swift-version 5 -target arm64-apple-ios16.0 \
+          xcrun swiftc -typecheck -swift-version 6 -strict-concurrency=complete -warnings-as-errors -j 1 -num-threads 1 -target arm64-apple-ios16.0 \
             -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
-            app/Tests/ServerConfigViewAvailabilityTests.swift app/SourcesShared/ServerConfigView.swift
+            app/Tests/ServerConfigViewAvailabilityTests.swift app/SourcesShared/ValueChangeObservation.swift app/SourcesShared/ServerConfigView.swift
 
       # Derive the masked edge secret and inject it into every app build.
       #
