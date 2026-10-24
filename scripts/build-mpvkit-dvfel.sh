@@ -178,7 +178,7 @@ else
     [ -z "$line" ] && continue
     case "$line" in
       ' M Package.swift'|'M Package.swift'|' M Sources/BuildScripts/XCFrameworkBuild/main.swift'|'M Sources/BuildScripts/XCFrameworkBuild/main.swift') ;;
-      '?? .build/'*|'?? dist/'*|'?? Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch'|'?? Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch'|'?? Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch') ;;
+      '?? .build/'*|'?? dist/'*|'?? Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch'|'?? Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch'|'?? Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch'|'?? Sources/BuildScripts/patch/libmpv/0007-upstream-audio-layout-bounds.patch'|'?? Sources/BuildScripts/patch/libmpv/0008-upstream-gpu-next-seek-reset.patch') ;;
       *) fail "existing MPVKit checkout has unexpected dirty state: $line" ;;
     esac
   done <<< "$STATUS"
@@ -218,6 +218,10 @@ copy_exact "$REPO/scripts/mpv-coreaudio-hotplug-lifecycle.patch" \
   "$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch"
 copy_exact "$REPO/scripts/mpv-http-seek-interrupt.patch" \
   "$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch"
+copy_exact "$REPO/scripts/mpv-upstream-audio-layout-bounds.patch" \
+  "$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/0007-upstream-audio-layout-bounds.patch"
+copy_exact "$REPO/scripts/mpv-upstream-gpu-next-seek-reset.patch" \
+  "$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/0008-upstream-gpu-next-seek-reset.patch"
 
 # A prior interrupted experiment installed this retired VortX-only FFmpeg patch as an untracked
 # file. Do not delete or overwrite it implicitly; fail with an actionable path instead.
