@@ -1296,17 +1296,12 @@ fun PlayerScreen(
     // playable's imdb identity. Fail-soft at every step -- a trailer, an id-less playable, no
     // subtitle add-ons installed, or a flaky add-on simply leaves the sheet's add-on section empty.
     // The results list in the chrome's subtitle sheet under the embedded tracks; picking one mounts
-    // it on the live engine (mpv `sub-add` / the ExoPlayer side-loaded track rebuild) and
-    // auto-selects it once the engine reports the grown track list.
+    // it on the live engine. Each engine selects the exact requested file; the UI never guesses
+    // identity from inventory count/order, which can change when unrelated sidecars finish.
     var addonSubtitles by remember(playbackSessionKey) { mutableStateOf<List<AddonSubtitle>>(emptyList()) }
     var trackSelectionPhases by remember(playbackSessionKey, engine) { mutableStateOf(TrackSelectionPhases()) }
-    val mountedAddonSubs = remember(playbackSessionKey, engine) { mutableSetOf<String>() }
-    var pendingSubSelectAbove by remember(playbackSessionKey, engine) { mutableStateOf<Int?>(null) }
-    fun mountAddonSubtitle(sub: AddonSubtitle) {
-        if (mountedAddonSubs.add(sub.url)) {
-            pendingSubSelectAbove = latestState.subtitleTracks.size
-            engine.addExternalSubtitle(sub.url)
-        }
+    fun mountAddonSubtitle(sub: AddonSubtitle, original: PlayerSubtitleSelection) {
+        engine.addExternalSubtitle(sub.url, original)
     }
     // Shared by phone and TV: pool IO is owned by the exact source/account/profile lifetime.
     // Freeze the first real duration/release query rather than applying a duration-0 pool offset.
@@ -1325,11 +1320,13 @@ fun PlayerScreen(
         mutableStateOf(emptyList<SubtitlePoolClient.PooledSubtitle>())
     }
     var poolLoadingId by remember(playbackSessionKey, engine) { mutableStateOf<Int?>(null) }
+    var poolLoadingSelection by remember(playbackSessionKey, engine) { mutableStateOf<PlayerSubtitleSelection?>(null) }
     fun admitCurrentSubtitleEngine(action: () -> Boolean): Boolean = withCurrentSubtitleOwner {
         latestSubtitleEngine === engine && action()
     }
     LaunchedEffect(playbackSessionKey, engine, subtitlePoolQuery, poolThin, poolSignedIn) {
         val query = subtitlePoolQuery ?: return@LaunchedEffect
+        val original = engine.captureSubtitleSelection() ?: return@LaunchedEffect
         val syncEnabled = com.vortx.android.config.RemoteConfig.isFeatureOn("subtitleSync",
             com.vortx.android.config.RemoteConfigDefaults.FEATURE_SUBTITLE_SYNC)
         if (!poolSignedIn || (!poolThin && !(engine.subtitleDelayAvailable && syncEnabled)) ||
@@ -1345,25 +1342,38 @@ fun PlayerScreen(
             true
         }
         // Offset and subtitle choices came from THIS captured query, not a mutable title lookup.
-        if (syncEnabled) subtitleTiming.applyCommunity(result.offsetMs, engine.subtitleDelayAvailable,
+        if (syncEnabled && engine.isSubtitleSelectionCurrent(original)) subtitleTiming.applyCommunityAccepted(result.offsetMs, engine.subtitleDelayAvailable,
             ::admitCurrentSubtitleEngine) { seconds ->
-            engine.setSubtitleDelay(seconds)
+            if (!engine.setSubtitleDelay(seconds, original)) return@applyCommunityAccepted false
             subtitleDelaySeconds = seconds
+            true
         }
     }
     fun selectPooledSubtitle(sub: SubtitlePoolClient.PooledSubtitle) {
-        if (poolLoadingId != null || sub !in pooledSubtitles || !poolSignedIn ||
+        if ((poolLoadingId != null && poolLoadingSelection?.let(engine::isSubtitleSelectionCurrent) == true) ||
+            sub !in pooledSubtitles || !poolSignedIn ||
             !admitCurrentSubtitleEngine { true }) return
+        val original = engine.beginSubtitleSelection() ?: return
         showControls()
         trackSelectionPhases = trackSelectionPhases.holdSubtitle()
         poolLoadingId = sub.id
+        poolLoadingSelection = original
         subtitlePoolScope.launch {
-            val local = SubtitlePoolClient.download(context, sub, isSignedIn = true)
-            currentCoroutineContext().ensureActive()
-            admitCurrentSubtitleEngine {
-                poolLoadingId = null
-                if (local != null) mountAddonSubtitle(AddonSubtitle("pool:${sub.id}", local, sub.lang, "Community"))
-                true
+            try {
+                val local = SubtitlePoolClient.download(context, sub, isSignedIn = true)
+                currentCoroutineContext().ensureActive()
+                admitCurrentSubtitleEngine {
+                    if (local != null && engine.isSubtitleSelectionCurrent(original)) {
+                        mountAddonSubtitle(AddonSubtitle("pool:${sub.id}", local, sub.lang, "Community"), original)
+                    }
+                    true
+                }
+            } finally {
+                // An older completion/cancellation must not clear a newer choice's loading UI.
+                if (poolLoadingSelection === original) {
+                    poolLoadingId = null
+                    poolLoadingSelection = null
+                }
             }
         }
     }
@@ -1382,19 +1392,6 @@ fun PlayerScreen(
             language = AddonSubtitle::lang,
         )
     }
-    // A picked add-on subtitle has mounted when the engine's subtitle list grows past its pre-mount
-    // count; select the newly appended track (mpv appends on `sub-add`, the ExoPlayer rebuild
-    // appends the side-loaded config last). Idempotent on mpv, whose `sub-add` default flag already
-    // selects the new track.
-    LaunchedEffect(playerState.subtitleTracks) {
-        val preMountCount = pendingSubSelectAbove ?: return@LaunchedEffect
-        val tracks = latestState.subtitleTracks
-        if (tracks.size > preMountCount) {
-            tracks.lastOrNull()?.let { engine.selectSubtitleTrack(it.id) }
-            pendingSubSelectAbove = null
-        }
-    }
-
     // Preference-driven auto track selection (the Android port of Apple TrackSelector). Audio and subtitle
     // inventories can arrive independently, so each type gets one default decision once *its own*
     // selectable inventory appears. A viewer's manual or external subtitle pick holds that type until this
@@ -1429,7 +1426,9 @@ fun PlayerScreen(
         if (defaults.selectAudio) audioId?.let { engine.selectAudioTrack(it) }
         if (defaults.selectSubtitle) {
             val subId = pick.subtitleId
-            if (subId != null && subId >= 0) engine.selectSubtitleTrack(subId) else engine.selectSubtitleTrack(null)
+            engine.captureSubtitleSelection()?.let { original ->
+                engine.selectSubtitleTrack(subId?.takeIf { it >= 0 }, original)
+            }
         }
         trackSelectionPhases = trackSelectionPhases.apply(defaults)
     }
@@ -1472,7 +1471,7 @@ fun PlayerScreen(
         // Reserve before mounting: the engine publishes a new inventory for the sidecar, which recomposes
         // this effect. The reservation prevents a second automatic overlay for the same loaded engine.
         trackSelectionPhases = trackSelectionPhases.recordAddonSelection()
-        mountAddonSubtitle(sub)
+        engine.captureSubtitleSelection()?.let { original -> mountAddonSubtitle(sub, original) }
     }
 
     // Apply the persisted subtitle appearance to whichever engine is live (mpv sub-* properties / ExoPlayer
@@ -2057,11 +2056,15 @@ fun PlayerScreen(
             subtitleDelaySeconds = subtitleDelaySeconds,
             onAdjustSubtitleDelay = { delta ->
                 showControls()
-                subtitleTiming.applyManual(adjustedPlayerDelay(subtitleDelaySeconds, delta),
-                    engine.subtitleDelayAvailable, ::admitCurrentSubtitleEngine) { seconds ->
-                    engine.setSubtitleDelay(seconds)
+                subtitleTiming.applyManualAccepted(adjustedPlayerDelay(subtitleDelaySeconds, delta),
+                    engine.subtitleDelayAvailable, ::admitCurrentSubtitleEngine) manualDelay@{ seconds ->
+                    // Manual timing is another explicit decision. Community/saved offset applications
+                    // do not create a new choice or silently revoke a selected external file.
+                    val original = engine.beginSubtitleSelection() ?: return@manualDelay false
+                    if (!engine.setSubtitleDelay(seconds, original)) return@manualDelay false
                     subtitleDelaySeconds = seconds
                     SubtitleOffsetMemory.save(context, subtitleDelaySeconds, subtitleContentKey)
+                    true
                 }
             },
             subtitleStyle = subtitleStyle,
@@ -2128,7 +2131,6 @@ fun PlayerScreen(
             onSelectSubtitle = {
                 showControls()
                 trackSelectionPhases = trackSelectionPhases.holdSubtitle()
-                pendingSubSelectAbove = null
                 engine.selectSubtitleTrack(it)
             },
             onSetSpeed = { newSpeed ->
@@ -2225,7 +2227,7 @@ fun PlayerScreen(
             onSelectAddonSubtitle = { sub ->
                 showControls()
                 trackSelectionPhases = trackSelectionPhases.holdSubtitle()
-                mountAddonSubtitle(sub)
+                engine.beginSubtitleSelection()?.let { original -> mountAddonSubtitle(sub, original) }
             },
             // Secondary (dual) subtitles: mpv-only; the ids are re-read from the live engine on each
             // recomposition so the checkmarks reflect the current secondary-sid / sid after a pick.
@@ -2235,7 +2237,6 @@ fun PlayerScreen(
             onSelectSecondarySubtitle = { id ->
                 showControls()
                 trackSelectionPhases = trackSelectionPhases.holdSubtitle()
-                pendingSubSelectAbove = null
                 engine.setSecondarySubtitleTrack(id)
             },
             // Sleep timer. End-of-episode is offered only for a series episode (it stops the auto-advance).

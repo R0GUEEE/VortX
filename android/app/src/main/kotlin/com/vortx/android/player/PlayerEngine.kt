@@ -100,7 +100,17 @@ interface PlayerEngine {
     fun selectAudioTrack(id: Int)
     fun selectSubtitleTrack(id: Int?)
 
-    /// Mount an additional external subtitle file at runtime and offset its timing (seconds, +/-).
+    /// Capture a manual decision BEFORE asynchronous subtitle IO; do not adopt a newer source or
+    /// choice at completion. Unsupported engines fail closed. The concrete final mount rechecks it.
+    fun beginSubtitleSelection(): PlayerSubtitleSelection? = null
+    fun captureSubtitleSelection(): PlayerSubtitleSelection? = null
+    fun isSubtitleSelectionCurrent(request: PlayerSubtitleSelection): Boolean = false
+    fun selectSubtitleTrack(id: Int?, request: PlayerSubtitleSelection): Boolean = false
+    fun addExternalSubtitle(url: String, request: PlayerSubtitleSelection): Boolean = false
+    fun setSubtitleDelay(seconds: Double, request: PlayerSubtitleSelection): Boolean = false
+
+    /// Mount and select the exact additional external subtitle file. Re-selecting a mounted file
+    /// must not depend on inventory growth or its order. Subtitle timing is a separate command.
     fun addExternalSubtitle(url: String)
     fun setSubtitleDelay(seconds: Double)
 

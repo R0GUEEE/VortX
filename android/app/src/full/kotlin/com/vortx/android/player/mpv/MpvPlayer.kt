@@ -38,6 +38,8 @@ import com.vortx.android.player.SessionAudioPresetAvailability
 import com.vortx.android.player.SessionAudioPresetSession
 import com.vortx.android.player.SessionAudioRouteRequest
 import com.vortx.android.player.SubtitleStyle
+import com.vortx.android.player.PlayerSubtitleSelection
+import com.vortx.android.player.SubtitleSelectionAuthority
 import com.vortx.android.player.VideoScaleMode
 import com.vortx.android.player.normalizedExternalSubtitles
 import com.vortx.android.player.recoverNativeFailure
@@ -188,6 +190,9 @@ class MpvPlayer private constructor(
     private val subtitleLoadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val subtitleLoadGeneration = AtomicLong()
     private val subtitleGenerationGate = Any()
+    // All mutation/retirement and final local-file/native property admission use the EXISTING gate.
+    // The receipt helper itself performs no IO/callback and holds no lock across a native call.
+    private val subtitleSelections = SubtitleSelectionAuthority()
     // Metadata only; all access is under subtitleGenerationGate, not the terminal/audio locks.
     private val metadataLoadIdentity = MpvMetadataLoadIdentity()
     private var startupSampleBudget = StartupSampleBudget(0L)
@@ -416,17 +421,18 @@ class MpvPlayer private constructor(
 
     override fun load(playable: Playable) {
         if (released.get()) return
-        val loadGeneration = synchronized(subtitleGenerationGate) {
+        val (loadGeneration, initialSubtitleSelection) = synchronized(subtitleGenerationGate) {
             if (released.get()) return
-            subtitleLoadGeneration.incrementAndGet().also { generation ->
-                metadataLoadIdentity.begin(generation)
-                startupSampleBudget = StartupSampleBudget(SystemClock.elapsedRealtime())
-                startupSample = null
-                sessionAudioPreset.loading()
-                audioPresetReconciledRead = null
-                _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
-                    sessionAudioPreset = sessionAudioPreset.state, startupEvidence = PlaybackStartupEvidence.AWAITING) }
-            }
+            val generation = subtitleLoadGeneration.incrementAndGet()
+            val original = subtitleSelections.beginSource(generation) ?: return
+            metadataLoadIdentity.begin(generation)
+            startupSampleBudget = StartupSampleBudget(SystemClock.elapsedRealtime())
+            startupSample = null
+            sessionAudioPreset.loading()
+            audioPresetReconciledRead = null
+            _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
+                sessionAudioPreset = sessionAudioPreset.state, startupEvidence = PlaybackStartupEvidence.AWAITING) }
+            generation to original
         }
         // Reset terminal classification and invalidate the previous source's opportunity tokens before
         // cancelling its jobs. Their finally blocks may run immediately; completion must be a no-op for
@@ -531,7 +537,7 @@ class MpvPlayer private constructor(
         // WHY audit 07.5: never hand an untrusted remote subtitle URL to mpv. Download under the same
         // 8 MiB / 20s bounds as Apple, then mount only the local cache file. Failure never affects playback.
         for (sub in MpvExternalSubtitleTransport.normalizedTracks(playable)) {
-            mountExternalSubtitle(sub, loadGeneration)
+            mountExternalSubtitle(sub, loadGeneration, initialSubtitleSelection)
         }
 
         // Resume position: DEFER the seek to the first rendered frame rather than issuing it here. A
@@ -638,25 +644,64 @@ class MpvPlayer private constructor(
     override fun selectAudioTrack(id: Int) { mpv.setPropertyString(PROP_AID, id.toString()) }
 
     override fun selectSubtitleTrack(id: Int?) {
-        mpv.setPropertyString(PROP_SID, id?.toString() ?: "no")
+        synchronized(subtitleGenerationGate) {
+            if (released.get() || subtitleSelections.beginChoice() == null) return
+            mpv.setPropertyString(PROP_SID, id?.toString() ?: "no")
+        }
     }
 
     override fun addExternalSubtitle(url: String) {
-        mountExternalSubtitle(ExternalSubtitle(url = url), subtitleLoadGeneration.get())
+        val original = beginSubtitleSelection() ?: return
+        addExternalSubtitle(url, original)
     }
 
-    private fun mountExternalSubtitle(source: ExternalSubtitle, generation: Long) {
+    override fun beginSubtitleSelection(): PlayerSubtitleSelection? = synchronized(subtitleGenerationGate) {
+        if (released.get()) null else subtitleSelections.beginChoice()
+    }
+    override fun captureSubtitleSelection(): PlayerSubtitleSelection? = synchronized(subtitleGenerationGate) {
+        if (released.get()) null else subtitleSelections.capture()
+    }
+    override fun isSubtitleSelectionCurrent(request: PlayerSubtitleSelection): Boolean =
+        synchronized(subtitleGenerationGate) { isSubtitleSelectionCurrentLocked(request) }
+
+    private fun isSubtitleSelectionCurrentLocked(request: PlayerSubtitleSelection): Boolean =
+        !released.get() && subtitleSelections.isCurrent(request) &&
+            request.sourceContext == subtitleLoadGeneration.get()
+
+    override fun selectSubtitleTrack(id: Int?, request: PlayerSubtitleSelection): Boolean =
+        synchronized(subtitleGenerationGate) {
+            if (!isSubtitleSelectionCurrentLocked(request)) return@synchronized false
+            mpv.setPropertyString(PROP_SID, id?.toString() ?: "no")
+            true
+        }
+
+    override fun addExternalSubtitle(url: String, request: PlayerSubtitleSelection): Boolean {
+        // Extract the generation from the ORIGINAL pre-IO receipt, never the latest mutable load.
+        val generation = synchronized(subtitleGenerationGate) {
+            if (!isSubtitleSelectionCurrentLocked(request)) return false
+            request.sourceContext as? Long ?: return false
+        }
+        mountExternalSubtitle(ExternalSubtitle(url = url), generation, request)
+        return true
+    }
+
+    private fun mountExternalSubtitle(source: ExternalSubtitle, generation: Long, original: PlayerSubtitleSelection) {
         subtitleLoadScope.launch {
+            if (!isSubtitleSelectionCurrent(original)) return@launch
             val local = boundedSubtitleFile(source)
             if (local == null) {
                 Log.w(TAG, "external subtitle skipped: bounded fetch failed")
                 return@launch
             }
             synchronized(subtitleGenerationGate) {
-                if (released.get() || !MpvExternalSubtitleTransport.shouldMount(generation, subtitleLoadGeneration.get())) {
+                if (!isSubtitleSelectionCurrentLocked(original) ||
+                    !MpvExternalSubtitleTransport.shouldMount(generation, subtitleLoadGeneration.get())) {
                     return@launch
                 }
-                mpv.command(arrayOf("sub-add", local.absolutePath))
+                // Final already-local command shares the same boundary as Off/manual revocation,
+                // source replacement and retirement. No host fetch/copy/cancel/destroy/join occurs
+                // under it. The local native command can still do file IO or wait on the MPV core.
+                mpv.command(arrayOf("sub-add", local.absolutePath, "select"))
             }
         }
     }
@@ -767,14 +812,29 @@ class MpvPlayer private constructor(
         }
     }
 
-    override fun setSubtitleDelay(seconds: Double) { mpv.setPropertyString(PROP_SUB_DELAY, seconds.toString()) }
+    override fun setSubtitleDelay(seconds: Double) {
+        synchronized(subtitleGenerationGate) {
+            if (released.get()) return
+            mpv.setPropertyString(PROP_SUB_DELAY, seconds.toString())
+        }
+    }
+
+    override fun setSubtitleDelay(seconds: Double, request: PlayerSubtitleSelection): Boolean =
+        synchronized(subtitleGenerationGate) {
+            if (!isSubtitleSelectionCurrentLocked(request)) return@synchronized false
+            mpv.setPropertyString(PROP_SUB_DELAY, seconds.toString())
+            true
+        }
 
     /// Select / clear the SECOND simultaneous subtitle track via mpv `secondary-sid`. A negative / null id
     /// clears it (`no`). Setting it makes mpv flag the second track `selected` in `track-list`, which
     /// republishes [PlayerState.subtitleTracks] so the chrome re-reads [secondarySubtitleId]. Mirrors Apple
     /// `setSecondarySubtitleTrack`.
     override fun setSecondarySubtitleTrack(id: Int?) {
-        mpv.setPropertyString(PROP_SECONDARY_SID, id?.takeIf { it >= 0 }?.toString() ?: "no")
+        synchronized(subtitleGenerationGate) {
+            if (released.get() || subtitleSelections.beginChoice() == null) return
+            mpv.setPropertyString(PROP_SECONDARY_SID, id?.takeIf { it >= 0 }?.toString() ?: "no")
+        }
     }
 
     /// Force hardware (`mediacodec`, the DV/HDR passthrough default) or software (`no`) decode via mpv
@@ -1217,6 +1277,7 @@ class MpvPlayer private constructor(
             // Retirement and load-owned publication share one monitor. A callback cannot pass a final
             // released check then publish after a concurrent release has claimed this instance.
             if (!released.compareAndSet(false, true)) return
+            subtitleSelections.retire()
             subtitleLoadGeneration.incrementAndGet()
             metadataLoadIdentity.retire()
             startupSample = null

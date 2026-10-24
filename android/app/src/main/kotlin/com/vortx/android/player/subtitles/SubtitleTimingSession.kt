@@ -16,6 +16,17 @@ internal class SubtitleTimingSession(savedManualSeconds: Double?) {
         delaySupported: Boolean,
         admit: ((() -> Boolean) -> Boolean),
         apply: (Double) -> Unit,
+    ): Boolean = applyCommunityAccepted(poolOffsetMs, delaySupported, admit) { seconds ->
+        apply(seconds)
+        true
+    }
+
+    /** Seed only when the actual original-source native operation was admitted. */
+    fun applyCommunityAccepted(
+        poolOffsetMs: Int?,
+        delaySupported: Boolean,
+        admit: ((() -> Boolean) -> Boolean),
+        apply: (Double) -> Boolean,
     ): Boolean {
         if (!delaySupported) return false // Media3 has no supported live subtitle-delay operation.
         return admit {
@@ -23,7 +34,7 @@ internal class SubtitleTimingSession(savedManualSeconds: Double?) {
                 if (retired || seeded) return@synchronized false
                 val resolved = SubtitleAutoResync.resolve(null, poolOffsetMs, alreadySeeded = false)
                 if (resolved.source != SubtitleAutoResync.OffsetSource.COMMUNITY) return@synchronized false
-                apply(resolved.seconds)
+                if (!apply(resolved.seconds)) return@synchronized false
                 seeded = true
                 true
             }
@@ -36,13 +47,24 @@ internal class SubtitleTimingSession(savedManualSeconds: Double?) {
         delaySupported: Boolean,
         admit: ((() -> Boolean) -> Boolean),
         apply: (Double) -> Unit,
+    ): Boolean = applyManualAccepted(seconds, delaySupported, admit) { resolved ->
+        apply(resolved)
+        true
+    }
+
+    /** A rejected final native write must not consume a manual/community seeding opportunity. */
+    fun applyManualAccepted(
+        seconds: Double,
+        delaySupported: Boolean,
+        admit: ((() -> Boolean) -> Boolean),
+        apply: (Double) -> Boolean,
     ): Boolean {
         if (!delaySupported || !SubtitleAutoResync.captureIsValid(seconds)) return false
         return admit {
             synchronized(this) {
                 if (retired) return@synchronized false
                 val resolved = SubtitleAutoResync.resolve(seconds, null, alreadySeeded = false)
-                apply(resolved.seconds)
+                if (!apply(resolved.seconds)) return@synchronized false
                 seeded = true
                 true
             }
