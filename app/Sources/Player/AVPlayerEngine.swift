@@ -839,6 +839,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// New external subtitle requests supersede every earlier fetch, including a later Off/built-in choice on
     /// the same AVPlayerItem.  Item/token ownership alone cannot distinguish those requests.
     private var externalSubtitleRequestRevision: UInt64 = 0
+    /// Subtitle intent/timing authority is independent of fetch and native-legible settlement revisions.
+    private var subtitleAlignmentGeneration: UInt64 = 0
     /// A loaded external cue file waits here while AVFoundation is still resolving native legible deselection.
     /// Unlike a Boolean, its generation/mount/revision ownership survives the final bounded retry and lets the
     /// matching media-selection notification consume the overlay activation exactly once.
@@ -1133,6 +1135,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     // MARK: Loading + transport
 
     func invalidateLoadToken() {
+        retireSubtitleAlignment()
         replacementReadyDeadlineTask?.cancel()
         replacementReadyDeadlineTask = nil
         cancelColdLocalRemuxPreparation()
@@ -1323,6 +1326,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     @discardableResult
     func loadFile(_ url: URL, headers: [String: String]?, live: Bool, audioSidecar: URL?,
                   reusing loadToken: PlayerLoadToken?) -> PlayerLoadToken {
+        // A same-logical-token remount still retires preparation made against the previous mount.
+        retireSubtitleAlignment()
         let carriedSeekTarget = pendingRequestedSourcePositionSeconds
         invalidateSeekRequests()
         eventOwnedRecoveryTask?.cancel()
@@ -2299,6 +2304,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         selectionTopologyGeneration = nil
         selectionRefreshState.reset()
 
+        retireSubtitleAlignment()
         let freshItem = AVPlayerItem(asset: AVURLAsset(url: fallbackURL))
         itemGeneration &+= 1
         midPlaybackRecoveryBudget.reset(for: playbackMountIdentity)
@@ -3682,6 +3688,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// detour through an embedded track or Off), which is what makes the external row behave like every other
     /// row in the picker instead of being a one-way door.
     func setSubtitleTrack(_ id: Int) {
+        retireSubtitleAlignment()
         // This user decision supersedes any in-flight external file fetch for the same item.
         externalSubtitleRequestRevision &+= 1
         let nativeID: Int
@@ -3731,6 +3738,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         _ requested: AVMediaSelectionOption?,
         activatingExternalAfterSettlement: Bool
     ) {
+        retireSubtitleAlignment()
         invalidateNativeSubtitleOverlay()
         subtitleSelectionRevision &+= 1
         let revision = subtitleSelectionRevision
@@ -3820,6 +3828,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     }
 
     private func setExternalSubtitleActive(_ active: Bool) {
+        // Settlement can activate the overlay after preparation started; the commit is a new revision too.
+        retireSubtitleAlignment()
         if active { invalidateNativeSubtitleOverlay() }
         externalSubActive = active
         guard active else {
@@ -3926,6 +3936,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// AVPlayer-native legible track so subtitles never double up. `completion(true)` once cues are loaded.
     func addExternalSubtitle(url: String, title: String, lang: String,
                              timeout: TimeInterval, completion: ((Bool) -> Void)?) {
+        retireSubtitleAlignment()
         externalSubtitleRequestRevision &+= 1
         let requestRevision = externalSubtitleRequestRevision
         // Keep the current selection during I/O. A failed/empty subtitle must not erase a working native
@@ -3979,6 +3990,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// the chrome has already hidden that add-on's own row (it lives in `addedSubURLs`) on the promise that
     /// the subtitle re-appears in the ordinary track list. `discardingCues: true` is the title-change reset.
     private func disableExternalSubtitle(discardingCues: Bool = false) {
+        retireSubtitleAlignment()
         // Cancellation is required even when keeping parsed cues for a picker detour: a newer selection may
         // re-activate them, but delayed settlement work from the old one must never do so on its own.
         externalSubtitleSettlement.clear()
@@ -3995,9 +4007,16 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// cue renderer consumes `setSubDelay`, so the chrome must gate its Sync controls on this live capability.
     var subtitleDelayAvailable: Bool { externalSubActive }
 
+    var subtitleAlignmentRevision: UInt64? { subtitleAlignmentGeneration }
+
+    private func retireSubtitleAlignment() {
+        subtitleAlignmentGeneration &+= 1
+    }
+
     /// Manual subtitle sync in seconds (positive = subtitles appear LATER, matching libmpv `sub-delay`). Applied
     /// as the renderer's offset, so the change is live: the next overlay update uses the new offset immediately.
     func setSubDelay(_ seconds: Double) {
+        retireSubtitleAlignment()
         subtitleRenderer.offset = seconds
         if externalSubActive {
             updateSubtitleOverlay(atClock: RemuxResumePolicy.presented(
@@ -5855,6 +5874,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
               selectionTopologyGeneration == itemGeneration,
               let loadToken = activeLoadToken,
               owns(changedItem, loadToken: loadToken) else { return }
+        // System media-selection changes can leave and return to the same subtitle without a picker call.
+        retireSubtitleAlignment()
         retireBadgeMetadata()
         defer {
             if owns(changedItem, loadToken: loadToken) { publishTrackListIfTopologyReady() }

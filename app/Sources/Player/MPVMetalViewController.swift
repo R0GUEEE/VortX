@@ -275,6 +275,7 @@ private final class MPVNativeState: Sendable {
         var cacheReadaheadRampLastFrameDrop = 0
         var cacheReadaheadRampStartSecs = 0
         var externalSubtitleRequestGeneration: UInt64 = 0
+        var subtitleAlignmentGeneration: UInt64 = 0
         #if os(tvOS)
         var seekCacheHoldArmed = false
         #endif
@@ -1700,6 +1701,7 @@ final class MPVMetalViewController: PlatformViewController {
     }
 
     func invalidateLoadToken() {
+        retireSubtitleAlignment()
         retirePendingTrailerPreparation(invalidateNativeLease: true)
         finishCacheFlushFlight(cacheFlushFlight.reset())
         seekEOFRecoveryTimeout?.cancel(); seekEOFRecoveryTimeout = nil
@@ -1845,6 +1847,8 @@ final class MPVMetalViewController: PlatformViewController {
         audioSidecar: URL? = nil,
         reusing loadToken: PlayerLoadToken? = nil
     ) -> PlayerLoadToken {
+        // A deferred trailer preparation is already a new intent, before its native load can start.
+        retireSubtitleAlignment()
         let isGoogleVideo = { (u: URL?) in u?.host?.contains("googlevideo") ?? false }
         let needsTrailerProxy =
             (isGoogleVideo(url) && !YouTubeDirectResolver.isManifestURL(url)) ||
@@ -1887,6 +1891,8 @@ final class MPVMetalViewController: PlatformViewController {
         preparedTrailer: VXTrailerPreparedURLs? = nil,
         preissuedToken: PlayerLoadToken? = nil
     ) -> PlayerLoadToken {
+        // Even a retry/rejected replacement retires work prepared before this new load intent.
+        retireSubtitleAlignment()
         // libmpv has no exact AVPlayerItem-style ownership fence. Every load therefore mints a fresh token,
         // including internal reloads, so a queued callback can never become valid again through token reuse.
         // Ordinary and internal synchronous loads are fresh. A pre-issued
@@ -4121,6 +4127,7 @@ final class MPVMetalViewController: PlatformViewController {
         setString(MPVProperty.aid, id < 0 ? "no" : String(id))
     }
     func setSubtitleTrack(_ id: Int) {
+        retireSubtitleAlignment()
         // Off or an embedded pick supersedes an older external download for this load.
         // Its final sub-add guard shares this transaction, so a late result cannot undo the choice.
         native.update { $0.externalSubtitleRequestGeneration &+= 1 }
@@ -4158,6 +4165,7 @@ final class MPVMetalViewController: PlatformViewController {
     /// top, and setting an unknown property is a harmless no-op, so this is safe across engine versions. The
     /// user's subtitle style (font, size, colour) applies to both tracks automatically.
     func setSecondarySubtitleTrack(_ id: Int) {
+        retireSubtitleAlignment()
         secondarySubtitleID = id
         #if os(tvOS)
         armSeekCacheHold()   // a secondary-sid change triggers the same demuxer refresh-seek as a primary sid switch
@@ -4207,6 +4215,15 @@ final class MPVMetalViewController: PlatformViewController {
         set { native.update { $0.externalSubtitleRequestGeneration = newValue } }
     }
 
+    var subtitleAlignmentRevision: UInt64? {
+        native.read { $0.subtitleAlignmentGeneration }
+    }
+
+    /// Separate from fetch retirement: changing sync must not cancel a subtitle the viewer is downloading.
+    private nonisolated func retireSubtitleAlignment() {
+        native.update { $0.subtitleAlignmentGeneration &+= 1 }
+    }
+
     private nonisolated static func acceptsExternalSubtitleURL(_ url: URL) -> Bool {
         guard (url.scheme?.lowercased() == "https" || url.scheme?.lowercased() == "http"),
               let host = url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]")),
@@ -4242,6 +4259,7 @@ final class MPVMetalViewController: PlatformViewController {
             return
         }
         let requestGeneration = native.update {
+            $0.subtitleAlignmentGeneration &+= 1
             $0.externalSubtitleRequestGeneration &+= 1
             return $0.externalSubtitleRequestGeneration
         }
@@ -4280,6 +4298,8 @@ final class MPVMetalViewController: PlatformViewController {
                   PlayerLoadProvenanceState.accepts(
                     callbackToken: loadToken, activeToken: loadProvenance.activeToken
                   ) else { return false }
+            // Retire preparations captured while this file was downloading, under the same final transaction.
+            retireSubtitleAlignment()
             var arguments = makeCArgs("sub-add", [localFile.path, "select", title, lang])
                 .map { $0.flatMap { UnsafePointer<CChar>(strdup($0)) } }
             defer {
@@ -4358,7 +4378,10 @@ final class MPVMetalViewController: PlatformViewController {
     }
 
     /// Manual subtitle sync, in seconds (positive = subtitles appear later). Maps to mpv `sub-delay`.
-    func setSubDelay(_ seconds: Double) { setString("sub-delay", String(format: "%.2f", seconds)) }
+    func setSubDelay(_ seconds: Double) {
+        retireSubtitleAlignment()
+        setString("sub-delay", String(format: "%.2f", seconds))
+    }
 
     /// Video frame-rate for the community-subtitle release fingerprint. Prefers the container-declared fps,
     /// falling back to the estimated video-filter fps; 0 when unknown (the fingerprint tolerates a 0/absent

@@ -104,10 +104,13 @@ private struct PendingSubtitle: Sendable {
     private nonisolated let port = NativePort()
     private(set) var secondarySubtitleID = -1
 // @source:accessors
+// @source:alignmentAccessor
+// @source:alignmentRetire
 // @source:primary
 // @source:secondary
 // @source:apply
 // @source:arguments
+// @source:delay
 
     init() { replaceLoad() }
     private func setString(_ name: String, _ value: String) { port.set(name, value) }
@@ -130,13 +133,20 @@ private struct PendingSubtitle: Sendable {
     func retireContext() { nativeContext?.retire() }
     func clearContext() { native.update { $0.context = nil } }
     func rejectCommands() { port.rejectCommands() }
+    var requestGeneration: UInt64 { native.read { $0.externalSubtitleRequestGeneration } }
+#if VORTX_CURRENT_ALIGNMENT
+    var alignmentGeneration: UInt64 {
+        guard let revision = subtitleAlignmentRevision else { preconditionFailure("Concrete MPV lost its capability") }
+        return revision
+    }
+#endif
     func capturePending(_ name: String) -> PendingSubtitle {
         guard let token = loadProvenance.activeToken, let context = nativeContext else { preconditionFailure("Missing synthetic native owner") }
-        // Models only request capture, not networking or the final guard. This matches addExternalSubtitle's
-        // checked increment/capture; all final admission and selection statements are selected actual source.
-        let generation = native.update { $0.externalSubtitleRequestGeneration &+= 1; return $0.externalSubtitleRequestGeneration }
+        // Request metadata/networking are synthetic; reservation, selection, timing and final admission
+        // are selected actual source, including both independent request/alignment fields.
+        // @source:requestIntent
         return PendingSubtitle(file: URL(fileURLWithPath: "/synthetic/" + name + ".srt"), title: name,
-                               language: "eng", context: context, token: token, generation: generation)
+                               language: "eng", context: context, token: token, generation: requestGeneration)
     }
     nonisolated func complete(_ pending: PendingSubtitle, gate: QueueGate? = nil) async -> Bool {
         await withCheckedContinuation { continuation in
@@ -174,6 +184,52 @@ private struct PendingSubtitle: Sendable {
     static func main() async {
         await lateApplyAfterSelection(-1, name: "pending-then-Off")
         await lateApplyAfterSelection(8, name: "pending-then-embedded")
+#if VORTX_CURRENT_ALIGNMENT
+        do {
+            let controller = MPVMetalViewController()
+            let original = controller.alignmentGeneration
+            let pending = controller.capturePending("timing-independent")
+            let requested = controller.alignmentGeneration
+            let request = controller.requestGeneration
+            check(requested != original, "external intent retires the original alignment")
+            controller.setSubDelay(1.25)
+            let delayed = controller.alignmentGeneration
+            check(delayed != requested, "manual delay retires prepared alignment")
+            check(controller.requestGeneration == request, "manual delay preserves pending download authority")
+            check(controller.snapshot.properties["sub-delay"] == "1.25", "delay retains existing native seconds and formatting")
+            check(await controller.complete(pending), "pending subtitle still applies after a timing edit")
+            check(controller.alignmentGeneration != delayed, "admitted file retires preparation captured during download")
+        }
+        do {
+            let controller = MPVMetalViewController()
+            let pending = controller.capturePending("secondary-independent")
+            let original = controller.alignmentGeneration
+            let request = controller.requestGeneration
+            controller.setSecondarySubtitleTrack(7)
+            check(controller.alignmentGeneration != original, "secondary selection retires prepared alignment")
+            check(controller.requestGeneration == request, "secondary selection preserves download authority")
+            check(await controller.complete(pending), "pending subtitle survives a secondary selection")
+        }
+        do {
+            let controller = MPVMetalViewController()
+            controller.setSubtitleTrack(3)
+            let original = controller.alignmentGeneration
+            controller.setSubtitleTrack(8)
+            let middle = controller.alignmentGeneration
+            controller.setSubtitleTrack(3)
+            let final = controller.alignmentGeneration
+            check(final != original && middle != original && final != middle,
+                  "same-track ABA cannot revive original alignment")
+            let beforeOff = controller.alignmentGeneration
+            controller.setSubtitleTrack(-1)
+            check(controller.alignmentGeneration != beforeOff, "Off retires alignment")
+            let stale = controller.capturePending("denied-external")
+            controller.setSubtitleTrack(4)
+            let afterSelection = controller.alignmentGeneration
+            check(!(await controller.complete(stale)), "manual selection still denies stale download")
+            check(controller.alignmentGeneration == afterSelection, "denied completion cannot mutate alignment authority")
+        }
+#endif
         do {
             let controller = MPVMetalViewController()
             controller.setSubtitleTrack(3)

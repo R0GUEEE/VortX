@@ -56,15 +56,27 @@ function declaration(text, marker) {
   throw new Error(`Unclosed selected declaration: ${marker}`);
 }
 const controller = read('app/Sources/Player/MPVMetalViewController.swift');
+const protocol = read('app/Sources/Player/PlayerEngine.swift');
+if (!protocol.includes('var subtitleAlignmentRevision: UInt64? { get }')
+    || !protocol.includes('var subtitleAlignmentRevision: UInt64? { nil }')) {
+  if (ref === 'current') throw new Error('Current PlayerEngine must fail closed for unsupported alignment');
+}
 const core = read('app/SourcesShared/CoreModels.swift');
 const properties = read('app/Sources/Player/MPVProperty.swift');
 const native = declaration(controller, 'private final class MPVNativeState: Sendable');
 const fullState = declaration(native, '    struct State: Sendable');
+const alignmentMarkers = ['        var subtitleAlignmentGeneration: UInt64 = 0',
+  '    var subtitleAlignmentRevision: UInt64?', '    private nonisolated func retireSubtitleAlignment()'];
+const alignmentParts = alignmentMarkers.filter(marker => controller.includes(marker)).length;
+if (alignmentParts !== 0 && alignmentParts !== alignmentMarkers.length) throw new Error('Partial alignment capability');
+const supportsAlignment = alignmentParts === alignmentMarkers.length;
+if (ref === 'current' && !supportsAlignment) throw new Error('Current MPV alignment capability is missing');
 const stateMembers = [
   '        var context: MPVNativeHandle?',
   '        var loadProvenance = PlayerLoadProvenanceState()',
   '        var externalSubtitleRequestGeneration: UInt64 = 0'
 ];
+if (supportsAlignment) stateMembers.push(alignmentMarkers[0]);
 for (const member of stateMembers) once(fullState, member + '\n');
 const projectedNative = native.replace(fullState, '    struct State: Sendable {\n' + stateMembers.join('\n') + '\n    }');
 for (const marker of ['let transaction = NSRecursiveLock()', 'OSAllocatedUnfairLock(initialState: State())', 'transaction.lock(); defer { transaction.unlock() }']) {
@@ -83,8 +95,21 @@ const blocks = {
   primary: declaration(controller, '    func setSubtitleTrack(_ id: Int)'),
   secondary: declaration(controller, '    func setSecondarySubtitleTrack(_ id: Int)'),
   apply: declaration(controller, '    private nonisolated func applyExternalSubtitle('),
-  arguments: declaration(controller, '    private nonisolated func makeCArgs(_ command: String, _ args: [String?])')
+  arguments: declaration(controller, '    private nonisolated func makeCArgs(_ command: String, _ args: [String?])'),
+  delay: declaration(controller, '    func setSubDelay(_ seconds: Double)'),
+  alignmentAccessor: supportsAlignment ? declaration(controller, alignmentMarkers[1]) : '',
+  alignmentRetire: supportsAlignment ? declaration(controller, alignmentMarkers[2]) : '',
+  requestIntent: declaration(controller, '        let requestGeneration = native.update')
 };
+if (supportsAlignment) {
+  if (!blocks.requestIntent.includes('$0.subtitleAlignmentGeneration &+= 1')
+      || !blocks.requestIntent.includes('$0.externalSubtitleRequestGeneration &+= 1')) {
+    throw new Error('External intent must reserve the independent revisions in one update');
+  }
+  for (const marker of ['    func invalidateLoadToken()', '    func loadFile(\n', '    private func loadFile(\n']) {
+    if (!declaration(controller, marker).includes('retireSubtitleAlignment()')) throw new Error('Missing load retirement: ' + marker);
+  }
+}
 for (const marker of ['context.withBorrow', 'loadTokenLock.lock(); defer { loadTokenLock.unlock() }', 'nativeContext === context', '!context.isRetired', 'externalSubtitleRequestGeneration == requestGeneration', 'PlayerLoadProvenanceState.accepts(', 'mpv_command(handle, &arguments)', 'free(UnsafeMutablePointer(mutating: pointer!))']) {
   if (!blocks.apply.includes(marker)) throw new Error(`Incomplete final-apply source: ${marker}`);
 }
@@ -95,9 +120,13 @@ inputs['app/Tests/MPVManualSubtitleRetirementTests.swift'] = sha(fixture);
 for (const [name, body] of Object.entries(blocks)) { const marker = `// @source:${name}`; once(fixture, marker); fixture = fixture.replace(marker, body); }
 if (fixture.includes('// @source:')) throw new Error('Unfilled actual-source fixture slot');
 fs.writeFileSync(`${out}/ActualSourceTests.swift`, fixture);
-fs.writeFileSync(`${out}/source-manifest.json`, JSON.stringify({source_ref:ref, commit, inputs, selections, projected_native_sha256:sha(projectedNative), generated_sha256:sha(fixture), projection:'Native State retains only actual context/provenance/external-generation members; recursive transaction/storage/accessor methods are unchanged. Native C API, queue-owned context and property recorder are inert checked test collaborators.'}, null, 2) + '\n');
+fs.writeFileSync(`${out}/source-manifest.json`, JSON.stringify({source_ref:ref, commit, supports_alignment:supportsAlignment, inputs, selections, projected_native_sha256:sha(projectedNative), generated_sha256:sha(fixture), projection:'Actual context/provenance/request/alignment fields and recursive transaction/storage/accessors; actual request reservation, selection, delay and final apply. Native C API, queue-owned context and property recorder are inert checked test collaborators; lifecycle retirement is source asserted, not full-player runtime.'}, null, 2) + '\n');
 NODE
+alignment_flags=(-D VORTX_SUBTITLE_RETIREMENT_FIXTURE)
+if [[ "$(node -p "require('./$test_dir/source-manifest.json').supports_alignment")" == true ]]; then
+  alignment_flags+=(-D VORTX_CURRENT_ALIGNMENT)
+fi
 nice -n 15 xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete \
-  -warnings-as-errors -j 1 -num-threads 1 -target "$host_arch-apple-macosx14.0" -sdk "$host_sdk" \
+  -warnings-as-errors -j 1 -num-threads 1 "${alignment_flags[@]}" -target "$host_arch-apple-macosx14.0" -sdk "$host_sdk" \
   -module-cache-path "$test_dir/module-cache" "$test_dir/ActualSourceTests.swift" -o "$test_dir/tests"
 "$test_dir/tests"
