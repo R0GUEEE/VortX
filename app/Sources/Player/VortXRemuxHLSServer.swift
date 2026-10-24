@@ -987,6 +987,15 @@ final class VortXRemuxHLSServer: @unchecked Sendable {
     /// Header-read deadline so a client that connects and stalls never leaks its connection.
     private static let headerDeadline: TimeInterval = 15
 
+    /// Deadline-state capture is only this checked flag; existing receive SDK captures are unchanged.
+    /// The original WorkItem body retains its original connection without a new Sendable requirement.
+    private final class HeaderReadCancellation: Sendable {
+        private let cancelled = OSAllocatedUnfairLock(initialState: false)
+
+        var isCancelled: Bool { cancelled.withLock { $0 } }
+        func cancel() { cancelled.withLock { $0 = true } }
+    }
+
     private func accept(_ connection: NWConnection) {
         stateLock.lock()
         if invalidated {
@@ -1008,14 +1017,17 @@ final class VortXRemuxHLSServer: @unchecked Sendable {
             }
         }
         connection.start(queue: queue)
-        let deadline = DispatchWorkItem { connection.cancel() }
-        queue.asyncAfter(deadline: .now() + Self.headerDeadline, execute: deadline)
+        let deadline = HeaderReadCancellation()
+        let deadlineWork = DispatchWorkItem {
+            if !deadline.isCancelled { connection.cancel() }
+        }
+        queue.asyncAfter(deadline: .now() + Self.headerDeadline, execute: deadlineWork)
         readRequest(connection, buffer: Data(), deadline: deadline)
     }
 
     /// Read until the CRLFCRLF header terminator, then route. Bounded (a malformed client cannot make us
     /// buffer without limit); the deadline force-cancels a never-completing header.
-    private func readRequest(_ connection: NWConnection, buffer: Data, deadline: DispatchWorkItem) {
+    private func readRequest(_ connection: NWConnection, buffer: Data, deadline: HeaderReadCancellation) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] chunk, _, isComplete, error in
             guard let self else { return }
             if error != nil {
