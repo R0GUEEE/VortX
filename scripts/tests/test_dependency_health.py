@@ -622,6 +622,337 @@ class GitHubHistoryTests(unittest.TestCase):
         self.assertEqual(replay["releases"]["github:"+self.name], previous)
 
 
+class NativeDependencyAdapterTests(unittest.TestCase):
+    """Offline native topology/retention checks; no registry or GitHub calls."""
+    @classmethod
+    def setUpClass(cls):
+        adapter_path = ROOT / "scripts/dependency_native_adapter.py"
+        adapter_spec = importlib.util.spec_from_file_location("dependency_native_adapter", adapter_path)
+        cls.adapter = importlib.util.module_from_spec(adapter_spec)
+        assert adapter_spec.loader is not None
+        adapter_spec.loader.exec_module(cls.adapter)
+        capture_path = ROOT / "scripts/tests/fixtures/native-manifest-capture.json"
+        cls.capture = json.loads(capture_path.read_text())
+        cls.manifest = cls.manifest_from_capture(cls.capture)
 
+    @staticmethod
+    def manifest_from_capture(capture):
+        upstreams = {}
+        for group, repository in capture["github"]:
+            repository = repository.lower()
+            upstreams[group] = {
+                "mode": "github-tags+releases",
+                "endpoints": [
+                    f"https://api.github.com/repos/{repository}/releases?per_page=100&page={{page}}",
+                    f"https://api.github.com/repos/{repository}/tags?per_page=100&page={{page}}",
+                ],
+                "review": "CAPTURED_PUBLIC_TABLE",
+            }
+            if group == "dovi":
+                upstreams[group]["scope"] = capture["scope_notes"]["dovi"]
+        for group, mode, endpoint in capture["unsupported"]:
+            upstreams[group] = {
+                "mode": mode,
+                "endpoints": [] if endpoint is None else [endpoint],
+                "review": "CAPTURED_PUBLIC_TABLE",
+            }
+        lanes = {}
+        for row, groups, pin_map in capture["lanes"]:
+            lanes[f"native-{row:02d}"] = {
+                "row": row,
+                "component": f"captured-native-{row:02d}",
+                "lane": "captured",
+                "evidence": {"tsv_data_row": row, "pin_map": pin_map},
+                "upstreams": groups,
+                "modes": [upstreams[group]["mode"] for group in groups],
+            }
+        supplemental = {}
+        for name, groups in capture["supplemental"]:
+            supplemental[name] = {
+                "component": name,
+                "upstreams": groups,
+                "modes": [upstreams[group]["mode"] for group in groups],
+            }
+        return {
+            "schema_version": 1,
+            "counts": capture["counts"],
+            "source_evidence": {
+                "inventory": {"sha256": "1" * 64},
+                "pin_map": {"sha256": "2" * 64},
+                "original_readme": {"sha256": "3" * 64},
+                "central_config_snapshot": {"sha256": "4" * 64},
+            },
+            "upstreams": upstreams,
+            "lanes": lanes,
+            "supplemental_observations": supplemental,
+        }
+
+    def test_public_capture_and_mixed_case_identity_are_complete(self):
+        mapping = self.adapter.github_upstream_identities(self.manifest)
+        self.assertEqual(len(self.manifest["lanes"]), 63)
+        self.assertEqual(len(self.manifest["upstreams"]), 69)
+        self.assertEqual(len(mapping["identities"]), 34)
+        result = self.adapter.augment_inventory(
+            {"entries": [{
+                "ecosystem": "github", "name": "MPV-PLAYER/MPV",
+                "current": "manual-pin", "repository": "config",
+                "source": "pin-map", "kind": "manual-pin",
+            }], "coverage_gaps": []},
+            self.manifest,
+        )
+        matches = [entry for entry in result["entries"]
+                   if entry["ecosystem"] == "github" and entry["name"] == "mpv-player/mpv"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["name_aliases"], ["MPV-PLAYER/MPV"])
+
+    def test_native_mapping_projection_covers_all_lanes_and_supplemental_observations(self):
+        coverage = self.adapter.build_native_coverage(self.manifest)
+        lane_rows = [mapping for record in coverage["groups"].values()
+                     for mapping in record["lane_mappings"]]
+        supplemental_rows = [mapping for record in coverage["groups"].values()
+                             for mapping in record["supplemental_mappings"]]
+        expected_lane_rows = sum(len(lane["upstreams"]) for lane in self.manifest["lanes"].values())
+        expected_supplemental_rows = sum(
+            len(spec["upstreams"]) for spec in self.manifest["supplemental_observations"].values())
+        self.assertEqual(len(lane_rows), expected_lane_rows)
+        self.assertEqual({(item["lane"], item["row"]) for item in lane_rows},
+                         {(name, lane["row"]) for name, lane in self.manifest["lanes"].items()})
+        self.assertEqual(len({item["observation"] for item in supplemental_rows}),
+                         len(self.manifest["supplemental_observations"]))
+        self.assertEqual(len(supplemental_rows), expected_supplemental_rows)
+        for item in lane_rows + supplemental_rows:
+            for value in item.values():
+                if isinstance(value, str):
+                    self.assertNotIn("/", value)
+                    self.assertNotIn("\\", value)
+                    self.assertNotIn("\n", value)
+        private = json.loads(json.dumps(self.manifest))
+        private["lanes"]["native-01"]["component"] = "/Users/daksh/private-component"
+        private["lanes"]["native-01"]["evidence"]["pin_map"] = "/private/pin-map"
+        private["supplemental_observations"]["monitor-python"]["component"] = "/private/runtime"
+        private_coverage = self.adapter.build_native_coverage(private)
+        private_text = json.dumps(private_coverage["groups"], sort_keys=True)
+        self.assertNotIn("/Users/daksh/private-component", private_text)
+        self.assertNotIn("/private/pin-map", private_text)
+        self.assertNotIn("/private/runtime", private_text)
+
+    def test_contraction_and_unsupported_retention_are_flat(self):
+        previous = self.adapter.build_native_coverage(self.manifest)
+        previous["groups"]["mpv"]["status"] = "observed"
+        previous["groups"]["mpv"]["last_success"] = {"cursor": "retained"}
+        previous["groups"]["ffmpeg"]["journal_refs"] = [f"ref-{index}" for index in range(20)]
+        previous["groups"]["ffmpeg"]["previous_state"] = {"previous_state": {"status": "unverified"}}
+        comparison = {
+            "releases": {"github:mpv-player/mpv": {
+                "absent_observations": ["tag:v2"], "absent_versions": []}},
+            "history_contractions": [{"component": "github:mpv-player/mpv"}],
+        }
+        current = self.adapter.coverage_after_compare(self.manifest, previous, comparison)
+        mpv = current["groups"]["mpv"]
+        self.assertEqual(mpv["status"], "unverified")
+        self.assertEqual(mpv["reason"], "existing-github-observer-incomplete")
+        self.assertEqual(mpv["last_success"], {"cursor": "retained"})
+        self.assertNotIn("previous_state", mpv)
+        ffmpeg = current["groups"]["ffmpeg"]
+        self.assertEqual(len(ffmpeg["journal_refs"]), 8)
+        self.assertNotIn("previous_state", ffmpeg)
+
+    def test_dovi_repository_observation_has_explicit_library_gap(self):
+        coverage = self.adapter.build_native_coverage(
+            self.manifest, releases={"github:quietvoid/dovi_tool": {}},
+        )
+        dovi = coverage["groups"]["dovi"]
+        self.assertEqual(dovi["status"], "observed")
+        self.assertEqual(dovi["repository_observation_scope"], "repository-metadata-only")
+        self.assertEqual(dovi["underlying_library"]["immutable_source"], "dolby_vision/Cargo.toml")
+        self.assertEqual(dovi["underlying_library"]["status"], "UNVERIFIED")
+        self.assertIn({"source": "native/dovi/libdovi", "reason": "underlying-library-version-unverified"},
+                      coverage["coverage_gaps"])
+
+    def test_lane_pin_evidence_change_is_separate_source_event(self):
+        prior = self.adapter.build_native_coverage(self.manifest)
+        changed = json.loads(json.dumps(self.manifest))
+        changed["lanes"]["native-17"]["evidence"]["pin_map"] = "A17-replaced"
+        current = self.adapter.build_native_coverage(changed)
+        changes = self.adapter.detect_source_changes(prior, current)
+        self.assertIn("dovi", {item["group"] for item in changes})
+
+    def test_supplemental_and_source_evidence_changes_are_attributed(self):
+        prior = self.adapter.build_native_coverage(self.manifest)
+        changed = json.loads(json.dumps(self.manifest))
+        # Swap the two one-to-one supplemental attributions so the manifest
+        # remains topology-complete while both affected groups change.
+        changed["supplemental_observations"]["monitor-node"]["upstreams"] = ["python-runtime"]
+        changed["supplemental_observations"]["monitor-python"]["upstreams"] = ["node-runtime"]
+        changed["source_evidence"]["pin_map"]["sha256"] = "9" * 64
+        current = self.adapter.build_native_coverage(changed)
+        changes = self.adapter.detect_source_changes(prior, current)
+        changed_groups = {item["group"] for item in changes}
+        self.assertIn("node-runtime", changed_groups)
+        self.assertIn("python-runtime", changed_groups)
+        self.assertEqual([item["scope"] for item in changes if item["group"] == "__manifest__"],
+                         ["source-evidence"])
+
+    def test_compare_reconciles_mixed_case_prior_and_reuse_with_new_release(self):
+        adapter = self.adapter
+        source = "https://api.github.com/repos/public/example/releases"
+        prior_record = {
+            "github_history_schema": 2, "legacy_published_versions": [],
+            "repository": "PUBLIC/EXAMPLE", "source": source.replace("public/example", "PUBLIC/EXAMPLE"),
+            "versions": ["v1.0.0"], "latest_stable": "v1.0.0",
+            "observed_at": "2026-10-24T00:00:00+00:00",
+            "observations": {
+                "tag:v1.0.0": {"kind": "tag", "version": "v1.0.0", "commit": "a" * 40,
+                               "ref_type": "commit", "ref": "a" * 40},
+                "release:1": {"kind": "release", "version": "v1.0.0", "id": 1, "revision": "b" * 64},
+                "asset:1:10": {"kind": "asset", "version": "v1.0.0", "id": 10, "release_id": 1,
+                               "revision": "c" * 64, "digest": "sha256:" + "1" * 64},
+            },
+        }
+        fresh = json.loads(json.dumps(prior_record))
+        fresh["repository"] = "public/example"; fresh["source"] = source
+        fresh["observed_at"] = "2026-10-24T01:00:00+00:00"
+        fresh["observations"]["tag:v1.0.0"]["commit"] = "d" * 40
+        fresh["observations"]["tag:v1.0.0"]["ref"] = "d" * 40
+        fresh["observations"]["release:1"]["revision"] = "e" * 64
+        fresh["observations"]["asset:1:10"]["revision"] = "f" * 64
+        fresh["observations"]["asset:1:10"]["digest"] = "sha256:" + "2" * 64
+        fresh["versions"].append("v2.0.0"); fresh["latest_stable"] = "v2.0.0"
+        fresh["observations"]["tag:v2.0.0"] = {
+            "kind": "tag", "version": "v2.0.0", "commit": "c" * 40,
+            "ref_type": "commit", "ref": "c" * 40,
+        }
+        fresh["observations"]["release:2"] = {
+            "kind": "release", "version": "v2.0.0", "id": 2, "revision": "d" * 64,
+        }
+        fresh["observations"]["asset:2:20"] = {
+            "kind": "asset", "version": "v2.0.0", "id": 20, "release_id": 2,
+            "revision": "e" * 64, "digest": "sha256:" + "3" * 64,
+        }
+        prior, reused, conflicts = adapter.reconcile_github_state(
+            {"releases": {"github:PUBLIC/EXAMPLE": prior_record}},
+            {"github:PUBLIC/EXAMPLE": fresh},
+        )
+        self.assertFalse(conflicts)
+        with patch.object(health, "releases") as fetch:
+            report = health.compare(
+                {"entries": [{"ecosystem": "github", "name": "public/example", "current": "v1.0.0",
+                               "kind": "github-action"}], "coverage_gaps": []},
+                prior, 1, reuse=reused,
+            )
+        fetch.assert_not_called()
+        self.assertEqual(report["new_releases"][0]["new_versions"], ["v2.0.0"])
+        self.assertIn("tag:v1.0.0", report["releases"]["github:public/example"]["observations"])
+        self.assertEqual(report["releases"]["github:public/example"]["vortx_identity_aliases"],
+                         ["github:PUBLIC/EXAMPLE"])
+        self.assertEqual(report["releases"]["github:public/example"]["observed_at"],
+                         "2026-10-24T01:00:00+00:00")
+        self.assertEqual(report["releases"]["github:public/example"]["vortx_alias_observed_at"],
+                         {"github:PUBLIC/EXAMPLE": "2026-10-24T01:00:00+00:00"})
+        self.assertGreaterEqual(len(report["releases"]["github:public/example"]["observation_history"]["tag:v1.0.0"]), 2)
+        self.assertGreaterEqual(len(report["releases"]["github:public/example"]["observation_history"]["asset:1:10"]), 2)
+
+        with patch.object(health, "releases", return_value=fresh) as fetch:
+            fresh_report = health.compare(
+                {"entries": [{"ecosystem": "github", "name": "public/example", "current": "v1.0.0",
+                               "kind": "github-action"}], "coverage_gaps": []},
+                prior, 1,
+            )
+        fetch.assert_called_once_with("github", "public/example")
+        self.assertEqual(fresh_report["releases"]["github:public/example"]["vortx_identity_aliases"],
+                         ["github:PUBLIC/EXAMPLE"])
+        self.assertEqual(fresh_report["releases"]["github:public/example"]["vortx_alias_observed_at"],
+                         {"github:PUBLIC/EXAMPLE": "2026-10-24T00:00:00+00:00"})
+        self.assertEqual(fresh_report["releases"]["github:public/example"]["observed_at"],
+                         "2026-10-24T01:00:00+00:00")
+
+    def test_compare_blocks_conflicting_aliases_without_query_or_history_selection(self):
+        adapter = self.adapter
+        base = {"github_history_schema": 2, "legacy_published_versions": [],
+                "repository": "public/example", "source": "https://api.github.com/repos/public/example/releases",
+                "versions": ["v1.0.0"], "latest_stable": "v1.0.0",
+                "observations": {"tag:v1.0.0": {"kind": "tag", "version": "v1.0.0", "commit": "a" * 40,
+                                                   "ref_type": "commit", "ref": "a" * 40}}}
+        conflict = json.loads(json.dumps(base)); conflict["observations"]["tag:v1.0.0"]["commit"] = "b" * 40
+        prior, reused, conflicts = adapter.reconcile_github_state(
+            {"releases": {"github:public/example": base, "github:PUBLIC/EXAMPLE": conflict}}, {},
+        )
+        with patch.object(health, "releases") as fetch:
+            report = health.compare(
+                {"entries": [{"ecosystem": "github", "name": "public/example", "current": "v1.0.0",
+                               "kind": "github-action"}], "coverage_gaps": []},
+                prior, 1, reuse=reused, identity_conflicts=conflicts,
+            )
+        fetch.assert_not_called()
+        self.assertEqual(report["registry_errors"], [{"component": "github:public/example", "reason": "IdentityConflict"}])
+        self.assertFalse(report["complete"])
+        self.assertIn("github:PUBLIC/EXAMPLE", report["releases"])
+
+    def test_malformed_prior_source_is_blocked_without_cursor_loss_or_query(self):
+        malformed = {
+            "repository": "public/example",
+            "source": "https://[invalid",
+            "versions": ["v1.0.0"],
+            "observations": {"tag:v1.0.0": {"commit": "a" * 40}},
+        }
+        prior, reused, conflicts = self.adapter.reconcile_github_state(
+            {"releases": {"github:public/example": malformed}}, {},
+        )
+        self.assertEqual(len(conflicts), 1)
+        with patch.object(health, "releases") as fetch:
+            report = health.compare(
+                {"entries": [{"ecosystem": "github", "name": "public/example", "current": "v1.0.0",
+                               "kind": "github-action"}], "coverage_gaps": []},
+                prior, 1, reuse=reused, identity_conflicts=conflicts,
+            )
+        fetch.assert_not_called()
+        self.assertEqual(report["registry_errors"],
+                         [{"component": "github:public/example", "reason": "IdentityConflict"}])
+        self.assertEqual(report["releases"]["github:public/example"], malformed)
+
+        for malformed_cursor in (None, ["not", "a", "mapping"]):
+            prior, reused, conflicts = self.adapter.reconcile_github_state(
+                {"releases": {"github:public/example": malformed_cursor}}, {},
+            )
+            self.assertEqual(len(conflicts), 1)
+            with patch.object(health, "releases") as fetch:
+                report = health.compare(
+                    {"entries": [{"ecosystem": "github", "name": "public/example", "current": "v1.0.0",
+                                   "kind": "github-action"}], "coverage_gaps": []},
+                    prior, 1, reuse=reused, identity_conflicts=conflicts,
+                )
+            fetch.assert_not_called()
+            self.assertEqual(report["registry_errors"],
+                             [{"component": "github:public/example", "reason": "IdentityConflict"}])
+            self.assertEqual(report["releases"]["github:public/example"], malformed_cursor)
+
+    def test_generic_only_refresh_carries_native_ledger_for_both_modes(self):
+        temporary_root = ROOT / "_build"
+        temporary_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temporary_root, prefix="native-carry-forward-") as folder:
+            folder = Path(folder)
+            config = folder / "config.json"
+            previous_path = folder / "previous.json"
+            config.write_text("{}")
+            native = {"schema_version": 1, "groups": {
+                "ffmpeg": {"status": "unverified", "last_success": {"cursor": "retained"}},
+                "mpv": {"status": "observed", "last_success": {"cursor": "observed"}},
+            }}
+            previous_path.write_text(json.dumps({"native_monitor": native}))
+            for suffix, inventory_only in (("full", False), ("inventory", True)):
+                report = folder / f"{suffix}.json"
+                argv = ["dependency-health.py", "--config", str(config),
+                        "--report", str(report), "--previous", str(previous_path)]
+                if inventory_only:
+                    argv.append("--inventory-only")
+                with patch("sys.argv", argv), patch.object(health, "inventory", return_value={
+                        "entries": [], "manifests": [], "coverage_gaps": []}):
+                    health.main()
+                output = json.loads(report.read_text())
+                self.assertEqual(output["native_monitor"], native)
+                self.assertFalse(output["complete"])
+                self.assertFalse(output["native_complete"])
+                self.assertEqual(output["native_monitor_refresh"]["status"], "not-refreshed")
+                self.assertEqual(output["native_monitor_refresh"]["unresolved_groups"], ["ffmpeg"])
 if __name__ == "__main__":
     unittest.main()
