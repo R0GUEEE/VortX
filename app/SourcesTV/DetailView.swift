@@ -235,8 +235,8 @@ struct DetailView: View {
             let current = ResidentMeta.fenced(details?.meta, pageID: metaRequestID) { $0.id }
             if current.map(RandomPickPolicy.EpisodeSource.init) != source { clearRandomEpisodePick() }
         }
-        .onChange(of: metaRequestID) { _ in clearRandomEpisodePick() }
-        .onChange(of: effectiveType) { _ in clearRandomEpisodePick() }
+        .onChange(of: metaRequestID, initial: false) { _, _ in clearRandomEpisodePick() }
+        .onChange(of: effectiveType, initial: false) { _, _ in clearRandomEpisodePick() }
         // Page disappearance also happens when an accepted episode/player covers it.
         // Only dismiss an uncommitted preview here; route pop clears the full receipt.
         .onDisappear { if randomEpisodeRoute == nil { clearRandomEpisodePick() } }
@@ -327,7 +327,7 @@ struct DetailView: View {
             if let m = fencedMeta { loadSimilar(m); loadRatings(); loadWatchProviders(); loadFinancials(); loadReleaseDates() }
             refreshLanguageChips()
         }
-        .onChange(of: core.streamLoadProgress().loaded) { _ in
+        .onChange(of: core.streamLoadProgress().loaded, initial: false) { _, _ in
             refreshLanguageChips()   // recompute the "Also available in" chips as more sources answer
         }
     }
@@ -1324,7 +1324,7 @@ struct DetailView: View {
             }
         }
         .onAppear { routeRandomSeriesPlay(meta: meta, primary: primary?.video) }
-        .onChange(of: videos) { _ in routeRandomSeriesPlay(meta: meta, primary: primary?.video) }
+        .onChange(of: videos, initial: false) { _, _ in routeRandomSeriesPlay(meta: meta, primary: primary?.video) }
         // Show-level watched rollup (issue #143): a series reads as watched once every AIRED, regular-season
         // episode is watched, so unaired episodes and Season 0 specials never hold a finished show back, and a
         // series whose episodes were MARKED (not played) still flips the poster badge even though the engine's
@@ -1401,7 +1401,7 @@ struct DetailView: View {
                             Spacer(minLength: Theme.Space.lg)
                             VStack(alignment: .leading, spacing: Theme.Space.sm) {
                                 languageChips
-                                CoreStreamList(title: m.name,
+                                CoreStreamList(title: m.name, profiles: profiles,
                                                meta: PlaybackMeta(libraryId: m.id, videoId: m.id,
                                                                   type: m.type.isEmpty ? effectiveType : m.type,
                                                                   name: m.name, poster: m.poster,
@@ -1523,7 +1523,7 @@ struct DetailView: View {
                         metaRow(m)
                     }
                     epgStrip(m)
-                    CoreStreamList(title: m.name,
+                    CoreStreamList(title: m.name, profiles: profiles,
                                    meta: PlaybackMeta(libraryId: m.id, videoId: m.id, type: type,
                                                       name: m.name, poster: m.poster,
                                                       season: nil, episode: nil),
@@ -2983,7 +2983,7 @@ struct CoreEpisodeStreams: View {
                         .focusable()
                         .focused($episodeFocusTarget, equals: .top)
                         .accessibilityElement(children: .combine)
-                        CoreStreamList(title: "\(meta.name) · S\(shownSeason)·E\(currentVideo.episode ?? 0)",
+                        CoreStreamList(title: "\(meta.name) · S\(shownSeason)·E\(currentVideo.episode ?? 0)", profiles: profiles,
                                    meta: PlaybackMeta(libraryId: meta.id, videoId: currentVideo.id, type: meta.type,
                                                       name: meta.name, poster: meta.poster,
                                                       season: currentVideo.season, episode: currentVideo.episode),
@@ -3182,6 +3182,8 @@ private typealias SourceRow = SourceQuickFilterPolicy.Row
 
 struct CoreStreamList: View {
     let title: String
+    /// The mounting detail/episode view's existing owner; never replace pending intent authority with a singleton.
+    @ObservedObject var profiles: ProfileStore
     var meta: PlaybackMeta? = nil
     var episodes: [CoreVideo] = []               // the season's episodes (series only), for the player's Prev/Next/Episodes
     var seriesInventoryAuthority: AppleCWSeriesInventory.Authority = .launch
@@ -3861,9 +3863,9 @@ struct CoreStreamList: View {
             intent.revoke()
         }
         .onReceive(core.metaDetailsPublisher) { randomPlayIntent?.invalidateMetadata($0) }
-        .onChange(of: sourceFilter) { _ in randomPlayIntent?.revoke() }
-        .onChange(of: sourcePin) { _ in randomPlayIntent?.revoke() }
-        .onChange(of: sourceList.sessionAudioLanguages) { _ in randomPlayIntent?.revoke() }
+        .onChange(of: sourceFilter, initial: false) { _, _ in randomPlayIntent?.revoke() }
+        .onChange(of: sourcePin, initial: false) { _, _ in randomPlayIntent?.revoke() }
+        .onChange(of: sourceList.sessionAudioLanguages, initial: false) { _, _ in randomPlayIntent?.revoke() }
         .onDisappear { randomPlayIntent?.revoke() }
         // END TV RANDOM PLAY SOURCE LIFECYCLE
         // Smart Source Selection (Lane A): auto-pick my best source, scoped to a SERIES episode page (meta
@@ -3900,16 +3902,16 @@ struct CoreStreamList: View {
         // Debrid cache awareness: as add-ons answer (the load count climbs), check which raw torrents the
         // user's debrid account has cached. `refresh` de-dups by the hash set, so this only hits a provider
         // when the torrents change; with no debrid key it returns an empty set and nothing renders or re-ranks.
-        .onChange(of: core.streamLoadProgress().loaded) { _ in scheduleSourceRefresh() }
+        .onChange(of: core.streamLoadProgress().loaded, initial: false) { _, _ in scheduleSourceRefresh() }
         // The Singularity pool answers asynchronously (a network fetch), so re-run the debrid cache check when
         // its streams arrive: each pooled torrent infohash is checked against the user's own debrid account
         // and resolves per-user instead of merely rendering.
-        .onChange(of: sourceIndex.streams.count) { _ in scheduleSourceRefresh() }
+        .onChange(of: sourceIndex.streams.count, initial: false) { _, _ in scheduleSourceRefresh() }
         // Reset the render window when the list collapses (so re-expanding starts fresh at the top) or the
         // title changes (a new list should not inherit the previous title's expanded window).
-        .onChange(of: showAllSources) { _ in if !showAllSources { sourceRenderLimit = Self.sourceWindowInitial } }
-        .onChange(of: sourceList.quickFilters) { _ in sourceRenderLimit = Self.sourceWindowInitial }
-        .onChange(of: meta?.libraryId) { _ in sourceRenderLimit = Self.sourceWindowInitial }
+        .onChange(of: showAllSources, initial: false) { _, _ in if !showAllSources { sourceRenderLimit = Self.sourceWindowInitial } }
+        .onChange(of: sourceList.quickFilters, initial: false) { _, _ in sourceRenderLimit = Self.sourceWindowInitial }
+        .onChange(of: meta?.libraryId, initial: false) { _, _ in sourceRenderLimit = Self.sourceWindowInitial }
         // Auxiliary contributors carry the exact title/episode token. Each owner clears the old publication
         // before loading a replacement, and SourceListModel checks the same token again before merging.
         .onAppear {
@@ -3923,7 +3925,7 @@ struct CoreStreamList: View {
                                  title: meta?.name, publicationTarget: mediaServerTarget)
             refreshSourceIndex()
         }
-        .onChange(of: mediaServerTarget) { _ in
+        .onChange(of: mediaServerTarget, initial: false) { _, _ in
             AuxiliarySourcePipeline.refresh(
                 target: auxiliaryTarget, torBox: torboxSearch, sourceIndex: sourceIndex,
                 isSignedIn: VortXSyncManager.shared.isSignedIn
@@ -3933,7 +3935,7 @@ struct CoreStreamList: View {
             refreshSourceIndex()
             scheduleSourceRefresh()
         }
-        .onChange(of: core.playerActive) { active in
+        .onChange(of: core.playerActive, initial: false) { _, active in
             if active {
                 sourceRefreshPlaybackGate.playbackStarted()
                 sourceRefreshDebounce?.cancel()
@@ -5106,11 +5108,11 @@ struct WatchlistChip: View {
             .disabled(watchlistAction.isRunning)
             .onAppear { isWatchlisted = LibraryAutoAdd.isWatchlisted(meta.id, type: meta.type) }
             .onDisappear { watchlistAction.cancel() }
-            .onChange(of: profiles.activeID) { _ in
+            .onChange(of: profiles.activeID, initial: false) { _, _ in
                 watchlistAction.cancel()
                 isWatchlisted = LibraryAutoAdd.isWatchlisted(meta.id, type: meta.type)
             }
-            .onChange(of: meta.type + ":" + meta.id) { _ in
+            .onChange(of: meta.type + ":" + meta.id, initial: false) { _, _ in
                 watchlistAction.cancel()
                 isWatchlisted = LibraryAutoAdd.isWatchlisted(meta.id, type: meta.type)
             }

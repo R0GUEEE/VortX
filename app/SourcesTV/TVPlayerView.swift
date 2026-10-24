@@ -1349,15 +1349,15 @@ struct TVPlayerView: View {
         // Quality buttons must appear when they do. `streamsEpoch` bumps ONLY when the engine's ready-stream
         // set actually changed, so this is the exact, cheap edge the cached counts need: no per-body-pass walk,
         // and no waiting for the viewer to open a panel before the buttons show up.
-        .onChange(of: playbackDeadlineClock.isPaused) { _ in refreshPlaybackIdleTimer() }
-        .onChange(of: loadFailed) { _ in refreshPlaybackIdleTimer() }
-        .onChange(of: curDebridRef?.nativeUsenetLease) { [oldLease = curDebridRef?.nativeUsenetLease] newLease in
+        .onChange(of: playbackDeadlineClock.isPaused) { refreshPlaybackIdleTimer() }
+        .onChange(of: loadFailed) { refreshPlaybackIdleTimer() }
+        .onChange(of: curDebridRef?.nativeUsenetLease) { oldLease, newLease in
             // Accepted source/episode replacement only; prewarm and engine remount keep this lease.
             if oldLease != newLease { oldLease?.close() }
         }
         // The options panel and the failure screen list sources, so they follow every engine change.
-        .onChange(of: showOptions || loadFailed) { listsSources in engineChanges.followAll(listsSources) }
-        .onChange(of: core.streamsEpoch) { _ in
+        .onChange(of: showOptions || loadFailed) { _, listsSources in engineChanges.followAll(listsSources) }
+        .onChange(of: core.streamsEpoch) {
             refreshSourceOptionCounts()
             establishSubtitleTimingScopeIfAvailable()
             if appliedAutoTracks {
@@ -1365,15 +1365,15 @@ struct TVPlayerView: View {
                 applyCurrentSubtitleDelayIfReady(force: false)
             }
         }
-        .onChange(of: account.streamSources) { _ in
+        .onChange(of: account.streamSources) {
             // Account/profile changes replace the add-on and credential authority behind a preload. A source
             // resolved under the old account must never be published into the new one.
             invalidateNextEpisodePreparation(reason: "stream sources changed")
         }
-        .onChange(of: allEpisodes.map(\.id)) { _ in
+        .onChange(of: allEpisodes.map(\.id)) {
             consumePendingManualEpisodeNavigationIfReady()
         }
-        .onChange(of: sourceSwitchGeneration) { _ in
+        .onChange(of: sourceSwitchGeneration) {
             fetchSkipTimestamps()
             cancelDirectResumeInventoryRefresh()
             clearPendingManualEpisodeNavigation(reason: "source replacement")
@@ -5099,7 +5099,7 @@ struct TVPlayerView: View {
                     }
                     .padding(Theme.Space.lg)
                 }
-                .onChange(of: optionRow) { _ in
+                .onChange(of: optionRow) {
                     if accessibilityReduceMotion {
                         proxy.scrollTo(optionRow, anchor: .center)
                     } else {
@@ -8995,7 +8995,7 @@ struct TVPlayerView: View {
                                 .strokeBorder(Theme.Palette.accent.opacity(0.5), lineWidth: 1)
                         }
                     }
-                    .buttonStyle(.plain)
+                    .vortxSelfFocusButton()
                     .accessibilityLabel("Skip \(segment.kind.rawValue) now")
                     .accessibilityHint("Skips this segment immediately")
 
@@ -9019,7 +9019,7 @@ struct TVPlayerView: View {
                                     )
                                 }
                         }
-                        .buttonStyle(.plain)
+                        .vortxSelfFocusButton()
                         .accessibilityLabel("Cancel automatic skip for \(segment.kind.rawValue)")
                         .accessibilityHint("Hides this prompt and will not auto-skip this segment again")
                     }
@@ -12122,6 +12122,10 @@ private struct RemoteCatcher: UIViewControllerRepresentable {
         update(vc)
     }
 
+    static func dismantleUIViewController(_ vc: CatchVC, coordinator: ()) {
+        vc.retireCallbacks()
+    }
+
     private func update(_ vc: CatchVC) {
         vc.onPress = onPress
         vc.onSwipe = onSwipe
@@ -12291,7 +12295,25 @@ private struct RemoteCatcher: UIViewControllerRepresentable {
 
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
+            acceptsRepeat = true
             setNeedsFocusUpdate(); updateFocusIfNeeded()
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            acceptsRepeat = false
+            stopRepeat()
+            super.viewWillDisappear(animated)
+        }
+
+        fileprivate func retireCallbacks() {
+            acceptsRepeat = false
+            stopRepeat()
+            onPress = nil
+            onSwipe = nil
+            onAccessibilityFocus = nil
+            onAccessibilityActivate = nil
+            onAccessibilityAdjust = nil
+            onAccessibilityEscape = nil
         }
 
         /// Lock focus on the catcher. It is the ONLY focusable while playing and it handles every remote
@@ -12343,6 +12365,26 @@ private struct RemoteCatcher: UIViewControllerRepresentable {
         private var repeatTimer: Timer?
         private var repeatType: UIPress.PressType?
         private var repeatCount = 0
+        private var repeatGeneration: UUID?
+        private var acceptsRepeat = false
+
+        /// Foundation retains its target; the target must not retain the controller. Selector delivery
+        /// stays on the main run loop instead of enqueueing a Task for every held-remote tick.
+        @MainActor
+        private final class RepeatTarget: NSObject {
+            weak var owner: CatchVC?
+            let generation: UUID
+
+            init(owner: CatchVC, generation: UUID) {
+                self.owner = owner
+                self.generation = generation
+            }
+
+            @objc func fire(_ timer: Timer) {
+                guard let owner else { timer.invalidate(); return }
+                owner.repeatTick(timer, generation: generation)
+            }
+        }
 
         override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
             var handled = false
@@ -12381,18 +12423,37 @@ private struct RemoteCatcher: UIViewControllerRepresentable {
 
         private func startRepeat(_ type: UIPress.PressType) {
             stopRepeat()
+            guard acceptsRepeat else { return }
             repeatType = type; repeatCount = 0
-            let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] t in
-                guard let self, let type = self.repeatType else { t.invalidate(); return }
-                self.repeatCount += 1
-                if self.repeatCount > 120 { self.stopRepeat(); return }   // ~14s safety cap
-                self.onPress?(type)
-            }
+            let generation = UUID()
+            repeatGeneration = generation
+            let target = RepeatTarget(owner: self, generation: generation)
+            let timer = Timer(timeInterval: 0.12, target: target,
+                              selector: #selector(RepeatTarget.fire(_:)), userInfo: nil, repeats: true)
             timer.fireDate = Date().addingTimeInterval(0.45)              // hold delay before repeats kick in
-            RunLoop.main.add(timer, forMode: .common)
             repeatTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
         }
-        private func stopRepeat() { repeatTimer?.invalidate(); repeatTimer = nil; repeatType = nil }
+
+        private func repeatTick(_ timer: Timer, generation: UUID) {
+            guard acceptsRepeat, repeatGeneration == generation,
+                  repeatTimer === timer, let type = repeatType else {
+                timer.invalidate()
+                return
+            }
+            repeatCount += 1
+            if repeatCount > 120 { stopRepeat(); return }                // ~14s safety cap
+            onPress?(type)
+        }
+
+        private func stopRepeat() {
+            // Retire admission before invalidation, so a queued old tick cannot act on a new hold.
+            repeatGeneration = nil
+            let timer = repeatTimer
+            repeatTimer = nil
+            repeatType = nil
+            timer?.invalidate()
+        }
 
         override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
             super.didUpdateFocus(in: context, with: coordinator)

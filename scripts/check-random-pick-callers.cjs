@@ -70,7 +70,7 @@ function contracts(files) {
     }
     if (kind === 'Episode') {
       need(current.includes('RandomPickPolicy.EpisodeSource(currentMeta) == randomEpisodeSource'), file + ': metadata receipt');
-      need(lifecycle.includes('.onReceive(core.$metaDetails)') && lifecycle.includes('current.map(RandomPickPolicy.EpisodeSource.init) != source'), file + ': metadata invalidation');
+      need(lifecycle.includes('.onReceive(core.metaDetailsPublisher)') && lifecycle.includes('current.map(RandomPickPolicy.EpisodeSource.init) != source'), file + ': metadata invalidation');
       need(lifecycle.includes('guard randomEpisodePreview != nil, randomEpisodeRoute == nil,\n                  let source = randomEpisodeSource else { return }'), file + ': metadata invalidates only an uncommitted preview');
       need(lifecycle.includes('if randomEpisodeRoute == nil { clearRandomEpisodePick() }'), file + ': presenting disappearance preserves admitted session');
       const open = method(helpers, 'openRandomEpisode');
@@ -100,6 +100,9 @@ function contracts(files) {
   const sourceModel = files['app/SourcesShared/SourceListModel.swift'];
   const sourceStart = tv.indexOf('struct CoreStreamList: View');
   const sourceView = tv.slice(sourceStart);
+  need(sourceView.includes('@ObservedObject var profiles: ProfileStore'), 'TV source list receives the observed profile owner');
+  need((tv.match(/CoreStreamList\(title: [^\n]+, profiles: profiles,\n/g) || []).length === 3,
+       'all three TV source-list callers pass their existing profile owner');
   need((tv.match(/var autoPlayOnAppear = false/g) || []).length === 3, 'TV autoplay defaults off on all three surfaces');
   need(tv.includes('autoPlayOnAppear: Bool = false') && tv.includes('self.autoPlayOnAppear = autoPlayOnAppear'), 'episode custom initializer defaults off');
   need(tv.includes('autoPlayOnAppear: route.autoPlay') && tv.includes('randomPlayIntent: route.intent, suppressPreferenceAutoPlay: true'), 'random episode true Play / navigation-only Open');
@@ -169,6 +172,10 @@ function contracts(files) {
 }
 contracts(sources);
 const mutations = [
+  ['app/SourcesTV/DetailView.swift', '@ObservedObject var profiles: ProfileStore', '', 'TV child loses profile owner'],
+  ['app/SourcesTV/DetailView.swift', 'CoreStreamList(title: m.name, profiles: profiles,', 'CoreStreamList(title: m.name,', 'TV movie source list loses injected owner'],
+  ['app/SourcesiOS/iOSDetailView.swift', '.onReceive(core.metaDetailsPublisher) { details in', '.onReceive(core.revisionPublisher) { details in', 'iOS metadata observer follows unrelated revisions'],
+  ['app/SourcesTV/DetailView.swift', '.onReceive(core.metaDetailsPublisher) { details in', '.onReceive(core.revisionPublisher) { details in', 'TV metadata observer follows unrelated revisions'],
   ['app/SourcesTV/LibraryView.swift', 'onPlay: { openRandomLibraryItem(ticket, autoPlay: true) }', 'onPlay: { openRandomLibraryItem(ticket, autoPlay: false) }', 'TV Play aliases Open'],
   ['app/SourcesTV/DetailView.swift', 'var autoPlayOnAppear = false', 'var autoPlayOnAppear = true', 'TV defaults autoplay on'],
   ['app/SourcesTV/DetailView.swift', 'guard autoPlayOnAppear, let intent = randomPlayIntent, intent.isPending', 'guard let intent = randomPlayIntent, intent.isPending', 'TV ignores explicit enabled flag'],

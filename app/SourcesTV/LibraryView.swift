@@ -207,9 +207,9 @@ struct LibraryView: View {
         .onReceive(profiles.$pickedThisLaunch) { picked in
             if !picked, profiles.profiles.count > 1 { clearRandomLibraryPick() }
         }
-        .onChange(of: account.credentialBoundaryGeneration) { _ in clearRandomLibraryPick() }
-        .onChange(of: segment) { _ in clearRandomLibraryPick() }
-        .onChange(of: activeFilters) { _ in clearRandomLibraryPick() }
+        .onChange(of: account.credentialBoundaryGeneration) { clearRandomLibraryPick() }
+        .onChange(of: segment) { clearRandomLibraryPick() }
+        .onChange(of: activeFilters) { clearRandomLibraryPick() }
         .onReceive(core.$revision) { _ in
             if let route = randomLibraryRoute {
                 if !(route.intent?.routeIsCurrent(core: core, profiles: profiles)

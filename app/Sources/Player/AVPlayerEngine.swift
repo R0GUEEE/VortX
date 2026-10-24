@@ -4342,18 +4342,76 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
     /// Load the video track's nominal frame rate off the main thread and cache it for `containerFrameRate()`
     /// (Gap 8), using the non-deprecated async `load(.nominalFrameRate)`. No-op for HLS (no AVAssetTrack
     /// objects) and identity-guarded like loadChapters, so a later load never sees a stale value.
-    private func loadContainerFrameRate(_ item: AVPlayerItem) {
+    private func loadContainerFrameRate(_ item: AVPlayerItem,
+                                        loadToken: PlayerLoadToken,
+                                        generation: UInt64) {
         let asset = item.asset
         Task { @MainActor in
             let tracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
-            guard player.currentItem === item else { return }
+            guard pendingLoadIsCurrent(loadToken: loadToken, generation: generation),
+                  player.currentItem === item else { return }
             for track in tracks {
                 let fps = (try? await track.load(.nominalFrameRate)) ?? 0
-                guard player.currentItem === item else { return }
-                if fps > 0 { containerFPS = Double(fps); return }
+                guard pendingLoadIsCurrent(loadToken: loadToken, generation: generation),
+                      player.currentItem === item else { return }
+                if fps > 0 {
+                    containerFPS = Double(fps)
+                    #if os(tvOS)
+                    // The ready callback may run before AVFoundation finishes this async property load.
+                    // Reuse the same classifier/range/size request once the owned value arrives; the
+                    // load-token + exact-item fence prevents a retired item from touching the display.
+                    reassertRemuxDisplayMode(
+                        for: item, loadToken: loadToken, generation: generation)
+                    #endif
+                    return
+                }
             }
         }
     }
+
+    #if os(tvOS)
+    /// Reassert the existing remux display policy after AVFoundation's async frame-rate property resolves.
+    /// This keeps the original classified-first, asset-fallback ordering without using the deprecated
+    /// synchronous AVAssetTrack.nominalFrameRate accessor. A classified rate remains usable immediately;
+    /// an asset-only rate is applied on this callback once its exact current load is known.
+    private func reassertRemuxDisplayMode(for item: AVPlayerItem,
+                                          loadToken: PlayerLoadToken,
+                                          generation: UInt64) {
+        guard isReady, isRemuxMounted,
+              pendingLoadIsCurrent(loadToken: loadToken, generation: generation),
+              self.item === item,
+              player.currentItem === item else { return }
+        let size = item.presentationSize
+        let assetFPS = containerFPS
+        let classifiedFPS = remuxHLSServer?.authoritativeFrameRate
+            ?? remuxRemoteMount?.authoritativeFrameRate ?? 0
+        if let fps = DVPlaybackPolicy.frameRate(
+            classified: classifiedFPS, assetTrack: assetFPS) {
+            let videoRange = remuxHLSServer?.signaling?.videoRange
+                ?? remuxRemoteMount?.videoRange
+            let range = DVPlaybackPolicy.remuxDisplayRange(
+                dolbyVision: remuxHLSServer?.signaling?.dolbyVision
+                    ?? remuxRemoteMount?.carriesDolbyVision ?? false,
+                hdrFallback: usingHDRFallbackItem, videoRange: videoRange)
+            let requestedRange: ContentDynamicRange
+            switch range {
+            case .dolbyVision: requestedRange = .dolbyVision
+            case .hdr10: requestedRange = .hdr10
+            case .hlg: requestedRange = .hlg
+            case .sdr: requestedRange = .sdr
+            }
+            HDRDisplayMode.request(requestedRange, fps: fps,
+                                   width: Int(size.width), height: Int(size.height), in: nil)
+            VXProbe.log(
+                "dv",
+                "AVPlayer ready -> re-asserted \(requestedRange.rawValue) display mode fps=\(fps) \(Int(size.width))x\(Int(size.height)) remux=\(isRemuxMounted)")
+        } else {
+            VXProbe.log(
+                "dv",
+                "AVPlayer ready -> display mode deferred: frame rate unknown \(Int(size.width))x\(Int(size.height)) remux=\(isRemuxMounted)")
+        }
+    }
+    #endif
 
     // MARK: Decode / audio routing (AVFoundation-managed; no-ops on this engine)
 
@@ -4866,7 +4924,9 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
             loadChapters()                     // async; re-emits track-list if the asset has chapter markers
             emitDynamicRange(item)             // Existing playback/capture behavior remains unchanged.
             refreshBadgeMetadataIfNeeded(item)
-            loadContainerFrameRate(item)       // Gap 8: cache the video track fps for the subtitle fingerprint
+            loadContainerFrameRate(
+                item, loadToken: loadToken, generation: itemGeneration
+            )                                      // Gap 8: cache the video track fps for the subtitle fingerprint
             if let target = pendingSeek, seekable {
                 pendingSeek = nil
                 // A remux resume is fulfilled by opening the INPUT at its origin, not by seeking AVPlayer into
@@ -4937,35 +4997,8 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
                 // exact AVAsset.preferredDisplayCriteria object loaded and applied before attach, which covers
                 // a replaced display manager without inventing metadata. reset() on stop returns the default.
                 if isRemuxMounted {
-                    let size = item.presentationSize
-                    let assetFPS = Double(item.tracks.first {
-                        $0.assetTrack?.mediaType == .video
-                    }?.assetTrack?.nominalFrameRate ?? 0)
-                    let classifiedFPS = remuxHLSServer?.authoritativeFrameRate
-                        ?? remuxRemoteMount?.authoritativeFrameRate ?? 0
-                    if let fps = DVPlaybackPolicy.frameRate(
-                        classified: classifiedFPS, assetTrack: assetFPS) {
-                        let videoRange = remuxHLSServer?.signaling?.videoRange
-                            ?? remuxRemoteMount?.videoRange
-                        let range = DVPlaybackPolicy.remuxDisplayRange(
-                            dolbyVision: remuxHLSServer?.signaling?.dolbyVision
-                                ?? remuxRemoteMount?.carriesDolbyVision ?? false,
-                            hdrFallback: usingHDRFallbackItem, videoRange: videoRange)
-                        let requestedRange: ContentDynamicRange
-                        switch range {
-                        case .dolbyVision: requestedRange = .dolbyVision
-                        case .hdr10: requestedRange = .hdr10
-                        case .hlg: requestedRange = .hlg
-                        case .sdr: requestedRange = .sdr
-                        }
-                        HDRDisplayMode.request(requestedRange, fps: fps,
-                                               width: Int(size.width), height: Int(size.height), in: nil)
-                        VXProbe.log(
-                            "dv",
-                            "AVPlayer ready -> re-asserted \(requestedRange.rawValue) display mode fps=\(fps) \(Int(size.width))x\(Int(size.height)) remux=\(isRemuxMounted)")
-                    } else {
-                        VXProbe.log("dv", "AVPlayer ready -> display mode deferred: frame rate unknown \(Int(size.width))x\(Int(size.height)) remux=\(isRemuxMounted)")
-                    }
+                    reassertRemuxDisplayMode(
+                        for: item, loadToken: loadToken, generation: itemGeneration)
                 } else if contentIsDolbyVision, let nativeDisplayCriteria {
                     let reapplied = HDRDisplayMode.applyNativePreferredCriteria(nativeDisplayCriteria, in: nil)
                     VXProbe.log(

@@ -56,7 +56,7 @@ struct LoginView: View {
         .onReceive(account.$isSignedIn) { signedIn in
             handleStremioSignIn(signedIn: signedIn)
         }
-        .onChange(of: account.credentialBoundaryGeneration) { _ in
+        .onChange(of: account.credentialBoundaryGeneration) {
             handleStremioSignIn(signedIn: account.isSignedIn)
         }
     }
