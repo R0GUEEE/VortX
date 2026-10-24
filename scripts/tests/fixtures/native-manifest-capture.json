@@ -67,8 +67,15 @@
     ["lua", "official-archive/feed", "https://www.lua.org/ftp/"],
     ["libxml2", "official-archive/feed", "https://download.gnome.org/sources/libxml2/"],
     ["fontconfig", "official-archive/feed", "https://cgit.freedesktop.org/fontconfig/refs/tags"],
-    ["media3", "parent-registry", "https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer/maven-metadata.xml"],
-    ["agp", "parent-registry", "https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/maven-metadata.xml"],
+    ["media3", "parent-registry", [
+      "https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer/maven-metadata.xml",
+      "https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer-hls/maven-metadata.xml",
+      "https://dl.google.com/dl/android/maven2/androidx/media3/media3-ui/maven-metadata.xml",
+      "https://dl.google.com/dl/android/maven2/androidx/media3/media3-session/maven-metadata.xml"
+    ]],
+    ["agp", "parent-registry", [
+      "https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/maven-metadata.xml"
+    ]],
     ["gradle", "official-archive/feed", "https://services.gradle.org/versions/all"],
     ["android-sdk", "official-archive/feed", "https://dl.google.com/android/repository/repository2-1.xml"],
     ["jdk-major-discovery", "official-archive/feed", "https://api.adoptium.net/v3/info/available_releases"],
@@ -79,10 +86,19 @@
     ["nasm", "official-archive/feed", "https://www.nasm.us/pub/nasm/releasebuilds/"],
     ["wget", "official-archive/feed", "https://ftp.gnu.org/gnu/wget/"],
     ["vortx-sdk", "internal", null],
-    ["aws-lc-rust", "parent-registry", "https://crates.io/api/v1/crates/aws-lc-rs"],
-    ["rquickjs", "parent-registry", "https://crates.io/api/v1/crates/rquickjs"],
-    ["ring", "parent-registry", "https://crates.io/api/v1/crates/ring"],
-    ["rust-build-helpers", "parent-registry", "https://crates.io/api/v1/crates/cc"],
+    ["aws-lc-rust", "parent-registry", [
+      "https://crates.io/api/v1/crates/aws-lc-rs",
+      "https://crates.io/api/v1/crates/aws-lc-sys"
+    ]],
+    ["rquickjs", "parent-registry", [
+      "https://crates.io/api/v1/crates/rquickjs",
+      "https://crates.io/api/v1/crates/rquickjs-sys"
+    ]],
+    ["ring", "parent-registry", ["https://crates.io/api/v1/crates/ring"]],
+    ["rust-build-helpers", "parent-registry", [
+      "https://crates.io/api/v1/crates/cc",
+      "https://crates.io/api/v1/crates/cmake"
+    ]],
     ["rust-channels", "rolling-commit", "https://static.rust-lang.org/dist/channel-rust-stable.toml"],
     ["python-runtime", "official-archive/feed", "https://www.python.org/downloads/feed.rss"],
     ["pyyaml-runtime", "parent-registry", "https://pypi.org/pypi/PyYAML/json"],

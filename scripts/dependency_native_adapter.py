@@ -54,6 +54,47 @@ _DOVI_SCOPE = {
 _SAFE_MAPPING_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+&(),:/-]{0,159}$")
 _MAPPING_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
+# These are the only parent-registry identities this adapter is allowed to
+# borrow from the generic monitor.  The keys are the exact public endpoints in
+# the reviewed native manifest; the values are the exact generic compare
+# identities produced by dependency-health.py.  Keeping this table explicit
+# prevents an endpoint or package-name typo from silently becoming a fresh
+# native observation.
+_PARENT_REGISTRY_IDENTITIES = {
+    "media3": {
+        "https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer/maven-metadata.xml":
+            "maven:androidx.media3:media3-exoplayer",
+        "https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer-hls/maven-metadata.xml":
+            "maven:androidx.media3:media3-exoplayer-hls",
+        "https://dl.google.com/dl/android/maven2/androidx/media3/media3-ui/maven-metadata.xml":
+            "maven:androidx.media3:media3-ui",
+        "https://dl.google.com/dl/android/maven2/androidx/media3/media3-session/maven-metadata.xml":
+            "maven:androidx.media3:media3-session",
+    },
+    "agp": {
+        "https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/maven-metadata.xml":
+            "plugin:com.android.application",
+    },
+    "aws-lc-rust": {
+        "https://crates.io/api/v1/crates/aws-lc-rs": "cargo:aws-lc-rs",
+        "https://crates.io/api/v1/crates/aws-lc-sys": "cargo:aws-lc-sys",
+    },
+    "rquickjs": {
+        "https://crates.io/api/v1/crates/rquickjs": "cargo:rquickjs",
+        "https://crates.io/api/v1/crates/rquickjs-sys": "cargo:rquickjs-sys",
+    },
+    "ring": {
+        "https://crates.io/api/v1/crates/ring": "cargo:ring",
+    },
+    "rust-build-helpers": {
+        "https://crates.io/api/v1/crates/cc": "cargo:cc",
+        "https://crates.io/api/v1/crates/cmake": "cargo:cmake",
+    },
+    "pyyaml-runtime": {
+        "https://pypi.org/pypi/PyYAML/json": "pypi:PyYAML",
+    },
+}
+
 
 class NativeManifestError(ValueError):
     """Raised when the operator manifest cannot be safely mapped."""
@@ -564,6 +605,50 @@ def augment_inventory(inventory: Mapping[str, Any], manifest: Mapping[str, Any],
     return result
 
 
+def reconcile_top_level_coverage_gaps(existing_gaps: Iterable[Mapping[str, Any]],
+                                      current_native: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Refresh native gaps in the report without hiding unrelated gaps.
+
+    ``augment_inventory`` runs before the generic compare, so its native
+    parent-registry gaps can still be present in the top-level report after
+    ``coverage_after_compare`` proves a group in the same run.  The native
+    ledger is authoritative for exact known group gaps; subordinate gaps and
+    non-native/unknown-source gaps remain visible.
+    """
+    current = current_native if isinstance(current_native, Mapping) else {}
+    current_groups = current.get("groups", {})
+    if not isinstance(current_groups, Mapping):
+        current_groups = {}
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    current_gap_sources: set[str] = set()
+    for item in current.get("coverage_gaps", []):
+        if isinstance(item, Mapping) and isinstance(item.get("source"), str) and isinstance(item.get("reason"), str):
+            value = dict(item)
+            merged[(value["source"], value["reason"])] = value
+            current_gap_sources.add(value["source"])
+    for item in existing_gaps or ():
+        if not isinstance(item, Mapping) or not isinstance(item.get("source"), str) or not isinstance(item.get("reason"), str):
+            continue
+        value = dict(item)
+        source = value["source"]
+        if source.startswith("native/"):
+            suffix = source[len("native/"):]
+            group = suffix.split("/", 1)[0]
+            group_record = current_groups.get(group)
+            if "/" not in suffix and isinstance(group_record, Mapping) and group in current_groups:
+                # Current native coverage owns this exact group.  An observed
+                # group has no unresolved exact gap; an unverified group is
+                # replaced only when the current ledger emitted a new exact
+                # gap.  A pending GitHub observation may emit no gap, so keep
+                # that prior unresolved signal rather than hiding it.
+                if group_record.get("status") == "observed" or source in current_gap_sources:
+                    continue
+            # A subordinate native gap (for example dovi/libdovi), a removed
+            # group, or an unknown future group remains explicit.
+        merged.setdefault((source, value["reason"]), value)
+    return sorted(merged.values(), key=lambda item: (item["source"], item["reason"]))
+
+
 def native_inventory_entries(manifest: Mapping[str, Any], existing_entries: Iterable[Mapping[str, Any]] = ()) -> list[dict[str, Any]]:
     """Return the merged entry table for callers that do not hold full inventory."""
     return augment_inventory({"entries": list(existing_entries), "coverage_gaps": []}, manifest)["entries"]
@@ -592,6 +677,156 @@ def _reuse_keys(spec: Mapping[str, Any]) -> list[str]:
         if "crates.io" in endpoint:
             keys.add("cargo:registry-source")
     return sorted(keys)
+
+
+def _parent_registry_mapping(group: str, spec: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Return an exact, public endpoint-to-identity mapping for one parent lane.
+
+    The native manifest is source evidence, not a query plan.  A parent lane is
+    eligible only when its mode and endpoint list exactly match the reviewed
+    public mapping above.  Unknown, extra, duplicated, or otherwise changed
+    endpoints are left unverified rather than guessed from a URL suffix.
+    """
+    if spec.get("mode") != "parent-registry":
+        return []
+    expected = _PARENT_REGISTRY_IDENTITIES.get(group)
+    endpoints = spec.get("endpoints")
+    if not expected or not isinstance(endpoints, list) or any(not isinstance(value, str) for value in endpoints):
+        return []
+    if len(endpoints) != len(expected) or len(set(endpoints)) != len(endpoints):
+        return []
+    if set(endpoints) != set(expected):
+        return []
+    return [{"source": endpoint, "component": expected[endpoint]} for endpoint in endpoints]
+
+
+def _cargo_index_source(name: str) -> str:
+    """Return the exact public sparse-index source used by releases()."""
+    name = name.lower()
+    part = "1" if len(name) == 1 else "2" if len(name) == 2 else (
+        f"3/{name[0]}" if len(name) == 3 else f"{name[:2]}/{name[2:4]}"
+    )
+    return f"https://index.crates.io/{part}/{name}"
+
+
+def _parent_registry_source_is_exact(source: Any, endpoint: str, component: str) -> bool:
+    """Validate generic metadata against the reviewed public source identity."""
+    if not isinstance(source, str):
+        return False
+    if component.startswith("cargo:"):
+        return source == _cargo_index_source(component.split(":", 1)[1])
+    return source == endpoint
+
+
+def _parent_metadata_reason(metadata: Any, endpoint: str, component: str) -> str | None:
+    """Fail closed on malformed or retained-only generic metadata."""
+    if not isinstance(metadata, Mapping):
+        return "parent-registry-observation-missing"
+    required = {"versions", "latest_stable", "source", "observed_at"}
+    if not required <= set(metadata):
+        return "parent-registry-observation-metadata-incomplete"
+    versions = metadata.get("versions")
+    if (not isinstance(versions, list) or not versions or
+            any(not isinstance(version, str) or not version for version in versions) or
+            versions != sorted(set(versions))):
+        return "parent-registry-observation-versions-invalid"
+    latest = metadata.get("latest_stable")
+    if latest is not None and (not isinstance(latest, str) or latest not in versions):
+        return "parent-registry-observation-latest-invalid"
+    if not isinstance(metadata.get("observed_at"), str) or not metadata["observed_at"]:
+        return "parent-registry-observation-timestamp-invalid"
+    if not _parent_registry_source_is_exact(metadata.get("source"), endpoint, component):
+        return "parent-registry-observation-source-mismatch"
+    if metadata.get("absent_observations") or metadata.get("absent_versions"):
+        return "parent-registry-observation-incomplete"
+    return None
+
+
+def _parent_success_evidence_reason(evidence: Any, metadata: Mapping[str, Any]) -> str | None:
+    """Require compare's explicit same-run success marker for one component."""
+    if not isinstance(metadata, Mapping):
+        return "parent-registry-success-evidence-invalid"
+    if (not isinstance(metadata.get("observed_at"), str) or not metadata["observed_at"] or
+            not isinstance(metadata.get("source"), str) or not metadata["source"]):
+        return "parent-registry-success-evidence-invalid"
+    if not isinstance(evidence, Mapping):
+        return "parent-registry-success-evidence-missing"
+    required = {"observed_at", "source", "kind"}
+    if not required <= set(evidence):
+        return "parent-registry-success-evidence-invalid"
+    kind = evidence.get("kind")
+    if not isinstance(kind, str) or kind not in {"fresh", "reused"}:
+        return "parent-registry-success-evidence-invalid"
+    if evidence.get("observed_at") != metadata.get("observed_at"):
+        return "parent-registry-success-evidence-mismatch"
+    if evidence.get("source") != metadata.get("source"):
+        return "parent-registry-success-evidence-mismatch"
+    return None
+
+
+def _parent_registry_observation(group: str, spec: Mapping[str, Any], releases: Mapping[str, Any] | None,
+                                 error_keys: set[str], incomplete_keys: set[str],
+                                 compare_checked_at: str | None,
+                                 successful_observations: Mapping[str, Any] | None,
+                                 compare_collections_valid: bool) -> dict[str, Any]:
+    """Project only successful current generic observations into a native lane.
+
+    ``releases`` is intentionally accepted only from the same compare result;
+    prior_native is never consulted here.  The compare-level success map is the
+    freshness boundary: its exact component keys prove that each endpoint was
+    refreshed or explicitly reused in this invocation.  A checked-at stamp and
+    per-component observed-at/source stamps make that boundary auditable.
+    """
+    mapping = _parent_registry_mapping(group, spec)
+    keys = sorted(item["component"] for item in mapping)
+    base = {"registry_reuse_keys": keys}
+    if not mapping:
+        base.update({"status": "unverified", "reason": "parent-registry-source-not-allowlisted"})
+        return base
+    if not isinstance(compare_checked_at, str) or not compare_checked_at:
+        base.update({"status": "unverified", "reason": "parent-registry-compare-timestamp-missing"})
+        return base
+    if not isinstance(releases, Mapping):
+        base.update({"status": "unverified", "reason": "parent-registry-observation-not-run"})
+        return base
+    if not compare_collections_valid:
+        base.update({"status": "unverified", "reason": "parent-registry-compare-collections-malformed"})
+        return base
+    if not isinstance(successful_observations, Mapping):
+        base.update({"status": "unverified", "reason": "parent-registry-success-evidence-missing"})
+        return base
+    observations: dict[str, str] = {}
+    for item in mapping:
+        component = item["component"]
+        if component in error_keys:
+            base.update({"status": "unverified", "reason": "parent-registry-observation-failed"})
+            return base
+        if component in incomplete_keys:
+            base.update({"status": "unverified", "reason": "parent-registry-observation-incomplete"})
+            return base
+        metadata = releases.get(component)
+        reason = _parent_metadata_reason(metadata, item["source"], component)
+        if reason is not None:
+            base.update({"status": "unverified", "reason": reason})
+            return base
+        reason = _parent_success_evidence_reason(successful_observations.get(component), metadata)
+        if reason is not None:
+            base.update({"status": "unverified", "reason": reason})
+            return base
+        observations[component] = metadata["observed_at"]
+    base.update({
+        "status": "observed",
+        "observation_source": "same-run-generic-registry-observer",
+        "observation_checked_at": compare_checked_at,
+        "registry_observed_at": dict(sorted(observations.items())),
+        "registry_sources": [
+            {"component": item["component"],
+             "manifest_endpoint": item["source"],
+             "observation_source": releases[item["component"]]["source"]}
+            for item in mapping
+        ],
+    })
+    return base
 
 
 def _unsupported_reason(mode: str, review: str) -> str:
@@ -640,12 +875,18 @@ def _retain_previous_cursor(record: dict[str, Any], previous: Mapping[str, Any])
 
 def _incomplete_observation_keys(comparison: Mapping[str, Any]) -> set[str]:
     """Return generic identities whose retained data is stale or contracted."""
+    contractions = comparison.get("history_contractions", [])
+    if not isinstance(contractions, list):
+        contractions = []
     keys = {
         item.get("component")
-        for item in comparison.get("history_contractions", [])
+        for item in contractions
         if isinstance(item, Mapping) and isinstance(item.get("component"), str)
     }
-    for key, metadata in comparison.get("releases", {}).items():
+    releases = comparison.get("releases", {})
+    if not isinstance(releases, Mapping):
+        return keys
+    for key, metadata in releases.items():
         if isinstance(key, str) and isinstance(metadata, Mapping) and (
                 metadata.get("absent_observations") or metadata.get("absent_versions")):
             keys.add(key)
@@ -655,7 +896,10 @@ def _incomplete_observation_keys(comparison: Mapping[str, Any]) -> set[str]:
 def build_native_coverage(manifest: Mapping[str, Any], prior_native: Mapping[str, Any] | None = None,
                          releases: Mapping[str, Any] | None = None,
                          errors: Iterable[str] | None = None,
-                         incomplete: Iterable[str] | None = None) -> dict[str, Any]:
+                         incomplete: Iterable[str] | None = None,
+                         observation_checked_at: str | None = None,
+                         successful_observations: Mapping[str, Any] | None = None,
+                         compare_collections_valid: bool = True) -> dict[str, Any]:
     """Build a 69-group ledger; unsupported groups remain explicit UNVERIFIED."""
     manifest = validate_manifest(manifest)
     mapping = github_upstream_identities(manifest)
@@ -697,17 +941,44 @@ def build_native_coverage(manifest: Mapping[str, Any], prior_native: Mapping[str
                 "observation_key": key,
                 "observation_source": "existing-github-tag-release-asset-observer",
             })
-            if releases is not None and key in releases and key not in error_keys and key not in incomplete_keys:
-                record["status"] = "observed"
-            elif key in error_keys:
+            if key in error_keys:
                 record["status"] = "unverified"
                 record["reason"] = "existing-github-observer-failed"
             elif key in incomplete_keys:
                 record["status"] = "unverified"
                 record["reason"] = "existing-github-observer-incomplete"
+            elif releases is not None and not isinstance(releases, Mapping):
+                record["status"] = "unverified"
+                record["reason"] = "existing-github-observer-observation-malformed"
+            elif isinstance(releases, Mapping) and key in releases:
+                if not compare_collections_valid:
+                    record["status"] = "unverified"
+                    record["reason"] = "native-compare-collections-malformed"
+                elif not isinstance(successful_observations, Mapping):
+                    record["status"] = "unverified"
+                    record["reason"] = "existing-github-observer-success-evidence-missing"
+                else:
+                    evidence_reason = _parent_success_evidence_reason(
+                        successful_observations.get(key), releases[key]
+                    )
+                    if evidence_reason is None:
+                        record["status"] = "observed"
+                    else:
+                        record["status"] = "unverified"
+                        record["reason"] = "existing-github-observer-" + evidence_reason.removeprefix(
+                            "parent-registry-"
+                        )
             else:
                 record["status"] = "pending-observation"
                 record["reason"] = "existing-github-observer-not-run"
+        elif mode == "parent-registry":
+            parent = _parent_registry_observation(
+                group, spec, releases, error_keys, incomplete_keys, observation_checked_at,
+                successful_observations, compare_collections_valid,
+            )
+            record.update(parent)
+            if parent["status"] != "observed":
+                gaps.append({"source": "native/" + group, "reason": parent["reason"]})
         else:
             record["status"] = "unverified"
             record["reason"] = _unsupported_reason(mode, review)
@@ -755,10 +1026,37 @@ def merge_native_coverage(previous: Mapping[str, Any] | None, current: Mapping[s
             _retain_previous_cursor(value, old)
         groups[group] = value
     merged["groups"] = dict(sorted(groups.items()))
-    gap_map = {(item.get("source"), item.get("reason")): item
-               for item in prior.get("coverage_gaps", []) if isinstance(item, Mapping)}
-    gap_map.update({(item.get("source"), item.get("reason")): item
-                    for item in current.get("coverage_gaps", []) if isinstance(item, Mapping)})
+    current_gaps = {
+        (item.get("source"), item.get("reason")): item
+        for item in current.get("coverage_gaps", []) if isinstance(item, Mapping)
+    }
+    current_gap_sources = {
+        item.get("source") for item in current.get("coverage_gaps", [])
+        if isinstance(item, Mapping) and isinstance(item.get("source"), str)
+    }
+    gap_map = dict(current_gaps)
+    current_groups = current.get("groups", {})
+    for item in prior.get("coverage_gaps", []):
+        if not isinstance(item, Mapping):
+            continue
+        source = item.get("source")
+        if not isinstance(source, str) or not source.startswith("native/"):
+            gap_map.setdefault((item.get("source"), item.get("reason")), item)
+            continue
+        suffix = source.removeprefix("native/")
+        group = suffix.split("/", 1)[0]
+        # A current group-level gap is authoritative.  Drop its old reasons so
+        # an observed parent cannot remain blocked by a stale adapter gap.  If
+        # a pending GitHub row emitted no replacement gap, retain its prior
+        # unresolved signal.  Keep subordinate gaps (for example dovi/libdovi)
+        # and gaps for removed or otherwise unknown groups explicit.
+        current_record = current_groups.get(group) if isinstance(current_groups, Mapping) else None
+        if "/" in suffix or not isinstance(current_groups, Mapping) or group not in current_groups:
+            gap_map.setdefault((item.get("source"), item.get("reason")), item)
+        elif (isinstance(current_record, Mapping)
+              and current_record.get("status") != "observed"
+              and source not in current_gap_sources):
+            gap_map.setdefault((item.get("source"), item.get("reason")), item)
     merged["coverage_gaps"] = sorted(gap_map.values(), key=lambda item: (item.get("source", ""), item.get("reason", "")))
     return merged
 
@@ -766,11 +1064,39 @@ def merge_native_coverage(previous: Mapping[str, Any] | None, current: Mapping[s
 def coverage_after_compare(manifest: Mapping[str, Any], previous_native: Mapping[str, Any] | None,
                            comparison: Mapping[str, Any]) -> dict[str, Any]:
     """Attach generic compare results while retaining the native cursor contract."""
-    errors = [item.get("component") for item in comparison.get("registry_errors", [])
+    registry_errors = comparison.get("registry_errors", [])
+    identity_conflicts = comparison.get("identity_conflicts", [])
+    compare_collections_valid = True
+    for name in ("registry_errors", "identity_conflicts", "history_contractions"):
+        if name not in comparison:
+            continue
+        collection = comparison.get(name)
+        if not isinstance(collection, list) or any(
+                not isinstance(item, Mapping) or
+                not isinstance(item.get("component"), str) or not item.get("component")
+                for item in collection):
+            compare_collections_valid = False
+    successful_observations = comparison.get("successful_observations")
+    if "successful_observations" in comparison and not isinstance(successful_observations, Mapping):
+        compare_collections_valid = False
+    if not isinstance(registry_errors, list):
+        registry_errors = []
+    if not isinstance(identity_conflicts, list):
+        identity_conflicts = []
+    errors = [item.get("component") for item in registry_errors
               if isinstance(item, Mapping) and isinstance(item.get("component"), str)]
+    errors.extend(item.get("component") for item in identity_conflicts
+                  if isinstance(item, Mapping) and isinstance(item.get("component"), str))
     incomplete = _incomplete_observation_keys(comparison)
-    current = build_native_coverage(manifest, releases=comparison.get("releases", {}),
-                                    errors=errors, incomplete=incomplete)
+    current = build_native_coverage(
+        manifest,
+        releases=comparison.get("releases", {}),
+        errors=errors,
+        incomplete=incomplete,
+        observation_checked_at=comparison.get("checked_at"),
+        successful_observations=successful_observations,
+        compare_collections_valid=compare_collections_valid,
+    )
     merged = merge_native_coverage(previous_native, current)
     merged["source_changes"] = detect_source_changes(previous_native, current)
     return merged

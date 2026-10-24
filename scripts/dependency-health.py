@@ -653,6 +653,12 @@ def compare(inventory_result, prior, workers, checkpoint=None, reuse=None, ident
     identities = sorted(set((entry["ecosystem"], entry["name"]) for entry in inventory_result["entries"]))
     # A temporarily missing source is not explicit component retirement. Preserve its cursor.
     result, errors, changes, enrolled, observations = dict(prior.get("releases", {})), [], [], [], []
+    # This is the compare-level freshness boundary.  ``result`` intentionally
+    # starts with the prior ledger so an inactive identity can be retained, but
+    # only identities completed by this invocation are recorded here.  Native
+    # projections must consume this map rather than treating a retained
+    # ``releases`` entry as a fresh observation.
+    successful_observations = {}
     conflict_records = {}
     for item in identity_conflicts or ():
         if isinstance(item, dict) and isinstance(item.get("component"), str):
@@ -707,10 +713,27 @@ def compare(inventory_result, prior, workers, checkpoint=None, reuse=None, ident
                     new = sorted(set(data["versions"]) - set(previous["versions"]))
                 if new: changes.append({"component": key, "new_versions": new, "source": data["source"]})
                 observations.extend({"component":key, **event} for event in events)
+                if not key.startswith("github:"):
+                    previous_versions = previous.get("versions") if isinstance(previous, dict) else None
+                    current_versions = data.get("versions") if isinstance(data, dict) else None
+                    if isinstance(previous_versions, list) and isinstance(current_versions, list):
+                        missing_versions = sorted(set(previous_versions) - set(current_versions))
+                        if missing_versions:
+                            retained_missing = data.get("absent_versions", [])
+                            if not isinstance(retained_missing, list):
+                                retained_missing = []
+                            data = {**data, "absent_versions": sorted(
+                                set(retained_missing) | set(missing_versions)
+                            )}
                 data = {**data, "versions": sorted(set(previous["versions"]) | set(data["versions"]))}
             elif prior:
                 enrolled.append({"component": key, "latest_stable": data["latest_stable"], "source": data["source"]})
             result[key] = data
+            successful_observations[key] = {
+                "observed_at": data.get("observed_at"),
+                "source": data.get("source"),
+                "kind": "reused" if reuse and key in reuse else "fresh",
+            }
     contractions = [{"component":key, "missing_observations":metadata.get("absent_observations", []),
                      "missing_versions":metadata.get("absent_versions", [])}
                     for key, metadata in sorted(result.items())
@@ -737,6 +760,7 @@ def compare(inventory_result, prior, workers, checkpoint=None, reuse=None, ident
             "releases": result, "registry_errors": errors, "new_releases": changes, "newly_tracked": enrolled,
             "baseline": not bool(prior), "unresolved_entries": unresolved,
             "github_observation_changes": observations, "history_contractions": contractions,
+            "successful_observations": successful_observations,
             "identity_conflicts": sorted((item for values in conflict_records.values() for item in values),
                                           key=lambda item: (item["component"], item.get("scope", ""), item.get("keys", []))),
             "complete": not errors and not contractions and not inventory_result["coverage_gaps"] and unresolved == 0}
@@ -835,11 +859,19 @@ def main():
             if native_manifest is not None:
                 data["native_monitor"] = native_adapter.coverage_after_compare(
                     native_manifest, prior_report.get("native_monitor"), data)
+                data["coverage_gaps"] = native_adapter.reconcile_top_level_coverage_gaps(
+                    data.get("coverage_gaps", []), data["native_monitor"])
+                data["complete"] = (not data.get("registry_errors")
+                                     and not data.get("history_contractions")
+                                     and not data.get("coverage_gaps")
+                                     and data.get("unresolved_entries", 0) == 0)
         finally:
             if journal: journal.close()
     if args.inventory_only and native_manifest is not None:
         data["native_monitor"] = native_adapter.build_native_coverage(
             native_manifest, prior_native=prior_report.get("native_monitor"))
+        data["coverage_gaps"] = native_adapter.reconcile_top_level_coverage_gaps(
+            data.get("coverage_gaps", []), data["native_monitor"])
         if identity_conflicts:
             data["identity_conflicts"] = identity_conflicts
             data["complete"] = False

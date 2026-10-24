@@ -236,6 +236,29 @@ class DependencyHealthTests(unittest.TestCase):
             reappeared = health.compare(inventory(), contracted, 1)
         self.assertEqual(reappeared["new_releases"], [])
 
+    def test_generic_compare_marks_dropped_versions_and_excludes_inactive_prior_keys(self):
+        previous = {
+            "versions": ["1.0.0", "2.0.0-rc.1"],
+            "latest_stable": "1.0.0",
+            "source": "https://index.crates.io/ex/am/example",
+        }
+        inactive = {**previous, "source": "https://index.crates.io/ac/ti/active"}
+        inventory = {"entries": [{"ecosystem": "cargo", "name": "example", "current": "1.0.0",
+                                  "kind": "resolved-transitive"}], "coverage_gaps": []}
+        current = {"versions": ["1.0.0"], "latest_stable": "1.0.0",
+                   "source": previous["source"]}
+        with patch.object(health, "releases", return_value=current):
+            report = health.compare(
+                inventory,
+                {"releases": {"cargo:example": previous, "cargo:inactive": inactive}},
+                1,
+            )
+        self.assertEqual(report["successful_observations"].keys(), {"cargo:example"})
+        self.assertEqual(report["releases"]["cargo:example"]["versions"], previous["versions"])
+        self.assertEqual(report["releases"]["cargo:example"]["absent_versions"], ["2.0.0-rc.1"])
+        self.assertEqual(report["history_contractions"][0]["component"], "cargo:example")
+        self.assertEqual(report["releases"]["cargo:inactive"], inactive)
+
     def test_cargo_declared_constraint_is_not_an_installed_version(self):
         inventory = {"entries":[
             {"ecosystem":"cargo","name":"example","current":"1","kind":"dependencies"},
@@ -651,9 +674,10 @@ class NativeDependencyAdapterTests(unittest.TestCase):
             if group == "dovi":
                 upstreams[group]["scope"] = capture["scope_notes"]["dovi"]
         for group, mode, endpoint in capture["unsupported"]:
+            endpoints = endpoint if isinstance(endpoint, list) else ([] if endpoint is None else [endpoint])
             upstreams[group] = {
                 "mode": mode,
-                "endpoints": [] if endpoint is None else [endpoint],
+                "endpoints": endpoints,
                 "review": "CAPTURED_PUBLIC_TABLE",
             }
         lanes = {}
@@ -758,8 +782,44 @@ class NativeDependencyAdapterTests(unittest.TestCase):
         self.assertNotIn("previous_state", ffmpeg)
 
     def test_dovi_repository_observation_has_explicit_library_gap(self):
-        coverage = self.adapter.build_native_coverage(
-            self.manifest, releases={"github:quietvoid/dovi_tool": {}},
+        metadata = {
+            "source": "https://api.github.com/repos/quietvoid/dovi_tool/releases",
+            "observed_at": "2026-10-24T00:00:00+00:00",
+            "versions": ["v1.0.0"],
+            "latest_stable": "v1.0.0",
+        }
+        direct = self.adapter.build_native_coverage(
+            self.manifest, releases={"github:quietvoid/dovi_tool": metadata},
+        )
+        self.assertEqual(direct["groups"]["dovi"]["status"], "unverified")
+        self.assertEqual(direct["groups"]["dovi"]["reason"],
+                         "existing-github-observer-success-evidence-missing")
+        previous = self.adapter.build_native_coverage(self.manifest)
+        previous["groups"]["dovi"]["status"] = "observed"
+        previous["groups"]["dovi"]["last_success"] = {"cursor": "retained"}
+        retained_only = self.adapter.coverage_after_compare(
+            self.manifest, previous,
+            {"checked_at": "2026-10-24T00:01:00+00:00",
+             "releases": {"github:quietvoid/dovi_tool": metadata},
+             "registry_errors": [], "history_contractions": [],
+             "successful_observations": {}},
+        )
+        self.assertEqual(retained_only["groups"]["dovi"]["status"], "unverified")
+        self.assertEqual(retained_only["groups"]["dovi"]["reason"],
+                         "existing-github-observer-success-evidence-missing")
+        self.assertEqual(retained_only["groups"]["dovi"]["last_success"], {"cursor": "retained"})
+        coverage = self.adapter.coverage_after_compare(
+            self.manifest, None,
+            {"checked_at": "2026-10-24T00:01:00+00:00",
+             "releases": {"github:quietvoid/dovi_tool": metadata},
+             "registry_errors": [], "history_contractions": [],
+             "successful_observations": {
+                 "github:quietvoid/dovi_tool": {
+                     "observed_at": metadata["observed_at"],
+                     "source": metadata["source"],
+                     "kind": "fresh",
+                 },
+             }},
         )
         dovi = coverage["groups"]["dovi"]
         self.assertEqual(dovi["status"], "observed")
@@ -768,6 +828,40 @@ class NativeDependencyAdapterTests(unittest.TestCase):
         self.assertEqual(dovi["underlying_library"]["status"], "UNVERIFIED")
         self.assertIn({"source": "native/dovi/libdovi", "reason": "underlying-library-version-unverified"},
                       coverage["coverage_gaps"])
+
+        malformed_kind = self.adapter.coverage_after_compare(
+            self.manifest, None,
+            {"checked_at": "2026-10-24T00:01:00+00:00",
+             "releases": {"github:quietvoid/dovi_tool": metadata},
+             "registry_errors": [], "history_contractions": [],
+             "successful_observations": {
+                 "github:quietvoid/dovi_tool": {
+                     "observed_at": metadata["observed_at"],
+                     "source": metadata["source"],
+                     "kind": ["fresh"],
+                 },
+             }},
+        )
+        self.assertEqual(malformed_kind["groups"]["dovi"]["status"], "unverified")
+        self.assertEqual(malformed_kind["groups"]["dovi"]["reason"],
+                         "existing-github-observer-success-evidence-invalid")
+
+        malformed_releases = self.adapter.coverage_after_compare(
+            self.manifest, None,
+            {"checked_at": "2026-10-24T00:01:00+00:00",
+             "releases": ["github:quietvoid/dovi_tool"],
+             "registry_errors": [], "history_contractions": [],
+             "successful_observations": {
+                 "github:quietvoid/dovi_tool": {
+                     "observed_at": metadata["observed_at"],
+                     "source": metadata["source"],
+                     "kind": "fresh",
+                 },
+             }},
+        )
+        self.assertEqual(malformed_releases["groups"]["dovi"]["status"], "unverified")
+        self.assertEqual(malformed_releases["groups"]["dovi"]["reason"],
+                         "existing-github-observer-observation-malformed")
 
     def test_lane_pin_evidence_change_is_separate_source_event(self):
         prior = self.adapter.build_native_coverage(self.manifest)
@@ -954,5 +1048,299 @@ class NativeDependencyAdapterTests(unittest.TestCase):
                 self.assertFalse(output["native_complete"])
                 self.assertEqual(output["native_monitor_refresh"]["status"], "not-refreshed")
                 self.assertEqual(output["native_monitor_refresh"]["unresolved_groups"], ["ffmpeg"])
+
+    def test_main_native_compare_reconciles_report_gap_and_complete_flag(self):
+        temporary_root = ROOT / "_build"
+        temporary_root.mkdir(exist_ok=True)
+        capture = json.loads((ROOT / "scripts/tests/fixtures/native-manifest-capture.json").read_text())
+        manifest = NativeDependencyAdapterTests.manifest_from_capture(capture)
+        media3_sources = {
+            "maven:androidx.media3:media3-exoplayer":
+                "https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer/maven-metadata.xml",
+            "maven:androidx.media3:media3-exoplayer-hls":
+                "https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer-hls/maven-metadata.xml",
+            "maven:androidx.media3:media3-ui":
+                "https://dl.google.com/dl/android/maven2/androidx/media3/media3-ui/maven-metadata.xml",
+            "maven:androidx.media3:media3-session":
+                "https://dl.google.com/dl/android/maven2/androidx/media3/media3-session/maven-metadata.xml",
+        }
+        releases = {
+            component: {"versions": ["1.0.0"], "latest_stable": "1.0.0",
+                        "source": source, "observed_at": "2026-10-24T00:00:00+00:00"}
+            for component, source in media3_sources.items()
+        }
+        successful = {
+            component: {"observed_at": metadata["observed_at"], "source": metadata["source"], "kind": "fresh"}
+            for component, metadata in releases.items()
+        }
+
+        with tempfile.TemporaryDirectory(dir=temporary_root, prefix="native-main-report-") as folder:
+            folder = Path(folder)
+            config = folder / "config.json"
+            manifest_path = folder / "native-manifest.json"
+            report = folder / "report.json"
+            config.write_text("{}")
+            manifest_path.write_text(json.dumps(manifest))
+
+            def fake_compare(data, prior, workers, record, reuse, identity_conflicts=None):
+                return {
+                    "entries": data["entries"], "manifests": data["manifests"],
+                    "coverage_gaps": [
+                        {"source": "native/media3", "reason": "parent-registry-compare-timestamp-missing"},
+                        {"source": "registry/example", "reason": "registry-unavailable"},
+                    ],
+                    "releases": releases, "registry_errors": [], "history_contractions": [],
+                    "identity_conflicts": [], "successful_observations": successful,
+                    "checked_at": "2026-10-24T00:01:00+00:00",
+                    "unresolved_entries": 0, "complete": True,
+                }
+
+            argv = ["dependency-health.py", "--config", str(config), "--report", str(report),
+                    "--native-manifest", str(manifest_path), "--workers", "1"]
+            with patch("sys.argv", argv), patch.object(health, "inventory", return_value={
+                    "entries": [], "manifests": [], "coverage_gaps": []}), \
+                    patch.object(health, "compare", side_effect=fake_compare):
+                health.main()
+            output = json.loads(report.read_text())
+            self.assertFalse(any(item["source"] == "native/media3"
+                                 for item in output["coverage_gaps"]))
+            self.assertIn({"source": "registry/example", "reason": "registry-unavailable"},
+                          output["coverage_gaps"])
+            self.assertFalse(output["complete"])
+
+    def _same_run_parent_releases(self):
+        releases = {}
+        for group, endpoints in self.adapter._PARENT_REGISTRY_IDENTITIES.items():
+            for endpoint, component in endpoints.items():
+                if component.startswith("cargo:"):
+                    source = self.adapter._cargo_index_source(component.split(":", 1)[1])
+                else:
+                    source = endpoint
+                releases[component] = {
+                    "versions": ["1.0.0", "1.1.0", "1.1.0-rc01"],
+                    "latest_stable": "1.1.0",
+                    "source": source,
+                    "observed_at": "2026-10-24T00:00:00+00:00",
+                }
+        return releases
+
+    def _same_run_parent_successful_observations(self, releases=None):
+        releases = releases or self._same_run_parent_releases()
+        return {
+            component: {
+                "observed_at": metadata["observed_at"],
+                "source": metadata["source"],
+                "kind": "fresh",
+            }
+            for component, metadata in releases.items()
+        }
+
+    def test_parent_registry_projects_complete_same_run_generic_observations(self):
+        comparison = {
+            "checked_at": "2026-10-24T00:01:00+00:00",
+            "releases": self._same_run_parent_releases(),
+            "registry_errors": [],
+            "history_contractions": [],
+            "successful_observations": self._same_run_parent_successful_observations(),
+        }
+        coverage = self.adapter.coverage_after_compare(self.manifest, None, comparison)
+        parent_groups = {
+            group for group, spec in self.manifest["upstreams"].items()
+            if spec["mode"] == "parent-registry"
+        }
+        self.assertEqual(parent_groups, set(self.adapter._PARENT_REGISTRY_IDENTITIES))
+        for group in parent_groups:
+            record = coverage["groups"][group]
+            self.assertEqual(record["status"], "observed")
+            self.assertEqual(record["observation_source"], "same-run-generic-registry-observer")
+            self.assertEqual(set(record["registry_reuse_keys"]),
+                             set(self.adapter._PARENT_REGISTRY_IDENTITIES[group].values()))
+            self.assertEqual(record["observation_checked_at"], comparison["checked_at"])
+        media3_sources = {item["component"]: item for item in coverage["groups"]["media3"]["registry_sources"]}
+        self.assertEqual(
+            media3_sources["maven:androidx.media3:media3-exoplayer"]["manifest_endpoint"],
+            "https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer/maven-metadata.xml",
+        )
+        self.assertEqual(
+            media3_sources["maven:androidx.media3:media3-exoplayer"]["observation_source"],
+            comparison["releases"]["maven:androidx.media3:media3-exoplayer"]["source"],
+        )
+        self.assertNotIn("UPSTREAM_METADATA_REUSED", json.dumps(coverage))
+
+    def test_observed_parent_removes_stale_group_gap_but_keeps_subordinate_gap(self):
+        previous = self.adapter.build_native_coverage(self.manifest)
+        previous["coverage_gaps"].append({
+            "source": "native/media3",
+            "reason": "adapter-not-implemented-parent-registry-reuse",
+        })
+        comparison = {
+            "checked_at": "2026-10-24T00:01:00+00:00",
+            "releases": self._same_run_parent_releases(),
+            "registry_errors": [],
+            "history_contractions": [],
+            "successful_observations": self._same_run_parent_successful_observations(),
+        }
+        coverage = self.adapter.coverage_after_compare(self.manifest, previous, comparison)
+        self.assertFalse(any(item["source"] == "native/media3"
+                             for item in coverage["coverage_gaps"]))
+        self.assertTrue(any(item["source"] == "native/dovi/libdovi"
+                            for item in coverage["coverage_gaps"]))
+
+    def test_main_report_reconciles_precompare_native_gaps_without_hiding_unknowns(self):
+        existing = [
+            {"source": "native/media3", "reason": "parent-registry-compare-timestamp-missing"},
+            {"source": "native/dovi/libdovi", "reason": "underlying-library-version-unverified"},
+            {"source": "native/removed-group", "reason": "retained-unknown-group"},
+            {"source": "registry/example", "reason": "registry-unavailable"},
+        ]
+        current = {
+            "groups": {
+                "media3": {"status": "observed"},
+                "dovi": {"status": "observed"},
+            },
+            "coverage_gaps": [
+                {"source": "native/dovi/libdovi", "reason": "underlying-library-version-unverified"},
+            ],
+        }
+        reconciled = self.adapter.reconcile_top_level_coverage_gaps(existing, current)
+        pairs = {(item["source"], item["reason"]) for item in reconciled}
+        self.assertNotIn(("native/media3", "parent-registry-compare-timestamp-missing"), pairs)
+        self.assertIn(("native/dovi/libdovi", "underlying-library-version-unverified"), pairs)
+        self.assertIn(("native/removed-group", "retained-unknown-group"), pairs)
+        self.assertIn(("registry/example", "registry-unavailable"), pairs)
+
+        pending = self.adapter.reconcile_top_level_coverage_gaps(
+            [{"source": "native/mpv", "reason": "existing-github-observer-not-run"}],
+            {"groups": {"mpv": {"status": "pending-observation"}}, "coverage_gaps": []},
+        )
+        self.assertIn({"source": "native/mpv", "reason": "existing-github-observer-not-run"}, pending)
+        merged_pending = self.adapter.merge_native_coverage(
+            {"groups": {"mpv": {"status": "pending-observation"}},
+             "coverage_gaps": [{"source": "native/mpv", "reason": "existing-github-observer-not-run"}]},
+            {"groups": {"mpv": {"status": "pending-observation"}}, "coverage_gaps": []},
+        )
+        self.assertIn({"source": "native/mpv", "reason": "existing-github-observer-not-run"},
+                      merged_pending["coverage_gaps"])
+
+    def test_parent_registry_never_promotes_retained_only_or_partial_metadata(self):
+        releases = self._same_run_parent_releases()
+        direct = self.adapter.build_native_coverage(self.manifest, releases=releases)
+        self.assertEqual(direct["groups"]["media3"]["status"], "unverified")
+        self.assertEqual(direct["groups"]["media3"]["reason"],
+                         "parent-registry-compare-timestamp-missing")
+        previous = self.adapter.build_native_coverage(self.manifest)
+        previous["groups"]["media3"]["last_success"] = {"cursor": "retained"}
+        del releases["maven:androidx.media3:media3-session"]
+        comparison = {
+            "checked_at": "2026-10-24T00:01:00+00:00",
+            "releases": releases,
+            "registry_errors": [],
+            "history_contractions": [],
+            "successful_observations": self._same_run_parent_successful_observations(releases),
+        }
+        coverage = self.adapter.coverage_after_compare(self.manifest, previous, comparison)
+        media3 = coverage["groups"]["media3"]
+        self.assertEqual(media3["status"], "unverified")
+        self.assertEqual(media3["reason"], "parent-registry-observation-missing")
+        self.assertEqual(media3["last_success"], {"cursor": "retained"})
+        self.assertNotIn("maven:androidx.media3:media3-session", media3.get("registry_observed_at", {}))
+
+    def test_parent_registry_requires_explicit_compare_success_evidence(self):
+        releases = self._same_run_parent_releases()
+        comparison = {
+            "checked_at": "2026-10-24T00:01:00+00:00",
+            "releases": releases,
+            "registry_errors": [],
+            "history_contractions": [],
+        }
+        coverage = self.adapter.coverage_after_compare(self.manifest, None, comparison)
+        self.assertEqual(coverage["groups"]["media3"]["status"], "unverified")
+        self.assertEqual(coverage["groups"]["media3"]["reason"],
+                         "parent-registry-success-evidence-missing")
+
+        evidence = self._same_run_parent_successful_observations(releases)
+        evidence["maven:androidx.media3:media3-exoplayer"]["observed_at"] = "stale"
+        comparison["successful_observations"] = evidence
+        coverage = self.adapter.coverage_after_compare(self.manifest, None, comparison)
+        self.assertEqual(coverage["groups"]["media3"]["status"], "unverified")
+        self.assertEqual(coverage["groups"]["media3"]["reason"],
+                         "parent-registry-success-evidence-mismatch")
+
+    def test_parent_registry_failure_contraction_and_source_allowlist_are_unverified(self):
+        releases = self._same_run_parent_releases()
+        previous = self.adapter.build_native_coverage(self.manifest)
+        previous["groups"]["ring"]["last_success"] = {"cursor": "ring-retained"}
+        releases["cargo:ring"]["absent_versions"] = ["0.1.0"]
+        comparison = {
+            "checked_at": "2026-10-24T00:01:00+00:00",
+            "releases": releases,
+            "registry_errors": [{"component": "cargo:ring", "reason": "ValueError"}],
+            "history_contractions": [{"component": "cargo:ring"}],
+            "successful_observations": self._same_run_parent_successful_observations(releases),
+        }
+        coverage = self.adapter.coverage_after_compare(self.manifest, previous, comparison)
+        ring = coverage["groups"]["ring"]
+        self.assertEqual(ring["status"], "unverified")
+        self.assertEqual(ring["reason"], "parent-registry-observation-failed")
+        self.assertEqual(ring["last_success"], {"cursor": "ring-retained"})
+
+        contraction = {
+            "checked_at": "2026-10-24T00:01:00+00:00",
+            "releases": releases,
+            "registry_errors": [],
+            "history_contractions": [{"component": "cargo:ring", "missing_versions": ["0.1.0"]}],
+            "successful_observations": self._same_run_parent_successful_observations(releases),
+        }
+        contraction_coverage = self.adapter.coverage_after_compare(self.manifest, previous, contraction)
+        self.assertEqual(contraction_coverage["groups"]["ring"]["status"], "unverified")
+        self.assertEqual(contraction_coverage["groups"]["ring"]["reason"],
+                         "parent-registry-observation-incomplete")
+
+        changed = json.loads(json.dumps(self.manifest))
+        changed["upstreams"]["ring"]["endpoints"].append("https://crates.io/api/v1/crates/private-ring")
+        invalid = self.adapter.build_native_coverage(
+            changed, releases=self._same_run_parent_releases(),
+            observation_checked_at="2026-10-24T00:01:00+00:00",
+        )
+        self.assertEqual(invalid["groups"]["ring"]["status"], "unverified")
+        self.assertEqual(invalid["groups"]["ring"]["reason"],
+                         "parent-registry-source-not-allowlisted")
+        self.assertNotIn("private-ring", json.dumps(invalid))
+
+        malformed = self.adapter.coverage_after_compare(
+            self.manifest, previous,
+            {"checked_at": "2026-10-24T00:01:00+00:00", "releases": None,
+             "registry_errors": None, "identity_conflicts": None,
+             "history_contractions": None},
+        )
+        self.assertEqual(malformed["groups"]["media3"]["status"], "unverified")
+        self.assertEqual(malformed["groups"]["media3"]["reason"],
+                         "parent-registry-observation-not-run")
+
+        malformed_collections = self.adapter.coverage_after_compare(
+            self.manifest, previous,
+            {"checked_at": "2026-10-24T00:01:00+00:00", "releases": self._same_run_parent_releases(),
+             "registry_errors": None, "history_contractions": [],
+             "successful_observations": self._same_run_parent_successful_observations()},
+        )
+        self.assertEqual(malformed_collections["groups"]["media3"]["status"], "unverified")
+        self.assertEqual(malformed_collections["groups"]["media3"]["reason"],
+                         "parent-registry-compare-collections-malformed")
+
+        for field, value in (("registry_errors", ["unknown failure"]),
+                             ("identity_conflicts", [{}]),
+                             ("history_contractions", [None]),
+                             ("history_contractions", [{"component": ""}])):
+            with self.subTest(field=field):
+                malformed_item = {
+                    "checked_at": "2026-10-24T00:01:00+00:00",
+                    "releases": self._same_run_parent_releases(),
+                    "registry_errors": [], "identity_conflicts": [], "history_contractions": [],
+                    "successful_observations": self._same_run_parent_successful_observations(),
+                }
+                malformed_item[field] = value
+                coverage = self.adapter.coverage_after_compare(self.manifest, previous, malformed_item)
+                self.assertEqual(coverage["groups"]["media3"]["reason"],
+                                 "parent-registry-compare-collections-malformed")
 if __name__ == "__main__":
     unittest.main()
