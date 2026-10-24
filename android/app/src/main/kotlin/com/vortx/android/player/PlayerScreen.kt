@@ -376,7 +376,7 @@ fun PlayerScreen(
                 original,
                 subtitleProfileRevision,
                 allowLocalOnly = subtitleSyncManager == null ||
-                    subtitleSyncManager.sessionUiState.value == com.vortx.android.sync.SessionUiState.SignedOut,
+                    subtitleSyncManager.sessionUiState.value == com.vortx.android.sync.VortXSyncManager.SessionUiState.SignedOut,
                 accountRequired = subtitleSyncManager != null,
                 accountAdmission = subtitleAccountAdmission,
             )
