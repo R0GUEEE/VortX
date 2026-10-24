@@ -5958,7 +5958,7 @@ final class AVPlayerEngineController: NSObject, ObservableObject, PlayerEngine {
         }
     }
 
-    deinit {
+    isolated deinit {
         // stop() is the normal teardown; this is a safety net if the engine is released without it.
         pipDelegate?.retire()
         replacementReadyDeadlineTask?.cancel()

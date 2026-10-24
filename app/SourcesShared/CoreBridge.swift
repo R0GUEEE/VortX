@@ -372,6 +372,7 @@ final class CoreBridge: ObservableObject {
             return (facade, binding.profileID)
         }
     }
+    @MainActor
     func nativeResumeSeconds(for meta: PlaybackMeta, target: PlaybackMutationTarget) async -> Double {
         guard let (facade, profile) = nativePlaybackBinding(target), case .native(let binding?) = target, let epoch = binding.accountGeneration else { return 0 }
         let id = meta.usesSeriesLifecycle ? meta.videoId : meta.libraryId

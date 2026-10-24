@@ -379,12 +379,15 @@ struct CircleIconButtonStyle: ButtonStyle {
         var body: some View {
             #if os(macOS)
             let active = isHovered
+            let scale: CGFloat = configuration.isPressed ? 0.92 : (active && !reduceMotion ? 1.06 : 1)
+            let shadowOpacity = active ? 0.35 : 0
             #else
-            let active = false
+            let scale: CGFloat = configuration.isPressed ? 0.92 : 1
+            let shadowOpacity = 0.0
             #endif
             let label = configuration.label
-                .scaleEffect(configuration.isPressed ? 0.92 : (active && !reduceMotion ? 1.06 : 1))
-                .shadow(color: Theme.Palette.accent.opacity(active ? 0.35 : 0), radius: 14, y: 0)
+                .scaleEffect(scale)
+                .shadow(color: Theme.Palette.accent.opacity(shadowOpacity), radius: 14, y: 0)
                 .animation(reduceMotion ? nil : Theme.Motion.state, value: configuration.isPressed)
             #if os(macOS)
             return label.onHover { isHovered = $0 }
@@ -409,8 +412,11 @@ struct HeroPlayButtonStyle: ButtonStyle {
         var body: some View {
             #if os(macOS)
             let active = isHovered
+            let glassTint = active ? Theme.Palette.accentBright : Theme.Palette.accent
+            let shadowOpacity = active ? 0.55 : 0.30
             #else
-            let active = false
+            let glassTint = Theme.Palette.accent
+            let shadowOpacity = 0.30
             #endif
             let label = configuration.label
                 .font(Theme.Typography.cardTitle.weight(.bold))
@@ -421,9 +427,9 @@ struct HeroPlayButtonStyle: ButtonStyle {
                 // OS 26, still ember-forward and AA-legible; the focus brighten flows through the tint, and
                 // the press scale + resting / focus glow below are preserved.
                 .vortxGlassProminent(in: RoundedRectangle(cornerRadius: Theme.Radius.hero, style: .continuous),
-                                     tint: active ? Theme.Palette.accentBright : Theme.Palette.accent)
+                                     tint: glassTint)
                 .scaleEffect(configuration.isPressed ? 0.98 : 1)
-                .shadow(color: Theme.Palette.accent.opacity(active ? 0.55 : 0.30), radius: 22, y: 10)
+                .shadow(color: Theme.Palette.accent.opacity(shadowOpacity), radius: 22, y: 10)
                 .animation(reduceMotion ? nil : Theme.Motion.state, value: configuration.isPressed)
             #if os(macOS)
             return label.onHover { isHovered = $0 }
