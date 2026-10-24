@@ -15,6 +15,10 @@
 // header's directory and resolves on every target that compiles the QuickJS C sources.
 #include "../../SourcesShared/JSProviders/QuickJS/VortXQuickJSBridge.h"
 
+// The trailer range proxy owns Network.framework objects in Objective-C. Swift receives only value callbacks
+// (lease ID, port and success/failure), so no nw_* object crosses the Swift 6 boundary.
+#include "VXTrailerNetworkOwner.h"
+
 // macOS 26 (Tahoe) SwiftUI toolbar-crash guard. Swallows the NSException thrown by
 // NSToolbar's private -_insertNewItemWithItemIdentifier:... under SwiftUI's
 // ToolbarBridge on a hidden, unused window toolbar, which AppKit otherwise turns

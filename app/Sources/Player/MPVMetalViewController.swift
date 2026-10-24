@@ -541,6 +541,12 @@ final class MPVMetalViewController: PlatformViewController {
     }
     private var seekEOFReloadSource: SeekEOFReloadSource?
     private var seekEOFRecoveryTimeout: DispatchWorkItem?
+    private var trailerProxyOwnerID: UInt64?
+    /// A trailer listener may be preparing asynchronously. The generation is
+    /// invalidated by stop, seek, or a newer source before any prepared URL is
+    /// admitted into mpv.
+    private var trailerPreparationGeneration: UInt64 = 0
+    private var trailerPreparationTask: Task<Void, Never>?
     private static let seekEOFRecoveryTimeoutSeconds: TimeInterval = 12
     nonisolated var activeLoadToken: PlayerLoadToken? {
         loadTokenLock.lock(); defer { loadTokenLock.unlock() }
@@ -1675,7 +1681,26 @@ final class MPVMetalViewController: PlatformViewController {
     }
     #endif   // canImport(UIKit): audio-session + lifecycle observers are iOS/tvOS only
 
+    private func retirePendingTrailerPreparation(invalidateNativeLease: Bool = false) {
+        trailerPreparationGeneration &+= 1
+        trailerPreparationTask?.cancel()
+        trailerPreparationTask = nil
+        guard invalidateNativeLease, let owner = trailerProxyOwnerID else { return }
+        // Teardown releases only this controller's ownership. A second
+        // controller may still be using the shared native listener.
+        VXTrailerProxy.shared.release(owner: owner)
+        trailerProxyOwnerID = nil
+    }
+
+    private func ensureTrailerProxyOwnerID() -> UInt64? {
+        if let trailerProxyOwnerID { return trailerProxyOwnerID }
+        guard let owner = VXTrailerProxy.shared.registerOwner() else { return nil }
+        trailerProxyOwnerID = owner
+        return owner
+    }
+
     func invalidateLoadToken() {
+        retirePendingTrailerPreparation(invalidateNativeLease: true)
         finishCacheFlushFlight(cacheFlushFlight.reset())
         seekEOFRecoveryTimeout?.cancel(); seekEOFRecoveryTimeout = nil
         seekEOFRecovery.reset()
@@ -1820,8 +1845,35 @@ final class MPVMetalViewController: PlatformViewController {
         audioSidecar: URL? = nil,
         reusing loadToken: PlayerLoadToken? = nil
     ) -> PlayerLoadToken {
-        loadFile(url, headers: headers, live: live, audioSidecar: audioSidecar,
-                 reusing: loadToken, preservingSeekEOFRecovery: false)
+        let isGoogleVideo = { (u: URL?) in u?.host?.contains("googlevideo") ?? false }
+        let needsTrailerProxy =
+            (isGoogleVideo(url) && !YouTubeDirectResolver.isManifestURL(url)) ||
+            isGoogleVideo(audioSidecar)
+        if needsTrailerProxy {
+            retirePendingTrailerPreparation()
+            let issuedToken = PlayerLoadToken()
+            let generation = trailerPreparationGeneration
+            guard let owner = ensureTrailerProxyOwnerID() else { return issuedToken }
+            trailerPreparationTask = Task { @MainActor [weak self] in
+                let prepared = await VXTrailerProxy.shared.prepare(video: url, audio: audioSidecar, owner: owner)
+                guard let self, !Task.isCancelled,
+                      self.trailerPreparationGeneration == generation else { return }
+                self.trailerPreparationTask = nil
+                _ = self.loadFile(
+                    url, headers: headers, live: live, audioSidecar: audioSidecar,
+                    reusing: nil, preservingSeekEOFRecovery: false,
+                    preparedTrailer: prepared, preissuedToken: issuedToken
+                )
+            }
+            return issuedToken
+        }
+        retirePendingTrailerPreparation()
+        // reusing remains source-compatible for callers, but ordinary
+        // loads always mint a fresh provenance token. Only the private async
+        // trailer continuation may pass its reserved token below.
+        return loadFile(url, headers: headers, live: live, audioSidecar: audioSidecar,
+                        reusing: nil, preservingSeekEOFRecovery: false,
+                        preissuedToken: nil)
     }
 
     @discardableResult
@@ -1831,11 +1883,16 @@ final class MPVMetalViewController: PlatformViewController {
         live: Bool = false,
         audioSidecar: URL? = nil,
         reusing loadToken: PlayerLoadToken? = nil,
-        preservingSeekEOFRecovery: Bool
+        preservingSeekEOFRecovery: Bool,
+        preparedTrailer: VXTrailerPreparedURLs? = nil,
+        preissuedToken: PlayerLoadToken? = nil
     ) -> PlayerLoadToken {
         // libmpv has no exact AVPlayerItem-style ownership fence. Every load therefore mints a fresh token,
         // including internal reloads, so a queued callback can never become valid again through token reuse.
-        let issuedToken = PlayerLoadToken()
+        // Ordinary and internal synchronous loads are fresh. A pre-issued
+        // token is accepted only from the private async trailer preparation
+        // transaction that reserved it before awaiting native readiness.
+        let issuedToken = preissuedToken ?? PlayerLoadToken()
         loadTokenLock.lock()
         let requestedOrigin = requestedFreshOrigin
         let requestedOriginGeneration = requestedFreshOriginGeneration
@@ -1928,8 +1985,8 @@ final class MPVMetalViewController: PlatformViewController {
         // trailer swaps these to their local VXTrailerProxy (127.0.0.1) equivalents below, BEFORE they are handed
         // to mpv via `args` and the `audio-files` append. Everything downstream (args, isLocalStream, the audio
         // sidecar append, the redacted log) reads these, so the swap flows through the rest of loadFile untouched.
-        var playURL = url
-        var sidecar = audioSidecar
+        var playURL = preparedTrailer?.video ?? url
+        var sidecar = preparedTrailer?.audio ?? audioSidecar
         var args = [playURL.absoluteString]
 
         args.append("replace")
@@ -1957,11 +2014,15 @@ final class MPVMetalViewController: PlatformViewController {
                     // then never returns a manifest URL).
                     playURL = url
                 } else {
-                    playURL = VXTrailerProxy.shared.proxied(url, mime: "video/mp4") ?? url
+                    playURL = preparedTrailer?.video
+                        ?? VXTrailerProxy.shared.proxied(url, mime: "video/mp4")
+                        ?? url
                 }
             }
             if let audioSidecar, isGoogleVideo(audioSidecar) {
-                sidecar = VXTrailerProxy.shared.proxied(audioSidecar, mime: "audio/mp4") ?? audioSidecar
+                sidecar = preparedTrailer?.audio
+                    ?? VXTrailerProxy.shared.proxied(audioSidecar, mime: "audio/mp4")
+                    ?? audioSidecar
             }
             args[0] = playURL.absoluteString
             // Trailer audio-language belt-and-suspenders: the resolver already selects the preferred-language
@@ -3490,6 +3551,7 @@ final class MPVMetalViewController: PlatformViewController {
     }
 
     func seek(to seconds: Double) {
+        retirePendingTrailerPreparation()
         cancelCacheReanchorForExplicitSeek()
         supersedeSeekEOFRecoveryForExplicitSeek()
         // Mark this as a USER seek so the disk-cache read-ahead ramp does not misread the keyframe re-decode drop
@@ -3532,6 +3594,7 @@ final class MPVMetalViewController: PlatformViewController {
     /// completes.  A stored resume must be allowed to fail independently of presentation, so it issues
     /// the same mpv command without adopting that manual-scrub cache hold/watchdog transaction.
     func seekForResume(to seconds: Double) {
+        retirePendingTrailerPreparation()
         cancelCacheReanchorForExplicitSeek()
         supersedeSeekEOFRecoveryForExplicitSeek()
         let owner = callbackLoadToken(requiresLoadedFile: true)
@@ -3597,6 +3660,7 @@ final class MPVMetalViewController: PlatformViewController {
     }
 
     func seekForPausedRecovery(to seconds: Double, owner: PlayerLoadToken) -> Bool {
+        retirePendingTrailerPreparation()
         guard seconds.isFinite, activeLoadToken == owner,
               callbackLoadToken(requiresLoadedFile: true) == owner else { return false }
         cancelCacheReanchorForExplicitSeek()
@@ -3617,6 +3681,7 @@ final class MPVMetalViewController: PlatformViewController {
     /// Relative seek (e.g. -10 / +10), used by the tvOS remote's left/right. Apply the same cache-window
     /// decision as an absolute scrub: a ten-second backward hop can exceed the small back buffer.
     func seek(by seconds: Double) {
+        retirePendingTrailerPreparation()
         cancelCacheReanchorForExplicitSeek()
         supersedeSeekEOFRecoveryForExplicitSeek()
         // Mark this as a USER seek (the tvOS remote's directional hop routes here via hiddenSeek) so the disk-cache
@@ -4917,8 +4982,14 @@ final class MPVMetalViewController: PlatformViewController {
             return
         }
         DiagnosticsLog.log("player", "seek-eof-recovery begin origin=\(intent.origin) target=\(String(format: "%.3f", intent.target)) paused=\(intent.wasPaused) loadToken=\(loadToken.hashValue)")
+        // EOF recovery is already inside the admitted load path. Do not start
+        // a second asynchronous trailer-preparation task here: the active
+        // native lease is reused synchronously, and the returned token must be
+        // immediately attributable to this recovery transaction.
         let replacement = loadFile(source.url, headers: source.headers, live: source.live,
-                                   audioSidecar: source.audioSidecar, preservingSeekEOFRecovery: true)
+                                   audioSidecar: source.audioSidecar, reusing: nil,
+                                   preservingSeekEOFRecovery: true, preparedTrailer: nil,
+                                   preissuedToken: nil)
         guard PlayerLoadProvenanceState.accepts(callbackToken: replacement, activeToken: activeLoadToken),
               seekEOFRecovery.adoptReload(owner: replacement) != nil else {
             failSeekEOFRecovery(loadToken: loadToken, reason: "same-source reopen command was rejected")
