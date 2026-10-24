@@ -4121,6 +4121,9 @@ final class MPVMetalViewController: PlatformViewController {
         setString(MPVProperty.aid, id < 0 ? "no" : String(id))
     }
     func setSubtitleTrack(_ id: Int) {
+        // Off or an embedded pick supersedes an older external download for this load.
+        // Its final sub-add guard shares this transaction, so a late result cannot undo the choice.
+        native.update { $0.externalSubtitleRequestGeneration &+= 1 }
         #if os(tvOS)
         armSeekCacheHold()   // a sid change triggers the same demuxer refresh-seek as an audio switch
         #endif

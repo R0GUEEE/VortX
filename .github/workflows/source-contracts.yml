@@ -30,6 +30,7 @@ on:
       - "scripts/test-hls-seek-producer-gate.sh"
       - "scripts/test-hls-startup-reservation.sh"
       - "scripts/test-mpv-seek-settlement.sh"
+      - "scripts/test-mpv-manual-subtitle-retirement.sh"
       - "scripts/test-sync-derived-document-revisions.sh"
       - "scripts/test-native-bootstrap-archive.sh"
       - "scripts/test-profile-roster-propagation.sh"
@@ -104,6 +105,7 @@ on:
       - "scripts/test-hls-seek-producer-gate.sh"
       - "scripts/test-hls-startup-reservation.sh"
       - "scripts/test-mpv-seek-settlement.sh"
+      - "scripts/test-mpv-manual-subtitle-retirement.sh"
       - "scripts/test-sync-derived-document-revisions.sh"
       - "scripts/test-native-bootstrap-archive.sh"
       - "scripts/test-profile-roster-propagation.sh"
@@ -212,6 +214,7 @@ jobs:
       - run: bash scripts/test-hls-seek-producer-gate.sh
       - run: bash scripts/test-hls-startup-reservation.sh
       - run: bash scripts/test-mpv-seek-settlement.sh
+      - run: bash scripts/test-mpv-manual-subtitle-retirement.sh
       - run: bash scripts/test-sync-derived-document-revisions.sh
       - run: bash scripts/test-native-bootstrap-archive.sh
       - run: bash scripts/test-profile-roster-propagation.sh
