@@ -26,8 +26,9 @@ enum XperienceExportSystemKeychain {
             kSecAttrSynchronizable as String: false
         ]
         #if os(tvOS)
-        // LAContext.interactionNotAllowed is unavailable on tvOS. Preserve its explicit
-        // fail-without-UI query; the Security SDK does not deprecate this value on tvOS.
+        // Security deprecates this flag, but its LAContext.interactionNotAllowed replacement
+        // is unavailable on tvOS. Keep fail-without-UI until supported parity exists;
+        // Skip can misreport protected items as missing, and omitting the policy allows UI.
         value[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
         #else
         // Fresh per query: never reuse a previously authenticated context across operations.
