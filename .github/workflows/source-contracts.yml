@@ -16,6 +16,11 @@ on:
       - "scripts/test-player-skip-chrome.sh"
       - "scripts/test-apple-playback-profile-lifecycle.sh"
       - "scripts/test-landscape-backdrop-cache.sh"
+      - "scripts/test-native-transport.sh"
+      - "scripts/test-apple-usenet-admission.sh"
+      - "scripts/test-apple-nzb-operation.sh"
+      - "test/native-transport-redirect.py"
+      - "test/apple-nzb-operation-http.py"
       - "scripts/test-tv-search-collections.sh"
       - "scripts/test-addon-selfhosted.sh"
       - "scripts/test-apple-parity-contracts.sh"
@@ -85,6 +90,11 @@ on:
       - "scripts/test-player-skip-chrome.sh"
       - "scripts/test-apple-playback-profile-lifecycle.sh"
       - "scripts/test-landscape-backdrop-cache.sh"
+      - "scripts/test-native-transport.sh"
+      - "scripts/test-apple-usenet-admission.sh"
+      - "scripts/test-apple-nzb-operation.sh"
+      - "test/native-transport-redirect.py"
+      - "test/apple-nzb-operation-http.py"
       - "scripts/test-tv-search-collections.sh"
       - "scripts/test-addon-selfhosted.sh"
       - "scripts/test-apple-parity-contracts.sh"
@@ -174,6 +184,7 @@ jobs:
       - run: bash scripts/test-player-skip-chrome.sh
       - run: bash scripts/test-apple-playback-profile-lifecycle.sh
       - run: bash scripts/test-landscape-backdrop-cache.sh
+      - run: bash scripts/test-native-transport.sh
       - run: bash scripts/test-tv-search-collections.sh
       - run: bash scripts/test-addon-selfhosted.sh
       - run: bash scripts/test-episode-source-isolation.sh
