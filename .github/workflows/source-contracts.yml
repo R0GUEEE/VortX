@@ -32,6 +32,7 @@ on:
       - "scripts/test-home-cw-selection.sh"
       - "scripts/test-cw-worker-currentness.sh"
       - "scripts/test-series-sticky-ownership.sh"
+      - "scripts/test-loopback-playback-assertion.sh"
       - "scripts/test-addon-stream-publication.sh"
       - "scripts/test-native-preference-acknowledgement.sh"
       - "scripts/test-binge-language-continuity.sh"
@@ -97,6 +98,7 @@ on:
       - "scripts/test-home-cw-selection.sh"
       - "scripts/test-cw-worker-currentness.sh"
       - "scripts/test-series-sticky-ownership.sh"
+      - "scripts/test-loopback-playback-assertion.sh"
       - "scripts/test-addon-stream-publication.sh"
       - "scripts/test-native-preference-acknowledgement.sh"
       - "scripts/test-binge-language-continuity.sh"
@@ -203,6 +205,7 @@ jobs:
       - run: bash scripts/test-home-cw-selection.sh
       - run: bash scripts/test-cw-worker-currentness.sh
       - run: bash scripts/test-series-sticky-ownership.sh
+      - run: bash scripts/test-loopback-playback-assertion.sh
       - run: bash scripts/test-addon-stream-publication.sh
       - run: bash scripts/test-native-preference-acknowledgement.sh
       - run: bash scripts/test-apple-parity-contracts.sh
