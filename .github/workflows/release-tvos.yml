@@ -604,7 +604,7 @@ jobs:
           path: |
             app/Vendor/VortxEngine.xcframework
             app/Vendor/engine-prelocalize/VortxEngine
-          key: vortx-ffi-resource-host-v1-${{ runner.os }}-${{ steps.toolchain.outputs.xcode_version }}-${{ env.VORTX_ENGINE_SOURCE_REVISION }}-${{ hashFiles('vortx-core/Cargo.toml', 'vortx-core/Cargo.lock', 'vortx-core/rust-toolchain.toml', 'vortx-core/crates/**', 'scripts/build-ffi-xcframework.sh', 'scripts/verify-native-engine-abi.sh') }}
+          key: vortx-ffi-resource-host-v1-${{ runner.os }}-${{ steps.toolchain.outputs.xcode_version }}-${{ env.VORTX_ENGINE_SOURCE_REVISION }}-${{ hashFiles('vortx-core/Cargo.toml', 'vortx-core/Cargo.lock', 'vortx-core/rust-toolchain.toml', 'vortx-core/crates/**', 'scripts/build-ffi-xcframework.sh', 'scripts/native-rust-toolchain-env.sh', 'scripts/verify-native-engine-abi.sh') }}
 
       - name: Build the vortx-ffi xcframework
         if: steps.cache-ffi-xcframework.outputs.cache-hit != 'true'
@@ -655,7 +655,11 @@ jobs:
           # Exercise the real C/Swift boundary with synthetic local account data only.
           # This remains a strict disk-backed checkpoint gate, including Complete file
           # protection; an unavailable protection class fails rather than weakening it.
-          MACOSX_DEPLOYMENT_TARGET=14.0 cargo +nightly-2026-07-19 build --locked \
+          source "$PWD/scripts/native-rust-toolchain-env.sh"
+          NATIVE_RUST_LLVM_PATH="$(native_rust_llvm_library_path nightly-2026-07-19)"
+          DYLD_LIBRARY_PATH="$NATIVE_RUST_LLVM_PATH" \
+          MACOSX_DEPLOYMENT_TARGET=14.0 \
+            cargo +nightly-2026-07-19 build --locked \
             --manifest-path vortx-core/Cargo.toml -p vortx-ffi \
             --no-default-features --features resource-host --release --target aarch64-apple-darwin
           VORTX_FFI_HEADER="$PWD/app/Vendor/VortxEngine.xcframework/macos-arm64/Headers/vortx/vortx_ffi.h" \
