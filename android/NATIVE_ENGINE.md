@@ -37,7 +37,7 @@ fresh staged bytes after the same pinned strip normalization. There is no two-en
 shipping path. Historical source-to-ABI admissions remain explicit for older packages.
 
 Both Android workflows now pin `VortXTV/vortx-core` to
-`d2ca37b89556c732da6edc1e5ca1f5908cf5d508`, matching the normal Apple future-build source.
+`2ea2e0f27dd2e53b7b28228435ca35a70f92831f`, matching the normal Apple future-build source.
 The hosted JNI receipt checks select that same exact candidate. Desktop remains separately
 pinned to `0c30f4782aee544a2b7e33169ad60d03630d4097` and is outside the seven Apple/Android
 release assets; its later adoption remains open. These workflows no longer fetch or build

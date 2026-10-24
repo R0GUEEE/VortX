@@ -206,7 +206,7 @@ jobs:
       VORTX_NATIVE_ONLY: ${{ github.event_name != 'workflow_dispatch' || inputs.native_only }}
       BUILD_SOURCE_SHA: ${{ inputs.recovery_source_commit || github.sha }}
       # Normal new app sources advance independently of admitted historical recovery cuts.
-      NORMAL_NATIVE_REVISION: d2ca37b89556c732da6edc1e5ca1f5908cf5d508
+      NORMAL_NATIVE_REVISION: 2ea2e0f27dd2e53b7b28228435ca35a70f92831f
     # GitHub-owned actions are SHA-pinned too (a mutable tag -- even on an actions/* repo -- can be
     # repointed, and this job holds ENGINE_REPO_TOKEN + the release secrets). Each pin carries the
     # tag it resolved from.
@@ -312,7 +312,7 @@ jobs:
           [ "$(git rev-parse HEAD)" = "$BUILD_SOURCE_SHA" ] && [ -z "$(git status --porcelain)" ] || exit 1
           if [ -z "$RECOVERY_SOURCE" ]; then
             [ "$BUILD_SOURCE_SHA" = "$GITHUB_SHA" ] && [ "$RECOVERY_OUTCOME" = skipped ] && [ -z "$ADMITTED_SOURCE$ADMITTED_NATIVE_REVISION" ] || exit 1
-            [ "$NORMAL_NATIVE_REVISION" = d2ca37b89556c732da6edc1e5ca1f5908cf5d508 ] || exit 1
+            [ "$NORMAL_NATIVE_REVISION" = 2ea2e0f27dd2e53b7b28228435ca35a70f92831f ] || exit 1
             NATIVE_REVISION="$NORMAL_NATIVE_REVISION"
           else
             [ "$RECOVERY_OUTCOME" = success ] && [ "$RECOVERY_SOURCE" = "$BUILD_SOURCE_SHA" ] && [ "$ADMITTED_SOURCE" = "$BUILD_SOURCE_SHA" ] || exit 1
@@ -622,7 +622,7 @@ jobs:
           # The authenticated normal selection requires the new ABI on ALL five slices.
           # Admitted immutable recovery sources retain their original resource-host gate.
           case "$EXPECTED_NATIVE_REVISION" in
-            d2ca37b89556c732da6edc1e5ca1f5908cf5d508)
+            2ea2e0f27dd2e53b7b28228435ca35a70f92831f)
               ./scripts/verify-native-engine-abi.sh apple app/Vendor/VortxEngine.xcframework owner-history ;;
             0c201563c6aa54eeb0545b55ad01582c0c3bcae3)
               ./scripts/verify-native-engine-abi.sh apple app/Vendor/VortxEngine.xcframework resource-host ;;

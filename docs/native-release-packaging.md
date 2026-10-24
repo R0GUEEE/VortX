@@ -10,7 +10,7 @@ independent review, full-build and artifact gates remain required before publica
 
 The checkout and post-checkout equality assertions in `release-tvos.yml`, `android.yml` and
 `android-release.yml` select the identical reviewed source revision
-`d2ca37b89556c732da6edc1e5ca1f5908cf5d508` for future Apple/Android builds. This is a source
+`2ea2e0f27dd2e53b7b28228435ca35a70f92831f` for future Apple/Android builds. This is a source
 candidate, not evidence that its Android ABIs or the other Apple slices have been built. Updating
 this pin does not establish private CI, fresh cross-platform SDK, app, signing or release
 acceptance; those gates must pass against the final combined public source before shipping.

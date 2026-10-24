@@ -8,7 +8,7 @@ import { test } from 'node:test';
 
 const workflow = readFileSync(new URL('../../.github/workflows/release-tvos.yml', import.meta.url), 'utf8');
 const source = '844782d29a93ae51991bfadc639d50bc3619d40b', code = 'a'.repeat(40), tag = 'v0.5.0-beta.1';
-const normalNative = 'd2ca37b89556c732da6edc1e5ca1f5908cf5d508';
+const normalNative = '2ea2e0f27dd2e53b7b28228435ca35a70f92831f';
 // Desktop is outside the seven mobile/Apple release assets; adoption remains a separate gate.
 const desktopNative = '0c30f4782aee544a2b7e33169ad60d03630d4097';
 const historicalNative = '0c201563c6aa54eeb0545b55ad01582c0c3bcae3';
