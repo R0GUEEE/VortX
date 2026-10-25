@@ -243,6 +243,10 @@ SPIKE_BLOCK="$FIXTURE/spikegit-production.swift"
 sed -n '/^enum SpikeGit {/,/^private class BuildOpenSSL: ZipBaseBuild {/p' \
   "$PATCHED_SOURCE" | sed '$d' >"$SPIKE_BLOCK"
 [ -s "$SPIKE_BLOCK" ] || fail "could not extract the patched production SpikeGit implementation"
+SMB_METADATA_BLOCK="$FIXTURE/smb-metadata-production.swift"
+sed -n '/^enum SmbMetadataNormalizer {/,/^private class BuildSmbclient:/p' \
+  "$PATCHED_SOURCE" | sed '$d' >"$SMB_METADATA_BLOCK"
+[ -s "$SMB_METADATA_BLOCK" ] || fail "could not extract production SmbMetadataNormalizer"
 ENVIRONMENT_BLOCK="$FIXTURE/environment-production.swift"
 PKG_CONFIG_BLOCK="$FIXTURE/pkgconfig-production.swift"
 # These selectors end at the method's four-space closing brace, preserving each
@@ -265,6 +269,7 @@ SWIFT_HELPER="$FIXTURE/spikegit-fixture.swift"
   printf '%s\n' \
     'import Foundation' \
     'import Darwin' \
+    'import CryptoKit' \
     '' \
     'enum Library: String, CaseIterable {' \
     '    case fixture, FFmpeg, openssl' \
@@ -325,6 +330,7 @@ SWIFT_HELPER="$FIXTURE/spikegit-fixture.swift"
     '}' \
     ''
   sed -n '1,$p' "$SPIKE_BLOCK"
+  cat "$SMB_METADATA_BLOCK"
   cat <<'SWIFT_TYPES'
 
 enum ArchType: String { case arm64, x86_64, arm64e }
@@ -428,9 +434,180 @@ func runTargetIsolation(executable: String, root: URL) throws {
     print("TARGET ISOLATION FIXTURE PASS")
 }
 
+// These observations deliberately reuse production's immutable proof records.
+// They exercise policy, not physical ZIP/archive/header validation or provenance.
+func smbObserved(_ base: SmbMetadataNormalizer.Snapshot,
+                 version: String? = nil, zipHash: String? = nil,
+                 headers: [String: String]? = nil, archives: [String: String]? = nil,
+                 templates: [String: String]? = nil, requested: Set<String>? = nil,
+                 restored: [String: SmbMetadataNormalizer.Restored]? = nil) -> SmbMetadataNormalizer.Snapshot {
+    SmbMetadataNormalizer.Snapshot(version: version ?? base.version, zipHash: zipHash ?? base.zipHash,
+        headers: headers ?? base.headers, archives: archives ?? base.archives,
+        templates: templates ?? base.templates, requested: requested ?? base.requested,
+        restored: restored ?? base.restored)
+}
+
+func expectSmbRefusal(_ label: String, _ operation: () throws -> Void) throws {
+    var rejected = false
+    do { try operation() } catch { rejected = true }
+    try requireFixture(rejected, "SMB policy accepted \(label)")
+}
+
+func runSmbMetadataContract(root: URL) throws {
+    typealias Normalizer = SmbMetadataNormalizer
+    let manager = FileManager.default
+    try manager.createDirectory(at: root, withIntermediateDirectories: true)
+    let output = root.appendingPathComponent("output")
+    let headers = Normalizer.headerPins.mapValues { $0.1 }
+    let archives = Dictionary(uniqueKeysWithValues: Normalizer.rows.compactMap { row in row.archiveHash.map { (row.key, $0) } })
+    let templates = Dictionary(uniqueKeysWithValues: Normalizer.rows.map { ($0.key, Normalizer.template($0)) })
+    let requested = Set(Normalizer.rows.map { $0.key })
+    let restored = Dictionary(uniqueKeysWithValues: Normalizer.rows.map { row in
+        (row.key, Normalizer.Restored(text: templates[row.key]!.replacingOccurrences(of: "/path/to/workdir", with: output.path),
+                                     archiveHash: row.archiveHash, headers: headers))
+    })
+    let original = Normalizer.Snapshot(version: Normalizer.version, zipHash: Normalizer.zipHash,
+        headers: headers, archives: archives, templates: templates, requested: requested, restored: restored)
+    let correctable: Set<String> = ["isimulator/x86_64", "macos/arm64", "macos/x86_64", "tvos/arm64e", "tvsimulator/x86_64"]
+    let unchanged: Set<String> = ["ios/arm64", "isimulator/arm64", "tvos/arm64", "tvsimulator/arm64"]
+    let unsupported: Set<String> = ["maccatalyst/arm64", "maccatalyst/x86_64", "xros/arm64", "xrsimulator/arm64"]
+    try requireFixture(archives.count == 9 && templates.count == 13, "production proof record cardinality changed")
+    try requireFixture(requested == correctable.union(unchanged).union(unsupported), "production template keys changed")
+    let changes = try Normalizer.plan(original, outputRoot: output)
+    try requireFixture(Set(changes.keys) == correctable, "plan must change exactly the five approved GLib declarations")
+    for row in Normalizer.rows {
+        let before = restored[row.key]!.text
+        guard let after = changes[row.key] else {
+            try requireFixture(unchanged.contains(row.key) || unsupported.contains(row.key), "approved correction was omitted")
+            try requireFixture(Normalizer.template(row, corrected: true) == templates[row.key], "unchanged/unsupported template would be normalized")
+            continue
+        }
+        let exactRemoval = before.replacingOccurrences(of: " -lglib-2.0", with: "")
+            .replacingOccurrences(of: "Requires.private: gnutls glib-2.0", with: "Requires.private: gnutls")
+        try requireFixture(after == exactRemoval, "correction changed fields beyond the exact two GLib tokens")
+        for retained in ["Version: 0.7.0\n", "-lresolv -lpthread -lz -liconv -lgnutls", "-lncurses -lreadline", "Requires.private: gnutls\n", "-lsmbclient"] {
+            try requireFixture(after.contains(retained), "correction removed API version, GnuTLS, or system flags")
+        }
+        try requireFixture(after.contains(" -lpam") == row.pam, "correction changed PAM selection")
+        try requireFixture(!after.contains("glib-2.0"), "approved GLib token was retained")
+    }
+    var afterRestored = restored
+    for (key, text) in changes {
+        let prior = restored[key]!
+        afterRestored[key] = Normalizer.Restored(text: text, archiveHash: prior.archiveHash, headers: prior.headers)
+    }
+    let afterPlan = try Normalizer.plan(smbObserved(original, restored: afterRestored), outputRoot: output)
+    try requireFixture(afterPlan.isEmpty, "exact approved afterimages were not idempotent")
+    let completed: Set<String> = ["macos/arm64", "tvos/arm64e"]
+    var partial = restored
+    for key in completed { partial[key] = afterRestored[key] }
+    let partialPlan = try Normalizer.plan(smbObserved(original, restored: partial), outputRoot: output)
+    try requireFixture(Set(partialPlan.keys) == correctable.subtracting(completed), "mixed exact before/after states were not recoverable")
+    try requireFixture(partialPlan.allSatisfy { changes[$0.key] == $0.value }, "partial recovery changed approved output")
+    let active = correctable.union(unchanged)
+    let activeRestored = restored.filter { active.contains($0.key) }
+    let activePlan = try Normalizer.plan(smbObserved(original, requested: active, restored: activeRestored), outputRoot: output)
+    try requireFixture(activePlan == changes, "selecting the nine proven payloads changed correction policy")
+    let none = try Normalizer.plan(smbObserved(original, requested: [], restored: [:]), outputRoot: output)
+    try requireFixture(none.isEmpty, "wrapper validation planned unrequested writes")
+
+    var failures: [(String, Normalizer.Snapshot)] = [
+        ("wrong version", smbObserved(original, version: "4.25.1")),
+        ("wrong ZIP fingerprint", smbObserved(original, zipHash: String(repeating: "0", count: 64))),
+        ("missing canonical headers", smbObserved(original, headers: [:])),
+        ("missing raw archive", smbObserved(original, archives: [:])),
+        ("missing raw templates", smbObserved(original, templates: [:])),
+        ("missing requested restored row", smbObserved(original, restored: [:])),
+        ("extra restored row", smbObserved(original, requested: active)),
+    ]
+    var badHeaders = headers
+    badHeaders["libsmbclient.h"] = "changed-header"
+    failures.append(("wrong canonical header", smbObserved(original, headers: badHeaders)))
+    var badArchives = archives
+    badArchives["macos/arm64"] = "changed-archive"
+    failures.append(("wrong raw archive", smbObserved(original, archives: badArchives)))
+    badArchives = archives
+    badArchives["maccatalyst/arm64"] = archives["macos/arm64"]
+    failures.append(("unproven archive observation", smbObserved(original, archives: badArchives)))
+    var badTemplates = templates
+    badTemplates["macos/arm64"] = templates["macos/arm64"]! + "# unrelated change\n"
+    failures.append(("changed raw PC", smbObserved(original, templates: badTemplates)))
+    badTemplates = templates
+    badTemplates["unknown/arm64"] = "unknown template"
+    failures.append(("unknown raw template row", smbObserved(original, templates: badTemplates)))
+    let selected = "macos/arm64"
+    let prior = restored[selected]!
+    var badRestored = restored
+    badRestored[selected] = Normalizer.Restored(text: prior.text, archiveHash: "changed-restored-archive", headers: prior.headers)
+    failures.append(("wrong restored archive", smbObserved(original, restored: badRestored)))
+    badRestored = restored
+    badRestored[selected] = Normalizer.Restored(text: prior.text, archiveHash: prior.archiveHash, headers: badHeaders)
+    failures.append(("wrong restored header", smbObserved(original, restored: badRestored)))
+    badRestored = restored
+    badRestored[selected] = Normalizer.Restored(text: prior.text + "# unrelated change\n", archiveHash: prior.archiveHash, headers: prior.headers)
+    failures.append(("changed restored PC", smbObserved(original, restored: badRestored)))
+    badRestored = restored
+    badRestored["unknown/arm64"] = prior
+    failures.append(("unknown requested key", smbObserved(original, requested: requested.union(["unknown/arm64"]), restored: badRestored)))
+    for (label, observation) in failures {
+        try expectSmbRefusal(label) { _ = try Normalizer.plan(observation, outputRoot: output) }
+    }
+    // The wrapper-name guard runs before payload IO; no 97 MB ZIP is fabricated.
+    try expectSmbRefusal("wrong wrapper directory") {
+        _ = try Normalizer.snapshot(wrapper: root.appendingPathComponent("unapproved-wrapper"), outputRoot: output,
+                                    version: Normalizer.version, requested: [])
+    }
+
+    // Exercise actual streaming fileHash only on tiny data, with a known SHA-256.
+    let bytes = Data("abc".utf8)
+    let small = root.appendingPathComponent("hash-input")
+    try bytes.write(to: small)
+    let smallHash = try Normalizer.fileHash(small, size: 3)
+    try requireFixture(smallHash == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "small streaming hash differs")
+    try expectSmbRefusal("wrong small-file size") { _ = try Normalizer.fileHash(small, size: 4) }
+    let symlink = root.appendingPathComponent("hash-link")
+    try manager.createSymbolicLink(at: symlink, withDestinationURL: small)
+    try expectSmbRefusal("small-file symlink") { _ = try Normalizer.fileHash(symlink, size: 3) }
+    let remainingBytes = try Data(contentsOf: small)
+    try requireFixture(remainingBytes == bytes, "hash/validation changed fixture input bytes")
+    let entries = try manager.contentsOfDirectory(atPath: root.path).sorted()
+    try requireFixture(entries == ["hash-input", "hash-link"], "pure plan wrote files or fileHash mutated the fixture set")
+    // Exact-name cached zero ZIP must refuse without deleting its cache/sibling data.
+    let cache = root.appendingPathComponent("libsmbclient-\(Normalizer.version)")
+    try manager.createDirectory(at: cache, withIntermediateDirectories: true)
+    let zeroZIP = cache.appendingPathComponent("libsmbclient.zip")
+    let sibling = cache.appendingPathComponent("keep")
+    try Data().write(to: zeroZIP)
+    try bytes.write(to: sibling)
+    try expectSmbRefusal("cached zero ZIP") { try Normalizer.validateArchive(zeroZIP, version: Normalizer.version) }
+    let zeroBytes = try Data(contentsOf: zeroZIP)
+    let siblingBytes = try Data(contentsOf: sibling)
+    try requireFixture(zeroBytes.isEmpty, "cached zero ZIP was changed or deleted")
+    try requireFixture(siblingBytes == bytes, "cached ZIP validation deleted sibling data")
+    let absentDirectory = root.appendingPathComponent("fresh-absent")
+    try Normalizer.validateFreshDirectory(absentDirectory)
+    try requireFixture(!manager.fileExists(atPath: absentDirectory.path), "fresh validation created a cache")
+    let emptyDirectory = root.appendingPathComponent("fresh-empty")
+    try manager.createDirectory(at: emptyDirectory, withIntermediateDirectories: true)
+    try Normalizer.validateFreshDirectory(emptyDirectory)
+    let partialDirectory = root.appendingPathComponent("fresh-partial")
+    try manager.createDirectory(at: partialDirectory, withIntermediateDirectories: true)
+    let retained = partialDirectory.appendingPathComponent("retained")
+    try bytes.write(to: retained)
+    try expectSmbRefusal("nonempty cache without ZIP") { try Normalizer.validateFreshDirectory(partialDirectory) }
+    let retainedBytes = try Data(contentsOf: retained)
+    try requireFixture(retainedBytes == bytes, "fresh-cache refusal changed unknown retained data")
+    let directoryLink = root.appendingPathComponent("fresh-link")
+    try manager.createSymbolicLink(at: directoryLink, withDestinationURL: emptyDirectory)
+    try expectSmbRefusal("symlink cache without ZIP") { try Normalizer.validateFreshDirectory(directoryLink) }
+    print("SMB METADATA POLICY FIXTURE PASS (synthetic fingerprints; not physical ZIP/payload validation)")
+}
+
 do {
     if CommandLine.arguments[1] == "--target-isolation" {
         try runTargetIsolation(executable: CommandLine.arguments[2], root: URL(fileURLWithPath: CommandLine.arguments[3]))
+    } else if CommandLine.arguments[1] == "--smb-metadata-contract" {
+        try runSmbMetadataContract(root: URL(fileURLWithPath: CommandLine.arguments[2]))
     } else {
         let expectedSHA = CommandLine.arguments[1]
         let checkout = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -447,6 +624,12 @@ SWIFT_ISOLATION
 
 SWIFT_BINARY="$FIXTURE/spikegit-fixture"
 swiftc -j 1 -num-threads 1 "$SWIFT_HELPER" -o "$SWIFT_BINARY" || fail "actual patched SpikeGit fixture did not compile"
+
+# Pure-policy coverage uses synthetic observations of immutable production pins;
+# this invocation does not hash or validate the physical wrapper ZIP/payloads.
+"$SWIFT_BINARY" --smb-metadata-contract "$FIXTURE/smb-metadata-contract" \
+  >"$FIXTURE/smb-metadata-contract.log" 2>&1 ||
+  fail "compiled production SMB metadata policy fixture failed: $(cat "$FIXTURE/smb-metadata-contract.log")"
 
 # The Process scaffold deliberately merges its poisoned parent environment, then
 # overlays the actual production dictionary. Production Utility.launch instead
