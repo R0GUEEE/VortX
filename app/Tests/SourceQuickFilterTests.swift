@@ -30,6 +30,15 @@ enum SourceQuickFilterTests {
         expect(tagCalls == 7, "tag facts built once per input occurrence")
         let all = index.project(.init(), cachedHashes: [], cachedUsenetURLs: [])
         expect(all.map(\.group) == original, "inactive filter preserves complete groups and order")
+        expect(all[0].rows.allSatisfy { $0.groupID == "one" } && all[1].rows.allSatisfy { $0.groupID == "two" },
+               "flattenable production rows retain the exact configured group identity")
+        let sameName = SourceQuickFilterPolicy.Index(groups: [
+            .init(id: "configured-a", addon: "AIOStreams", streams: [first]),
+            .init(id: "configured-b", addon: "AIOStreams", streams: [first])
+        ], reportedTags: { _ in [] })
+        expect(sameName.groups.map { $0.rows[0].groupID } == ["configured-a", "configured-b"]
+                   && sameName.groups[0].rows[0].id != sameName.groups[1].rows[0].id,
+               "identical rows and names in two configurations retain distinct origins and row identities")
         expect(Set(all.flatMap(\.rows).map(\.id)).count == 7, "duplicate IDs are unique across occurrences and add-ons")
         expect(first.id == second.id, "fixture exercises actual duplicate stream identity")
         let secondID = all[0].rows[3].id

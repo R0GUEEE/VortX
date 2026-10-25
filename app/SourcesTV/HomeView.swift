@@ -38,6 +38,7 @@ struct HomeView: View {
     @AppStorage(ContinueWatchingPreferences.windowKey) private var continueWatchingWindow = "20"
     @State private var traktContinueWatchingRevision = 0
     @State private var traktNextEpisodeTarget: TraktNextEpisodeHomeRoute?
+    @State private var homeSurpriseRoute: HomeSurpriseRoute?
     @AppStorage("stremiox.autoplayTrailers") private var autoplayTrailers = true
     @ObservedObject private var catalogPrefs = CatalogPreferences.shared   // #105: rails vs poster-wall Home layout
     @ReducedMotion private var reduceMotion
@@ -150,6 +151,11 @@ struct HomeView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
                         Color.clear.frame(height: 0).scrollToTopAnchor()   // re-select Home tab -> scroll here
+                        HStack {
+                            HomeSurpriseButton(isActive: isActive, candidates: homeSurpriseCandidates) { homeSurpriseRoute = $0 }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, Theme.Space.screenEdge)
                         if !renderedContinueWatching.selection.items.isEmpty {
                             // The long-press menu is safe on every profile now: Details is pure
                             // navigation, and the dismiss routes into the overlay profile's own
@@ -221,6 +227,23 @@ struct HomeView: View {
             .background(Theme.Palette.canvas.ignoresSafeArea())
             .navigationDestination(for: XperienceHomeRoute.self) { _ in
                 XperienceCollectionsBrowserView()
+            }
+            .onReceive(profiles.$activeID) { incoming in
+                if let route = homeSurpriseRoute, incoming != route.access.profile.id { homeSurpriseRoute = nil }
+            }
+            .onReceive(profiles.$profiles) { incoming in
+                if let route = homeSurpriseRoute,
+                   !route.access.matchesPublishedNavigationProfiles(incoming, pickedThisLaunch: profiles.pickedThisLaunch) { homeSurpriseRoute = nil }
+            }
+            .onReceive(profiles.$pickedThisLaunch) { picked in
+                if !picked, profiles.profiles.count > 1 { homeSurpriseRoute = nil }
+            }
+            .onReceive(core.$revision) { _ in
+                if let route = homeSurpriseRoute, !route.access.isNavigationCurrent(profiles: profiles, core: core) { homeSurpriseRoute = nil }
+            }
+            .onReceive(account.$credentialBoundaryGeneration) { _ in homeSurpriseRoute = nil }
+            .navigationDestination(item: $homeSurpriseRoute) { route in
+                HomeSurpriseDestination(route: route)
             }
             .navigationDestination(item: $traktNextEpisodeTarget) { target in
                 TraktNextEpisodeHomeDestination(offer: target.offer)
@@ -479,6 +502,28 @@ struct HomeView: View {
         // sign-out, which must clear them). The writer resolves the profile-aware history itself and the
         // store diffs content, so an unchanged re-seed writes nothing and wakes no extension.
         TopShelfSnapshotWriter.publishCurrent()
+    }
+
+    /// Action-time resident pool from visible recommendations, then add-on catalogs. Private
+    /// Continue Watching, hidden sections, upcoming rails and network fetching stay out of the pick.
+    private func homeSurpriseCandidates() -> HomeSurprisePool {
+        var pool = HomeSurprisePool()
+        if !railPrefs.isHidden(.forYou), forYouEnabled {
+            pool.recommendations += forYouRows.currentInterestItems(profileID: profiles.activeID,
+                interests: forYou.interests).map(HomeSurpriseItem.init)
+        }
+        if profiles.active?.isKids != true, !railPrefs.isHidden(.topPicks) {
+            pool.recommendations += topPicks.currentItems(profileID: profiles.activeID,
+                ownerKey: becauseYouWatchedOwnerKey).map(HomeSurpriseItem.init)
+        }
+        if !railPrefs.isHidden(.addonCatalogs) {
+            // Re-apply current visibility at action time: preference changes may precede the
+            // coalesced board publication. allCatalogs retains disabled/tombstone admission.
+            let allowed = Set(core.allCatalogs.map(\.key)).subtracting(CatalogPrefsStore.hidden())
+            pool.catalogs = core.boardRows.filter { allowed.contains($0.id) }
+                .flatMap(\.items).map(HomeSurpriseItem.init)
+        }
+        return pool
     }
 
     /// Render one reorderable Home section. Each case is the section's ORIGINAL view, unchanged, moved behind

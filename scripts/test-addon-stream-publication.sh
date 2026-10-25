@@ -132,6 +132,24 @@ extension VortXSyncManager {
   static func orderedByApplied<T>(_ values: [T], url: (T) -> String) -> [T] { values }
 }
 `);
+// Exact production Player attribution method and matching predicate. Only input storage, dispatch and
+// diagnostic collaborators are inert: no native engine, user state, stream or account mutation is used.
+const originLoader = block(core, 'func loadEnginePlayer(for stream: CoreStream, sourceGroupID:');
+const originMatcher = block(core, 'private func streamMatches(');
+fs.appendFileSync(`${out}/Collaborators.swift`, `
+@MainActor final class SourceOriginBindingProbe {
+  let metadata: Data
+  var dispatched: [[String: Any]] = []
+  init(_ object: [String: Any]) throws { metadata = try JSONSerialization.data(withJSONObject: object) }
+  func stateData(_ field: String) -> Data? { field == "meta_details" ? metadata : nil }
+  func dispatch(action: [String: Any], field: String) -> Bool {
+    guard field == "player" else { return false }; dispatched.append(action); return true
+  }
+  enum DiagnosticsLog { static func log(_ category: String, _ message: String) {} }
+  ${originLoader}
+  ${originMatcher}
+}
+`);
 const declarations = [
   block(read('app/SourcesShared/VortxNativeRuntime.swift'), 'enum VortxNativeError:'),
   block(read('app/SourcesShared/ContinueWatchingDedupe.swift'), 'enum WatchedMembershipPolicy {'),

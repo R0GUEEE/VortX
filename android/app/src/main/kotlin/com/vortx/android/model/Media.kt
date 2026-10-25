@@ -619,7 +619,12 @@ data class StreamGroup(
     /// CoreBridge.swift:984) -- [addon] is a display label (host string) and is not unique enough
     /// to filter by. Empty for a group whose request carried no base (kept, never filtered).
     val base: String = "",
-)
+) {
+    /// Exact configured transport identity, including configuration path/query. Never render or log it.
+    /// Older local/synthetic groups without a base retain label-scoped identity; equal such labels cannot
+    /// be distinguished until their producer supplies a stable base.
+    val sourceInstanceId: String get() = base.ifEmpty { "label:$addon" }
+}
 
 /// A resolved, directly-playable handle for the player. The engine turns a [StreamSource] (which may
 /// be a torrent infohash, a debrid lock, or an HTTP link) into one of these: a concrete [url] the

@@ -1,5 +1,7 @@
 package com.vortx.android.ui.randompick
 
+import com.vortx.android.home.HomeRail
+import com.vortx.android.model.Catalog
 import com.vortx.android.model.Episode
 import com.vortx.android.model.MediaType
 import com.vortx.android.model.MetaDetail
@@ -14,6 +16,38 @@ internal enum class RandomLibraryFilter { ALL, MOVIES, SHOWS }
 
 /** Selection only: callers supply the current native parental-admitted library/detail snapshot. */
 internal object RandomPickPolicy {
+    /** Home supplies its already published, profile-admitted rows. Selection never loads a catalog.
+     * Prefer the current profile's recommendation rails; fall back to visible VOD catalogs when those
+     * have no eligible titles. Continue Watching/private activity and coming-soon rails are separate.
+     */
+    fun homeCandidates(catalogs: List<Catalog>, now: Instant = Instant.now()): List<MetaItem> {
+        val currentYear = now.atOffset(ZoneOffset.UTC).year
+        val rows = catalogs.filter { catalog ->
+            catalog.id != HomeRail.CONTINUE_CATALOG_ID &&
+                catalog.type?.lowercase() !in setOf("tv", "channel", "events") &&
+                HomeRail.forCatalog(catalog) !in setOf(HomeRail.UPCOMING_EPISODES, HomeRail.UPCOMING_MOVIES)
+        }
+        fun candidates(rows: List<Catalog>): List<MetaItem> = libraryCandidates(
+            rows.flatMap { it.items }.filter {
+                !it.watched && it.continueWatchingPermit == null &&
+                    knownHomeStartYear(it.year)?.let { year -> year > currentYear } != true
+            },
+            RandomLibraryFilter.ALL,
+        )
+        val preferred = candidates(rows.filter { HomeRail.forCatalog(it) in setOf(
+            HomeRail.FOR_YOU, HomeRail.SMART_COLLECTIONS, HomeRail.TOP_PICKS, HomeRail.BECAUSE_YOU_WATCHED,
+        ) })
+        return preferred.ifEmpty { candidates(rows) }
+    }
+
+    /** A bounded explicit year, date or range prefix is evidence; arbitrary malformed text is not. */
+    private fun knownHomeStartYear(value: String?): Int? {
+        val raw = value?.trim()?.takeIf { it.length in 4..64 } ?: return null
+        if (!raw.take(4).all { it in '0'..'9' } ||
+            (raw.length > 4 && raw[4] !in "-–— /")) return null
+        return raw.take(4).toIntOrNull()
+    }
+
     fun libraryCandidates(items: List<MetaItem>, filter: RandomLibraryFilter): List<MetaItem> =
         items.asSequence()
             .filter { item ->

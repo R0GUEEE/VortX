@@ -59,6 +59,22 @@ enum RandomPickPolicyTests {
         expect(library.count == 2, "library identity includes type and excludes unsaved bookkeeping")
         expect(saved.state.timeOffset == 99 && saved.state.timesWatched == 2, "pick preserves saved state")
 
+        func home(_ id: String, _ type: String = "movie", title: String = "Title", release: String? = nil) -> RandomPickPolicy.HomeRecord {
+            .init(record: .init(identity: .init(type: type, id: id), title: title, subtitle: type, metadata: []), releaseInfo: release)
+        }
+        let suggested = home("suggested")
+        expect(RandomPickPolicy.homeRecords(recommendations: [suggested, suggested], catalogs: [home("fallback")],
+            watchedIDs: [], now: now).map(\.identity.id) == ["suggested"], "Home prefers deduplicated recommendations")
+        let homeFallback = RandomPickPolicy.homeRecords(recommendations: [home("watched"), home("future", release: "2027")],
+            catalogs: [home("movie"), home("movie"), home("movie", "series"), home("live", "tv"), home(" "),
+                       home("blank", title: "  "), home("dated", release: "2026-10-25"), home("range", release: "2027–")],
+            watchedIDs: ["watched"], now: now)
+        expect(homeFallback.map(\.identity) == [.init(type: "movie", id: "movie"), .init(type: "series", id: "movie")],
+               "Home falls back to current valid unwatched VOD, preserving type identity and rejecting known future releases")
+        expect(RandomPickPolicy.homeRecords(recommendations: [], catalogs: [], watchedIDs: [], now: now).isEmpty, "Home empty remains empty")
+        expect(RandomPickPolicy.homeRecords(recommendations: [], catalogs: [home("unknown-release", release: "2027maybe")],
+            watchedIDs: [], now: now).count == 1, "Malformed release text remains unknown rather than an invented future date")
+
         let profileA = UUID(), profileB = UUID()
         var session = RandomPickPolicy.Session()
         var generator = Generator()

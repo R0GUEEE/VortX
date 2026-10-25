@@ -45,6 +45,17 @@ private func require(_ condition: @autoclosure () -> Bool, _ name: String) {
         let base = try stream(#"{"url":"https://fixture.invalid/movie","name":"Film 2026 1080p WEB English"}"#)
         let plain = prefs(), preferred = prefs(prefer: ["web"])
         let baseline = score(base, plain)
+        let sameNameA = CoreStreamSourceGroup(id: "https://a.invalid/config", addon: "AIOStreams", streams: [base])
+        let sameNameB = CoreStreamSourceGroup(id: "https://b.invalid/config", addon: "AIOStreams", streams: [base])
+        let variantsA = SourcePreferences.$readingOverride.withValue(plain) {
+            StreamRanking.variantOptions([sameNameA, sameNameB], tier: "1080p")
+        }
+        let variantsB = SourcePreferences.$readingOverride.withValue(plain) {
+            StreamRanking.variantOptions([sameNameB, sameNameA], tier: "1080p")
+        }
+        require(variantsA.first?.groupID == sameNameA.id && variantsB.first?.groupID == sameNameB.id
+                    && variantsA.first?.addon == "AIOStreams" && variantsB.first?.addon == "AIOStreams",
+                "actual quality picker retains the selected configured identity when names and full streams are equal")
         require(score(base, preferred) == baseline + 2500 && score(base, plain) == baseline,
                 "alternating captured prefer snapshots never share a score")
 
@@ -116,6 +127,6 @@ private func require(_ condition: @autoclosure () -> Bool, _ name: String) {
         _ = memo.value(for: "second") { 3 }
         _ = memo.value(for: "third") { 4 }
         require(memo.value(for: "key") { 9 } == 9, "bounded capacity retires old entries without changing computation")
-        print("All 17 ranking/cache groups passed; live stores, UI/native routing and full app Swift 6 remain separate gates.")
+        print("All 18 ranking/cache groups passed; live stores, UI/native routing and full app Swift 6 remain separate gates.")
     }
 }

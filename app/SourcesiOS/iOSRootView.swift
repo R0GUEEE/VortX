@@ -1144,6 +1144,7 @@ struct iOSHomeView: View {
     @Environment(\.colorSchemeContrast) private var accessibilityContrast
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var showSignIn = false
+    @State private var homeSurpriseRoute: HomeSurpriseRoute?
     @StateObject private var hero = FeaturedHeroModel()
     @State private var homeHeroTint: FeaturedHeroTintSnapshot<Color>?
     @StateObject private var topPicks = TopPicksModel()   // local recommendations from this profile's history
@@ -1499,6 +1500,11 @@ struct iOSHomeView: View {
                     #else
                     Color.clear.frame(height: 0).backToTopMarker(key: TabScrollKeys.home, active: isActive)
                     #endif
+                    HStack {
+                        HomeSurpriseButton(isActive: isActive, candidates: homeSurpriseCandidates) { homeSurpriseRoute = $0 }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, Theme.Space.md)
                     if !renderedContinueWatching.items.isEmpty {
                         // Continue Watching is PINNED first (not part of HomeRailPreferences): it is a resume
                         // queue stepped through in recency order, not a browse surface. A CW card tap resumes
@@ -1650,6 +1656,23 @@ struct iOSHomeView: View {
             .alert("Playback unavailable", isPresented: Binding(get: { unavailableContinueWatching != nil }, set: { if !$0 { unavailableContinueWatching = nil } })) {
                 Button("OK", role: .cancel) { unavailableContinueWatching = nil }
             } message: { Text(unavailableContinueWatching ?? "") }
+            .onReceive(profiles.$activeID) { incoming in
+                if let route = homeSurpriseRoute, incoming != route.access.profile.id { homeSurpriseRoute = nil }
+            }
+            .onReceive(profiles.$profiles) { incoming in
+                if let route = homeSurpriseRoute,
+                   !route.access.matchesPublishedNavigationProfiles(incoming, pickedThisLaunch: profiles.pickedThisLaunch) { homeSurpriseRoute = nil }
+            }
+            .onReceive(profiles.$pickedThisLaunch) { picked in
+                if !picked, profiles.profiles.count > 1 { homeSurpriseRoute = nil }
+            }
+            .onReceive(core.$revision) { _ in
+                if let route = homeSurpriseRoute, !route.access.isNavigationCurrent(profiles: profiles, core: core) { homeSurpriseRoute = nil }
+            }
+            .onReceive(account.$credentialBoundaryGeneration) { _ in homeSurpriseRoute = nil }
+            .navigationDestination(item: $homeSurpriseRoute) { route in
+                HomeSurpriseDestination(route: route)
+            }
             .navigationDestination(for: FeaturedHeroItem.self) { item in
                 // Thread the hub card's already-resolved art so the detail hero never blanks while (or if)
                 // Cinemeta meta is nil for a new/unreleased title.
@@ -1983,6 +2006,28 @@ struct iOSHomeView: View {
 
     private func forYouRailItem(_ preview: MetaPreview) -> RailItem {
         RailItem(id: preview.id, type: preview.type, name: preview.name, poster: preview.poster, progress: 0)
+    }
+
+    /// Match the visible Home sections; hidden/disabled catalogs and private Continue Watching
+    /// never become a surprise source. No fetch or source resolution occurs here.
+    private func homeSurpriseCandidates() -> HomeSurprisePool {
+        var pool = HomeSurprisePool()
+        if !railPrefs.isHidden(.forYou), forYouEnabled {
+            pool.recommendations += forYouRows.currentInterestItems(profileID: profiles.activeID,
+                interests: forYou.interests).map(HomeSurpriseItem.init)
+        }
+        if profiles.active?.isKids != true, !railPrefs.isHidden(.topPicks) {
+            pool.recommendations += topPicks.currentItems(profileID: profiles.activeID,
+                ownerKey: becauseYouWatchedOwnerKey).map(HomeSurpriseItem.init)
+        }
+        if !railPrefs.isHidden(.addonCatalogs) {
+            // Re-apply current visibility at action time: preference changes may precede the
+            // coalesced board publication. allCatalogs retains disabled/tombstone admission.
+            let allowed = Set(core.allCatalogs.map(\.key)).subtracting(CatalogPrefsStore.hidden())
+            pool.catalogs = core.boardRows.filter { allowed.contains($0.id) }
+                .flatMap(\.items).map(HomeSurpriseItem.init)
+        }
+        return pool
     }
 
     private var forYouEnabled: Bool {

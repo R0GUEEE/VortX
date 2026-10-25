@@ -63,6 +63,43 @@ enum RandomPickPolicy {
 
     }
 
+    /// Home supplies only currently visible, profile-owned shelves. Prefer its recommendations;
+    /// fall back to already-loaded catalogs without another fetch or a hidden catalog traversal.
+    struct HomeRecord: Equatable {
+        let record: Record
+        let releaseInfo: String?
+    }
+
+    static func homeRecords(recommendations: [HomeRecord], catalogs: [HomeRecord],
+                            watchedIDs: Set<String>, now: Date) -> [Record] {
+        let parser = ReleaseParser()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let year = calendar.component(.year, from: now)
+        func eligible(_ source: [HomeRecord]) -> [Record] {
+            var seen = Set<Identity>()
+            return source.compactMap { candidate in
+                let record = candidate.record
+                guard ["movie", "series"].contains(record.identity.type),
+                      !record.identity.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !record.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !watchedIDs.contains(record.identity.id) else { return nil }
+                if let release = candidate.releaseInfo?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                    if let date = parser.date(release), date > now { return nil }
+                    // Catalog previews often expose a year or year range, not an exact release date.
+                    let prefix = release.prefix(4)
+                    let boundary = release.dropFirst(4).first
+                    if prefix.utf8.count == 4, prefix.utf8.allSatisfy({ (48...57).contains($0) }),
+                       boundary.map({ "-–— /".contains($0) }) ?? true,
+                       let start = Int(prefix), start > year { return nil }
+                }
+                return seen.insert(record.identity).inserted ? record : nil
+            }
+        }
+        let preferred = eligible(recommendations)
+        return preferred.isEmpty ? eligible(catalogs) : preferred
+    }
+
     static func libraryRecord(_ item: CoreCWItem) -> Record {
         Record(identity: Identity(type: item.type, id: item.id), title: item.name,
                subtitle: item.type.capitalized,

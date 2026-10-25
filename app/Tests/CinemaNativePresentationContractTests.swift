@@ -5,7 +5,7 @@ func source(_ path: String) throws -> String {
     try String(contentsOfFile: root + "/" + path, encoding: .utf8)
 }
 var checks = 0
-func expect(_ condition: Bool, _ label: String) {
+@MainActor func expect(_ condition: Bool, _ label: String) {
     precondition(condition, label)
     checks += 1
 }

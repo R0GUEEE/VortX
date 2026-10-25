@@ -157,7 +157,9 @@ class ProfileStore private constructor(context: Context) {
         refreshNativeProjection()
     }
     internal fun refreshNativeProjection(forceSettings: Boolean = false) = ContinueWatchingOwnerGate.serialized {
-        applyNativeProjection(checkNotNull(nativeGateway).read(), forceSettings)
+        checkNotNull(nativeGateway).withCurrentProjection { current ->
+            applyNativeProjectionLocked(current, forceSettings)
+        }
     }
     internal fun clearNativeProjection() = ContinueWatchingOwnerGate.serialized {
         ContinueWatchingOwnerGate.transition(::captureActiveProfileBinding) {

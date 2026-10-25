@@ -691,7 +691,71 @@ import os
             Double(tailElapsed) / 1_000_000, Double(tailElapsed) / Double(iterations) / 1_000_000))
     }
 
+    static func sourceOriginChecks() throws {
+        let a = "https://provider.invalid/config/manifest.json?quality=4k&account=A"
+        let b = "https://provider.invalid/config/manifest.json?quality=4k&account=B"
+        let row: [String: Any] = ["url": "https://media.invalid/shared", "name": "same release",
+            "behaviorHints": ["proxyHeaders": ["request": ["X-Synthetic": "same"]]]]
+        let selected = try JSONDecoder().decode(CoreStream.self, from: JSONSerialization.data(withJSONObject: row))
+        let groups = [CoreStreamSourceGroup(id: a, addon: "4k", streams: [selected]),
+                      CoreStreamSourceGroup(id: b, addon: "4k", streams: [selected])]
+        let clicked = SourceOrigin(id: b, addon: "4k")
+        check(SourceOrigin.current(for: selected, clicked: clicked, groups: groups) == clicked,
+              "two identical full stream records retain the explicitly clicked second configuration")
+        check(clicked.engineBase == b, "source origin preserves complete configured path and query")
+        check(SourceOrigin.current(for: selected, clicked: nil, groups: groups) == nil,
+              "legacy inference refuses identical records across different configured instances")
+        check(SourceOrigin.current(for: selected, clicked: nil, groups: [groups[1]]) == clicked,
+              "legacy inference is allowed for a unique complete-record group")
+        check(SourceOrigin.current(for: selected, clicked: .init(id: a + "-missing", addon: "4k"), groups: groups) == nil,
+              "an explicit missing configured identity cannot fall back by label")
+        check(SourceOrigin.current(for: selected, clicked: .init(id: b, addon: "different"), groups: groups) == nil,
+              "a stale mismatching label cannot become current source-origin proof")
+        check(SourceOrigin.current(for: selected, clicked: clicked, groups: [groups[1], groups[1]]) == nil,
+              "duplicate configured group IDs fail closed")
+        let synthetic = SourceOrigin(id: "vortx.singularity.sources", addon: "Singularity")
+        check(SourceOrigin.current(for: selected, clicked: synthetic,
+            groups: [.init(id: synthetic.id, addon: synthetic.addon, streams: [selected])]) == synthetic
+              && synthetic.engineBase == nil, "valid synthetic origins remain distinct from missing/invalid origins")
+        var differentHeaders = row
+        differentHeaders["behaviorHints"] = ["proxyHeaders": ["request": ["X-Synthetic": "other"]]]
+        let other = try JSONDecoder().decode(CoreStream.self, from: JSONSerialization.data(withJSONObject: differentHeaders))
+        check(SourceOrigin.current(for: selected, clicked: clicked,
+            groups: [.init(id: b, addon: "4k", streams: [other])]) == nil,
+              "matching URL alone cannot satisfy full selected-record attribution")
+        func group(_ base: String, _ rows: [[String: Any]]) -> [String: Any] {
+            ["request": ["base": base, "path": ["resource": "stream", "type": "movie", "id": "synthetic-title"]],
+             "content": ["type": "Ready", "content": rows]]
+        }
+        let meta: [String: Any] = ["request": ["base": a,
+            "path": ["resource": "meta", "type": "movie", "id": "synthetic-title"]],
+            "content": ["type": "Ready", "content": ["id": "synthetic-title", "type": "movie", "name": "Synthetic"]]]
+        let object: [String: Any] = ["metaItems": [meta], "streams": [group(a, [row]), group(b, [row])]]
+        let probe = try SourceOriginBindingProbe(object)
+        check(probe.loadEnginePlayer(for: selected, sourceGroupID: b),
+              "the actual production movie attribution method dispatches the clicked second instance")
+        let action = probe.dispatched.last?["args"] as? [String: Any]
+        let selection = action?["args"] as? [String: Any]
+        let request = selection?["streamRequest"] as? [String: Any]
+        check(request?["base"] as? String == b, "the dispatched source request binds B rather than first-equal A")
+        let missing = try SourceOriginBindingProbe(object)
+        check(!missing.loadEnginePlayer(for: selected, sourceGroupID: b + "-missing") && missing.dispatched.isEmpty,
+              "missing explicit movie origin does not dispatch or borrow another ready instance")
+        let mismatch = try SourceOriginBindingProbe(["metaItems": [meta],
+            "streams": [group(a, [row]), group(b, [differentHeaders])]])
+        check(!mismatch.loadEnginePlayer(for: selected, sourceGroupID: b) && mismatch.dispatched.isEmpty,
+              "full-record mismatch at clicked B never falls back to matching A")
+        let embedded = try SourceOriginBindingProbe(["metaItems": [meta], "metaStreams": [group(b, [row])],
+            "streams": [group(a, [row])]])
+        check(embedded.loadEnginePlayer(for: selected, sourceGroupID: b),
+              "an explicitly clicked meta-embedded source retains its actual instance attribution")
+        let local = try SourceOriginBindingProbe(object)
+        check(!local.loadEnginePlayer(for: selected, sourceGroupID: synthetic.id) && local.dispatched.isEmpty,
+              "a valid synthetic selection cannot masquerade as another ready network add-on")
+    }
+
     static func main() async throws {
+        try sourceOriginChecks()
         let statusProbe = AddonPublicationProbe()
         let currentRequest: [String: Any] = ["base": base,
             "path": ["resource": "stream", "type": "series", "id": "synthetic-title:1:2"]]

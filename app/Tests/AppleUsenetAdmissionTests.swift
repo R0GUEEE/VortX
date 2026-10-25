@@ -37,6 +37,11 @@ enum UsenetProviderStore {
     static var isConfigured: Bool { UsenetAdmissionEnvironment.shared.readSavedProvider() }
 }
 enum PlaybackSettings { static let torrentsDisabled = false }
+// Environment values for the actual extracted iOSEpisodeStreams admission methods. These supply no
+// provider request/response or fake admission policy; the methods and CoreModels policies stay production.
+struct CoreVideo { let season: Int?; let episode: Int? }
+typealias DebridEpisode = UsenetNodeClient.Selection.Episode
+struct WatchAdmissionDebridKeys { let hasAnyKey: Bool }
 struct CommunityStreamGateway: Sendable {
     static let shared = CommunityStreamGateway()
     func localURLIfReady(for stream: CoreStream, upstream: URL) -> URL? { nil }
@@ -108,6 +113,8 @@ extension StreamRanking {
         check("\(label) validated add-on eligibility does not read saved secrets",
               UsenetAdmissionEnvironment.shared.providerReads == readsBeforeAddon)
         assertAdmission("\(label) no credentials", stream: saved, expected: false)
+        check("\(label) a torrent key cannot unlock an unavailable NZB route",
+              watchDisabled(loading: false, preparing: false, best: saved, ownTorrentKeyConfigured: true))
 
         environment.nativeSupported = false
         environment.savedProvider = true
@@ -133,6 +140,20 @@ extension StreamRanking {
         assertAdmission("\(label) direct playback unchanged", stream: direct, expected: true)
         let torrent = try stream(["infoHash": String(repeating: "a", count: 40), "fileIdx": 2])
         check("\(label) explicit torrent file unchanged", torrent.playableURL(isEpisode: true)?.lastPathComponent == "2")
+        let hashOnlyEpisode = try stream(["infoHash": String(repeating: "b", count: 40)])
+        check("\(label) hash-only episode keeps its raw media URL closed",
+              hashOnlyEpisode.playableURL(isEpisode: true) == nil)
+        check("\(label) actual Watch methods admit an own-provider semantic episode attempt",
+              !watchDisabled(loading: false, preparing: false, best: hashOnlyEpisode,
+                             ownTorrentKeyConfigured: true, hasSemanticEpisode: true))
+        check("\(label) own-provider Watch attempt still needs a semantic episode",
+              watchDisabled(loading: false, preparing: false, best: hashOnlyEpisode,
+                            ownTorrentKeyConfigured: true, hasSemanticEpisode: false))
+        check("\(label) hash-only Watch without an own key remains disabled",
+              watchDisabled(loading: false, preparing: false, best: hashOnlyEpisode))
+        check("\(label) resolver-only Watch retains loading and preparation gates",
+              watchDisabled(loading: true, preparing: false, best: hashOnlyEpisode, ownTorrentKeyConfigured: true)
+                && watchDisabled(loading: false, preparing: true, best: hashOnlyEpisode, ownTorrentKeyConfigured: true))
         check("\(label) Watch loading/preparing gates remain intact",
               watchDisabled(loading: true, preparing: false, best: direct)
                 && watchDisabled(loading: false, preparing: true, best: direct))

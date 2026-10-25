@@ -607,7 +607,7 @@ struct Issue164TraktContractTests {
         )
         let iosEpisodeContentLaunches = segment(
             in: iosDetail,
-            from: "private func play(\n        _ stream: CoreStream,\n        url: URL,",
+            from: "private func play(\n        _ stream: CoreStream,\n        url: URL? = nil,",
             to: "private func autoPickAndPlayEpisode("
         )
         let iosEpisodeAutoPick = segment(
@@ -634,7 +634,7 @@ struct Issue164TraktContractTests {
         require(shadow.contains("AccountBoundResumeSuggestion<TraktSessionID>?")
                     && shadow.contains("AccountBoundResumeSuggestion(seconds: seconds, sessionID: currentSession)")
                     && tvDetail.contains("resumeSuggestion: suggestion")
-                    && iosDetail.contains("playMovie(resumeSuggestion: suggestion)")
+                    && iosDetail.contains("playMovie(resumeSuggestion: suggestion, explicitSourceChoice: true)")
                     && occurrences(of: "TraktAuth.storedSessionID", in: segment(
                         in: tvDetail,
                         from: "if let suggestion = traktSuggestion",

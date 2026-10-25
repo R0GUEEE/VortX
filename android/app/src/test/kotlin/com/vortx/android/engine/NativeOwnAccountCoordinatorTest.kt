@@ -14,7 +14,11 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.viewModelScope
 import com.vortx.android.ui.viewmodel.NativeStreamingAccountViewModel
 import org.json.JSONArray
 import org.json.JSONObject
@@ -25,6 +29,23 @@ import org.junit.Test
 /** Production coordinator + real JNI; all authenticated responses below are synthetic local data. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class NativeOwnAccountCoordinatorTest {
+    /** Main must remain installed until the REAL lifecycle jobs, including native-read children,
+     * have finished cancellation. clear() requests cancellation; it does not join those jobs. */
+    private suspend fun clearModelsAndJoin(models: ViewModelStore, jobs: List<Job>) = withContext(NonCancellable) {
+        try { models.clear() }
+        finally {
+            jobs.forEach { it.cancel() }
+            withTimeout(5_000) { jobs.forEach { it.join() } }
+        }
+    }
+
+    private suspend fun cancelScopeAndJoin(scope: CoroutineScope) = withContext(NonCancellable) {
+        val job = checkNotNull(scope.coroutineContext[Job])
+        job.cancel()
+        withTimeout(5_000) { job.join() }
+    }
+
+    private val stateReads = java.util.concurrent.atomic.AtomicInteger()
     private val account = SessionOwnerSnapshot.Account("00000000-0000-0000-0000-000000000456", 7)
     private val owner = UserProfile(id = UserProfile.OWNER_ID, name = "Main", avatar = "🍿", isOwner = true)
     private val child = UserProfile(id = "11111111-1111-1111-1111-111111111111", name = "Independent", avatar = "🍿", usesOwnAccount = true)
@@ -54,7 +75,7 @@ class NativeOwnAccountCoordinatorTest {
             override fun hydrate(snapshot: String) = VortxCore.nativeInitFromStateJson(snapshot)
             override fun dispatch(handle: Long, action: String) = VortxCore.nativeDispatchJson(handle, action)
             override fun resolve(handle: Long, request: String) = VortxCore.nativeResolveJson(handle, request)
-            override fun state(handle: Long) = VortxCore.nativeGetStateJson(handle)
+            override fun state(handle: Long) = VortxCore.nativeGetStateJson(handle).also { stateReads.incrementAndGet() }
             override fun delta(handle: Long) = VortxCore.nativeGetStateDeltaJson(handle)
             override fun free(handle: Long) = VortxCore.nativeEngineFree(handle)
         }
@@ -157,11 +178,15 @@ class NativeOwnAccountCoordinatorTest {
     }
 
     @Test fun `profile form shows only authenticated setup and clears captured form after verified commit`() = runBlocking {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
         val accounts = coordinator(Store(), Journal()); val models = androidx.lifecycle.ViewModelStore()
+        val modelJobs = mutableListOf<Job>()
+        Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             assertFalse(accounts.applyDocument(account, document()) { true })
-            val model = NativeStreamingAccountViewModel(accounts).also { models.put("profile-sign-in", it) }
+            val model = NativeStreamingAccountViewModel(accounts).also {
+                modelJobs += checkNotNull(it.viewModelScope.coroutineContext[Job])
+                models.put("profile-sign-in", it)
+            }
             withTimeout(5_000) { model.state.first { !it.loading } }
             assertFalse(model.state.value.mounted)
             assertEquals(listOf(child.id), model.state.value.profiles.map { it.id })
@@ -171,16 +196,26 @@ class NativeOwnAccountCoordinatorTest {
             assertNull(state.formProfile)
             assertFalse(state.toString().contains("fake-password")); assertFalse(state.toString().contains("fake-token"))
             assertTrue(state.streaming.single().pendingOverlay)
-        } finally { models.clear(); accounts.retire(); Dispatchers.resetMain() }
+        } finally {
+            try { clearModelsAndJoin(models, modelJobs) }
+            finally {
+                try { accounts.retire() }
+                finally { Dispatchers.resetMain() }
+            }
+        }
     }
 
     @Test fun `form submission cannot recapture a replacement setup or reveal credential error detail`() = runBlocking {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
         val journal = Journal(); val store = Store(); val accounts = coordinator(store, journal)
         val models = androidx.lifecycle.ViewModelStore()
+        val modelJobs = mutableListOf<Job>()
+        Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             assertFalse(accounts.applyDocument(account, document()) { true })
-            val model = NativeStreamingAccountViewModel(accounts).also { models.put("profile-sign-in", it) }
+            val model = NativeStreamingAccountViewModel(accounts).also {
+                modelJobs += checkNotNull(it.viewModelScope.coroutineContext[Job])
+                models.put("profile-sign-in", it)
+            }
             withTimeout(5_000) { model.state.first { !it.loading } }
             model.open(child.id)
             assertFalse(accounts.applyDocument(account, document()) { true })
@@ -193,17 +228,27 @@ class NativeOwnAccountCoordinatorTest {
             assertTrue(journal.values.isEmpty()); assertNull(store.value); assertNull(store.locator)
             assertFalse(state.toString().contains("fake-password")); assertFalse(state.toString().contains("fake@example.invalid"))
             model.close(); assertNull(model.state.value.formProfile)
-        } finally { models.clear(); accounts.retire(); Dispatchers.resetMain() }
+        } finally {
+            try { clearModelsAndJoin(models, modelJobs) }
+            finally {
+                try { accounts.retire() }
+                finally { Dispatchers.resetMain() }
+            }
+        }
     }
 
     @Test fun `old PIN dialog cannot recapture a replacement authenticated setup`() = runBlocking {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
         val accounts = coordinator(Store(), Journal()); val models = androidx.lifecycle.ViewModelStore()
+        val modelJobs = mutableListOf<Job>()
+        Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             val original = document()
             original.getJSONObject("vortx").getJSONArray("roster").getJSONObject(1).put("pin", UserProfile.pinHash("1234", child.id))
             assertFalse(accounts.applyDocument(account, original) { true })
-            val model = NativeStreamingAccountViewModel(accounts).also { models.put("profile-sign-in", it) }
+            val model = NativeStreamingAccountViewModel(accounts).also {
+                modelJobs += checkNotNull(it.viewModelScope.coroutineContext[Job])
+                models.put("profile-sign-in", it)
+            }
             withTimeout(5_000) { model.state.first { !it.loading } }
             val beforePin = requireNotNull(model.prepare(child.id))
             assertEquals(UserProfile.pinHash("1234", child.id), beforePin.profile.pin)
@@ -213,17 +258,27 @@ class NativeOwnAccountCoordinatorTest {
             model.openPrepared(beforePin) // Even a correct old PIN does not authorize the new target.
             assertNull(model.state.value.formProfile)
             assertEquals(UserProfile.pinHash("5678", child.id), requireNotNull(model.prepare(child.id)).profile.pin)
-        } finally { models.clear(); accounts.retire(); Dispatchers.resetMain() }
+        } finally {
+            try { clearModelsAndJoin(models, modelJobs) }
+            finally {
+                try { accounts.retire() }
+                finally { Dispatchers.resetMain() }
+            }
+        }
     }
 
     @Test fun `editor save delete and add cannot recapture a later binding or profile ABA`() = runBlocking {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
         val accounts = coordinator(Store(), Journal()); val models = androidx.lifecycle.ViewModelStore()
+        val modelJobs = mutableListOf<Job>()
+        Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             assertFalse(accounts.applyDocument(account, document()) { true })
             assertTrue(accounts.signInStreaming(accounts.captureStreamingTarget(child.id), "fake@example.invalid", "fake-password"))
             val access = NativeProfileAccess { accounts.session() }; access.select(child.id)
-            val model = NativeStreamingAccountViewModel(accounts).also { models.put("profile-sign-in", it) }
+            val model = NativeStreamingAccountViewModel(accounts).also {
+                modelJobs += checkNotNull(it.viewModelScope.coroutineContext[Job])
+                models.put("profile-sign-in", it)
+            }
             withTimeout(5_000) { model.state.first { !it.loading } }
             val original = access.read().profiles.single { it.id == child.id }
             val editor = requireNotNull(model.captureEditor(original, false))
@@ -248,7 +303,13 @@ class NativeOwnAccountCoordinatorTest {
                 state.profiles.singleOrNull { it.id == child.id }?.name == "Remote update"
             } }
             assertEquals("Remote update", refreshed.profiles.single { it.id == child.id }.name)
-        } finally { models.clear(); accounts.retire(); Dispatchers.resetMain() }
+        } finally {
+            try { clearModelsAndJoin(models, modelJobs) }
+            finally {
+                try { accounts.retire() }
+                finally { Dispatchers.resetMain() }
+            }
+        }
     }
 
     private fun ownerDocument() = document().also { it.getJSONObject("vortx")
@@ -273,7 +334,10 @@ class NativeOwnAccountCoordinatorTest {
             assertEquals(com.vortx.android.model.AuthState.SignedOut, auth.authState.value)
             assertEquals(before, store.value)
             assertEquals(owner.id, accounts.session().read().owner.profileID)
-        } finally { scope.cancel(); accounts.retire() }
+        } finally {
+            try { cancelScopeAndJoin(scope) }
+            finally { accounts.retire() }
+        }
     }
 
     @Test fun `shared child cannot manage owner credential and old UI revision cannot survive profile ABA`() = runBlocking {
@@ -294,7 +358,10 @@ class NativeOwnAccountCoordinatorTest {
             assertTrue(auth.management.value.canManage)
             assertTrue(runCatching { auth.signOutForRevision(old) }.isFailure)
             assertEquals(com.vortx.android.model.AuthState.SignedIn(null, uid), auth.authState.value)
-        } finally { scope.cancel(); accounts.retire() }
+        } finally {
+            try { cancelScopeAndJoin(scope) }
+            finally { accounts.retire() }
+        }
     }
 
     @Test fun `retirement after owner UID response leaves staged token inactive and never clears native account`() = runBlocking {
@@ -311,7 +378,58 @@ class NativeOwnAccountCoordinatorTest {
             assertEquals(com.vortx.android.model.AuthState.SignedOut, auth.authState.value)
             assertTrue(accounts.reopenCheckpoint(account) { true })
             auth.refresh(); assertEquals(com.vortx.android.model.AuthState.SignedOut, auth.authState.value)
-        } finally { scope.cancel(); accounts.retire() }
+        } finally {
+            try { cancelScopeAndJoin(scope) }
+            finally { accounts.retire() }
+        }
+    }
+
+    @Test fun `current profile projection reads native state once and retains publication admission`() = runBlocking {
+        val accounts = coordinator(Store(), Journal())
+        try {
+            assertFalse(accounts.applyDocument(account, document()) { true })
+            assertTrue(accounts.signInStreaming(accounts.captureStreamingTarget(child.id), "fake@example.invalid", "fake-password"))
+            val session = accounts.session()
+            val access = NativeProfileAccess(
+                publicationAdmission = { runtime, action ->
+                    val captured = accounts.accountFor(runtime)
+                    captured != null && accounts.withProfileMutation(runtime, captured, action)
+                },
+                session = { accounts.session() },
+            )
+            val expected = NativeProfileAccess.projection(session.read())
+            stateReads.set(0)
+            var callbacks = 0
+            val current = access.withCurrentProjection { value ->
+                assertTrue(Thread.holdsLock(session))
+                callbacks++
+                value
+            }
+            assertEquals(expected, current)
+            assertEquals(1, callbacks)
+            assertEquals(1, stateReads.get())
+            stateReads.set(0)
+            val stale = expected.copy(activeID = "not-the-current-profile")
+            assertThrows(IllegalStateException::class.java) {
+                access.withProjection(stale) { callbacks++ }
+            }
+            assertEquals(1, callbacks)
+            assertEquals(1, stateReads.get())
+            val denied = NativeProfileAccess(publicationAdmission = { _, _ -> false }, session = { session })
+            stateReads.set(0)
+            assertThrows(IllegalStateException::class.java) {
+                denied.withCurrentProjection { callbacks++ }
+            }
+            assertEquals(1, callbacks)
+            assertEquals(1, stateReads.get())
+            accounts.retire()
+            stateReads.set(0)
+            assertThrows(IllegalStateException::class.java) {
+                access.withCurrentProjection { callbacks++ }
+            }
+            assertEquals(1, callbacks)
+            assertEquals(0, stateReads.get())
+        } finally { accounts.retire() }
     }
 
     @Test fun `picker snapshot preserves three views and publication never waits for native Session`() = runBlocking {

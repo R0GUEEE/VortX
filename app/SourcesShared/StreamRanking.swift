@@ -423,8 +423,8 @@ enum StreamRanking {
 
     /// Streams paired with their source group's add-on, the form pin matching needs (a flattened stream
     /// loses which add-on it came from, which the `global`/provider pin keys on).
-    private static func playablePairs(_ groups: [CoreStreamSourceGroup]) -> [(addon: String, stream: CoreStream)] {
-        groups.flatMap { g in g.streams.map { (addon: g.addon, stream: $0) } }
+    private static func playablePairs(_ groups: [CoreStreamSourceGroup]) -> [(addon: String, groupID: String, stream: CoreStream)] {
+        groups.flatMap { g in g.streams.map { (addon: g.addon, groupID: g.id, stream: $0) } }
             .filter { $0.stream.playableURL != nil && !$0.stream.isYouTubeTrailer }
     }
 
@@ -1292,9 +1292,9 @@ enum StreamRanking {
     /// Second level of the quality picker: distinct flavor variants inside one resolution tier
     /// ("Dolby Vision · Remux", "HDR · Atmos", "BluRay"), best variant of each, best-first, capped.
     static func variantOptions(_ groups: [CoreStreamSourceGroup], tier wanted: String)
-        -> [(label: String, stream: CoreStream, addon: String)] {
+        -> [(label: String, stream: CoreStream, addon: String, groupID: String)] {
         let playable = playablePairs(groups).filter { tier(of: $0.stream) == wanted }
-        var best: [String: (score: Int, stream: CoreStream, addon: String)] = [:]
+        var best: [String: (score: Int, stream: CoreStream, addon: String, groupID: String)] = [:]
         for pair in playable {
             let s = pair.stream
             let t = qualityText(s)
@@ -1313,13 +1313,13 @@ enum StreamRanking {
             let label = tags.isEmpty ? "Standard" : tags.joined(separator: " · ")
             let sc = score(s)
             if let current = best[label], current.score >= sc { continue }
-            best[label] = (sc, s, pair.addon)
+            best[label] = (sc, s, pair.addon, pair.groupID)
         }
-        return best.map { entry -> (label: String, stream: CoreStream, addon: String) in
+        return best.map { entry -> (label: String, stream: CoreStream, addon: String, groupID: String) in
             // The dedup key is the flavor; append the chosen stream's size for display.
             let size = sourceDetail(entry.value.stream).size
             let label = size.map { "\(entry.key)  ·  \($0)" } ?? entry.key
-            return (label: label, stream: entry.value.stream, addon: entry.value.addon)
+            return (label: label, stream: entry.value.stream, addon: entry.value.addon, groupID: entry.value.groupID)
         }
         .sorted { score($0.stream) > score($1.stream) }
         .prefix(8).map { $0 }

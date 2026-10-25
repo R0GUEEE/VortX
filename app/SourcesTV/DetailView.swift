@@ -3317,7 +3317,7 @@ struct CoreStreamList: View {
     @State private var showAudioLanguagePicker = false   // session audio-language filter dialog
     @State private var launchEnginePreference: PlayerEngineRouter.Override? = nil
     @State private var showPlayerPicker = false
-    @State private var usenetPlaybackMessage: String?
+    @State private var sourcePlaybackMessage: String?
     @State private var usenetResolutionInFlight = false
     @State private var hasSeatedFocus = false      // one-shot: seat focus on Watch Now once, then leave the user alone
     /// Focus anchors are visible action controls: Watch/Resume owns `.primary`, and the first secondary action
@@ -3526,7 +3526,7 @@ struct CoreStreamList: View {
         let groups = sourceList.groups                               // best source first within each add-on
         let best = sourceList.best
         let streamCount = groups.reduce(0) { $0 + $1.streams.count }
-        let visible = sourceList.quickFilterGroups.filter { sourceFilter == nil || $0.group.addon == sourceFilter }
+        let visible = sourceList.quickFilterGroups.filter { sourceFilter == nil || $0.group.id == sourceFilter }
         // Window the RENDERED rows: build at most `sourceRenderLimit` stable-id rows from the visible groups,
         // stopping the moment the budget is hit (bounded string work, no matter how many thousand sources land).
         // Ranking + auto-pick (playBest below) still read the FULL `groups`, never these windowed rows, so
@@ -3694,7 +3694,7 @@ struct CoreStreamList: View {
                                                        titleVisibility: .visible) {
                             if let tier = qualityTier {
                                 ForEach(StreamRanking.variantOptions(groups, tier: tier), id: \.label) { option in
-                                    Button(option.label) { play(option.stream, sourceAddon: option.addon) }
+                                    Button(option.label) { play(option.stream, sourceOrigin: SourceOrigin(id: option.groupID, addon: option.addon)) }
                                 }
                             }
                         }
@@ -3802,7 +3802,7 @@ struct CoreStreamList: View {
                         // republish no longer reshuffles the focus handle mid-scroll.
                         LazyVStack(spacing: Theme.Space.sm) {
                             ForEach(Array(shownRows.enumerated()), id: \.element.id) { index, row in
-                                let rowView = streamRow(row.addon, row.stream)
+                                let rowView = streamRow(SourceOrigin(id: row.groupID, addon: row.addon), row.stream)
                                 if TVDetailSourceColumnFocusPolicy.sourceRowOwnsUpEscape(at: index, groupsCount: groups.count, hasQuickFilters: true) {
                                     // No filter bar: the FIRST row is the column's top boundary, so Up from it
                                     // alone returns to the action row. Up from any deeper row stays native and
@@ -3849,13 +3849,13 @@ struct CoreStreamList: View {
         // FIX H: on appear, seat focus on Watch Now (above) rather than letting the focus engine pick the
         // first focusable view, which on the movie page is the Trailer chip laid out higher up.
         .defaultFocus($watchFocused, true)
-        .alert("NZB playback", isPresented: Binding(
-            get: { usenetPlaybackMessage != nil },
-            set: { if !$0 { usenetPlaybackMessage = nil } }
+        .alert("Playback", isPresented: Binding(
+            get: { sourcePlaybackMessage != nil },
+            set: { if !$0 { sourcePlaybackMessage = nil } }
         )) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(usenetPlaybackMessage ?? "")
+            Text(sourcePlaybackMessage ?? "")
         }
         // Warm the Trakt playback shadow so the "Resume from <time>" chip decides off a cache rather than
         // blocking the page on a network call. Internally throttled, opt-in gated, and a no-op when Trakt is
@@ -3923,7 +3923,7 @@ struct CoreStreamList: View {
                     // landed during this iteration, so never route playBest onto a dismissed page.
                     guard !Task.isCancelled, presenter.request == nil, !didAutoPick else { return }
                     didAutoPick = true
-                    playBest(best, in: sourceList.groups)
+                    playBest(best, in: sourceList.groups, explicitSourceChoice: false)
                     return
                 }
                 do { try await Task.sleep(for: .milliseconds(250)) }
@@ -4140,10 +4140,9 @@ struct CoreStreamList: View {
         !isEpisodePlayback || stream.url != nil || episodeHint != nil
     }
 
-    private func addonBase(for stream: CoreStream, in groups: [CoreStreamSourceGroup]? = nil) -> String? {
-        guard let id = (groups ?? sourceList.groups).first(where: { $0.streams.contains(stream) })?.id,
-              URL(string: id)?.scheme != nil else { return nil }
-        return id
+    private func admittedSourceOrigin(for stream: CoreStream, clicked: SourceOrigin?,
+                                      in groups: [CoreStreamSourceGroup]? = nil) -> SourceOrigin? {
+        SourceOrigin.current(for: stream, clicked: clicked, groups: groups ?? sourceList.groups)
     }
 
     private var targetCoreGroups: [CoreStreamSourceGroup] {
@@ -4154,14 +4153,15 @@ struct CoreStreamList: View {
     /// attribution overload and opens its writer gate only after that overload confirms dispatch.
     @discardableResult
     private func bindEngine(to stream: CoreStream, resolvedURL: URL? = nil,
-                            in groups: [CoreStreamSourceGroup]? = nil) -> String? {
+                            in groups: [CoreStreamSourceGroup]? = nil, sourceOrigin: SourceOrigin? = nil) -> String? {
+        guard let origin = admittedSourceOrigin(for: stream, clicked: sourceOrigin, in: groups) else { return nil }
         guard let videoID = episodeStreamId else {
-            core.loadEnginePlayer(for: stream)
+            core.loadEnginePlayer(for: stream, sourceGroupID: origin.id)
             return nil
         }
+        guard let base = origin.engineBase ?? (core.usesNativeProfileState ? "vortx://player" : nil) else { return nil }
         let succeeded = core.loadEnginePlayer(
-            for: stream, videoId: videoID, libraryId: meta?.libraryId, base: addonBase(for: stream, in: groups),
-            resolvedURL: resolvedURL
+            for: stream, videoId: videoID, libraryId: meta?.libraryId, base: base, resolvedURL: resolvedURL
         )
         return EpisodePlaybackIdentity.boundVideoID(
             requestedVideoID: videoID, bindingSucceeded: succeeded
@@ -4418,8 +4418,9 @@ struct CoreStreamList: View {
     private func play(
         _ stream: CoreStream,
         enginePreference: PlayerEngineRouter.Override? = nil,
-        sourceAddon: String? = nil
+        sourceOrigin: SourceOrigin? = nil
     ) {
+        guard sourceOrigin == nil || SourceOrigin.current(for: stream, clicked: sourceOrigin, groups: sourceList.groups) != nil else { return }
         randomPlayIntent?.revoke() // A manual source/trailer selection wins over pending auto Play.
         // #95: a tapped TRAILER row (a Streailer/YouTube `ytId` source) is NOT a content stream. Route it to
         // the trailer path (isTrailer:true, meta:nil) so a dead trailer hits TVPlayerView's isTrailer guard
@@ -4441,7 +4442,7 @@ struct CoreStreamList: View {
                 explicit: true,
                 startProposal: proposedStart,
                 enginePreference: enginePreference,
-                sourceAddon: sourceAddon
+                sourceOrigin: sourceOrigin
             )
         }   // a tapped source row / quality pick: honor it in the player
     }
@@ -4492,6 +4493,7 @@ struct CoreStreamList: View {
     private func playBest(
         _ best: CoreStream,
         in groups: [CoreStreamSourceGroup],
+        explicitSourceChoice: Bool = true,
         fromStart: Bool = false,
         resumeSuggestion: AccountBoundResumeSuggestion<TraktSessionID>? = nil
     ) {
@@ -4505,6 +4507,7 @@ struct CoreStreamList: View {
                 best,
                 in: groups,
                 fromStart: fromStart,
+                explicitSourceChoice: explicitSourceChoice,
                 startProposal: proposedStart
             )
         }
@@ -4550,6 +4553,7 @@ struct CoreStreamList: View {
         _ best: CoreStream,
         in groups: [CoreStreamSourceGroup],
         fromStart: Bool = false,
+        explicitSourceChoice: Bool = false,
         startProposal: AccountBoundResumeProposal<TraktSessionID>,
         randomAttempt: RandomPlayAttempt? = nil
     ) async {
@@ -4655,6 +4659,7 @@ struct CoreStreamList: View {
         await playResolving(
             best,
             explicit: false,
+            explicitSourceChoice: explicitSourceChoice,
             fromStart: fromStart,
             startProposal: startProposal,
             randomAttempt: randomAttempt
@@ -4666,32 +4671,38 @@ struct CoreStreamList: View {
     @MainActor private func playResolving(
         _ stream: CoreStream,
         explicit: Bool,
+        explicitSourceChoice: Bool = false,
         fromStart: Bool = false,
         startProposal: AccountBoundResumeProposal<TraktSessionID>,
         enginePreference: PlayerEngineRouter.Override? = nil,
-        sourceAddon: String? = nil,
+        sourceOrigin: SourceOrigin? = nil,
         randomAttempt: RandomPlayAttempt? = nil
     ) async {
         let targetVideoID = episodeStreamId
         let targetGeneration = episodeTargetGeneration
         let targetHint = episodeHint
-        guard targetIsCurrent(videoID: targetVideoID, generation: targetGeneration, randomAttempt: randomAttempt) else { return }
-        // INSTANT FIRST-PLAY: cache-gate the manual resolve on the account-confirmed sets so only a genuinely
-        // cached pick runs the blocking debrid resolve (~1 round trip to the direct link); a not-confirmed pick
-        // returns nil with zero network and falls straight through to the embedded path below, which plays in a
-        // snap (its own playableURL + prepareTorrent) exactly like the pre-511c973 instant path.
+        guard targetIsCurrent(videoID: targetVideoID, generation: targetGeneration, randomAttempt: randomAttempt),
+              sourceOrigin == nil || admittedSourceOrigin(for: stream, clicked: sourceOrigin) != nil else { return }
+        // Most manual picks retain the instant cache gate and their embedded fallback. A raw torrent
+        // without a usable fallback needs an explicit own-provider attempt; episodes also require a semantic target.
+        let resolverOnly = EpisodePlaybackIdentity.mayResolveTorrentWithoutURL(
+            isEpisode: isEpisodePlayback, isRawTorrent: stream.isTorrent,
+            hasPlayableURL: EpisodePlaybackIdentity.usableTorrentFallbackURL(playableURL(for: stream)) != nil,
+            hasOwnResolver: DebridKeys.shared.hasAnyKey, hasSemanticEpisode: targetHint != nil)
+        let permitsUncachedResolution = EpisodePlaybackIdentity.mayResolveUncachedTorrentPick(
+            isExplicitChoice: explicit || explicitSourceChoice, resolverOnlyEligible: resolverOnly)
         let ref: DebridPlaybackRef?
         if explicit, stream.isUsenet {
             switch await DebridCoordinator.shared.resolveExplicitUsenetPlayback(for: stream, episode: targetHint) {
             case .ready(let resolved): ref = resolved
             case .unsupported(let message), .failed(let message):
-                usenetPlaybackMessage = message
+                sourcePlaybackMessage = message
                 return
             }
         } else if canResolveNatively(stream) {
             ref = await DebridCoordinator.shared.resolvedPlaybackRef(
                 for: stream, episode: targetHint,
-                confirmedCachedHashes: debridCache.cachedHashes,
+                confirmedCachedHashes: permitsUncachedResolution ? nil : debridCache.cachedHashes,
                 confirmedUsenetURLs: debridCache.cachedUsenetURLs)
             guard targetIsCurrent(
                 videoID: targetVideoID, generation: targetGeneration, randomAttempt: randomAttempt
@@ -4700,12 +4711,15 @@ struct CoreStreamList: View {
             ref = nil
         }
         if let ref {
+            guard sourceOrigin == nil || admittedSourceOrigin(for: stream, clicked: sourceOrigin) != nil else {
+                ref.nativeUsenetLease?.close(); return
+            }
             var randomHandedOff = false
             defer { if randomAttempt != nil && !randomHandedOff { ref.nativeUsenetLease?.close() } }
             guard targetIsCurrent(
                 videoID: targetVideoID, generation: targetGeneration, randomAttempt: randomAttempt
             ) else { return }
-            let engineVideoID = bindEngine(to: stream, resolvedURL: ref.url)
+            let engineVideoID = bindEngine(to: stream, resolvedURL: ref.url, sourceOrigin: sourceOrigin)
             guard targetIsCurrent(
                 videoID: targetVideoID, generation: targetGeneration, randomAttempt: randomAttempt
             ) else { return }
@@ -4723,7 +4737,7 @@ struct CoreStreamList: View {
                                                 initialEnginePreference: enginePreference ?? launchEnginePreference,
                                                 debridRef: ref,
                                                 sourceStream: stream,
-                                                sourceAddon: sourceAddon,
+                                                sourceAddon: sourceOrigin?.addon,
                                             debridCachedHashes: debridCache.cachedHashes,
                                             enginePlayerVideoId: engineVideoID, wasExplicitPick: explicit,
                                             startFromZero: fromStart,
@@ -4734,10 +4748,18 @@ struct CoreStreamList: View {
         // A raw NZB URL is a descriptor for the resolver, never media bytes for the player.
         guard let url = EpisodePlaybackIdentity.resolvedEpisodeMediaURL(
             isUsenet: stream.isUsenet, resolvedURL: nil,
-            fallbackURL: playableURL(for: stream)
-        ) else { return }
+            fallbackURL: permitsUncachedResolution
+                ? EpisodePlaybackIdentity.usableTorrentFallbackURL(playableURL(for: stream)) : playableURL(for: stream)
+        ) else {
+            if (explicit || explicitSourceChoice), stream.isTorrent,
+               targetIsCurrent(videoID: targetVideoID, generation: targetGeneration, randomAttempt: randomAttempt) {
+                sourcePlaybackMessage = "This source could not be resolved. Try another source or check your debrid account."
+            }
+            return
+        }
         guard targetIsCurrent(videoID: targetVideoID, generation: targetGeneration, randomAttempt: randomAttempt) else { return }
-        let engineVideoID = bindEngine(to: stream)
+        guard sourceOrigin == nil || admittedSourceOrigin(for: stream, clicked: sourceOrigin) != nil else { return }
+        let engineVideoID = bindEngine(to: stream, sourceOrigin: sourceOrigin)
         prepareTorrent(stream)
         guard targetIsCurrent(videoID: targetVideoID, generation: targetGeneration, randomAttempt: randomAttempt) else { return }
         guard let admittedStart = initialStartGate.admit(
@@ -4752,7 +4774,7 @@ struct CoreStreamList: View {
                                             headers: stream.requestHeaders,
                                             initialEnginePreference: enginePreference ?? launchEnginePreference,
                                             sourceStream: stream,
-                                            sourceAddon: sourceAddon,
+                                            sourceAddon: sourceOrigin?.addon,
                                             debridCachedHashes: debridCache.cachedHashes,
                                             enginePlayerVideoId: engineVideoID,
                                             wasExplicitPick: explicit,
@@ -4776,8 +4798,8 @@ struct CoreStreamList: View {
                     Button { randomPlayIntent?.revoke(); sourceFilter = nil } label: { Text("All (\(total))") }
                         .buttonStyle(ChipButtonStyle(selected: sourceFilter == nil))
                     ForEach(groups) { group in
-                        Button { randomPlayIntent?.revoke(); sourceFilter = group.addon } label: { Text("\(group.addon) (\(group.streams.count))") }
-                            .buttonStyle(ChipButtonStyle(selected: sourceFilter == group.addon))
+                        Button { randomPlayIntent?.revoke(); sourceFilter = group.id } label: { Text("\(group.addon) (\(group.streams.count))") }
+                            .buttonStyle(ChipButtonStyle(selected: sourceFilter == group.id))
                     }
                 }
                 SourceQuickFilterControls(selection: sourceList.quickFilters, change: sourceList.setQuickFilters)
@@ -4786,13 +4808,14 @@ struct CoreStreamList: View {
         }
     }
 
-    @ViewBuilder private func streamRow(_ addon: String, _ stream: CoreStream) -> some View {
+    @ViewBuilder private func streamRow(_ origin: SourceOrigin, _ stream: CoreStream) -> some View {
+        let addon = origin.addon
         if playableURL(for: stream) != nil || (canResolveNatively(stream) && (stream.isTorrent || stream.isUsenet)) {
-            Button { play(stream, sourceAddon: addon) } label: { streamLabel(addon, stream, enabled: true, pinned: isPinned(addon, stream), debridCached: isDebridCached(stream), lastPlayed: isLastPlayed(stream)) }
+            Button { play(stream, sourceOrigin: origin) } label: { streamLabel(addon, stream, enabled: true, pinned: isPinned(addon, stream), debridCached: isDebridCached(stream), lastPlayed: isLastPlayed(stream)) }
                 .buttonStyle(RowFocusStyle())
                 .accessibilityHint("Press to play. Long-press for player options and source actions.")
                 .contextMenu {
-                    sourcePlayerMenu(stream, addon: addon)
+                    sourcePlayerMenu(stream, origin: origin)
                     Divider()
                     pinMenu(addon, stream)
                 }
@@ -4809,9 +4832,9 @@ struct CoreStreamList: View {
     /// One-launch choices for this exact source. Internal choices keep the existing resolver, headers,
     /// debrid provenance, torrent preparation, resume position, and explicit-pick behavior. External
     /// handoff is limited to detected players and self-contained remote URLs.
-    @ViewBuilder private func sourcePlayerMenu(_ stream: CoreStream, addon: String) -> some View {
+    @ViewBuilder private func sourcePlayerMenu(_ stream: CoreStream, origin: SourceOrigin) -> some View {
         Button("VortX Player") {
-            play(stream, enginePreference: .mpv, sourceAddon: addon)
+            play(stream, enginePreference: .mpv, sourceOrigin: origin)
         }
         if !stream.isYouTubeTrailer,
            let url = playableURL(for: stream),
@@ -4823,7 +4846,7 @@ struct CoreStreamList: View {
                plainRemuxDelivery: VortXRemuxHLSServer.deliveryEnabled
            ) {
             Button("AVPlayer") {
-                play(stream, enginePreference: .avfoundation, sourceAddon: addon)
+                play(stream, enginePreference: .avfoundation, sourceOrigin: origin)
             }
         }
         if let url = playableURL(for: stream),

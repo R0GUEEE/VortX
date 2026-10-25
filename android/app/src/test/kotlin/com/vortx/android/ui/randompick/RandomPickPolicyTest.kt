@@ -1,5 +1,7 @@
 package com.vortx.android.ui.randompick
 
+import com.vortx.android.home.HomeRail
+import com.vortx.android.model.Catalog
 import com.vortx.android.model.Episode
 import com.vortx.android.model.MediaType
 import com.vortx.android.model.MetaDetail
@@ -15,6 +17,58 @@ class RandomPickPolicyTest {
     private val now = Instant.parse("2026-10-23T12:00:00Z")
     private val movie = MetaItem("same-id", MediaType.MOVIE, "Movie")
     private val show = MetaItem("same-id", MediaType.SERIES, "Show")
+
+    @Test
+    fun `home prefers admitted recommendation rows without private upcoming live or watched titles`() {
+        val recommended = movie.copy(id = "recommended")
+        val catalogs = listOf(
+            Catalog(HomeRail.CONTINUE_CATALOG_ID, "Continue", listOf(movie.copy(id = "private", continueWatchingPermit = "private-receipt"))),
+            Catalog(HomeRail.UPCOMING_MOVIES.catalogId, "Upcoming", listOf(movie.copy(id = "future"))),
+            Catalog("popular", "Popular", listOf(show)),
+            Catalog(HomeRail.TOP_PICKS.catalogId, "Top picks", listOf(
+                recommended, recommended.copy(name = "Duplicate"),
+                movie.copy(id = "watched", watched = true),
+                movie.copy(id = "unreleased", year = "2027"),
+                movie.copy(id = "live", type = MediaType.CHANNEL),
+                movie.copy(id = "private-even-in-another-row", continueWatchingPermit = "private-receipt"),
+            )),
+        )
+        assertEquals(listOf(recommended), RandomPickPolicy.homeCandidates(catalogs, now))
+    }
+
+    @Test
+    fun `home falls back to visible loaded VOD and keeps exact typed identities`() {
+        val catalogs = listOf(
+            Catalog(HomeRail.FOR_YOU.catalogId + ":empty", "For you", emptyList()),
+            Catalog(HomeRail.UPCOMING_EPISODES.catalogId, "Upcoming", listOf(show.copy(id = "future-show"))),
+            Catalog("popular", "Popular", listOf(movie, movie.copy(name = "Duplicate"), show)),
+            Catalog("live", "Live", listOf(movie.copy(id = "wrong-live-type")), type = "channel"),
+        )
+        assertEquals(listOf(movie, show), RandomPickPolicy.homeCandidates(catalogs, now))
+        assertTrue(RandomPickPolicy.homeCandidates(emptyList()).isEmpty())
+        assertTrue(RandomPickPolicy.homeCandidates(listOf(catalogs[1])).isEmpty())
+    }
+
+    @Test
+    fun `home rejects known future year and range prefixes while malformed years remain unknown`() {
+        val malformed = movie.copy(id = "malformed-year", year = "2027x")
+        val unicode = movie.copy(id = "unicode-year", year = "２０２７")
+        val unknown = movie.copy(id = "unknown-year", year = null)
+        val catalogs = listOf(Catalog("popular", "Popular", listOf(
+            movie.copy(id = "future-year", year = "2027"),
+            movie.copy(id = "future-range", year = "2027–"),
+            movie.copy(id = "future-date", year = "2027-02-03"),
+            movie.copy(id = "future-spaced-range", year = " 2027 — 2030 "),
+            malformed, unicode, unknown,
+        )))
+        assertEquals(listOf(malformed, unicode, unknown), RandomPickPolicy.homeCandidates(catalogs, now))
+    }
+
+    @Test
+    fun `home pick again avoids the same typed title when alternatives remain`() {
+        val candidates = RandomPickPolicy.homeCandidates(listOf(Catalog("popular", "Popular", listOf(movie, show))))
+        assertSame(show, RandomPickPolicy.pick(candidates, "movie:same-id", { "${it.type.id}:${it.id}" }) { 0 })
+    }
 
     @Test
     fun `library candidates exclude blank unavailable and live rows`() {

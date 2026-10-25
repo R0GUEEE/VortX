@@ -140,7 +140,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     }
 
     let sourceID = UUID()
-    private static let presentationFields: Set<String> = ["ctx", "board", "search", "discover",
+    private static let presentationFields: Set<String> = ["ctx", "addon_management", "board", "search", "discover",
         "library", "meta_details", "local_search", "continue_watching_preview"]
     private var changeSequence: UInt64 = 0
     private var latestChangeSequence: [String: UInt64] = [:]
@@ -713,15 +713,17 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         await admission.1?.value
         await session.invalidateResources()
         let addonSnapshot = try await session.addonSnapshot()
-        let accepted = lock.withLock { () -> Bool in
+        let accepted = try lock.withLock { () throws -> Bool in
             guard !closed, expected.scope == session.scope, expected.generation == registryGeneration,
                   values["native_state"]?["activeProfileId"] == .string(expected.profileID), values["native_state"] == addonSnapshot.state else { return false }
+            let management = try addonManagementProjection(state: addonSnapshot.state, inventories: addonSnapshot.inventories)
             addonInventories = addonSnapshot.inventories
             registry = replacement; resourceRegistryValid = true; registryGeneration = UUID()
             values["ctx"] = .object(["profile": .object(["addons": .array(replacement.map {
                 .object(["transportUrl": .string($0.transportUrl), "manifest": $0.manifest ?? .object([:])])
             })])])
-            stageChanged(["ctx"], receipt: makeChangeReceipt(["ctx"]))
+            values["addon_management"] = management
+            stageChanged(["ctx", "addon_management"], receipt: makeChangeReceipt(["ctx", "addon_management"]))
             return true
         }
         guard accepted else { throw VortxNativeError.superseded }
@@ -2020,6 +2022,15 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         }
         return .object(["searchResults": .array(Array(matches))])
     }
+    /// Read-only management membership from the same acknowledged kernel inventory. Disabled
+    /// descriptors remain editable without admitting resource work. Inputs belong to the same
+    /// initial snapshot or locked accepted-state transaction, not a newer Session lookup.
+    private func addonManagementProjection(state: VortxJSON, inventories: [String: [VortxJSON]]) throws -> VortxJSON {
+        guard let owner = addonOwner(for: state), let rows = inventories[owner] else {
+            throw VortxNativeError.invalidSnapshot
+        }
+        return .object(["profile": .object(["addons": .array(rows)])])
+    }
     private func stateFields(_ state: VortxJSON) throws -> [String: VortxJSON] {
         // The formatter is local to this complete pass: no mutable formatter crosses threads.
         let formatter = ISO8601DateFormatter()
@@ -2027,6 +2038,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
         let membership = VortxLibraryMembership(projected)
         let descriptors = (lock.withLock { resourceRegistryValid ? registry : [] }).map { addon in VortxJSON.object(["transportUrl": .string(addon.transportUrl), "manifest": addon.manifest ?? .object([:])]) }
         var fields: [String: VortxJSON] = ["native_state": state, "ctx": .object(["profile": .object(["addons": .array(descriptors)])]),
+                "addon_management": try lock.withLock { try addonManagementProjection(state: state, inventories: addonInventories) },
                 "native_playback": playback ?? .null,
                 "continue_watching_preview": .object(["items": .array((playback?["continueWatching"]?.array ?? []).compactMap { playbackRow($0, formatter: formatter) })]),
                 "native_history": .object(["items": .array((playback?["history"]?.array ?? []).compactMap { playbackRow($0, formatter: formatter) })]),

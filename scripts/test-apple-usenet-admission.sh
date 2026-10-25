@@ -28,16 +28,32 @@ sed 's/#if os(macOS)/#if USENET_ADMISSION_MAC/g' "$usenet_test_dir/availability-
 {
   printf '%s\n' 'import Foundation' 'enum EpisodePlaybackIdentity {'
   sed -n '/    static func playableTorrentFileIndex(/,/^    }/p' app/SourcesShared/CoreModels.swift
+  sed -n '/    static func mayResolveTorrentWithoutURL(/,/^    }/p' app/SourcesShared/CoreModels.swift
+  sed -n '/    static func usableTorrentFallbackURL(/,/^    }/p' app/SourcesShared/CoreModels.swift
+  sed -n '/    static func mayResolveEpisodeTorrentWithoutURL(/,/^    }/p' app/SourcesShared/CoreModels.swift
   printf '%s\n' '}'
   sed -n '/^struct CoreStream: /,/^\/\/ MARK: discover/p' "$usenet_test_dir/models-source.swift" | sed '$d'
   printf '%s\n' 'enum StreamRanking {'
   sed -n '/    private static func playablePairs(/,/^    }/p' app/SourcesShared/StreamRanking.swift \
     | sed 's/private static/static/'
   sed -n '/    static func best(_ groups: \[CoreStreamSourceGroup\], pin:/,/^    }/p' app/SourcesShared/StreamRanking.swift
-  printf '%s\n' '}' 'func watchDisabled(loading: Bool, preparing: Bool, best: CoreStream?) -> Bool {'
-  sed -n 's/^[[:space:]]*\.disabled(\(loading || preparing || best?.playableURL(isEpisode: true) == nil\))/    return \1/p' \
+  printf '%s\n' '}' '@MainActor struct ProductionEpisodeWatchAdmission {' \
+    '    let shownVideo: CoreVideo' '    let season: Int' '    let debridKeys: WatchAdmissionDebridKeys'
+  # Keep the actual UI admission chain, including its positive semantic episode check. Only inert
+  # fields/keys/metadata are supplied by AppleUsenetAdmissionTests; no admission method is stubbed.
+  sed -n '/    private func debridHint(for target: CoreVideo)/,/^    }/p' app/SourcesiOS/iOSDetailView.swift
+  sed -n '/    private func canResolveEpisodeWithoutURL(/,/^    }/p' app/SourcesiOS/iOSDetailView.swift
+  sed -n '/    private func canAttemptEpisodePlayback(/,/^    }/p' app/SourcesiOS/iOSDetailView.swift
+  printf '%s\n' '    func disabled(loading: Bool, preparing: Bool, best: CoreStream?) -> Bool {'
+  sed -n 's/^[[:space:]]*\.disabled(\(loading || preparing || best.map { !canAttemptEpisodePlayback($0) } != false\))/        return \1/p' \
     app/SourcesiOS/iOSDetailView.swift
-  printf '%s\n' '}'
+  printf '%s\n' '    }' '}'
+  printf '%s\n' '@MainActor func watchDisabled(loading: Bool, preparing: Bool, best: CoreStream?,' \
+    '    ownTorrentKeyConfigured: Bool = false, hasSemanticEpisode: Bool = true) -> Bool {' \
+    '    let fixture = ProductionEpisodeWatchAdmission(' \
+    '        shownVideo: CoreVideo(season: 1, episode: hasSemanticEpisode ? 1 : nil),' \
+    '        season: 1, debridKeys: WatchAdmissionDebridKeys(hasAnyKey: ownTorrentKeyConfigured))' \
+    '    return fixture.disabled(loading: loading, preparing: preparing, best: best)' '}'
   # The untouched coordinator's actual cached-TorBox-before-local admission expression.
   printf '%s\n' 'func coordinatorWouldAttemptLocal(stream: CoreStream, nzb: String, confirmedUsenetURLs: Set<String>?, usenetSavedServers: [UsenetProviderServer]) -> Bool {'
   sed -n '/let torBoxHasItCached = confirmedUsenetURLs?.contains(nzb) ?? false/p' app/SourcesShared/DebridResolver.swift
@@ -46,10 +62,14 @@ sed 's/#if os(macOS)/#if USENET_ADMISSION_MAC/g' "$usenet_test_dir/availability-
   printf '%s\n' '}'
   sed -n '/^enum UsenetLocalResolver {/,/^\/\/ MARK: - Settings screen/p' app/SourcesShared/UsenetProvider.swift | sed '$d'
 } > "$usenet_test_dir/production-methods.swift"
-for marker in 'struct CoreStream:' 'static func playableTorrentFileIndex(' 'enum UsenetLocalResolver {' 'func coordinatorWouldAttemptLocal('; do
+for marker in 'struct CoreStream:' 'static func playableTorrentFileIndex(' \
+  'static func mayResolveTorrentWithoutURL(' 'static func usableTorrentFallbackURL(' \
+  'static func mayResolveEpisodeTorrentWithoutURL(' 'private func debridHint(for target: CoreVideo)' \
+  'private func canResolveEpisodeWithoutURL(' 'private func canAttemptEpisodePlayback(' \
+  'enum UsenetLocalResolver {' 'func coordinatorWouldAttemptLocal('; do
   rg -Fq "$marker" "$usenet_test_dir/production-methods.swift"
 done
-rg -Fq 'return loading || preparing || best?.playableURL(isEpisode: true) == nil' "$usenet_test_dir/production-methods.swift"
+rg -Fq 'return loading || preparing || best.map { !canAttemptEpisodePlayback($0) } != false' "$usenet_test_dir/production-methods.swift"
 rg -Fq 'return !torBoxHasItCached && !resumingCloudJob &&' "$usenet_test_dir/production-methods.swift"
 runtime_failed=0
 for variant in mobile mac lite; do

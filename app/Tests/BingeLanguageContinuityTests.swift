@@ -163,7 +163,7 @@ import Foundation
         precondition(tv.contains("let wantedAddon = choice?.addon"))
         let detailTV = try String(contentsOfFile: "app/SourcesTV/DetailView.swift", encoding: .utf8)
         precondition(!detailTV.contains("SeriesSourceSticky.record("))
-        precondition(detailTV.components(separatedBy: "sourceAddon: sourceAddon").count >= 3)
+        precondition(detailTV.components(separatedBy: "sourceAddon: sourceOrigin?.addon").count >= 3)
         let rootTV = try String(contentsOfFile: "app/SourcesTV/RootTabView.swift", encoding: .utf8)
         precondition(rootTV.contains("initialSourceAddon: req.sourceAddon"))
         print("PASS actual/delayed/empty audio inventory, bounded retry, manual-source admission, profiles, migration, delayed resolver/audio-change admission, exact-episode restart, player wiring")

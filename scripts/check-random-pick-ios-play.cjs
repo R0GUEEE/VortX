@@ -87,7 +87,7 @@ function contract(text) {
   need((playMovie.match(/guard admitRandomPickPlayback\([^\n]+else \{ return \}\n(?:\s+didTransferPlayback = true\n)?\s+presentation = \.player/g) || []).length === 3,
     'all three movie admissions immediately precede publication');
   before(method(movie, 'playStream'), 'cancelPendingQuickWatch()', 'if stream.isYouTubeTrailer', 'manual source cancels before content/trailer resolution');
-  need(/guard admitQueuedSource\(pm, ref: ref\) else \{ return \}\s*presentation = \.player/.test(method(movie, 'playStream')), 'manual movie source validates queue immediately before launch');
+  need(/guard sourceOrigin == nil \|\| SourceOrigin\.current\(for: stream, clicked: sourceOrigin, groups: sourceList\.groups\) != nil,\s*admitQueuedSource\(pm, ref: ref\) else \{ return \}\s*didTransferPlayback = true\s*presentation = \.player/.test(method(movie, 'playStream')), 'manual movie source validates clicked origin and queue, then transfers ownership immediately before launch');
   need((playMovie.match(/playbackQueueToken: playbackQueueToken/g) || []).length === 3, 'three movie autoplay handoffs retain original queue token');
   need(method(movie, 'playStream').includes('playbackQueueToken: playbackQueueToken'), 'manual movie source retains original queue token');
   before(method(movie, 'playTrailerStream'), 'cancelPendingQuickWatch()', 'await iOSDetailView.resolveTrailerLaunch', 'manual trailer cancels first');
@@ -119,7 +119,10 @@ const mutations = [
   ['guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: win.ref, meta: pm) else { return }', '', 'movie race skips admission'],
   ['guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: ref, meta: pm) else { return }', '', 'movie fallback skips admission'],
   ['return admitQueuedSource(meta, ref: ref)', 'return true', 'manual source skips original queue admission'],
-  ['guard admitQueuedSource(pm, ref: ref) else { return }', '', 'manual movie skips queue admission'],
+  ['admitQueuedSource(pm, ref: ref)', 'true', 'manual movie skips queue admission'],
+  ['guard sourceOrigin == nil || SourceOrigin.current(for: stream, clicked: sourceOrigin, groups: sourceList.groups) != nil,\n              admitQueuedSource(pm, ref: ref) else { return }', 'guard admitQueuedSource(pm, ref: ref) else { return }', 'manual movie loses final clicked-source admission'],
+  ['admitQueuedSource(pm, ref: ref) else { return }\n        didTransferPlayback = true', 'admitQueuedSource(pm, ref: ref) else { return }\n        didTransferPlayback = false', 'manual movie fails lease ownership transfer'],
+  ['admitQueuedSource(pm, ref: ref) else { return }\n        didTransferPlayback = true', 'admitQueuedSource(pm, ref: ref) else { return }\n        await Task.yield()\n        didTransferPlayback = true', 'manual movie suspends after final admission'],
   ['playbackQueueToken: playbackQueueToken', 'playbackQueueToken: nil', 'accepted source loses original queue token'],
   ['playbackQueueToken?.routingToken(\n                                    contentID: m.id, videoID: v.id, type: "series")', 'playbackQueueToken', 'unrelated manual episode inherits exact-episode queue capability'],
   ['if quickWatchScope == nil { cancelPendingQuickWatch() }', '', 'manual hero competes with auto'],

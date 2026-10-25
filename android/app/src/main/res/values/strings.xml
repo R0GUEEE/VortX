@@ -432,4 +432,6 @@
     <string name="smart_collections_summary_unwatched">Unwatched</string>
     <string name="smart_collections_summary_popular">Popular titles</string>
     <string name="smart_collections_summary_with">With %1$s</string>
+    <string name="home_surprise_pick">Surprise me</string>
+    <string name="home_surprise_unavailable">No titles are ready for this profile yet. Let Home finish loading or add a catalogue.</string>
 </resources>

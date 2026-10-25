@@ -47,7 +47,7 @@ enum UIScreenshotSeamsContractTests {
         precondition(tabs.contains("ScrollViewReader { proxy in")
                      && tabs.contains(".id(SourceAddonTabAnchor.all)")
                      && tabs.contains(".id(SourceAddonTabAnchor.addon(group.id))")
-                     && tabs.contains("groups.first(where: { $0.addon == addon })")
+                     && tabs.contains("groups.first(where: { $0.id == addon })")
                      && tabs.contains("return .addon(group.id)")
                      && !tabs.contains(".id(SourceAddonTabAnchor.addon(group.addon))")
                      && tabs.contains(".onValueChange(of: selectedSourceAddon)")

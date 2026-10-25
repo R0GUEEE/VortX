@@ -14,6 +14,7 @@ enum SourceQuickFilterPolicy {
     struct Row: Identifiable, Equatable, Sendable {
         let id: UUID
         let addon: String
+        let groupID: String
         let stream: CoreStream
         fileprivate let ranges: Set<Range>
         fileprivate let codecs: Set<Codec>
@@ -77,7 +78,7 @@ enum SourceQuickFilterPolicy {
                     if ranges.isEmpty { ranges.insert(.unknown) }
                     if codecs.isEmpty { codecs.insert(.unknown) }
                     return Row(id: id,
-                        addon: group.addon, stream: stream, ranges: ranges, codecs: codecs,
+                        addon: group.addon, groupID: group.id, stream: stream, ranges: ranges, codecs: codecs,
                         cacheHash: stream.isUsenet ? nil : stream.infoHash?.lowercased(),
                         cacheURLs: stream.isUsenet ? stream.usenetURLs : [])
                 }

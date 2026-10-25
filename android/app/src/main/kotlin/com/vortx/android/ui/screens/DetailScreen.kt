@@ -1947,18 +1947,33 @@ private fun SeasonPosterTile(
     }
 }
 
+private data class SourceAddonEntry(val id: String?, val label: String, val count: Int)
+
+/// Meta-embedded and stream-resource groups from one exact configuration share a tab. Display names
+/// are labels only: independently configured transports with equal names remain separate entries.
+private fun sourceAddonEntries(groups: List<StreamGroup>): List<SourceAddonEntry> =
+    listOf(SourceAddonEntry(null, "All", groups.sumOf { it.streams.size })) + groups
+        .groupBy { it.sourceInstanceId }
+        .map { (id, same) -> SourceAddonEntry(id, same.first().addon, same.sumOf { it.streams.size }) }
+
+private fun sourceGroupsMatchingInstance(groups: List<StreamGroup>, id: String?): List<StreamGroup> =
+    groups.filter { id == null || it.sourceInstanceId == id }
+
+private fun sourceRowMenuIdentity(group: StreamGroup, source: StreamSource): Pair<String, String> =
+    group.sourceInstanceId to source.id
+
 /// Add-on names as the source navigation: two-line accent tabs ("All" first, then each add-on in the incoming
 /// order) with ‹ › buttons that step the row three names at a time, since a mouse or a keyboard cannot swipe
 /// it the way a finger or trackpad can. Mirrors Apple `sourceAddonTabs`.
 @Composable
 private fun SourceAddonStrip(
-    entries: List<Pair<String?, Int>>,
+    entries: List<SourceAddonEntry>,
     selected: String?,
     onSelect: (String?) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val selectedIndex = entries.indexOfFirst { it.first == selected }.coerceAtLeast(0)
+    val selectedIndex = entries.indexOfFirst { it.id == selected }.coerceAtLeast(0)
     LaunchedEffect(selectedIndex) {
         val visible = listState.layoutInfo.visibleItemsInfo
         if (visible.none { it.index == selectedIndex }) listState.animateScrollToItem(selectedIndex)
@@ -1976,9 +1991,9 @@ private fun SourceAddonStrip(
             modifier = Modifier.weight(1f),
             horizontalArrangement = Arrangement.spacedBy(VortXTheme.spacing.sm),
         ) {
-            // Positional keys: entries are unique by name, and no add-on can pick a name that collides with All.
-            itemsIndexed(entries, key = { index, _ -> index }) { _, (addon, count) ->
-                SourceAddonTab(title = addon ?: "All", count = count, selected = addon == selected) { onSelect(addon) }
+            // All has its own key; exact configured identities survive reorder and same-name labels.
+            itemsIndexed(entries, key = { _, entry -> entry.id?.let { "instance:$it" } ?: "all" }) { _, entry ->
+                SourceAddonTab(title = entry.label, count = entry.count, selected = entry.id == selected) { onSelect(entry.id) }
             }
         }
         SourceAddonStepButton(forward = true, enabled = listState.canScrollForward) {
@@ -2131,9 +2146,8 @@ private fun SourcesSection(
     onPlayWithEngine: (StreamSource, PlayerEngineRouter.Override) -> Unit,
     onDownload: (StreamSource) -> Unit,
 ) {
-    // The row whose long-press opened the pin menu (null = closed). Keyed by the stream id so the menu
-    // anchors to its own row and a recompose from a pin write closes it cleanly.
-    var pinMenuFor by remember { mutableStateOf<String?>(null) }
+    // The menu belongs to one configured instance and row, even when providers return equal stream IDs.
+    var pinMenuFor by remember { mutableStateOf<Pair<String, String>?>(null) }
     // DET-2 grouped/collapsible source list state: the per-add-on filter ("All" = null), the remembered
     // collapsed add-on set, the render window (grown by "Show more"), and the two-level Quality menu.
     var sourceFilter by remember { mutableStateOf<String?>(null) }
@@ -2159,15 +2173,15 @@ private fun SourcesSection(
             is UiState.Success -> {
                 val groups = state.data
                 val total = groups.sumOf { it.streams.size }
-                val effectiveSourceFilter = sourceFilter?.takeIf { addon -> groups.any { it.addon == addon } }
-                val filteredGroups = groups.filter { effectiveSourceFilter == null || it.addon == effectiveSourceFilter }
+                val effectiveSourceFilter = sourceFilter?.takeIf { id -> groups.any { it.sourceInstanceId == id } }
+                val filteredGroups = sourceGroupsMatchingInstance(groups, effectiveSourceFilter)
                 val facetIndex = remember(filteredGroups) { SourceQuickFilterIndex(filteredGroups) }
                 val facetGroups = remember(facetIndex, quickFilters, currentCacheRevision) {
                     facetIndex.matchingGroups(quickFilters, currentCacheRevision)
                 }
                 val facetCount = facetGroups.sumOf { it.streams.size }
-                val sourceAnchors = remember(groups.map { it.addon }) {
-                    groups.associate { it.addon to BringIntoViewRequester() }
+                val sourceAnchors = remember(groups.map { it.sourceInstanceId }) {
+                    groups.associate { it.sourceInstanceId to BringIntoViewRequester() }
                 }
                 // A selected add-on is an actual jump into its source section as well as the established
                 // filter. The parent LazyColumn owns the scroll, and the incoming/user order is retained.
@@ -2197,17 +2211,14 @@ private fun SourcesSection(
                     // filter between (Apple's `sourceAddonTabs`, shown for groups.count > 1).
                     if (groups.size > 1) {
                         SourceAddonStrip(
-                            // A label repeated across transports is one tab (the filter is by name), counted once.
-                            entries = listOf<Pair<String?, Int>>(null to total) + groups
-                                .groupBy { it.addon }
-                                .map { (addon, same) -> addon to same.sumOf { it.streams.size } },
+                            entries = sourceAddonEntries(groups),
                             selected = effectiveSourceFilter,
-                            onSelect = { addon ->
-                                if (addon != null) {
-                                    collapsed = collapsed - addon
+                            onSelect = { id ->
+                                if (id != null) {
+                                    collapsed = collapsed - id
                                     sourceJumpRevision += 1
                                 }
-                                sourceFilter = addon
+                                sourceFilter = id
                             },
                         )
                     }
@@ -2356,16 +2367,17 @@ private fun SourcesSection(
                 var shownRows = 0
                 val anchoredAddons = HashSet<String>()
                 filtered.forEach { group ->
-                    val isCollapsed = group.addon in collapsed
-                    // Labels can repeat across transports. Jump to the first matching section, whose
-                    // sources get the render budget first, rather than scrolling through every duplicate.
-                    val sourceAnchor = sourceAnchors[group.addon]?.takeIf { anchoredAddons.add(group.addon) }
+                    val instanceId = group.sourceInstanceId
+                    val isCollapsed = instanceId in collapsed
+                    // One exact configuration can contribute both embedded and resource groups. Anchor
+                    // only its first section; same-name configurations keep independent requesters.
+                    val sourceAnchor = sourceAnchors[instanceId]?.takeIf { anchoredAddons.add(instanceId) }
                     SourceGroupHeader(
                         addon = group.addon,
                         count = group.streams.size,
                         collapsed = isCollapsed,
                         onToggle = {
-                            collapsed = if (isCollapsed) collapsed - group.addon else collapsed + group.addon
+                            collapsed = if (isCollapsed) collapsed - instanceId else collapsed + instanceId
                         },
                         modifier = sourceAnchor?.let { Modifier.bringIntoViewRequester(it) } ?: Modifier,
                     )
@@ -2376,14 +2388,15 @@ private fun SourcesSection(
                         shownRows += take
                         sorted.take(take).forEach { source ->
                             val pinned = pin.resolved?.let { SourcePinStore.matches(source, group.addon, it) } == true
+                            val rowMenuIdentity = sourceRowMenuIdentity(group, source)
                             StreamRowWithPinMenu(
                                 source = source,
                                 pinned = pinned,
                                 resolving = resolving,
                                 pin = pin,
                                 entryNoun = entryNoun,
-                                menuOpen = pinMenuFor == source.id,
-                                onOpenMenu = { pinMenuFor = source.id },
+                                menuOpen = pinMenuFor == rowMenuIdentity,
+                                onOpenMenu = { pinMenuFor = rowMenuIdentity },
                                 onDismissMenu = { pinMenuFor = null },
                                 onPlay = onPlay,
                                 onPlayWithEngine = onPlayWithEngine,
@@ -2397,7 +2410,7 @@ private fun SourcesSection(
                     }
                 }
                 // "Show more · N more" when the window hides rows in the currently-expanded, filtered groups.
-                val expandableTotal = filtered.filter { it.addon !in collapsed }.sumOf { it.streams.size }
+                val expandableTotal = filtered.filter { it.sourceInstanceId !in collapsed }.sumOf { it.streams.size }
                 if (shownRows < expandableTotal) {
                     Chip(
                         label = "Show more · ${expandableTotal - shownRows} more",

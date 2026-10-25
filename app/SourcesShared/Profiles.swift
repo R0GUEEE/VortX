@@ -1001,6 +1001,29 @@ final class ProfileStore: ObservableObject {
         update(profile)
     }
 
+    /// A visibility button is an explicit profile action. A cached roster can precede native
+    /// restoration, so prepare under the original account/profile admission and acknowledge the save.
+    /// Do not optimistically publish an eye state that the native checkpoint did not accept.
+    func setAddonDisabledForActive(base: String, disabled: Bool,
+                                   admission: CoreBridge.NativeProfileActionAdmission) async -> Bool {
+        await prepareNativeAction(admission, operation: "addon_visibility") { target in
+            guard var profile = self.active, profile.id == admission.profileID else {
+                self.nativeProfileError = "The profile changed. Try changing add-on visibility again."
+                return false
+            }
+            let baseline = profile
+            var set = Set(self.effectiveDisabledAddons(for: profile))
+            let key = ProfileAddonPreferencesPolicy.identity(base)
+            if disabled { set.insert(key) } else { set.remove(key) }
+            var preferences = self.addonPreferences(for: profile)
+            preferences.disabledAddonURLsOverride = set.sorted()
+            profile.addonPreferences = preferences
+            profile.disabledAddons = set.sorted()
+            return await self.saveNative(profile, creating: false, target: target,
+                                         preferenceBaseline: baseline)
+        }
+    }
+
     /// Whether an add-on (by transport URL) is currently turned off for the active profile.
     func isAddonDisabledForActive(base: String) -> Bool {
         guard let active else { return false }

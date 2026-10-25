@@ -17,8 +17,18 @@ function contract(s) {
   const rebuild = between(s.model, 'private func rebuild()', 'func sourceIndexLifecycleDidClose(');
   has(rebuild, ['let quickFilterIndex = SourceQuickFilterPolicy.Index(groups: ranked, previous: previousQuickFilterIndex,',
     'reportedTags: StreamRanking.flavorTags', 'quickFilterSession.index : .empty',
-    'self.installQuickFilterIndex(quickFilterIndex)', 'self.publishedGroups = ranked', 'self.publishedBest = rankedBest'], 'real ranked/display split');
+    'publicationOwner.installQuickFilterIndex(quickFilterIndex)', 'publicationOwner.publishedGroups = ranked', 'publicationOwner.publishedBest = rankedBest'], 'real ranked/display split');
   need(rebuild.indexOf('let quickFilterIndex =') < rebuild.indexOf('await MainActor.run'), 'tag parsing stays detached');
+  has(rebuild, ['let owner = self', 'let originalCoreIdentity = ObjectIdentifier(core)',
+    'Task.detached(priority: .userInitiated) { [weak owner] in',
+    'guard let publicationOwner = owner else { return }', 'await MainActor.run { [publicationOwner] in',
+    'guard gen == publicationOwner.generation, let core = publicationOwner.core,',
+    'ObjectIdentifier(core) == originalCoreIdentity else { return }'], 'actual frozen actor owner and original-core publication admission');
+  const publication = rebuild.slice(rebuild.indexOf('await MainActor.run { [publicationOwner] in'));
+  need(publication.indexOf('ObjectIdentifier(core) == originalCoreIdentity else { return }') <
+    publication.indexOf('publicationOwner.installQuickFilterIndex(quickFilterIndex)'), 'index is installed only after original owner/core admission');
+  need(!/\bself\./.test(publication), 'publication writes stay on the frozen checked owner');
+
   const display = between(s.model, '@Published private var quickFilterSession', '    var groups:');
   const selection = between(display, 'func setQuickFilters(', '    private func projectQuickFilters()');
   const projection = between(display, 'private func projectQuickFilters()', '    private func installQuickFilterIndex(');
@@ -67,7 +77,7 @@ function contract(s) {
   need((s.ios.match(/sourceRows: suspended \? \[\] : sourceList.quickFilterGroups/g) || []).length === 3, 'movie/live/episode display binding');
   need((s.ios.match(/onQuickFiltersChange: \{ sourceList.setQuickFilters\(\$0\) \}/g) || []).length === 3, 'three real selection setters');
   has(s.ios, ['bestStream: sourceList.best', 'resolutionTiers: sourceList.tiers',
-    'sourceRows.filter { sourceFilter == nil || $0.group.addon == sourceFilter }',
+    'sourceRows.filter { sourceFilter == nil || $0.group.id == sourceFilter }',
     'private typealias SourceRow = SourceQuickFilterPolicy.Row', 'Array(sortedStreams(display).prefix(take))',
     'lhs.sourceRows == rhs.sourceRows', 'lhs.quickFilters == rhs.quickFilters', 'No sources match these list filters.',
     'var onQuickFiltersChange: (@MainActor (SourceQuickFilterPolicy.Selection) -> Void)? = nil'], 'iOS displayed rows and immutable play choice');
@@ -93,7 +103,12 @@ function contract(s) {
 contract(sources);
 const mutations = [
   ['model', 'reportedTags: StreamRanking.flavorTags', 'reportedTags: { _ in [] }'],
-  ['model', 'self.installQuickFilterIndex(quickFilterIndex)', ''],
+  ['model', 'publicationOwner.installQuickFilterIndex(quickFilterIndex)', ''],
+  ['model', 'guard let publicationOwner = owner else { return }', 'let publicationOwner = owner!'],
+  ['model', 'guard gen == publicationOwner.generation, let core = publicationOwner.core,', 'guard let core = publicationOwner.core,'],
+  ['model', 'ObjectIdentifier(core) == originalCoreIdentity else { return }', 'true else { return }'],
+  ['model', 'publicationOwner.publishedGroups = ranked', 'self.publishedGroups = ranked'],
+
   ['model', 'quickFilterSession.select(selection,', 'trigger.send(); quickFilterSession.select(selection,'],
   ['model', 'quickFilterProfileID != profileID', 'false'],
   ['model', 'let snapshot = debridCache?.confirmedCacheSnapshot', 'let snapshot = nil'],
@@ -114,6 +129,7 @@ const mutations = [
   ['controls', 'let change: @MainActor', 'let change:'],
   ['ios', 'sourceRows: suspended ? [] : sourceList.quickFilterGroups', 'sourceRows: []'],
   ['ios', 'lhs.quickFilters == rhs.quickFilters', 'true'],
+  ['ios', 'sourceRows.filter { sourceFilter == nil || $0.group.id == sourceFilter }', 'sourceRows.filter { sourceFilter == nil || $0.group.addon == sourceFilter }'],
   ['tv', 'let visible = sourceList.quickFilterGroups.filter', 'let visible = sourceList.groups.filter'],
   ['tv', 'filterBarOwnsUpEscape(groupsCount: groups.count, hasQuickFilters: true)', 'filterBarOwnsUpEscape(groupsCount: groups.count)']
 ];

@@ -1313,6 +1313,7 @@ final class CoreBridge: ObservableObject {
         searchResults = []; guard owns() else { return nil }
         searchSuggestions = []; guard owns() else { return nil }
         searchIsLoading = false; guard owns() else { return nil }
+        managedAddons = []; guard owns() else { return nil }
         addons = []; guard owns() else { return nil }
         AddonMetaGate.publish(false); guard owns() else { return nil }
         // Metadata comes after legacy notifications. A nested new metadata turn
@@ -1442,6 +1443,12 @@ final class CoreBridge: ObservableObject {
     @Published private(set) var searchIsLoading = false
     @Published private(set) var searchSuggestions: [CoreSearchSuggestion] = []
     @Published private(set) var addons: [CoreDescriptor] = []
+    /// Add-ons controls need installed membership, including disabled rows. Resource/catalog
+    /// consumers retain the filtered `addons` list. Both come from one original native receipt.
+    // Plain storage: the existing final `addons`/revision notification drives the controls.
+    // Another @Published willSet here could reenter a clear, then store a retired roster.
+    private var managedAddons: [CoreDescriptor] = []
+    var addonsForManagement: [CoreDescriptor] { usesNativeProfileState ? managedAddons : addons }
 
     /// Raw addon descriptors keyed by transportUrl, kept so we can round-trip a full Descriptor back
     /// to the engine for UninstallAddon (which takes the whole descriptor, not just a URL).
@@ -1737,6 +1744,23 @@ final class CoreBridge: ObservableObject {
 
     @MainActor
     private func refreshAddons(capturedPublicationToken publicationToken: PublicationToken) {
+        if usesNativeProfileState {
+            // Explicit HOST refresh after profile/account preparation. Keep one original source,
+            // installation, credential, epoch and immutable Facade receipt through the worker;
+            // never pair a current unfiltered inventory with an older callback's filtered ctx.
+            guard publicationStillCurrent(publicationToken),
+                  let captured = nativeFacadeLock.withLock({ () -> (VortxNativeCoreFacade, UUID, CredentialScopeRegistry.Capture)? in
+                      guard let producer = nativeFacadeStorage, let credential = nativeCredentialCapture else { return nil }
+                      return (producer, nativeCallbackGeneration, credential)
+                  }) else { return }
+            let origin = NativeCallbackOrigin(producer: captured.0, installation: captured.1,
+                credential: captured.2, publication: publicationToken, playerWasActive: playerActiveSnapshot())
+            guard nativeCallbackOriginIsCurrent(origin),
+                  let receipt = captured.0.captureHostChange(fields: ["ctx", "addon_management"]),
+                  nativeCallbackOriginIsCurrent(origin) else { return }
+            receiveNativeLegacyHostSeed(receipt, origin: origin)
+            return
+        }
         // Typed and raw descriptors must describe ONE engine receipt. Reading ctx twice can pair an old
         // visible roster with a new raw map during a pull/install. A decode failure is not an empty roster.
         guard let snapshot = stateData("ctx"),
@@ -1885,12 +1909,17 @@ final class CoreBridge: ObservableObject {
         guard let normalized = normalizedAddonURL(urlString), let url = URL(string: normalized) else {
             return .failed(retryable: false, message: "Enter a valid add-on URL (https://…/manifest.json).")
         }
-        if addons.contains(where: { $0.transportUrl == normalized }), !replacingExisting {
+        if addonsForManagement.contains(where: { $0.transportUrl == normalized }), !replacingExisting {
             return .alreadyInstalled
         }
 
         let manifest: [String: Any]
         let identity: String
+        // An explicit refresh must fetch current provider truth, even when a recent preview
+        // cached this URL before the provider changed its configuration or resources.
+        if replacingExisting || replacingDescriptor != nil {
+            manifestPreviewCache.removeValue(forKey: normalized)
+        }
         if let cached = takeCachedManifest(normalized) {
             manifest = cached.manifest
             identity = cached.canonicalURL
@@ -1933,13 +1962,13 @@ final class CoreBridge: ObservableObject {
             // awaitAddonInstalled could observe that pre-existing target and mistake the rejected action for
             // success, then tombstone the old descriptor.
             if replacingDescriptor.transportUrl != identity,
-               rawAddonsByUrl[identity] != nil || addons.contains(where: { $0.transportUrl == identity }) {
+               rawAddonsByUrl[identity] != nil || addonsForManagement.contains(where: { $0.transportUrl == identity }) {
                 return .failed(retryable: false, message: "That add-on URL is already installed.")
             }
         }
 
         // A redirect can land on an already-installed identity different from the submitted URL.
-        let replacing = addons.contains(where: { $0.transportUrl == identity })
+        let replacing = addonsForManagement.contains(where: { $0.transportUrl == identity })
         if replacing, !replacingExisting { return .alreadyInstalled }
         let previousManifest: [String: Any]? = replacing
             ? (rawAddonsByUrl[identity]?["manifest"] as? [String: Any]) : nil
@@ -2005,7 +2034,7 @@ final class CoreBridge: ObservableObject {
             // Distinct URLs must prove the old descriptor disappeared. A pre-existing target alone cannot
             // acknowledge a rejected replace action; preserving old/order is safer than tombstoning data.
             guard rawAddonsByUrl[replacingDescriptor.transportUrl] == nil,
-                  !addons.contains(where: { $0.transportUrl == replacingDescriptor.transportUrl }) else {
+                  !addonsForManagement.contains(where: { $0.transportUrl == replacingDescriptor.transportUrl }) else {
                 return .failed(retryable: true, message: "Replacement did not confirm. Your existing add-on was kept.")
             }
             VortXSyncManager.shared.replaceInAppAddonOrder(
@@ -2123,7 +2152,7 @@ final class CoreBridge: ObservableObject {
     private func confirmedInstalled(_ identity: String,
                                     replacingManifest: [String: Any]?,
                                     expectedManifest: [String: Any]?) -> Bool {
-        guard addons.contains(where: { $0.transportUrl == identity }) else { return false }
+        guard addonsForManagement.contains(where: { $0.transportUrl == identity }) else { return false }
         if usesNativeProfileState {
             guard let expectedManifest,
                   let data = try? JSONSerialization.data(withJSONObject: expectedManifest),
@@ -4522,10 +4551,11 @@ final class CoreBridge: ObservableObject {
     /// Load the engine Player for the picked stream, so it records progress against the right library
     /// item. Built from the raw meta_details JSON (the engine wants back the exact Stream + the stream
     /// and meta requests it gave us). Best-effort: a shape mismatch is a silent no-op, never a crash.
+    @discardableResult
     @MainActor
-    func loadEnginePlayer(for stream: CoreStream) {
+    func loadEnginePlayer(for stream: CoreStream, sourceGroupID: String? = nil) -> Bool {
         guard let data = stateData("meta_details"),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
         let metaItems = object["metaItems"] as? [[String: Any]] ?? []
         let metaRequest = (metaItems.first { ($0["content"] as? [String: Any])?["type"] as? String == "Ready" }
                            ?? metaItems.first)?["request"]
@@ -4535,7 +4565,22 @@ final class CoreBridge: ObservableObject {
         var streamRequest: Any?
         var firstReadyStream: [String: Any]?
         var firstReadyRequest: Any?
-        for group in (object["streams"] as? [[String: Any]] ?? []) {
+        // A captured explicit origin is authority, not a label or a best-effort hint. Include meta-embedded
+        // streams for that instance, but never fall back into a different configured transport.
+        let ordinary = object["streams"] as? [[String: Any]] ?? []
+        let candidates = sourceGroupID == nil ? ordinary
+            : (object["metaStreams"] as? [[String: Any]] ?? []) + ordinary
+        if let sourceGroupID {
+            guard !sourceGroupID.isEmpty, candidates.contains(where: {
+                ($0["request"] as? [String: Any])?["base"] as? String == sourceGroupID
+            }) else {
+                DiagnosticsLog.log("cw", "loadEnginePlayer no-op (selected source origin is no longer current)")
+                return false
+            }
+        }
+        for group in candidates {
+            if let sourceGroupID,
+               (group["request"] as? [String: Any])?["base"] as? String != sourceGroupID { continue }
             guard let content = group["content"] as? [String: Any],
                   content["type"] as? String == "Ready",
                   let streams = content["content"] as? [[String: Any]] else { continue }
@@ -4546,7 +4591,14 @@ final class CoreBridge: ObservableObject {
             let isEpisode = EpisodePlaybackIdentity.isEpisodicContext(
                 type: requestType, season: nil, episode: nil, videoID: requestVideoID
             )
-            if let match = streams.first(where: { streamMatches($0, stream, isEpisode: isEpisode) }) {
+            if let match = streams.first(where: { raw in
+                if sourceGroupID != nil {
+                    guard let data = try? JSONSerialization.data(withJSONObject: raw),
+                          let candidate = try? JSONDecoder().decode(CoreStream.self, from: data) else { return false }
+                    return candidate == stream
+                }
+                return streamMatches(raw, stream, isEpisode: isEpisode)
+            }) {
                 rawStream = match; streamRequest = group["request"]; break
             }
         }
@@ -4567,13 +4619,13 @@ final class CoreBridge: ObservableObject {
         let titleIsEpisode = EpisodePlaybackIdentity.isEpisodicContext(
             type: metaType, season: nil, episode: nil, videoID: metaPath?["id"] as? String ?? ""
         )
-        if rawStream == nil, !(titleIsEpisode && (stream.isTorrent || stream.isUsenet)) {
+        if sourceGroupID == nil, rawStream == nil, !(titleIsEpisode && (stream.isTorrent || stream.isUsenet)) {
             rawStream = firstReadyStream
             streamRequest = firstReadyRequest
         }
         guard let rawStream, let streamRequest, let metaRequest else {
             DiagnosticsLog.log("cw", "loadEnginePlayer no-op (meta_details/stream/metaRequest missing); CW + progress will not track for this item")
-            return
+            return false
         }
         let selected: [String: Any] = [
             "stream": rawStream,
@@ -4581,7 +4633,7 @@ final class CoreBridge: ObservableObject {
             "metaRequest": metaRequest,
             "subtitlesPath": NSNull(),
         ]
-        dispatch(action: ["action": "Load", "args": ["model": "Player", "args": selected]], field: "player")
+        return dispatch(action: ["action": "Load", "args": ["model": "Player", "args": selected]], field: "player")
     }
 
     /// Re-point the engine Player to a KNOWN episode id SYNCHRONOUSLY, without waiting for that episode's
@@ -5612,6 +5664,7 @@ final class CoreBridge: ObservableObject {
     }
     private struct NativeLegacySample: Sendable {
         let context: CoreCtx?
+        let managementContext: CoreCtx?
         let rawAddons: [String: VortxJSON]
         let discover: NativeLegacyDiscoverSample?
         let library: CoreLibrary?
@@ -5762,9 +5815,11 @@ final class CoreBridge: ObservableObject {
         let values = work.receipt.values
         let context = work.fields.contains("ctx")
             ? nativeLegacyDecode(CoreCtx.self, value: values["ctx"]) : nil
+        let managementContext = work.fields.contains("ctx")
+            ? nativeLegacyDecode(CoreCtx.self, value: values["addon_management"]) : nil
         var rawAddons: [String: VortxJSON] = [:]
-        if context != nil {
-            for descriptor in values["ctx"]?["profile"]?["addons"]?.array ?? [] {
+        if context != nil, managementContext != nil {
+            for descriptor in values["addon_management"]?["profile"]?["addons"]?.array ?? [] {
                 if let rawURL = descriptor["transportUrl"], case .string(let url) = rawURL { rawAddons[url] = descriptor }
             }
         }
@@ -5801,7 +5856,7 @@ final class CoreBridge: ObservableObject {
             ? nativeLegacyDecode(CoreLocalSearchState.self, value: values["local_search"]) : nil
         let preview = work.includesContinueWatching
             ? nativeLegacyDecode(CoreCWPreview.self, value: values["continue_watching_preview"]) : nil
-        return .init(context: context, rawAddons: rawAddons, discover: discover,
+        return .init(context: context, managementContext: managementContext, rawAddons: rawAddons, discover: discover,
             library: library, search: search, suggestions: local?.searchResults ?? [],
             continueWatching: preview)
     }
@@ -5813,8 +5868,10 @@ final class CoreBridge: ObservableObject {
         let receipt = work.receipt
         guard nativeCallbackOriginIsCurrent(origin) else { return }
         if work.fields.contains("ctx"), let context = sample.context,
-           nativeLegacyReceiptIsCurrent(receipt, origin: origin, field: "ctx") {
-            publishNativeLegacyContext(context, rawAddons: sample.rawAddons,
+           let managementContext = sample.managementContext,
+           nativeLegacyReceiptIsCurrent(receipt, origin: origin, field: "ctx"),
+           nativeLegacyReceiptIsCurrent(receipt, origin: origin, field: "addon_management") {
+            publishNativeLegacyContext(context, managementContext: managementContext, rawAddons: sample.rawAddons,
                 receipt: receipt, origin: origin)
         }
         if let next = sample.discover,
@@ -5850,9 +5907,13 @@ final class CoreBridge: ObservableObject {
     }
 
     @MainActor
-    private func publishNativeLegacyContext(_ context: CoreCtx, rawAddons: [String: VortxJSON],
-        receipt: VortxNativeCoreFacade.ChangeReceipt, origin: NativeCallbackOrigin) {
-        let owns = { self.nativeLegacyReceiptIsCurrent(receipt, origin: origin, field: "ctx") }
+    private func publishNativeLegacyContext(_ context: CoreCtx, managementContext: CoreCtx,
+        rawAddons: [String: VortxJSON], receipt: VortxNativeCoreFacade.ChangeReceipt,
+        origin: NativeCallbackOrigin) {
+        let owns = {
+            self.nativeLegacyReceiptIsCurrent(receipt, origin: origin, field: "ctx")
+                && self.nativeLegacyReceiptIsCurrent(receipt, origin: origin, field: "addon_management")
+        }
         guard owns() else { return }
         let typed = context.profile.addons
         if !CatalogPrefsStore.order().isEmpty {
@@ -5871,6 +5932,8 @@ final class CoreBridge: ObservableObject {
         AddonMetaGate.publish(typed.contains { $0.providesTMDBMeta })
         guard owns() else { return }
         rawAddonsByUrl = raw
+        guard owns() else { return }
+        managedAddons = managementContext.profile.addons
         guard owns() else { return }
         addons = typed // no old-context state-write tail follows this synchronous setter
     }

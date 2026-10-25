@@ -131,6 +131,15 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
                 manager::captureLocalLibraryMutationAdmission) }
         },
         withReclaimLifecycle = { action -> DownloadManager.withWatchedReclaimAdmission(this, action) },
+        captureAddonPublication = { session, update ->
+            nativeAccounts.accountFor(session)?.let { account ->
+                { action: () -> Unit ->
+                    nativeAccounts.withProfileMutation(session, account) {
+                        if (session.updates.value == update) { action(); true } else false
+                    }
+                }
+            }
+        },
         mirrorLibrary = { added, type, id ->
             if (added) com.vortx.android.sync.AccountLibrarySync.onLibraryAdded(this, type, id)
             else com.vortx.android.sync.AccountLibrarySync.onLibraryRemoved(this, id, type)

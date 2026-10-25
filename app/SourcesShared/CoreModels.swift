@@ -1401,6 +1401,51 @@ enum EpisodePlaybackIdentity {
         return isEpisode ? nil : 0
     }
 
+    /// Own-provider resolution is distinct from a P2P URL. Movies need an own configured resolver;
+    /// episodes additionally need a positive semantic target. Neither case fabricates a URL or file index.
+    static func mayResolveTorrentWithoutURL(isEpisode: Bool, isRawTorrent: Bool, hasPlayableURL: Bool,
+                                           hasOwnResolver: Bool, hasSemanticEpisode: Bool) -> Bool {
+        isRawTorrent && !hasPlayableURL && hasOwnResolver && (!isEpisode || hasSemanticEpisode)
+    }
+
+    /// The native server's unpublished port-zero placeholder is not usable media. This predicate does not
+    /// alter CoreStream.playableURL or P2P startup/ranking; explicit own-resolver choices use it locally.
+    static func usableTorrentFallbackURL(_ url: URL?) -> URL? {
+        guard let url, url.port != 0 else { return nil }
+        return url
+    }
+
+    /// A hash-only episode can be selected for native resolution without inventing a torrent file index.
+    /// This admits an attempt only: the owner-scoped resolver still proves the semantic episode file and URL.
+    static func mayResolveEpisodeTorrentWithoutURL(isEpisode: Bool, isRawTorrent: Bool,
+                                                  hasPlayableURL: Bool, hasOwnEpisodeResolver: Bool) -> Bool {
+        isEpisode && mayResolveTorrentWithoutURL(isEpisode: true, isRawTorrent: isRawTorrent,
+            hasPlayableURL: hasPlayableURL, hasOwnResolver: hasOwnEpisodeResolver,
+            hasSemanticEpisode: hasOwnEpisodeResolver)
+    }
+
+    /// Unconfirmed hashes may spend a bounded own-provider resolve only for an explicit user choice when
+    /// the eligible torrent source has no usable embedded fallback. Ordinary fast picks keep their cache gate.
+    static func mayResolveUncachedTorrentPick(isExplicitChoice: Bool, resolverOnlyEligible: Bool) -> Bool {
+        isExplicitChoice && resolverOnlyEligible
+    }
+
+    /// Keep automatic fallback candidate order unchanged. Only an explicit user choice may retain a
+    /// resolver-only labeled episode source instead of the next candidate with an already safe media URL.
+    static func episodePlaybackFallback(_ labeledBest: CoreStream, candidates: [CoreStream],
+                                        hasOwnEpisodeResolver: Bool, isExplicitChoice: Bool) -> CoreStream? {
+        func eligible(_ stream: CoreStream) -> Bool {
+            guard !stream.isUsenet else { return false }
+            let hasURL = stream.playableURL(isEpisode: true) != nil
+            if hasURL { return true }
+            return mayResolveUncachedTorrentPick(isExplicitChoice: isExplicitChoice,
+                resolverOnlyEligible: mayResolveEpisodeTorrentWithoutURL(
+                    isEpisode: true, isRawTorrent: stream.isTorrent, hasPlayableURL: hasURL,
+                    hasOwnEpisodeResolver: hasOwnEpisodeResolver))
+        }
+        return eligible(labeledBest) ? labeledBest : candidates.first(where: eligible)
+    }
+
     /// Pick the stream shape for an explicit episode engine load. Direct streams remain unchanged even when
     /// they also carry provenance fields. A raw hash-only torrent can bind only through the concrete direct
     /// URL that native debrid actually resolved; no provider-local file offset is treated as a torrent index.
@@ -1698,6 +1743,34 @@ struct CoreStreamSourceGroup: Identifiable, Equatable, Sendable {
     let id: String
     let addon: String
     let streams: [CoreStream]
+}
+
+/// A source instance's configured identity plus its human label. Labels remain the pin/sticky contract;
+/// only `id` identifies the exact configured transport. Never display or log the potentially private id.
+struct SourceOrigin: Equatable, Sendable {
+    let id: String
+    let addon: String
+
+    /// A valid local/synthetic origin remains selectable without pretending to be a network add-on.
+    var engineBase: String? {
+        guard let url = URLComponents(string: id), let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme), let host = url.host, !host.isEmpty else { return nil }
+        return id
+    }
+
+    /// Explicit choices never infer a different instance. The exact complete stream must still belong
+    /// to the current group, and duplicate group IDs fail closed. Legacy callers without an origin may
+    /// infer only a unique full-record match. Revalidate after every asynchronous playback preparation.
+    static func current(for stream: CoreStream, clicked: SourceOrigin?,
+                        groups: [CoreStreamSourceGroup]) -> SourceOrigin? {
+        let candidates = groups.filter { group in
+            if let clicked { return group.id == clicked.id }
+            return group.streams.contains(stream)
+        }
+        guard candidates.count == 1, let group = candidates.first, !group.id.isEmpty,
+              group.streams.contains(stream), clicked == nil || clicked?.addon == group.addon else { return nil }
+        return SourceOrigin(id: group.id, addon: group.addon)
+    }
 }
 
 // MARK: discover (catalog_with_filters)

@@ -58,10 +58,10 @@ private func ordered(_ needles: [String], in source: String) -> Bool {
 /// Both menu choices must reach the current add-on-aware dispatch, with the legacy engine callback
 /// retained as a compatibility fallback. Inspect the actual bridge instead of a retired direct call.
 private func iosSourceChoicesWired(menu: String, dispatch: String) -> Bool {
-    menu.contains("playSourceRow(stream, url, addon: addon, preference: .mpv)")
-        && menu.contains("playSourceRow(stream, url, addon: addon, preference: .avfoundation)")
+    menu.contains("playSourceRow(stream, url, origin: origin, preference: .mpv)")
+        && menu.contains("playSourceRow(stream, url, origin: origin, preference: .avfoundation)")
         && menu.contains("canHonorAVPlayerChoice")
-        && dispatch.contains("playWithAddon(stream, url, addon, preference)")
+        && dispatch.contains("playWithAddon(stream, url, origin, preference)")
         && dispatch.contains("playWithEngine(stream, url, preference)")
 }
 
@@ -223,7 +223,7 @@ private enum AppleSourcePlayerChoiceContractTests {
                   !iosSourceChoicesWired(menu: iosMenu.replacingOccurrences(of: needle, with: "REMOVED"),
                                         dispatch: iosDispatch))
         }
-        for needle in ["playWithAddon(stream, url, addon, preference)", "playWithEngine(stream, url, preference)"] {
+        for needle in ["playWithAddon(stream, url, origin, preference)", "playWithEngine(stream, url, preference)"] {
             check("iOS dispatch contract rejects removal of \(needle)",
                   !iosSourceChoicesWired(menu: iosMenu,
                                         dispatch: iosDispatch.replacingOccurrences(of: needle, with: "REMOVED")))

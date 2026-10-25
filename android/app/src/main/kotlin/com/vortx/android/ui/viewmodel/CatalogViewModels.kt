@@ -72,6 +72,7 @@ import com.vortx.android.ui.UiState
 import com.vortx.android.ui.randompick.RandomLibraryFilter
 import com.vortx.android.ui.randompick.RandomLibraryPickModel
 import com.vortx.android.ui.randompick.RandomLibraryPickProfile
+import com.vortx.android.ui.randompick.RandomPickPolicy
 import com.vortx.android.ui.search.isSearchQueryEligible
 import com.vortx.android.ui.search.searchSuggestionTitles
 import kotlinx.coroutines.CancellationException
@@ -257,6 +258,7 @@ class HomeViewModel internal constructor(
     private val pendingContinueWatchingDismissals = linkedSetOf<ContinueWatchingDismissal>()
     private val continueWatchingRollbacks = mutableMapOf<ContinueWatchingDismissal, ContinueWatchingRollback>()
     private var renderedOwner: ContinueWatchingOwner? = null
+    private var lastHomeSurprise: Pair<ContinueWatchingOwner, String>? = null
     private var latestAuthoritativeRows: List<Catalog>? = null
     // For You: rows from the profile's interests and smart collections pinned to Home (Apple parity).
     private var forYouCatalogs: List<Catalog> = emptyList()
@@ -689,6 +691,30 @@ class HomeViewModel internal constructor(
             com.vortx.android.home.continueWatchingPermitIsCurrent(captured, currentContinueWatchingPermit(), renderedOwner,
                 token, continueWatchingPermitToken) && acceptedContinueWatchingPermit == captured
         }
+    }
+
+    /** Explicit Home choice: use loaded rows only, then re-admit that one title at the native boundary.
+     * This opens ordinary Detail; it cannot resolve a source or start playback. Runs on the UI caller.
+     */
+    internal fun pickHomeSurprise(nextInt: (Int) -> Int = kotlin.random.Random.Default::nextInt): MetaItem? {
+        val store = ProfileStore.sharedOrNull() ?: return null
+        val profile = store.active ?: return null
+        if (store.needsPicker || activeProfileId() != profile.id) return null
+        val owner = renderedOwner ?: return null
+        if (owner.profileId != profile.id) return null
+        val published = _state.value as? UiState.Success ?: return null
+        val candidates = RandomPickPolicy.homeCandidates(published.data)
+        val previous = lastHomeSurprise?.takeIf { it.first == owner }?.second
+        val chosen = RandomPickPolicy.pick(candidates, previous, { "${it.type.id}:${it.id}" }, nextInt) ?: return null
+        val row = published.data.firstOrNull { chosen in it.items } ?: return null
+        // Native admission checks account/profile/revision and parental policy under the Session lock.
+        // Re-admit one exact item, not every loaded rail; never fetch or synthesize certification.
+        val admitted = repo.admitClientHomeRows(listOf(row.copy(items = listOf(chosen))), owner)
+            .getOrNull()?.singleOrNull()?.items?.singleOrNull() ?: return null
+        if (admitted != chosen || _state.value != published || renderedOwner != owner ||
+            store.needsPicker || store.active != profile || activeProfileId() != profile.id) return null
+        lastHomeSurprise = owner to "${chosen.type.id}:${chosen.id}"
+        return chosen
     }
 
     /** Home re-entry is a read-only refresh; provider models retain their activities-first throttle. */
