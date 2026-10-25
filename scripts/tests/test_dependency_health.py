@@ -952,7 +952,7 @@ class NativeDependencyAdapterTests(unittest.TestCase):
                                "kind": "github-action"}], "coverage_gaps": []},
                 prior, 1,
             )
-        fetch.assert_called_once_with("github", "public/example")
+        fetch.assert_called_once_with("github", "public/example", previous=prior["releases"]["github:public/example"])
         self.assertEqual(fresh_report["releases"]["github:public/example"]["vortx_identity_aliases"],
                          ["github:PUBLIC/EXAMPLE"])
         self.assertEqual(fresh_report["releases"]["github:public/example"]["vortx_alias_observed_at"],
