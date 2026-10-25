@@ -712,10 +712,145 @@ index 8b268af..7a075b0 100644
  -endif
  +#endif
 diff --git a/Sources/BuildScripts/XCFrameworkBuild/base.swift b/Sources/BuildScripts/XCFrameworkBuild/base.swift
-index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..9edb77249f90be56a82183a6204b2a1c374fb035 100644
+index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..a5b87d6b0d9dd5062afb536a2004f10bfd70ac6d 100644
 --- a/Sources/BuildScripts/XCFrameworkBuild/base.swift
 +++ b/Sources/BuildScripts/XCFrameworkBuild/base.swift
-@@ -319,7 +319,6 @@
+@@ -87,6 +87,124 @@
+         }
+ 
+         return options
++    }
++}
++
++enum SDKSystemMetadata {
++    static func fail(_ message: String) -> NSError {
++        NSError(domain: "VortX.SDKSystemMetadata", code: 1,
++                userInfo: [NSLocalizedDescriptionKey: message])
++    }
++
++    private static func attributes(_ url: URL) throws -> [FileAttributeKey: Any]? {
++        do {
++            return try FileManager.default.attributesOfItem(atPath: url.path)
++        } catch let error as NSError where error.domain == NSCocoaErrorDomain &&
++            (error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError) {
++            return nil
++        }
++    }
++
++    private static func realDirectory(_ url: URL) throws {
++        guard try attributes(url)?[.type] as? FileAttributeType == .typeDirectory,
++              url.standardizedFileURL.path == url.resolvingSymlinksInPath().path else {
++            throw fail("Expected a real target build/SDK directory")
++        }
++    }
++
++    private static func sdkData(_ path: String, root: URL, limit: Int) throws -> Data {
++        let resolved = root.appendingPathComponent(path).resolvingSymlinksInPath()
++        guard resolved.path.hasPrefix(root.path + "/"),
++              let info = try attributes(resolved), info[.type] as? FileAttributeType == .typeRegular,
++              let size = info[.size] as? NSNumber, size.intValue > 0, size.intValue <= limit else {
++            throw fail("Missing or unsafe target SDK input: \(path)")
++        }
++        let bytes = try Data(contentsOf: resolved)
++        guard bytes.count == size.intValue else { throw fail("Target SDK input changed while reading") }
++        return bytes
++    }
++
++    private static func version(_ macro: String, header: Data) throws -> String {
++        guard let text = String(data: header, encoding: .utf8) else { throw fail("Unreadable target SDK header") }
++        let name = NSRegularExpression.escapedPattern(for: macro)
++        let definitions = text.components(separatedBy: .newlines).filter {
++            $0.range(of: "^[ \\t]*#[ \\t]*define[ \\t]+" + name + "\\b", options: .regularExpression) != nil
++        }
++        let expression = try NSRegularExpression(pattern: "^[ \\t]*#[ \\t]*define[ \\t]+" + name + #"[ \t]+"([0-9]{1,3}(?:\.[0-9]{1,3}){1,3})"[ \t]*$"#)
++        guard definitions.count == 1, let line = definitions.first,
++              let match = expression.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
++              let range = Range(match.range(at: 1), in: line) else {
++            throw fail("Target SDK must declare one bounded numeric \(macro)")
++        }
++        return String(line[range])
++    }
++
++    private static func validateStub(_ path: String, installName: String, root: URL) throws {
++        guard let stub = String(data: try sdkData(path, root: root, limit: 1048576), encoding: .utf8),
++              stub.hasPrefix("--- !tapi-tbd") else { throw fail("Target SDK linker stub is unavailable") }
++        let name = NSRegularExpression.escapedPattern(for: installName)
++        let pattern = "(?m)^install-name:[ \\t]+(?:'" + name + "'|\"" + name + "\"|" + name + ")[ \\t]*$"
++        guard stub.range(of: pattern, options: .regularExpression) != nil else {
++            throw fail("Unexpected target SDK linker stub identity")
++        }
++    }
++
++    static func prepare(sdkRoot: URL, buildRoot: URL) throws -> URL {
++        guard sdkRoot.isFileURL, buildRoot.isFileURL else { throw fail("Target SDK metadata requires file URLs") }
++        let sdk = sdkRoot.resolvingSymlinksInPath().standardizedFileURL
++        guard sdk.pathExtension == "sdk", sdk.path.rangeOfCharacter(from: .controlCharacters) == nil,
++              !sdk.path.contains("$") else { throw fail("Metadata requires the selected target SDK") }
++        try realDirectory(sdk)
++        try realDirectory(buildRoot)
++        let zlibVersion = try version("ZLIB_VERSION", header: sdkData("usr/include/zlib.h", root: sdk, limit: 262144))
++        let xmlVersion = try version("LIBXML_DOTTED_VERSION", header: sdkData("usr/include/libxml2/libxml/xmlversion.h", root: sdk, limit: 262144))
++        try validateStub("usr/lib/libz.tbd", installName: "/usr/lib/libz.1.dylib", root: sdk)
++        try validateStub("usr/lib/libxml2.tbd", installName: "/usr/lib/libxml2.2.dylib", root: sdk)
++        let include = sdk.appendingPathComponent("usr/include/libxml2").path
++            .replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
++        let contents = [
++            "zlib.pc": "Name: zlib\nDescription: Target Apple SDK zlib\nVersion: \(zlibVersion)\nLibs: -lz\nCflags:\n",
++            "libxml-2.0.pc": "Name: libxml-2.0\nDescription: Target Apple SDK libxml2\nVersion: \(xmlVersion)\nLibs: -lxml2\nCflags: -I\"\(include)\"\n",
++        ].mapValues { Data($0.utf8) }
++        let metadata = buildRoot.appendingPathComponent("vortx-sdk-pkgconfig")
++        guard !metadata.path.contains(":"), metadata.path.rangeOfCharacter(from: .controlCharacters) == nil else {
++            throw fail("Target SDK metadata path cannot be represented in pkg-config LIBDIR")
++        }
++        let existing = try attributes(metadata)
++        if existing != nil {
++            try realDirectory(metadata)
++            let names = Set(try FileManager.default.contentsOfDirectory(atPath: metadata.path))
++            guard names.isSubset(of: Set(contents.keys)) else { throw fail("Refusing unknown target SDK metadata files") }
++        }
++        // Validate BOTH existing files before creating or writing either one.
++        var missing: [String] = []
++        for name in contents.keys.sorted() {
++            let destination = metadata.appendingPathComponent(name)
++            let bytes = contents[name]!
++            if let info = try attributes(destination) {
++                guard info[.type] as? FileAttributeType == .typeRegular,
++                      let size = info[.size] as? NSNumber, size.intValue == bytes.count,
++                      try Data(contentsOf: destination) == bytes else {
++                    throw fail("Refusing changed existing target SDK metadata: \(name)")
++                }
++            } else {
++                missing.append(name)
++            }
++        }
++        if existing == nil { try FileManager.default.createDirectory(at: metadata, withIntermediateDirectories: false) }
++        for name in missing {
++            try contents[name]!.write(to: metadata.appendingPathComponent(name), options: .withoutOverwriting)
++        }
++        return metadata
++    }
++
++    static func append(to environment: inout [String: String], sdkRoot: URL, buildRoot: URL) throws {
++        guard let target = environment["PKG_CONFIG_LIBDIR"], !target.isEmpty,
++              !target.components(separatedBy: ":").contains(""), environment["PKG_CONFIG_PATH"] == "" else {
++            throw fail("SDK metadata requires explicit target-only pkg-config roots")
++        }
++        let metadata = try prepare(sdkRoot: sdkRoot, buildRoot: buildRoot)
++        environment["PKG_CONFIG_LIBDIR"] = target + ":" + metadata.path
+     }
+ }
+ 
+@@ -228,7 +346,8 @@
+     func build(platform: PlatformType, arch: ArchType) throws {
+         let buildURL = scratch(platform: platform, arch: arch)
+         try? FileManager.default.createDirectory(at: buildURL, withIntermediateDirectories: true, attributes: nil)
+-        let environ = environment(platform: platform, arch: arch)
++        var environ = environment(platform: platform, arch: arch)
++        try SDKSystemMetadata.append(to: &environ, sdkRoot: URL(fileURLWithPath: platform.isysroot), buildRoot: buildURL)
+         if FileManager.default.fileExists(atPath: (directoryURL + "meson.build").path) {
+             if Utility.shell("which meson") == nil {
+                 Utility.shell("brew install meson")
+@@ -319,7 +438,6 @@
          let cFlags = cFlags(platform: platform, arch: arch).joined(separator: " ")
          let ldFlags = ldFlags(platform: platform, arch: arch).joined(separator: " ")
          let pkgConfigPath = platform.pkgConfigPath(arch: arch)
@@ -723,7 +858,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..9edb77249f90be56a82183a6204b2a1c
          return [
              "LC_CTYPE": "C",
              "CC": "/usr/bin/clang",
-@@ -333,7 +332,9 @@
+@@ -333,7 +451,9 @@
              "CXXFLAGS": cFlags,
              "ASMFLAGS": cFlags,
              "LDFLAGS": ldFlags,
@@ -734,7 +869,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..9edb77249f90be56a82183a6204b2a1c
              "PATH": BaseBuild.defaultPath,
          ]
      }
-@@ -959,6 +960,9 @@
+@@ -959,6 +1079,9 @@
  
  class ZipBaseBuild : BaseBuild {
  
@@ -744,7 +879,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..9edb77249f90be56a82183a6204b2a1c
      override func beforeBuild() throws {
          // unzip builded static library
          let outputFileName = "\(library.rawValue).zip"
-@@ -972,7 +976,10 @@
+@@ -972,7 +1095,10 @@
  
          if !FileManager.default.fileExists(atPath: outputFile.path) {
              try! Utility.launch(path: "wget", arguments: ["-O", outputFileName, library.url], currentDirectoryURL: directoryURL)
@@ -755,7 +890,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..9edb77249f90be56a82183a6204b2a1c
          }
      }
  
-@@ -1245,14 +1252,13 @@
+@@ -1245,14 +1371,13 @@
      }
  
      func pkgConfigPath(arch: ArchType) -> String {
@@ -766,10 +901,11 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..9edb77249f90be56a82183a6204b2a1c
 -            if FileManager.default.fileExists(atPath: path.path) {
 -                pkgConfigPath += "\(path.path)/lib/pkgconfig:"
 -            }
+-        }
+-        return pkgConfigPath
 +            // Include even absent target roots so LIBDIR is explicit and never empty.
 +            pkgConfigPaths.append("\(path.path)/lib/pkgconfig")
-         }
--        return pkgConfigPath
++        }
 +        return pkgConfigPaths.joined(separator: ":")
      }
  }

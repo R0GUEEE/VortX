@@ -257,6 +257,17 @@ sed -n '/^    func pkgConfigPath(arch: ArchType) -> String {/,/^    }/p' \
   "$PATCHED_BASE" >"$PKG_CONFIG_BLOCK"
 [ -s "$ENVIRONMENT_BLOCK" ] || fail "could not extract production BaseBuild.environment"
 [ -s "$PKG_CONFIG_BLOCK" ] || fail "could not extract production PlatformType.pkgConfigPath"
+SDK_SYSTEM_BLOCK="$FIXTURE/sdk-system-production.swift"
+sed -n '/^enum SDKSystemMetadata {/,/^class BaseBuild {/p' "$PATCHED_BASE" | sed '$d' >"$SDK_SYSTEM_BLOCK"
+[ -s "$SDK_SYSTEM_BLOCK" ] || fail "could not extract production SDKSystemMetadata"
+base_build="$(sed -n '/^    func build(platform: PlatformType, arch: ArchType) throws {/,/^    }/p' "$PATCHED_BASE")"
+grep -Fq 'var environ = environment(platform: platform, arch: arch)' <<<"$base_build" ||
+  fail "actual BaseBuild.build must retain a mutable production environment"
+grep -Fq 'try SDKSystemMetadata.append(to: &environ, sdkRoot: URL(fileURLWithPath: platform.isysroot), buildRoot: buildURL)' <<<"$base_build" ||
+  fail "actual BaseBuild.build must append selected SDK metadata before launching its tools"
+sdk_append_line="$(grep -nF 'try SDKSystemMetadata.append(' <<<"$base_build" | cut -d: -f1)"
+first_tool_line="$(grep -nF 'Utility.' <<<"$base_build" | head -1 | cut -d: -f1)"
+[ "$sdk_append_line" -lt "$first_tool_line" ] || fail "SDK metadata must precede the actual build tool calls"
 
 SWIFT_PATCH_DIR="$FIXTURE/Sources/BuildScripts/patch/fixture"
 mkdir -p "$SWIFT_PATCH_DIR"
@@ -331,6 +342,7 @@ SWIFT_HELPER="$FIXTURE/spikegit-fixture.swift"
     ''
   sed -n '1,$p' "$SPIKE_BLOCK"
   cat "$SMB_METADATA_BLOCK"
+  cat "$SDK_SYSTEM_BLOCK"
   cat <<'SWIFT_TYPES'
 
 enum ArchType: String { case arm64, x86_64, arm64e }
@@ -603,11 +615,163 @@ func runSmbMetadataContract(root: URL) throws {
     print("SMB METADATA POLICY FIXTURE PASS (synthetic fingerprints; not physical ZIP/payload validation)")
 }
 
+func runSDKSystemContract(executable: String, root: URL) throws {
+    let manager = FileManager.default
+    try manager.createDirectory(at: root, withIntermediateDirectories: true)
+    try requireFixture(manager.changeCurrentDirectoryPath(root.path), "could not enter SDK fixture")
+    let header = "#define ZLIB_VERSION \"1.2.13\"\n"
+    let xmlHeader = "#define LIBXML_DOTTED_VERSION \"2.9.13\"\n"
+    let stub = "--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\ninstall-name: '/usr/lib/libz.1.dylib'\n...\n"
+    func tree(_ name: String, header text: String? = nil, stub linker: String? = nil) throws -> (URL, URL) {
+        let sdk = root.appendingPathComponent(name + ".sdk"), build = root.appendingPathComponent(name + "-build")
+        try manager.createDirectory(at: sdk.appendingPathComponent("usr/include"), withIntermediateDirectories: true)
+        try manager.createDirectory(at: sdk.appendingPathComponent("usr/include/libxml2/libxml"), withIntermediateDirectories: true)
+        try manager.createDirectory(at: sdk.appendingPathComponent("usr/lib"), withIntermediateDirectories: true)
+        try manager.createDirectory(at: build, withIntermediateDirectories: true)
+        try (text ?? header).write(to: sdk.appendingPathComponent("usr/include/zlib.h"), atomically: true, encoding: .utf8)
+        try (linker ?? stub).write(to: sdk.appendingPathComponent("usr/lib/libz.tbd"), atomically: true, encoding: .utf8)
+        try xmlHeader.write(to: sdk.appendingPathComponent("usr/include/libxml2/libxml/xmlversion.h"), atomically: true, encoding: .utf8)
+        try stub.replacingOccurrences(of: "/usr/lib/libz.1.dylib", with: "/usr/lib/libxml2.2.dylib").write(to: sdk.appendingPathComponent("usr/lib/libxml2.tbd"), atomically: true, encoding: .utf8)
+        return (sdk, build)
+    }
+    func refused(_ name: String, _ operation: () throws -> Void) throws {
+        var rejected = false
+        do { try operation() } catch { rejected = true }
+        try requireFixture(rejected, "SDK zlib accepted " + name)
+    }
+    let (sdk, build) = try tree("valid")
+    let metadata = try SDKSystemMetadata.prepare(sdkRoot: sdk, buildRoot: build)
+    let pc = metadata.appendingPathComponent("zlib.pc")
+    let expected = "Name: zlib\nDescription: Target Apple SDK zlib\nVersion: 1.2.13\nLibs: -lz\nCflags:\n"
+    let xmlPC = metadata.appendingPathComponent("libxml-2.0.pc")
+    let expectedXML = "Name: libxml-2.0\nDescription: Target Apple SDK libxml2\nVersion: 2.9.13\nLibs: -lxml2\nCflags: -I\"\(sdk.path)/usr/include/libxml2\"\n"
+    let first = try String(contentsOf: pc, encoding: .utf8)
+    let firstXML = try String(contentsOf: xmlPC, encoding: .utf8)
+    let metadataNames = try manager.contentsOfDirectory(atPath: metadata.path).sorted()
+    try requireFixture(firstXML == expectedXML && metadataNames == ["libxml-2.0.pc", "zlib.pc"], "SDK libxml metadata or exact two-file set differs")
+    try requireFixture(metadata.path == build.appendingPathComponent("vortx-sdk-pkgconfig").path && first == expected, "SDK metadata is not the exact deterministic afterimage")
+    let repeated = try SDKSystemMetadata.prepare(sdkRoot: sdk, buildRoot: build)
+    let repeatedText = try String(contentsOf: pc, encoding: .utf8)
+    let repeatedXML = try String(contentsOf: xmlPC, encoding: .utf8)
+    try requireFixture(repeated.path == metadata.path && repeatedText == first && repeatedXML == firstXML, "SDK metadata preparation is not idempotent")
+    // The actual production dictionary must replace the Process scaffold's poison.
+    let host = root.appendingPathComponent("host")
+    try manager.createDirectory(at: host, withIntermediateDirectories: true)
+    try "Name: zlib\nDescription: Host poison\nVersion: 99.0\nLibs: -lhost_poison\n".write(to: host.appendingPathComponent("zlib.pc"), atomically: true, encoding: .utf8)
+    try "Name: libxml-2.0\nDescription: Host poison\nVersion: 99.0\nLibs: -lhost_xml_poison\n".write(to: host.appendingPathComponent("libxml-2.0.pc"), atomically: true, encoding: .utf8)
+    try writeModule("vortx-sdk-host-only", in: host)
+    try requireFixture(ProcessInfo.processInfo.environment["PKG_CONFIG_PATH"] == host.path && ProcessInfo.processInfo.environment["PKG_CONFIG_LIBDIR"] == host.path, "SDK fixture requires poisoned parent paths")
+    _ = try Utility.launch(path: executable, arguments: ["--exists", "vortx-sdk-host-only"])
+    var environment = BaseBuild().environment(platform: .tvos, arch: .arm64)
+    let existing = environment["PKG_CONFIG_LIBDIR"]!
+    try SDKSystemMetadata.append(to: &environment, sdkRoot: sdk, buildRoot: build)
+    try requireFixture(environment["PKG_CONFIG_LIBDIR"] == existing + ":" + metadata.path && environment["PKG_CONFIG_PATH"] == "", "SDK metadata must follow the unchanged target roots")
+    let paths = environment["PKG_CONFIG_LIBDIR"]!.components(separatedBy: ":")
+    try requireFixture(!paths.contains("") && !paths.contains(host.path), "SDK append introduced empty or host search roots")
+    let target = URL(fileURLWithPath: paths[0])
+    try manager.createDirectory(at: target, withIntermediateDirectories: true)
+    try "Name: freetype2\nDescription: Synthetic target transitive dependency\nVersion: 2.13.0\nRequires.private: zlib\nLibs: -lfreetype\nCflags:\n".write(to: target.appendingPathComponent("freetype2.pc"), atomically: true, encoding: .utf8)
+    try "Name: libbluray\nDescription: Synthetic target transitive dependency\nVersion: 1.0\nRequires.private: libxml-2.0 >= 2.6\nLibs: -lbluray\nCflags:\n".write(to: target.appendingPathComponent("libbluray.pc"), atomically: true, encoding: .utf8)
+    try "Name: vortx-sdk-client\nDescription: Synthetic two-SDK-row client\nVersion: 1.0\nRequires.private: zlib libxml-2.0 >= 2.6\nLibs: -lvortx_sdk_client\n".write(to: target.appendingPathComponent("vortx-sdk-client.pc"), atomically: true, encoding: .utf8)
+    let version = try Utility.launch(path: executable, arguments: ["--modversion", "zlib"], isOutput: true, environment: environment)
+    let flags = try Utility.launch(path: executable, arguments: ["--cflags", "zlib"], isOutput: true, environment: environment)
+    let libs = try Utility.launch(path: executable, arguments: ["--libs", "zlib"], isOutput: true, environment: environment)
+    let transitive = try Utility.launch(path: executable, arguments: ["--static", "--libs", "freetype2"], isOutput: true, environment: environment)
+    let xmlVersion = try Utility.launch(path: executable, arguments: ["--modversion", "libxml-2.0"], isOutput: true, environment: environment)
+    let xmlFlags = try Utility.launch(path: executable, arguments: ["--cflags", "libxml-2.0"], isOutput: true, environment: environment)
+    let bluray = try Utility.launch(path: executable, arguments: ["--static", "--libs", "libbluray"], isOutput: true, environment: environment)
+    let both = try Utility.launch(path: executable, arguments: ["--static", "--libs", "vortx-sdk-client"], isOutput: true, environment: environment)
+    try requireFixture(xmlVersion == "2.9.13" && xmlFlags.trimmingCharacters(in: .whitespacesAndNewlines) == "-I\(sdk.path)/usr/include/libxml2", "SDK libxml version/include path resolved host metadata")
+    try requireFixture(bluray.split(whereSeparator: { $0.isWhitespace }).map(String.init) == ["-lbluray", "-lxml2"], "real pkg-config did not resolve target libbluray to SDK libxml")
+    try requireFixture(both.split(whereSeparator: { $0.isWhitespace }).map(String.init) == ["-lvortx_sdk_client", "-lz", "-lxml2"], "real pkg-config did not resolve the two fixed SDK rows")
+    try requireFixture(version == "1.2.13" && flags.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && libs.trimmingCharacters(in: .whitespacesAndNewlines) == "-lz", "SDK zlib resolved host metadata or added include/library search flags")
+    try requireFixture(transitive.split(whereSeparator: { $0.isWhitespace }).map(String.init) == ["-lfreetype", "-lz"], "real pkg-config did not resolve target freetype to SDK zlib")
+    let leaked = try? Utility.launch(path: executable, arguments: ["--exists", "vortx-sdk-host-only"], environment: environment)
+    try requireFixture(leaked == nil, "poisoned host metadata leaked after SDK append")
+    try "Name: zlib\nDescription: Earlier target zlib\nVersion: 7.7.7\nLibs: -ltarget_zlib\n".write(to: target.appendingPathComponent("zlib.pc"), atomically: true, encoding: .utf8)
+    let earlier = try Utility.launch(path: executable, arguments: ["--modversion", "zlib"], isOutput: true, environment: environment)
+    try requireFixture(earlier == "7.7.7", "SDK zlib shadowed an earlier target dependency")
+    try "Name: libxml-2.0\nDescription: Earlier target libxml\nVersion: 7.7.7\nLibs: -ltarget_xml\n".write(to: target.appendingPathComponent("libxml-2.0.pc"), atomically: true, encoding: .utf8)
+    let earlierXML = try Utility.launch(path: executable, arguments: ["--modversion", "libxml-2.0"], isOutput: true, environment: environment)
+    try requireFixture(earlierXML == "7.7.7", "SDK libxml shadowed an earlier target dependency")
+    for (name, value) in [("empty", ""), ("leading", ":" + existing), ("trailing", existing + ":"), ("middle", existing + "::missing")] {
+        var invalid = environment; invalid["PKG_CONFIG_LIBDIR"] = value
+        try refused(name + " LIBDIR") { try SDKSystemMetadata.append(to: &invalid, sdkRoot: sdk, buildRoot: build) }
+    }
+    var inherited = environment; inherited["PKG_CONFIG_PATH"] = host.path
+    try refused("nonempty PKG_CONFIG_PATH") { try SDKSystemMetadata.append(to: &inherited, sdkRoot: sdk, buildRoot: build) }
+    for (name, text) in [("malformed", "#define ZLIB_VERSION \"1.2.13-host\"\n"), ("duplicate", header + header)] {
+        let (badSDK, badBuild) = try tree(name, header: text)
+        try refused(name + " version") { _ = try SDKSystemMetadata.prepare(sdkRoot: badSDK, buildRoot: badBuild) }
+    }
+    for (name, text) in [("malformed-xml", "#define LIBXML_DOTTED_VERSION \"2.9.13-host\"\n"), ("duplicate-xml", xmlHeader + xmlHeader)] {
+        let (badSDK, badBuild) = try tree(name)
+        try text.write(to: badSDK.appendingPathComponent("usr/include/libxml2/libxml/xmlversion.h"), atomically: true, encoding: .utf8)
+        try refused(name + " version") { _ = try SDKSystemMetadata.prepare(sdkRoot: badSDK, buildRoot: badBuild) }
+    }
+    for (name, missing) in [("missing-header", "usr/include/zlib.h"), ("missing-stub", "usr/lib/libz.tbd"), ("missing-xml-header", "usr/include/libxml2/libxml/xmlversion.h"), ("missing-xml-stub", "usr/lib/libxml2.tbd")] {
+        let (badSDK, badBuild) = try tree(name)
+        try manager.removeItem(at: badSDK.appendingPathComponent(missing))
+        try refused(name) { _ = try SDKSystemMetadata.prepare(sdkRoot: badSDK, buildRoot: badBuild) }
+    }
+    let (invalidSDK, invalidBuild) = try tree("invalid-stub", stub: "not a TAPI zlib stub\n")
+    try refused("invalid stub identity") { _ = try SDKSystemMetadata.prepare(sdkRoot: invalidSDK, buildRoot: invalidBuild) }
+    let (wrongSDK, wrongBuild) = try tree("wrong-stub", stub: stub.replacingOccurrences(of: "/usr/lib/libz.1.dylib", with: "/usr/lib/libhost.dylib"))
+    try refused("wrong TAPI install name") { _ = try SDKSystemMetadata.prepare(sdkRoot: wrongSDK, buildRoot: wrongBuild) }
+    let (linkedSDK, linkedBuild) = try tree("linked-stub")
+    try manager.moveItem(at: linkedSDK.appendingPathComponent("usr/lib/libz.tbd"), to: linkedSDK.appendingPathComponent("usr/lib/libz.1.tbd"))
+    try manager.createSymbolicLink(atPath: linkedSDK.appendingPathComponent("usr/lib/libz.tbd").path, withDestinationPath: "libz.1.tbd")
+    let linkedMetadata = try SDKSystemMetadata.prepare(sdkRoot: linkedSDK, buildRoot: linkedBuild)
+    let (xmlLinkedSDK, xmlLinkedBuild) = try tree("linked-xml-stub")
+    try manager.moveItem(at: xmlLinkedSDK.appendingPathComponent("usr/lib/libxml2.tbd"), to: xmlLinkedSDK.appendingPathComponent("usr/lib/libxml2.2.tbd"))
+    try manager.createSymbolicLink(atPath: xmlLinkedSDK.appendingPathComponent("usr/lib/libxml2.tbd").path, withDestinationPath: "libxml2.2.tbd")
+    _ = try SDKSystemMetadata.prepare(sdkRoot: xmlLinkedSDK, buildRoot: xmlLinkedBuild)
+    let (escapeSDK, escapeBuild) = try tree("escaping-stub")
+    let outside = root.appendingPathComponent("outside.tbd"); try stub.write(to: outside, atomically: true, encoding: .utf8)
+    try manager.removeItem(at: escapeSDK.appendingPathComponent("usr/lib/libz.tbd"))
+    try manager.createSymbolicLink(at: escapeSDK.appendingPathComponent("usr/lib/libz.tbd"), withDestinationURL: outside)
+    try refused("escaping stub symlink") { _ = try SDKSystemMetadata.prepare(sdkRoot: escapeSDK, buildRoot: escapeBuild) }
+    let keptOutside = try String(contentsOf: outside, encoding: .utf8)
+    try requireFixture(keptOutside == stub, "escaping-stub refusal changed its target")
+    let (escapeXML, escapeXMLBuild) = try tree("escaping-xml-stub")
+    try manager.removeItem(at: escapeXML.appendingPathComponent("usr/lib/libxml2.tbd"))
+    try manager.createSymbolicLink(at: escapeXML.appendingPathComponent("usr/lib/libxml2.tbd"), withDestinationURL: xmlLinkedSDK.appendingPathComponent("usr/lib/libxml2.2.tbd"))
+    try refused("escaping libxml stub symlink") { _ = try SDKSystemMetadata.prepare(sdkRoot: escapeXML, buildRoot: escapeXMLBuild) }
+    for name in ["zlib.pc", "libxml-2.0.pc"] {
+        let (badSDK, badBuild) = try tree("prevalidate-" + name)
+        let directory = badBuild.appendingPathComponent("vortx-sdk-pkgconfig")
+        try manager.createDirectory(at: directory, withIntermediateDirectories: false)
+        let unknownPC = directory.appendingPathComponent(name)
+        try "unknown\n".write(to: unknownPC, atomically: true, encoding: .utf8)
+        try refused("unknown " + name + " before any other row write") { _ = try SDKSystemMetadata.prepare(sdkRoot: badSDK, buildRoot: badBuild) }
+        let names = try manager.contentsOfDirectory(atPath: directory.path)
+        let kept = try String(contentsOf: unknownPC, encoding: .utf8)
+        try requireFixture(names == [name] && kept == "unknown\n", "refusal wrote the missing row or changed unknown metadata")
+    }
+    try "unknown metadata\n".write(to: pc, atomically: true, encoding: .utf8)
+    try refused("unknown existing PC") { _ = try SDKSystemMetadata.prepare(sdkRoot: sdk, buildRoot: build) }
+    let unknown = try String(contentsOf: pc, encoding: .utf8)
+    try requireFixture(unknown == "unknown metadata\n", "unknown PC was overwritten")
+    try expected.write(to: pc, atomically: true, encoding: .utf8)
+    let extra = metadata.appendingPathComponent("keep"); try "keep\n".write(to: extra, atomically: true, encoding: .utf8)
+    try refused("extra metadata entry") { _ = try SDKSystemMetadata.prepare(sdkRoot: sdk, buildRoot: build) }
+    let kept = try String(contentsOf: extra, encoding: .utf8)
+    try requireFixture(kept == "keep\n", "unknown metadata entry was changed")
+    let (_, aliasBuild) = try tree("symlink-dir")
+    try manager.createSymbolicLink(at: aliasBuild.appendingPathComponent("vortx-sdk-pkgconfig"), withDestinationURL: linkedMetadata)
+    try refused("symlink metadata directory") { _ = try SDKSystemMetadata.prepare(sdkRoot: sdk, buildRoot: aliasBuild) }
+    let alias = try manager.destinationOfSymbolicLink(atPath: aliasBuild.appendingPathComponent("vortx-sdk-pkgconfig").path)
+    try requireFixture(alias == linkedMetadata.path, "refused metadata symlink was changed")
+    print("SDK SYSTEM FIXTURE PASS (synthetic SDK zlib/libxml metadata and real pkg-config; no native build/link proof)")
+}
+
 do {
     if CommandLine.arguments[1] == "--target-isolation" {
         try runTargetIsolation(executable: CommandLine.arguments[2], root: URL(fileURLWithPath: CommandLine.arguments[3]))
     } else if CommandLine.arguments[1] == "--smb-metadata-contract" {
         try runSmbMetadataContract(root: URL(fileURLWithPath: CommandLine.arguments[2]))
+    } else if CommandLine.arguments[1] == "--sdk-zlib-contract" {
+        try runSDKSystemContract(executable: CommandLine.arguments[2], root: URL(fileURLWithPath: CommandLine.arguments[3]))
     } else {
         let expectedSHA = CommandLine.arguments[1]
         let checkout = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -624,6 +788,11 @@ SWIFT_ISOLATION
 
 SWIFT_BINARY="$FIXTURE/spikegit-fixture"
 swiftc -j 1 -num-threads 1 "$SWIFT_HELPER" -o "$SWIFT_BINARY" || fail "actual patched SpikeGit fixture did not compile"
+
+PKG_CONFIG_PATH="$FIXTURE/sdk-zlib-contract/host" PKG_CONFIG_LIBDIR="$FIXTURE/sdk-zlib-contract/host" \
+  "$SWIFT_BINARY" --sdk-zlib-contract "$PKG_CONFIG_EXECUTABLE" "$FIXTURE/sdk-zlib-contract" \
+  >"$FIXTURE/sdk-zlib-contract.log" 2>&1 ||
+  fail "compiled production SDK zlib fixture failed: $(cat "$FIXTURE/sdk-zlib-contract.log")"
 
 # Pure-policy coverage uses synthetic observations of immutable production pins;
 # this invocation does not hash or validate the physical wrapper ZIP/payloads.
