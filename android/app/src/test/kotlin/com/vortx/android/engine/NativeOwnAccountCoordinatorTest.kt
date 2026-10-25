@@ -162,6 +162,7 @@ class NativeOwnAccountCoordinatorTest {
         try {
             assertFalse(accounts.applyDocument(account, document()) { true })
             val model = NativeStreamingAccountViewModel(accounts).also { models.put("profile-sign-in", it) }
+            withTimeout(5_000) { model.state.first { !it.loading } }
             assertFalse(model.state.value.mounted)
             assertEquals(listOf(child.id), model.state.value.profiles.map { it.id })
             model.open(child.id); assertEquals(child.id, model.state.value.formProfile!!.id)
@@ -180,12 +181,16 @@ class NativeOwnAccountCoordinatorTest {
         try {
             assertFalse(accounts.applyDocument(account, document()) { true })
             val model = NativeStreamingAccountViewModel(accounts).also { models.put("profile-sign-in", it) }
+            withTimeout(5_000) { model.state.first { !it.loading } }
             model.open(child.id)
             assertFalse(accounts.applyDocument(account, document()) { true })
+            // Replaced authenticated setup retires the original form/target before any new input.
+            // Await that actual publication; submitting through the cleared target must be a no-op.
+            withTimeout(5_000) { model.state.first { !it.loading && !it.busy && it.formProfile == null } }
             model.submit("fake@example.invalid", "fake-password")
-            val state = withTimeout(5_000) { model.state.first { !it.busy && it.message != null } }
-            assertFalse(state.mounted); assertNotNull(state.formProfile)
-            assertTrue(journal.values.isEmpty()); assertNull(store.value)
+            val state = model.state.value
+            assertFalse(state.mounted); assertFalse(state.busy); assertNull(state.formProfile)
+            assertTrue(journal.values.isEmpty()); assertNull(store.value); assertNull(store.locator)
             assertFalse(state.toString().contains("fake-password")); assertFalse(state.toString().contains("fake@example.invalid"))
             model.close(); assertNull(model.state.value.formProfile)
         } finally { models.clear(); accounts.retire(); Dispatchers.resetMain() }
@@ -199,6 +204,7 @@ class NativeOwnAccountCoordinatorTest {
             original.getJSONObject("vortx").getJSONArray("roster").getJSONObject(1).put("pin", UserProfile.pinHash("1234", child.id))
             assertFalse(accounts.applyDocument(account, original) { true })
             val model = NativeStreamingAccountViewModel(accounts).also { models.put("profile-sign-in", it) }
+            withTimeout(5_000) { model.state.first { !it.loading } }
             val beforePin = requireNotNull(model.prepare(child.id))
             assertEquals(UserProfile.pinHash("1234", child.id), beforePin.profile.pin)
             val replacement = document()
@@ -218,6 +224,7 @@ class NativeOwnAccountCoordinatorTest {
             assertTrue(accounts.signInStreaming(accounts.captureStreamingTarget(child.id), "fake@example.invalid", "fake-password"))
             val access = NativeProfileAccess { accounts.session() }; access.select(child.id)
             val model = NativeStreamingAccountViewModel(accounts).also { models.put("profile-sign-in", it) }
+            withTimeout(5_000) { model.state.first { !it.loading } }
             val original = access.read().profiles.single { it.id == child.id }
             val editor = requireNotNull(model.captureEditor(original, false))
             // Same UID relink still rotates immutable binding txn and must invalidate an old editor.
@@ -237,7 +244,10 @@ class NativeOwnAccountCoordinatorTest {
             assertFalse(model.commitEditor(switching) { callback = true; access.select(owner.id) })
             assertFalse(callback) // Same account/profile values after reopen do not revive old PIN admission.
             access.save(access.read().profiles.single { it.id == child.id }.copy(name = "Remote update"), false)
-            assertEquals("Remote update", model.state.value.profiles.single { it.id == child.id }.name)
+            val refreshed = withTimeout(5_000) { model.state.first { state ->
+                state.profiles.singleOrNull { it.id == child.id }?.name == "Remote update"
+            } }
+            assertEquals("Remote update", refreshed.profiles.single { it.id == child.id }.name)
         } finally { models.clear(); accounts.retire(); Dispatchers.resetMain() }
     }
 
@@ -302,5 +312,78 @@ class NativeOwnAccountCoordinatorTest {
             assertTrue(accounts.reopenCheckpoint(account) { true })
             auth.refresh(); assertEquals(com.vortx.android.model.AuthState.SignedOut, auth.authState.value)
         } finally { scope.cancel(); accounts.retire() }
+    }
+
+    @Test fun `picker snapshot preserves three views and publication never waits for native Session`() = runBlocking {
+        val accounts = coordinator(Store(), Journal())
+        try {
+            assertFalse(accounts.applyDocument(account, document()) { true })
+            assertTrue(accounts.signInStreaming(accounts.captureStreamingTarget(child.id), "fake@example.invalid", "fake-password"))
+            val snapshot = accounts.captureStreamingPresentation()
+            val projection = NativeProfileAccess { accounts.session() }.read()
+            assertEquals(projection, snapshot.projection)
+            assertEquals(accounts.streamingProfiles(), snapshot.streaming)
+            assertEquals(accounts.migrationStatus(), snapshot.migration)
+            val session = accounts.session()
+            val held = java.util.concurrent.CountDownLatch(1)
+            val release = java.util.concurrent.CountDownLatch(1)
+            val worker = Thread {
+                synchronized(session) { held.countDown(); release.await() }
+            }
+            val completed = java.util.concurrent.CountDownLatch(1)
+            val published = java.util.concurrent.atomic.AtomicInteger()
+            val result = java.util.concurrent.atomic.AtomicReference<Result<Boolean>>()
+            val publisher = Thread {
+                try { result.set(runCatching { snapshot.publishIfCurrent { published.incrementAndGet() } }) }
+                finally { completed.countDown() }
+            }
+            worker.start()
+            try {
+                assertTrue(held.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                publisher.start()
+                // Correctness ordering, not a latency threshold: publication must complete while
+                // Session remains held; only the finally block can release the native monitor.
+                assertTrue("Publication waited for native Session", completed.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                assertEquals(1L, release.count)
+                assertTrue(requireNotNull(result.get()).getOrThrow())
+                assertEquals(1, published.get())
+            } finally {
+                release.countDown(); worker.join(5_000)
+                if (publisher.state != Thread.State.NEW) publisher.join(5_000)
+                assertFalse(worker.isAlive); assertFalse(publisher.isAlive)
+            }
+        } finally { accounts.retire() }
+    }
+
+    @Test fun `picker snapshot rejects same mount profile update and retired mount`() = runBlocking {
+        val accounts = coordinator(Store(), Journal())
+        try {
+            assertFalse(accounts.applyDocument(account, document()) { true })
+            assertTrue(accounts.signInStreaming(accounts.captureStreamingTarget(child.id), "fake@example.invalid", "fake-password"))
+            val stale = accounts.captureStreamingPresentation()
+            val access = NativeProfileAccess { accounts.session() }
+            val original = access.read().profiles.single { it.id == child.id }
+            access.save(original.copy(name = "Renamed"), false)
+            var published = 0
+            assertFalse(stale.publishIfCurrent { published++ })
+            val retired = accounts.captureStreamingPresentation()
+            accounts.retire()
+            assertFalse(retired.publishIfCurrent { published++ })
+            assertEquals(0, published)
+        } finally { accounts.retire() }
+    }
+
+    @Test fun `picker snapshot rejects replaced pending setup and changed empty epoch`() = runBlocking {
+        val accounts = coordinator(Store(), Journal())
+        try {
+            val empty = accounts.captureStreamingPresentation()
+            assertFalse(accounts.applyDocument(account, document()) { true })
+            var published = 0
+            assertFalse(empty.publishIfCurrent { published++ })
+            val setup = accounts.captureStreamingPresentation()
+            assertFalse(accounts.applyDocument(account, document()) { true })
+            assertFalse(setup.publishIfCurrent { published++ })
+            assertEquals(0, published)
+        } finally { accounts.retire() }
     }
 }
