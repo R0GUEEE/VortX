@@ -37,11 +37,28 @@ private final class PublicationRecorder: Sendable {
     var legacyEvents: [[String]] { state.withLock { $0.legacy } }
 }
 
+// Synthetic kernel inventory is distinct from the filtered worker registry below.
+// Actual management selection/projection helpers are extracted by the runner.
+private enum ManagementFixture {
+    static let visible: VortxJSON = .object([
+        "transportUrl": .string("https://fixture.invalid/manifest.json"),
+        "manifest": .object(["id": .string("fixture")])])
+    static let hidden: VortxJSON = .object([
+        "transportUrl": .string("https://fixture.invalid/disabled/manifest.json"),
+        "manifest": .object(["id": .string("disabled-fixture"),
+            "opaque": .object(["preserved": .array([.bool(true), .unsigned(UInt64.max)])])])])
+    static let inventory = [visible, hidden]
+    static let expected: VortxJSON = .object(["profile": .object(["addons": .array(inventory)])])
+}
+private struct FixtureProjectionScope { let ownerProfileID = "owner" }
+private struct FixtureProjectionSession { let scope = FixtureProjectionScope() }
+
 private final class CurrentProjection {
     private let lock = VortxNativeFacadeLock()
     private let registry: [FixtureAddon] = [.init(transportUrl: "https://fixture.invalid/manifest.json", manifest: .object(["id": .string("fixture")]))]
-    private static let presentationFields: Set<String> = ["ctx", "board", "search", "discover",
-        "library", "meta_details", "local_search", "continue_watching_preview"]
+    // PRODUCTION_PRESENTATION_FIELDS
+    private let session = FixtureProjectionSession()
+    private let addonInventories: [String: [VortxJSON]] = ["owner": ManagementFixture.inventory]
     private let sourceID = UUID()
     private var changeSequence: UInt64 = 0
     private var latestChangeSequence: [String: UInt64] = [:]
@@ -93,6 +110,7 @@ private final class CurrentProjection {
                                         "unknownFixtureField": .string("retained")])], field: "meta_details", ticket: ticket)
         return values["meta_details"]
     }
+    // PRODUCTION_CURRENT_MANAGEMENT
     // PRODUCTION_CURRENT
     // PRODUCTION_CURRENT_PUBLICATION
 }
@@ -119,6 +137,18 @@ private final class BaselineProjection {
     static func check(_ condition: Bool, _ message: String) {
         guard condition else { print("FAIL " + message); exit(1) }
     }
+    // The old oracle predates only this additive presentation field. Require the
+    // new field's exact complete inventory and filtered-worker distinction before
+    // comparing every pre-existing output field against that unchanged oracle.
+    static func baselineEquivalentFields(_ value: VortxJSON) -> VortxJSON {
+        check(value["addon_management"] == ManagementFixture.expected,
+              "management projection preserves every acknowledged descriptor and opaque field")
+        check(value["ctx"]?["profile"]?["addons"] == .array([ManagementFixture.visible]),
+              "disabled management descriptor stays out of the worker registry")
+        guard case .object(var fields) = value else { check(false, "state fields are an object"); return value }
+        fields.removeValue(forKey: "addon_management")
+        return .object(fields)
+    }
     static func saved(_ id: String, _ type: String = "movie", name: String? = nil) -> VortxJSON {
         .object(["kind": .string("standard"), "id": .string(id), "type": .string(type), "name": .string(name ?? id), "poster": .null])
     }
@@ -129,6 +159,7 @@ private final class BaselineProjection {
     }
     static func state(_ saved: [VortxJSON], removals: [String: VortxJSON] = [:]) -> VortxJSON {
         .object(["activeProfileId": .string("owner"),
+                 "roster": .object(["profiles": .object(["owner": .object(["addons": .string("own")])])]),
                  "libraries": .object(["owner": .object(["items": .array(saved)])]),
                  "nativeSync": .object(["libraries": .object(["owner": .object(["records": .object(removals)])])])])
     }
@@ -176,7 +207,7 @@ private final class BaselineProjection {
                     let current = CurrentProjection(playback: playback, request: req, detailID: detail)
                     let baseline = BaselineProjection(playback: playback, request: req, detailID: detail)
                     let got = try current.fields(document), want = try baseline.fields(document)
-                    check(got == want, "full state fields differ: " + sort + "/" + (type ?? "all") + "/" + detail)
+                    check(baselineEquivalentFields(got) == want, "baseline-equivalent state fields differ: " + sort + "/" + (type ?? "all") + "/" + detail)
                     check(current.library(document, request: req) == baseline.library(document, request: req), "standalone library differs")
                     comparisons += 2
                 }
@@ -190,14 +221,14 @@ private final class BaselineProjection {
             let current = CurrentProjection(playback: playback, request: req)
             let baseline = BaselineProjection(playback: playback, request: req)
             let got = try current.fields(document), want = try baseline.fields(document)
-            check(got == want, "invalid/default request changed fallback")
+            check(baselineEquivalentFields(got) == want, "invalid/default request changed fallback")
             check(current.library(document, request: req) == baseline.library(document, request: req), "invalid request admission differs")
             comparisons += 2
         }
         for source: VortxJSON? in [nil, .object([:]), playback] {
             let current = CurrentProjection(playback: source), baseline = BaselineProjection(playback: source)
             let got = try current.fields(document), want = try baseline.fields(document)
-            check(got == want, "nil/empty playback differs")
+            check(baselineEquivalentFields(got) == want, "nil/empty playback differs")
             for query in ["", "d", "dup", "TWIN", "missing"] {
                 for limit in [0, 1, 20] {
                     check(current.search(document, query: query, limit: limit) == baseline.search(document, query: query, limit: limit), "local search differs")
@@ -251,13 +282,15 @@ private final class BaselineProjection {
         print("PASS filtered Library/resource metadata: current publish ticket, full membership, first-wins/opaque fields and acknowledged replacement")
         let recorder = PublicationRecorder()
         let receiptProjection = CurrentProjection(playback: playback, recorder: recorder)
+        _ = try receiptProjection.fields(document)
         _ = receiptProjection.resourceDetail("receipt-title")
         let firstReceipt = recorder.ownedReceipts.first
         check(recorder.ownedReceipts.count == 1 && recorder.legacyEvents == [["meta_details"]],
               "first changed projection delivers owned receipt and legacy notification")
         check(firstReceipt?.fields == ["meta_details"]
               && firstReceipt?.values["meta_details"]?["unknownFixtureField"] == .string("retained")
-              && firstReceipt?.values["native_state"] == nil,
+              && firstReceipt?.values["native_state"] == nil
+              && firstReceipt?.values["addon_management"] == ManagementFixture.expected,
               "owned receipt freezes presentation values and excludes control state")
         _ = receiptProjection.resourceDetail("receipt-title")
         check(recorder.ownedReceipts.count == 2 && recorder.legacyEvents.count == 1
@@ -279,8 +312,8 @@ private final class BaselineProjection {
         let newStart = ProcessInfo.processInfo.systemUptime
         let newFields = try CurrentProjection(playback: manyPlayback).fields(manyState)
         let newSeconds = ProcessInfo.processInfo.systemUptime - newStart
-        check(newFields == oldFields, "5k full JSON differs from exact previous production oracle")
-        print(String(format: "PASS 5k saved + 5k CW + 5k history full-JSON benchmark: baseline=%.4fs current=%.4fs speedup=%.2fx (host synthetic only)",
+        check(baselineEquivalentFields(newFields) == oldFields, "5k baseline-equivalent JSON differs from exact previous production oracle")
+        print(String(format: "PASS 5k saved + 5k CW + 5k history baseline-field benchmark: baseline=%.4fs current=%.4fs speedup=%.2fx (host synthetic only)",
                      oldSeconds, newSeconds, oldSeconds / max(newSeconds, 0.000001)))
     }
 }

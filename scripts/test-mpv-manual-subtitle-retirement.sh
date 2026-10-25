@@ -70,6 +70,8 @@ const alignmentMarkers = ['        var subtitleAlignmentGeneration: UInt64 = 0',
 const alignmentParts = alignmentMarkers.filter(marker => controller.includes(marker)).length;
 if (alignmentParts !== 0 && alignmentParts !== alignmentMarkers.length) throw new Error('Partial alignment capability');
 const supportsAlignment = alignmentParts === alignmentMarkers.length;
+const retirementTakeMarker = '    private nonisolated func takeSubtitleAlignmentRetirement() -> (';
+const supportsOwnedRetirement = supportsAlignment && controller.includes(retirementTakeMarker);
 if (ref === 'current' && !supportsAlignment) throw new Error('Current MPV alignment capability is missing');
 const stateMembers = [
   '        var context: MPVNativeHandle?',
@@ -77,6 +79,11 @@ const stateMembers = [
   '        var externalSubtitleRequestGeneration: UInt64 = 0'
 ];
 if (supportsAlignment) stateMembers.push(alignmentMarkers[0]);
+if (supportsOwnedRetirement) stateMembers.push(
+  '        var subtitleAlignmentCancellation: SubtitleEmbeddedExtractor.TimingWindowCancellation?',
+  '        var subtitleRendererRegistration: CredentialPublicationOutbox.SubtitleRendererRegistration?',
+  '        var alignedSubtitle: MPVAlignedSubtitleRecord?'
+);
 for (const member of stateMembers) once(fullState, member + '\n');
 const projectedNative = native.replace(fullState, '    struct State: Sendable {\n' + stateMembers.join('\n') + '\n    }');
 for (const marker of ['let transaction = NSRecursiveLock()', 'OSAllocatedUnfairLock(initialState: State())', 'transaction.lock(); defer { transaction.unlock() }']) {
@@ -98,13 +105,25 @@ const blocks = {
   arguments: declaration(controller, '    private nonisolated func makeCArgs(_ command: String, _ args: [String?])'),
   delay: declaration(controller, '    func setSubDelay(_ seconds: Double)'),
   alignmentAccessor: supportsAlignment ? declaration(controller, alignmentMarkers[1]) : '',
+  alignmentTake: supportsOwnedRetirement ? declaration(controller, retirementTakeMarker) : '',
   alignmentRetire: supportsAlignment ? declaration(controller, alignmentMarkers[2]) : '',
   requestIntent: declaration(controller, '        let requestGeneration = native.update')
 };
 if (supportsAlignment) {
-  if (!blocks.requestIntent.includes('$0.subtitleAlignmentGeneration &+= 1')
+  if (supportsOwnedRetirement) {
+    // Retain the literal current retirement-before-reservation prologue, not an old
+    // modeled generation increment. Nullable renderer collaborators are never mounted.
+    const add = declaration(controller, '    func addExternalSubtitle(');
+    const prefix = '        retireSubtitleAlignment()\n';
+    const start = once(add, prefix + '        let requestGeneration = native.update');
+    if (!blocks.requestIntent.includes('$0.externalSubtitleRequestGeneration &+= 1')
+        || blocks.requestIntent.includes('subtitleAlignmentGeneration')) {
+      throw new Error('Current external intent must reserve only its independent request revision');
+    }
+    blocks.requestIntent = add.slice(start, start + prefix.length) + blocks.requestIntent;
+  } else if (!blocks.requestIntent.includes('$0.subtitleAlignmentGeneration &+= 1')
       || !blocks.requestIntent.includes('$0.externalSubtitleRequestGeneration &+= 1')) {
-    throw new Error('External intent must reserve the independent revisions in one update');
+    throw new Error('Historical external intent must reserve the independent revisions in one update');
   }
   for (const marker of ['    func invalidateLoadToken()', '    func loadFile(\n', '    private func loadFile(\n']) {
     if (!declaration(controller, marker).includes('retireSubtitleAlignment()')) throw new Error('Missing load retirement: ' + marker);
@@ -120,7 +139,7 @@ inputs['app/Tests/MPVManualSubtitleRetirementTests.swift'] = sha(fixture);
 for (const [name, body] of Object.entries(blocks)) { const marker = `// @source:${name}`; once(fixture, marker); fixture = fixture.replace(marker, body); }
 if (fixture.includes('// @source:')) throw new Error('Unfilled actual-source fixture slot');
 fs.writeFileSync(`${out}/ActualSourceTests.swift`, fixture);
-fs.writeFileSync(`${out}/source-manifest.json`, JSON.stringify({source_ref:ref, commit, supports_alignment:supportsAlignment, inputs, selections, projected_native_sha256:sha(projectedNative), generated_sha256:sha(fixture), projection:'Actual context/provenance/request/alignment fields and recursive transaction/storage/accessors; actual request reservation, selection, delay and final apply. Native C API, queue-owned context and property recorder are inert checked test collaborators; lifecycle retirement is source asserted, not full-player runtime.'}, null, 2) + '\n');
+fs.writeFileSync(`${out}/source-manifest.json`, JSON.stringify({source_ref:ref, commit, supports_alignment:supportsAlignment, supports_owned_retirement:supportsOwnedRetirement, inputs, selections, projected_native_sha256:sha(projectedNative), generated_sha256:sha(fixture), projection:'Actual context/provenance/request/alignment fields and recursive transaction/storage/accessors; actual request retirement/reservation, selection, delay, scalar take and final apply. Native C API, queue-owned context and property recorder are inert checked test collaborators. Owned renderer/cancellation fields remain nil; their fixture-only collaborators reject unexpected invocation. No mounted-renderer cleanup, native owned subtitle, account/profile or full-player runtime proof.'}, null, 2) + '\n');
 NODE
 alignment_flags=(-D VORTX_SUBTITLE_RETIREMENT_FIXTURE)
 if [[ "$(node -p "require('./$test_dir/source-manifest.json').supports_alignment")" == true ]]; then

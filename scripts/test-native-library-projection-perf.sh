@@ -61,6 +61,10 @@ const membership = member(current, 'struct VortxLibraryMembership: Sendable {');
 const oldWatched = read('app/SourcesShared/VortxNativePreviouslyWatched.swift', baseline);
 const fixture = fs.readFileSync('app/Tests/NativeLibraryProjectionTests.swift', 'utf8');
 const markers = ['private func string(', 'private func projectedLibraryItems(', 'private func libraryRow(', 'private func libraryProjection(', 'private func localSearchProjection(', 'private func stateFields(', 'private func metaWithPlayback(', 'private func isoTimestamp(', 'private func playbackRow('];
+const managementHelpers = ['private func addonOwner(', 'private func addonManagementProjection(']
+  .map(marker => member(current, marker)).join('\n');
+const presentationFields = current.match(/^    private static let presentationFields: Set<String> = \[[\s\S]*?\]/gm) ?? [];
+assert.equal(presentationFields.length, 1, 'unique actual presentation field declaration');
 const sourceChangedHook = current.split('\n').filter(line => line.trim()
   === 'private var sourceChangedDelivery: (@Sendable ([String], ChangeReceipt?) -> (@Sendable () -> Void)?)?');
 assert.equal(sourceChangedHook.length, 1, 'unique exact production generic source-delivery property');
@@ -75,11 +79,13 @@ const combined = fixture
   .replace('// PRODUCTION_SOURCE_CHANGED_DELIVERY', sourceChangedHook[0])
   .replace('// PRODUCTION_CURRENT_PUBLICATION', [member(current, 'private func makeChangeReceipt('),
     member(current, 'private func stageChanged('), member(current, 'private func publish(')].join('\n'))
+  .replace('// PRODUCTION_CURRENT_MANAGEMENT', managementHelpers)
+  .replace('// PRODUCTION_PRESENTATION_FIELDS', presentationFields[0])
   .replace('// PRODUCTION_CURRENT', markers.map(m => member(current, m)).join('\n'))
   .replace('// PRODUCTION_BASELINE', markers.map(m => member(prior, m)).join('\n').replaceAll('VortxNativePreviouslyWatched', 'BaselinePreviouslyWatched'));
 fs.writeFileSync(out + '/Combined.swift', combined);
 const receipt = {sourceRef: ref, baselineRef: baseline, note: 'Exact production declarations; controlled playback/library state only. No SDK, app launch, account, credentials, or network.', sha256: {}};
-for (const [name, value] of Object.entries({CurrentFacade: current, BaselineFacade: prior, ResourceJSON: resource, RuntimeError: runtime, MembershipIndex: membership, CurrentPreviouslyWatched: watched, BaselinePreviouslyWatched: oldWatched, SourceChangedHook: sourceChangedHook[0], Fixture: fixture, Combined: combined})) {
+for (const [name, value] of Object.entries({CurrentFacade: current, BaselineFacade: prior, ResourceJSON: resource, RuntimeError: runtime, MembershipIndex: membership, CurrentPreviouslyWatched: watched, BaselinePreviouslyWatched: oldWatched, SourceChangedHook: sourceChangedHook[0], ManagementHelpers: managementHelpers, PresentationFields: presentationFields[0], Fixture: fixture, Combined: combined})) {
   receipt.sha256[name] = crypto.createHash('sha256').update(value).digest('hex');
 }
 fs.writeFileSync(out + '/source-receipt.json', JSON.stringify(receipt, null, 2) + '\n');

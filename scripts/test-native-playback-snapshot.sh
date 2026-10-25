@@ -61,7 +61,7 @@ const selectionSnapshot = member(selectionProfiles, 'private func selectionReadS
 // Current watchlist capture is an additional fixture dependency, never substituted into
 // the exact historical bridge bodies used by LegacyCoreBridge below.
 const currentWatchlistCore = read('app/SourcesShared/CoreBridge.swift', 'working-tree');
-const currentWatchlistHelpers = ['struct NativeWatchlistTarget {', 'private func captureNativeWatchlistTarget()']
+const currentWatchlistHelpers = ['struct NativeWatchlistTarget: Sendable {', 'private func captureNativeWatchlistTarget()']
   .map(marker => member(currentWatchlistCore, marker)).join('\n');
 const fixture = fs.readFileSync('app/Tests/NativePlaybackSnapshotTests.swift', 'utf8');
 const facadeMarkers = ['struct RegistryBinding:', 'struct WatchlistBinding:', 'var accountGeneration:', 'var watchlistBinding:', 'var isAvailable:', 'var registryBinding:', 'func stateData(', 'func playbackSnapshot(', 'private func string('];

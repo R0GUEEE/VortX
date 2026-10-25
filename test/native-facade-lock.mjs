@@ -91,8 +91,8 @@ const resourceTask = publish.indexOf('resourceValueTasks[$0.key] = ticket');
 assert(resourceTask >= 0 && resourceDelivery > resourceTask
   && resourceDelivery < publish.lastIndexOf('lock.unlock()'),
   'resource values/tasks and original receipt are captured before the local unlock');
-const accepted = registry.indexOf('let accepted = lock.withLock');
-const registryDelivery = registry.indexOf('stageChanged(["ctx"], receipt: makeChangeReceipt(["ctx"]))', accepted);
+const accepted = registry.indexOf('let accepted = try lock.withLock { () throws -> Bool in');
+const registryDelivery = registry.indexOf('stageChanged(["ctx", "addon_management"], receipt: makeChangeReceipt(["ctx", "addon_management"]))', accepted);
 const registryEnd = registry.indexOf('\n        }\n        guard accepted else', accepted);
 assert(accepted >= 0 && registryDelivery > accepted && registryEnd > registryDelivery,
   'registry receipt capture and stage stay within the original accepted transaction');

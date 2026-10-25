@@ -165,14 +165,22 @@ contract('mpv-release-and-waiting-load-retire-under-same-gate', f => {
   const release = block(f.mpv, 'override fun release()');
   const releaseGate = block(release, 'synchronized(subtitleGenerationGate)');
   const load = block(f.mpv, 'override fun load(playable: Playable)');
-  const loadGate = block(load, 'val loadGeneration = synchronized(subtitleGenerationGate)');
-  return has(releaseGate, 'if (!released.compareAndSet(false, true)) return', 'metadataLoadIdentity.retire()',
-    'startupEvidence = PlaybackStartupEvidence.UNAVAILABLE') &&
-    ordered(loadGate, 'if (released.get()) return', 'subtitleLoadGeneration.incrementAndGet()',
-      'startupEvidence = PlaybackStartupEvidence.AWAITING') &&
+  const loadGate = block(load, 'val (loadGeneration, initialSubtitleSelection) = synchronized(subtitleGenerationGate)');
+  return has(f.mpv, 'private val subtitleSelections = SubtitleSelectionAuthority()') &&
+    ordered(releaseGate, 'if (!released.compareAndSet(false, true)) return', 'subtitleSelections.retire()',
+      'subtitleLoadGeneration.incrementAndGet()', 'metadataLoadIdentity.retire()',
+      'startupEvidence = PlaybackStartupEvidence.UNAVAILABLE') &&
+    ordered(loadGate, 'if (released.get() || originalPlaybackOwner?.isActive != true) return',
+      'val generation = subtitleLoadGeneration.incrementAndGet()',
+      'val original = subtitleSelections.beginSource(generation) ?: return',
+      'metadataLoadIdentity.begin(generation)', 'startupEvidence = PlaybackStartupEvidence.AWAITING',
+      'generation to original') &&
     !release.slice(0, release.indexOf('synchronized(subtitleGenerationGate)')).includes('compareAndSet');
 }, [['mpv', 'override fun release() {\n        synchronized(subtitleGenerationGate)', 'override fun release() {\n        synchronized(unrelatedGate)'],
-    ['mpv', 'val loadGeneration = synchronized(subtitleGenerationGate) {\n            if (released.get()) return', 'val loadGeneration = synchronized(subtitleGenerationGate) {\n            REMOVED_INNER_RELEASE_RECHECK']]);
+    ['mpv', 'val (loadGeneration, initialSubtitleSelection) = synchronized(subtitleGenerationGate) {\n            if (released.get() || originalPlaybackOwner?.isActive != true) return', 'val (loadGeneration, initialSubtitleSelection) = synchronized(subtitleGenerationGate) {\n            REMOVED_INNER_RELEASE_RECHECK'],
+    ['mpv', 'val (loadGeneration, initialSubtitleSelection) = synchronized(subtitleGenerationGate) {\n            if (released.get() || originalPlaybackOwner?.isActive != true) return', 'val (loadGeneration, initialSubtitleSelection) = synchronized(subtitleGenerationGate) {\n            if (released.get()) return'],
+    ['mpv', 'val original = subtitleSelections.beginSource(generation) ?: return', 'val original = subtitleSelections.capture() ?: return'],
+    ['mpv', 'subtitleSelections.retire()', 'REMOVED_SUBTITLE_SELECTION_RETIREMENT']]);
 
 contract('mpv-fresh-native-samples-final-admission-not-restart-pixels', f => {
   const sample = block(f.mpv, 'private fun sampleStartupPresentation()');

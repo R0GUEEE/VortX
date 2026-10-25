@@ -505,9 +505,9 @@ private final class MPVNativeState: Sendable {
 
     func takeContext() -> MPVNativeHandle? {
         transaction.lock(); defer { transaction.unlock() }
-        return storage.withLock {
-            defer { $0.context = nil }
-            return $0.context
+        return storage.withLock { state in
+            defer { state.context = nil }
+            return state.context
         }
     }
 }
@@ -4505,14 +4505,14 @@ final class MPVMetalViewController: PlatformViewController {
         SubtitleEmbeddedExtractor.TimingWindowCancellation?,
         CredentialPublicationOutbox.SubtitleRendererRegistration?
     ) {
-        native.update {
-            $0.subtitleAlignmentGeneration &+= 1
+        native.update { state in
+            state.subtitleAlignmentGeneration &+= 1
             defer {
-                $0.subtitleAlignmentCancellation = nil
-                $0.subtitleRendererRegistration = nil
-                $0.alignedSubtitle = nil
+                state.subtitleAlignmentCancellation = nil
+                state.subtitleRendererRegistration = nil
+                state.alignedSubtitle = nil
             }
-            return ($0.subtitleAlignmentCancellation, $0.subtitleRendererRegistration)
+            return (state.subtitleAlignmentCancellation, state.subtitleRendererRegistration)
         }
     }
 

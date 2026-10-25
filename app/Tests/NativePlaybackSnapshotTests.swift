@@ -107,7 +107,12 @@ final class CoreBridge: FixtureBridge {
     // PRODUCTION_CURRENT_WATCHLIST_BRIDGE
     func fixtureHasWatchlistTarget() -> Bool { captureNativeWatchlistTarget() != nil }
 }
-final class LegacyCoreBridge: FixtureBridge {
+final class LegacyCoreBridge: FixtureBridge {}
+// The pinned oracle read the historical main-thread ProfileStore directly. Its methods
+// remain byte-for-byte extractions; this fixture-only execution context composes them
+// with today's MainActor ProfileStore without actor-isolating the current worker path.
+@MainActor
+extension LegacyCoreBridge {
     // PRODUCTION_BASELINE_BRIDGE
 }
 

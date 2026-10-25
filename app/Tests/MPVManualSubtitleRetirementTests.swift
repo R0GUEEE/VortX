@@ -64,6 +64,22 @@ private func mpv_command(_ handle: OpaquePointer, _ arguments: inout [UnsafePoin
     return NativeRegistry.port(handle).command(owned)
 }
 
+// These nullable collaborators admit the actual current scalar take/cleanup methods.
+// This fixture never mounts a renderer or starts an alignment extraction: invoking
+// either boundary would exceed its manual-selection/final-apply scope and must fail.
+private enum SubtitleEmbeddedExtractor {
+    struct TimingWindowCancellation: Sendable {
+        func cancel() { preconditionFailure("Alignment extraction is outside this fixture") }
+    }
+}
+private enum CredentialPublicationOutbox {
+    struct SubtitleRendererRegistration: Sendable {}
+    static func unregisterSubtitleRenderer(_ registration: SubtitleRendererRegistration) {
+        preconditionFailure("Mounted renderer cleanup is outside this fixture")
+    }
+}
+private struct MPVAlignedSubtitleRecord: Sendable {}
+
 // @source:native
 
 private final class QueueGate: Sendable {
@@ -105,6 +121,7 @@ private struct PendingSubtitle: Sendable {
     private(set) var secondarySubtitleID = -1
 // @source:accessors
 // @source:alignmentAccessor
+// @source:alignmentTake
 // @source:alignmentRetire
 // @source:primary
 // @source:secondary
