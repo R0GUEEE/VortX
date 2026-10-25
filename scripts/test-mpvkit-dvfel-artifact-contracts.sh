@@ -7,6 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/scripts/build-mpvkit-dvfel.sh"
 PATCH="$ROOT/scripts/mpvkit-dvfel.patch"
+REFERENCE_PATCH="$ROOT/scripts/mpv-original-http-reference-recipe.patch"
 VERIFY="$ROOT/scripts/verify-mpvkit-dvfel-artifacts.sh"
 WORKFLOW="$ROOT/.github/workflows/release-tvos.yml"
 
@@ -15,7 +16,7 @@ fail() {
   exit 1
 }
 
-for file in "$BUILD" "$PATCH" "$VERIFY" "$WORKFLOW"; do
+for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$VERIFY" "$WORKFLOW"; do
   [ -f "$file" ] || fail "missing required source: $file"
 done
 
@@ -227,6 +228,52 @@ CANONICAL_MPVKIT="${MPVKIT_DVFEL_CANONICAL:-/Users/daksh/VortXTV/MPVKit}"
 CANONICAL_REF="$(git -C "$CANONICAL_MPVKIT" rev-parse HEAD)"
 [ "$CANONICAL_REF" = "2103893078c5e339073b11737b86f7f22b9c4491" ] ||
   fail "canonical MPVKit fixture source is not pinned to 2103893: $CANONICAL_REF"
+
+# Verify the new native carrier through real Git application, not string-only
+# assertions or a copied C implementation. Only its HTTP/local-witness source
+# prerequisites touch these three preimages. Existing constructor/publication
+# producer contracts remain intact; this block is not their runtime proof.
+NATIVE_SOURCE="${MPVKIT_DVFEL_NATIVE_CONTRACT_SOURCE:-$CANONICAL_MPVKIT/dist/libmpv-master-8c67647b}"
+[ -e "$NATIVE_SOURCE/.git" ] || fail "canonical native contract source is unavailable: $NATIVE_SOURCE"
+NATIVE_HEAD="$(git -C "$NATIVE_SOURCE" rev-parse HEAD)"
+[ "$NATIVE_HEAD" = "8c67647b50059406c5c0444903597281b81516cf" ] ||
+  fail "native contract source is not pinned to 8c67647b: $NATIVE_HEAD"
+REFERENCE_HASH="$(shasum -a 256 "$REFERENCE_PATCH")"
+[ "${REFERENCE_HASH%% *}" = "7d4eaa5236fa8b1b7fb2bd1500ff71aac48fa79fca9e790dfab0dee6d3f0023e" ] ||
+  fail "native initial-request carrier differs from the reviewed source"
+NATIVE_REAL_INDEX="$(git -C "$NATIVE_SOURCE" rev-parse --path-format=absolute --git-path index)"
+[ -f "$NATIVE_REAL_INDEX" ] || fail "native canonical index is unavailable"
+NATIVE_INDEX_BEFORE="$(shasum -a 256 "$NATIVE_REAL_INDEX")"
+NATIVE_INDEX="$FIXTURE/native-reference.index"
+native_git() {
+  GIT_INDEX_FILE="$NATIVE_INDEX" git -C "$NATIVE_SOURCE" "$@"
+}
+check_native_source() {
+  local relative="$1" expected="$2" observed
+  native_git show ":$relative" >"$FIXTURE/native-reference-${relative##*/}"
+  observed="$(shasum -a 256 "$FIXTURE/native-reference-${relative##*/}")"
+  [ "${observed%% *}" = "$expected" ] || fail "native source identity mismatch: $relative"
+}
+native_git read-tree "$NATIVE_HEAD"
+native_git apply --cached "$ROOT/scripts/mpv-http-seek-interrupt.patch"
+native_git apply --cached "$ROOT/scripts/mpv-original-local-file-witness.patch"
+check_native_source stream/stream.h e7c6b69128db214210074d3a88e4291f97e2fc3119e60f34d8601a2085416fef
+check_native_source stream/stream.c 9f99d368a9485c6d1977735cc7276eda34b512bf61ee45cfd585a084d677f034
+check_native_source stream/stream_lavf.c a162b26af4381e946f9a0fa576b12bc9b29310135b6deb7f134cf6867068c654
+if native_git ls-files --error-unmatch -- stream/reference_source.h >/dev/null 2>&1; then
+  fail "native reference header unexpectedly exists before carrier application"
+fi
+NATIVE_PRE_TREE="$(native_git write-tree)"
+native_git apply --cached "$REFERENCE_PATCH"
+[ "$(native_git diff --cached --name-only "$NATIVE_PRE_TREE" --)" = "$(printf '%s\n' \
+  stream/reference_source.h stream/stream.c stream/stream.h stream/stream_lavf.c)" ] ||
+  fail "native initial-request carrier changed unexpected source paths"
+check_native_source stream/stream.h a5f1b6fd23f58bcb0282e36448f34dde0121768abac95913c29163ae163747c6
+check_native_source stream/stream.c 6da9c9c7e1efb4da5a37fe4c7a92188d9f3d4732bdfd4a4c976fe7e9f30145e9
+check_native_source stream/stream_lavf.c 15a7a08223efe0db0a33b2bc7b39616dd43fecfc1eca1e0ced23f16c7a839ad9
+check_native_source stream/reference_source.h 6330b5056700efacd2655a31b011a88c3e4e8b6424360bfe6ee1d728fd7399a1
+[ "$(shasum -a 256 "$NATIVE_REAL_INDEX")" = "$NATIVE_INDEX_BEFORE" ] ||
+  fail "native canonical index changed during the isolated carrier contract"
 
 PATCHED_INDEX="$FIXTURE/mpvkit-source.index"
 PATCHED_SOURCE="$FIXTURE/mpvkit-main.swift"

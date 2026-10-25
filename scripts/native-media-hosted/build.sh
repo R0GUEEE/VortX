@@ -130,6 +130,8 @@ PYTHON_TOOLCHAIN
     cp "$root/scripts/mpv-owned-subtitle-constructor.patch" "$upstream/buildscripts/patches/mpv/0006-owned-subtitle-constructor.patch"
     # Same first-drain publication lifecycle as Apple; app caller ownership remains separate.
     cp "$root/scripts/mpv-owned-subtitle-publication.patch" "$upstream/buildscripts/patches/mpv/0007-owned-subtitle-publication.patch"
+    # Same immutable INITIAL_REQUEST_ONLY prerequisite; no remote reader/node/UI activation.
+    cp "$root/scripts/mpv-original-http-reference-recipe.patch" "$upstream/buildscripts/patches/mpv/0008-original-http-reference-recipe.patch"
     git -C "$upstream" apply --check "$root/scripts/native-media-hosted/android-assembly.patch"
     git -C "$upstream" apply "$root/scripts/native-media-hosted/android-assembly.patch"
     # Use the hosted SDK; bypass upstream download-sdk.sh's moving gas-preprocessor/master fetch.

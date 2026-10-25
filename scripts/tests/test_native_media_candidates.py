@@ -25,7 +25,7 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertNotIn(name, names)
             names.add(name)
             self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), expected)
-        self.assertEqual(len(names), 24)
+        self.assertEqual(len(names), 25)
         self.assertEqual(names, {
             'scripts/assemble-mpvkit-dvfel.sh',
             'scripts/build-mpvkit-dvfel.sh',
@@ -33,6 +33,7 @@ class NativeMediaProducer(unittest.TestCase):
             'scripts/mpv-http-seek-interrupt.patch',
             'scripts/mpv-moltenvk-resize.patch',
             'scripts/mpv-original-local-file-witness.patch',
+            'scripts/mpv-original-http-reference-recipe.patch',
             'scripts/mpv-owned-subtitle-constructor.patch',
             'scripts/mpv-owned-subtitle-publication.patch',
             'scripts/mpv-upstream-audio-layout-bounds.patch',
@@ -60,6 +61,7 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertIn('scripts/mpv-upstream-edition-title-lifetime.patch', names)
         self.assertIn('scripts/mpv-owned-subtitle-constructor.patch', names)
         self.assertIn('scripts/mpv-owned-subtitle-publication.patch', names)
+        self.assertIn('scripts/mpv-original-http-reference-recipe.patch', names)
 
     def test_android_preserves_selected_custom_source_family(self):
         import re
@@ -89,7 +91,8 @@ class NativeMediaProducer(unittest.TestCase):
                 ("mpv-original-local-file-witness.patch", "0009-original-local-file-witness.patch", "0004-original-local-file-witness.patch"),
                 ("mpv-upstream-edition-title-lifetime.patch", "0010-upstream-edition-title-lifetime.patch", "0005-upstream-edition-title-lifetime.patch"),
                 ("mpv-owned-subtitle-constructor.patch", "0011-owned-subtitle-constructor.patch", "0006-owned-subtitle-constructor.patch"),
-                ("mpv-owned-subtitle-publication.patch", "0012-owned-subtitle-publication.patch", "0007-owned-subtitle-publication.patch")]:
+                ("mpv-owned-subtitle-publication.patch", "0012-owned-subtitle-publication.patch", "0007-owned-subtitle-publication.patch"),
+                ("mpv-original-http-reference-recipe.patch", "0013-original-http-reference-recipe.patch", "0008-original-http-reference-recipe.patch")]:
             self.assertIn('copy_exact "$REPO/scripts/' + source + '"', apple)
             self.assertIn('"$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/' + apple_number + '"', apple)
             self.assertIn('cp "$root/scripts/' + source + '" "$upstream/buildscripts/patches/mpv/' + android_number + '"', android)
@@ -103,7 +106,13 @@ class NativeMediaProducer(unittest.TestCase):
                         apple.index('copy_exact "$REPO/scripts/mpv-owned-subtitle-publication.patch"'))
         self.assertLess(android.index('cp "$root/scripts/mpv-owned-subtitle-constructor.patch"'),
                         android.index('cp "$root/scripts/mpv-owned-subtitle-publication.patch"'))
+        self.assertLess(apple.index('copy_exact "$REPO/scripts/mpv-owned-subtitle-publication.patch"'),
+                        apple.index('copy_exact "$REPO/scripts/mpv-original-http-reference-recipe.patch"'))
+        self.assertLess(android.index('cp "$root/scripts/mpv-owned-subtitle-publication.patch"'),
+                        android.index('cp "$root/scripts/mpv-original-http-reference-recipe.patch"'))
         self.assertLess(android.index("0007-owned-subtitle-publication.patch"),
+                        android.index("bash patch.sh"))
+        self.assertLess(android.index("0008-original-http-reference-recipe.patch"),
                         android.index("bash patch.sh"))
 
     def test_android_python_closure_is_pinned_and_isolated(self):
