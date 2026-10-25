@@ -1789,7 +1789,7 @@ final class VortXSyncManager: ObservableObject {
     private let credentialAuthority = CredentialScopeRegistry.shared
     private var authOperationGeneration: UInt64 = 0
     private var restoreTaskCapture: CredentialScopeRegistry.Capture?
-    private var qrOperation: AuthOperationCapture?
+    private var qrOperation: QrJoinOperation?
 
     private struct AuthOperationCapture: Sendable, Equatable {
         let generation: UInt64
@@ -2391,6 +2391,7 @@ final class VortXSyncManager: ObservableObject {
     /// the owner boundary. The generation is checked before every retry and again before protected state apply.
     private func beginCredentialOwnerIntent() -> AuthOperationCapture {
         authOperationGeneration &+= 1
+        if let qrOperation { retireQrOperation(qrOperation) }
         cancelCredentialOwnerRetry()
         return currentCredentialOwnerIntent()
     }
@@ -5277,6 +5278,7 @@ final class VortXSyncManager: ObservableObject {
     /// A live joiner pairing: the id to poll, the human code to show, and our ephemeral key kept in memory
     /// only (never persisted) until the handoff completes. `devicePublicKey` is embedded in the shown QR.
     struct QrJoinSession {
+        fileprivate let operationID: UUID
         let pairingID: String
         let code: String
         let devicePublicKey: String
@@ -5284,6 +5286,35 @@ final class VortXSyncManager: ObservableObject {
     }
 
     enum QrJoinResult: Equatable { case pending, transportError, expired, failed, signedIn(email: String) }
+
+    /// One original auth intent owns one ephemeral key and the relay's one-use delivery.
+    /// Keep only ciphertext/token in memory across a transient /me failure; never defaults,
+    /// logs or a replacement join. The server may already have consumed that delivery.
+    @MainActor private final class QrJoinOperation {
+        let id = UUID()
+        let capture: AuthOperationCapture
+        let mintedAtUptime = ProcessInfo.processInfo.systemUptime
+        var approval: (token: String, payload: String)?
+        var polling = false
+        init(capture: AuthOperationCapture) { self.capture = capture }
+    }
+
+    private func qrOperationIsCurrent(_ operation: QrJoinOperation) -> Bool {
+        qrOperation === operation && isCurrent(operation.capture)
+    }
+
+    private func retireQrOperation(_ operation: QrJoinOperation) {
+        if qrOperation === operation { qrOperation = nil }
+        operation.approval = nil
+    }
+
+    /// A disappearing or replaced screen can cancel only the pairing it actually owns.
+    /// Advancing the auth fence also prevents an in-flight adopter from persisting later.
+    func qrCancel(_ session: QrJoinSession) {
+        guard let operation = qrOperation, operation.id == session.operationID,
+              operation.capture.generation == authOperationGeneration else { return }
+        _ = beginCredentialOwnerIntent()
+    }
 
     /// Pure disposition of a `/v1/qr/status` poll from its HTTP status and whether the body already
     /// carries an approval. Split out (no crypto, no network) so the joiner's poll loop is unit-testable
@@ -5305,49 +5336,71 @@ final class VortXSyncManager: ObservableObject {
     /// JOINER (TV): open a pairing. Returns the session to poll, or nil on a transport failure.
     func qrStart() async -> QrJoinSession? {
         let operation = beginAuthOperation()
+        let join = QrJoinOperation(capture: operation)
+        qrOperation = join
         let eph = PairingCrypto.newEphemeral()
         let pub = eph.publicKeyBase64URL
         let (code, json) = await request("POST", "/v1/qr/start", body: ["devicePublicKey": pub], credentialCapture: operation.credential)
-        guard isCurrent(operation) else { return nil }
-        guard code == 200, let id = json?["pairingID"] as? String, let human = json?["code"] as? String else { return nil }
-        qrOperation = operation
-        return QrJoinSession(pairingID: id, code: human, devicePublicKey: pub, ephemeral: eph.privateKey)
+        guard !Task.isCancelled, qrOperationIsCurrent(join) else {
+            retireQrOperation(join); return nil
+        }
+        guard code == 200, let id = json?["pairingID"] as? String, !id.isEmpty,
+              let human = json?["code"] as? String, !human.isEmpty else {
+            retireQrOperation(join); return nil
+        }
+        return QrJoinSession(operationID: join.id, pairingID: id, code: human,
+                             devicePublicKey: pub, ephemeral: eph.privateKey)
     }
 
     /// JOINER (TV): poll once. On approval, unwrap the data key, fetch the account via /me with the freshly
     /// issued token, and adopt. Security: the token is DISCARDED (never adopted) if the unwrap fails, so a
     /// session with no decryptable data key can never leave a half-signed-in device.
     func qrPoll(_ session: QrJoinSession) async -> QrJoinResult {
-        let operation = qrOperation ?? AuthOperationCapture(
-            generation: authOperationGeneration,
-            credential: credentialAuthority.capture())
-        guard isCurrent(operation) else { return .failed }
-        let (code, json) = await request("GET", "/v1/qr/status?id=\(session.pairingID)", credentialCapture: operation.credential)
-        guard isCurrent(operation) else { return .failed }
-        let token = json?["token"] as? String
-        let payloadStr = json?["payload"] as? String
-        let isPending = (json?["pending"] as? Bool) == true
-        let hasApproval = token != nil && payloadStr != nil && !isPending
-        switch Self.qrPollDisposition(status: code, hasApproval: hasApproval) {
-        case .expired:        return .expired
-        case .retriableError: return .transportError   // relay unreachable / 5xx / rate-limited; keep polling
-        case .pending:        return .pending
-        case .ready:
-            guard let token, let payloadStr else { return .pending }
-            // Parse the {"claim","wrapped"} envelope and unwrap the sync data key with our ephemeral private key.
-            guard let pData = payloadStr.data(using: .utf8),
-                  let env = (try? JSONSerialization.jsonObject(with: pData)) as? [String: Any],
-                  let claim = env["claim"] as? String, let wrapped = env["wrapped"] as? String,
-                  let dk = PairingCrypto.unwrapDataKey(wrapped: wrapped, holderPublicKey: claim, using: session.ephemeral)
-            else { return .failed }
-            // Fetch the account this session belongs to, authing with the freshly issued token (not yet adopted).
-            let (mc, mj) = await request("GET", "/v1/auth/me", bearer: token, credentialCapture: operation.credential)
-            guard isCurrent(operation) else { return .failed }
-            guard mc == 200, let acct = mj?["account"] as? [String: Any] else { return .failed }
-            guard await adopt(token: token, account: acct, dataKey: dk, expectedOperation: operation) else { return .failed }
-            qrOperation = nil
-            return .signedIn(email: acct["email"] as? String ?? "")
+        guard let operation = qrOperation, operation.id == session.operationID,
+              qrOperationIsCurrent(operation), !Task.isCancelled else { return .failed }
+        // The relay consumes on delivery. A second caller must not race another destructive poll.
+        guard !operation.polling else { return .pending }
+        operation.polling = true
+        defer { operation.polling = false }
+        func current() -> Bool { !Task.isCancelled && qrOperationIsCurrent(operation) }
+        func expired() -> Bool {
+            ProcessInfo.processInfo.systemUptime - operation.mintedAtUptime >= 240
         }
+        func terminal(_ result: QrJoinResult) -> QrJoinResult {
+            retireQrOperation(operation); return result
+        }
+        guard !expired() else { return terminal(.expired) }
+        if operation.approval == nil {
+            let (code, json) = await request("GET", "/v1/qr/status?id=\(session.pairingID)", credentialCapture: operation.capture.credential)
+            guard current() else { return terminal(.failed) }
+            guard !expired() else { return terminal(.expired) }
+            let token = json?["token"] as? String
+            let payload = json?["payload"] as? String
+            let hasApproval = token?.isEmpty == false && payload != nil && (json?["pending"] as? Bool) != true
+            switch Self.qrPollDisposition(status: code, hasApproval: hasApproval) {
+            case .expired: return terminal(.expired)
+            case .retriableError: return .transportError
+            case .pending: return .pending
+            case .ready:
+                guard let token, let payload else { return terminal(.failed) }
+                operation.approval = (token, payload)
+            }
+        }
+        guard let approval = operation.approval else { return terminal(.failed) }
+        guard let pData = approval.payload.data(using: .utf8),
+              let envelope = (try? JSONSerialization.jsonObject(with: pData)) as? [String: Any],
+              let claim = envelope["claim"] as? String, let wrapped = envelope["wrapped"] as? String,
+              let dk = PairingCrypto.unwrapDataKey(wrapped: wrapped, holderPublicKey: claim, using: session.ephemeral)
+        else { return terminal(.failed) }
+        let (status, json) = await request("GET", "/v1/auth/me", bearer: approval.token, credentialCapture: operation.capture.credential)
+        guard current() else { return terminal(.failed) }
+        guard !expired() else { return terminal(.expired) }
+        if status == 0 || status == 408 || status == 429 || status >= 500 { return .transportError }
+        guard status == 200, let account = json?["account"] as? [String: Any] else { return terminal(.failed) }
+        guard await adopt(token: approval.token, account: account, dataKey: dk,
+                          expectedOperation: operation.capture) else { return terminal(.failed) }
+        guard qrOperation === operation, operation.capture.generation == authOperationGeneration else { return .failed }
+        return terminal(.signedIn(email: account["email"] as? String ?? ""))
     }
 
     /// HOLDER (a signed-in device, and the shared shape the web holder mirrors): approve a joining device's
