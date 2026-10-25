@@ -25,11 +25,39 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertNotIn(name, names)
             names.add(name)
             self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), expected)
-        self.assertEqual(len(names), 20)
+        self.assertEqual(len(names), 23)
+        self.assertEqual(names, {
+            'scripts/assemble-mpvkit-dvfel.sh',
+            'scripts/build-mpvkit-dvfel.sh',
+            'scripts/mpv-coreaudio-hotplug-lifecycle.patch',
+            'scripts/mpv-http-seek-interrupt.patch',
+            'scripts/mpv-moltenvk-resize.patch',
+            'scripts/mpv-original-local-file-witness.patch',
+            'scripts/mpv-owned-subtitle-constructor.patch',
+            'scripts/mpv-upstream-audio-layout-bounds.patch',
+            'scripts/mpv-upstream-edition-title-lifetime.patch',
+            'scripts/mpv-upstream-gpu-next-seek-reset.patch',
+            'scripts/mpvkit-dvfel.patch',
+            'scripts/native-media-hosted/android-assembly.patch',
+            'scripts/native-media-hosted/android/buildscripts/include/depinfo.sh',
+            'scripts/native-media-hosted/android/buildscripts/include/download-deps.sh',
+            'scripts/native-media-hosted/android/buildscripts/include/download-lua.sh',
+            'scripts/native-media-hosted/android/buildscripts/include/download-libunibreak.sh',
+            'scripts/native-media-hosted/android/buildscripts/patch.sh',
+            'scripts/native-media-hosted/android/buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch',
+            'scripts/native-media-hosted/android/buildscripts/scripts/ffmpeg.sh',
+            'scripts/native-media-hosted/build.sh',
+            'scripts/native-media-hosted/evidence.py',
+            'scripts/verify-mpvkit-dvfel-apple-tls.sh',
+            'scripts/verify-mpvkit-dvfel-artifacts.sh',
+        })
         self.assertIn('scripts/native-media-hosted/android/buildscripts/include/download-libunibreak.sh', names)
         self.assertIn('scripts/native-media-hosted/android/buildscripts/scripts/ffmpeg.sh', names)
         self.assertIn('scripts/mpv-upstream-audio-layout-bounds.patch', names)
         self.assertIn('scripts/mpv-upstream-gpu-next-seek-reset.patch', names)
+        self.assertIn('scripts/mpv-original-local-file-witness.patch', names)
+        self.assertIn('scripts/mpv-upstream-edition-title-lifetime.patch', names)
+        self.assertIn('scripts/mpv-owned-subtitle-constructor.patch', names)
 
     def test_android_preserves_selected_custom_source_family(self):
         import re
@@ -55,12 +83,19 @@ class NativeMediaProducer(unittest.TestCase):
         for source, apple_number, android_number in [
                 ("mpv-http-seek-interrupt.patch", "0006-http-seek-interrupt.patch", "0001-http-seek-interrupt.patch"),
                 ("mpv-upstream-audio-layout-bounds.patch", "0007-upstream-audio-layout-bounds.patch", "0002-upstream-audio-layout-bounds.patch"),
-                ("mpv-upstream-gpu-next-seek-reset.patch", "0008-upstream-gpu-next-seek-reset.patch", "0003-upstream-gpu-next-seek-reset.patch")]:
+                ("mpv-upstream-gpu-next-seek-reset.patch", "0008-upstream-gpu-next-seek-reset.patch", "0003-upstream-gpu-next-seek-reset.patch"),
+                ("mpv-original-local-file-witness.patch", "0009-original-local-file-witness.patch", "0004-original-local-file-witness.patch"),
+                ("mpv-upstream-edition-title-lifetime.patch", "0010-upstream-edition-title-lifetime.patch", "0005-upstream-edition-title-lifetime.patch"),
+                ("mpv-owned-subtitle-constructor.patch", "0011-owned-subtitle-constructor.patch", "0006-owned-subtitle-constructor.patch")]:
             self.assertIn('copy_exact "$REPO/scripts/' + source + '"', apple)
             self.assertIn('"$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/' + apple_number + '"', apple)
             self.assertIn('cp "$root/scripts/' + source + '" "$upstream/buildscripts/patches/mpv/' + android_number + '"', android)
-        self.assertLess(android.index("0003-upstream-gpu-next-seek-reset.patch"),
+        self.assertLess(android.index("0006-owned-subtitle-constructor.patch"),
                         android.index("bash patch.sh"))
+        self.assertLess(apple.index('copy_exact "$REPO/scripts/mpv-upstream-edition-title-lifetime.patch"'),
+                        apple.index('copy_exact "$REPO/scripts/mpv-owned-subtitle-constructor.patch"'))
+        self.assertLess(android.index('cp "$root/scripts/mpv-upstream-edition-title-lifetime.patch"'),
+                        android.index('cp "$root/scripts/mpv-owned-subtitle-constructor.patch"'))
 
     def test_android_python_closure_is_pinned_and_isolated(self):
         workflow = (ROOT / ".github/workflows/native-media-candidates.yml").read_text()
