@@ -1325,6 +1325,7 @@ struct PlayerScreen: View {
     var initialEnginePlayerVideoId: String? = nil
     /// Session-only engine route chosen on the detail/source surface. nil keeps the persisted automatic route.
     var initialEnginePreference: PlayerEngineRouter.Override? = nil
+    var playbackQueueToken: PlaybackTitleQueue.Token? = nil
     var isTrailer: Bool = false                             // a trailer preview: always plays in-app, never auto-routes external
     /// True when the LAUNCH source was an explicit user choice (a tapped source-list row / quality pick),
     /// false for an auto-pick (Watch Now / a Continue-Watching resume). An explicit pick is HONORED on a
@@ -1461,6 +1462,7 @@ struct PlayerScreen: View {
 
     private enum Panel: Identifiable, Equatable {
         case speed, subtitles, subtitleSettings, secondarySubtitles, subtitleLanguage(code: String, label: String), audio, audioSettings, video, sources, sourceAudio, episodes, info, playerSettings, sleep, quality, chapters, engine
+        case queue, queueItem(UUID)
         var id: Int {
             switch self {
             case .speed: 0; case .subtitles: 1; case .subtitleSettings: 2; case .audio: 3
@@ -1468,6 +1470,7 @@ struct PlayerScreen: View {
             case .playerSettings: 8; case .sleep: 9; case .episodes: 10; case .quality: 11
             case .chapters: 12; case .engine: 13; case .secondarySubtitles: 14
             case .subtitleLanguage: 15; case .sourceAudio: 16
+            case .queue: 17; case .queueItem: 18
             }
         }
         var title: String {
@@ -1480,6 +1483,7 @@ struct PlayerScreen: View {
             case .sources: "Sources"; case .sourceAudio: "Audio"; case .info: "Playback Info"; case .playerSettings: "Player Settings"
             case .sleep: "Sleep Timer"; case .episodes: "Episodes"; case .quality: "Quality"
             case .chapters: "Chapters"; case .engine: "Player Engine"
+            case .queue, .queueItem: "Playback Queue"
             }
         }
         /// Panels where picking a row is an unambiguous one-shot choice (a track, quality, source, or
@@ -1663,6 +1667,7 @@ struct PlayerScreen: View {
     @State private var idleWatchTask: Task<Void, Never>?    // single poll loop; started on open, cancelled on teardown
     @State private var consecutiveAutoAdvances = 0          // back-to-back auto-advances with no interaction between them
     @State private var pendingStillWatchingEpisodeId: String?  // next episode to roll to when Continue is chosen at a binge boundary
+    @State private var pendingStillWatchingQueue = false
     private static let idleWatchTimeout: TimeInterval = 4 * 60 * 60   // 4h of no interaction -> "Still watching?"
     private static let idleAutoAdvanceLimit = 4                       // 4 back-to-back auto-advances, zero input -> same
     @State private var showExternalChooser = false   // "Play in another app" sheet
@@ -2653,6 +2658,13 @@ struct PlayerScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
             refreshAutoSkipSettings()
         }
+        .onReceive(PlaybackTitleQueue.shared.$change) { _ in
+            guard let open = panel else { return }
+            switch open {
+            case .queue, .queueItem, .playerSettings: panelRows = rows(for: open)
+            default: break
+            }
+        }
         .onDisappear {
             let assetSanityAccepted =
                 assetSanityAttempt.isAccepted(owner: coordinator.player?.activeLoadToken)
@@ -2924,6 +2936,7 @@ struct PlayerScreen: View {
         if let meta = curMeta, pendingAdvance == nil,
            assetSanityDeferredStartToken == loadToken,
            coordinator.player?.activeLoadToken == loadToken {
+            _ = PlaybackTitleQueue.shared.acceptStarted(playbackQueueToken, meta: meta)
             onPlaybackIdentityCommitted(meta)
         }
         rememberAcceptedSeriesChoice()
@@ -3821,6 +3834,16 @@ struct PlayerScreen: View {
                 exitPlayerFullScreenIfNeeded()  // item 6: land back in windowed browse, not stranded fullscreen
                 invalidateEpisodeWorkForExit()
                 onClose()
+            } else if !skipEditActive, let meta = curMeta,
+                      PlaybackTitleQueue.shared.ownsActive(playbackQueueToken, meta: meta) {
+                if stillWatchingPromptEnabled,
+                   PlaybackTitleQueue.shared.shouldConfirmAdvance(playbackQueueToken, meta: meta,
+                                                                 after: stillWatchingAfterEpisodes) {
+                    pendingStillWatchingQueue = true
+                    presentStillWatching()
+                } else if PlaybackTitleQueue.shared.completed(playbackQueueToken, meta: meta) {
+                    leavePlayback()
+                }
             } else if canNextEpisode, let i = episodeIndex, !skipEditActive {
                 // In-place advance to the next episode: KEEP the cache (the same player keeps playing).
                 // Suppressed while the skip editor is open so an end-of-credits edit isn't yanked away.
@@ -10298,6 +10321,18 @@ struct PlayerScreen: View {
     }
     private func rows(for p: Panel) -> [Row] {
         switch p {
+        case .queue:
+            return playbackQueueRows
+        case .queueItem(let id):
+            guard let entry = PlaybackTitleQueue.shared.upcoming.first(where: { $0.id == id }) else {
+                return [Row(label: "This queued item is no longer available", isHeader: true)]
+            }
+            return [
+                Row(label: entry.candidate.title, detail: entry.candidate.episodeLabel ?? "", isHeader: true),
+                Row(label: "Move up") { PlaybackTitleQueue.shared.move(id, by: -1) },
+                Row(label: "Move down") { PlaybackTitleQueue.shared.move(id, by: 1) },
+                Row(label: "Remove") { PlaybackTitleQueue.shared.remove(id); openPanel(.queue) }
+            ]
         case .video:
             return sizeModes.map { m in Row(label: m.label, detail: m.detail, selected: (coordinator.player?.videoSizeMode ?? videoSize) == m.raw) {
                 applyVideoSize(m.raw)
@@ -10617,6 +10652,9 @@ struct PlayerScreen: View {
             }
         case .playerSettings:
             var rows: [Row] = []
+            if !isTrailer {
+                rows.append(Row(label: "Playback queue", detail: "\(PlaybackTitleQueue.shared.count)  ›") { openPanel(.queue) })
+            }
             // Decoder toggle is libmpv-only: AVPlayer always decodes in hardware and setHardwareDecoding is a
             // no-op there, so hide the Hardware/Software rows when the AVFoundation engine is active (#76).
             if !isAVPlayerActive {
@@ -11596,6 +11634,7 @@ struct PlayerScreen: View {
     private func noteInteraction() {
         idleDeadline = Date().addingTimeInterval(Self.idleWatchTimeout)
         consecutiveAutoAdvances = 0
+        PlaybackTitleQueue.shared.noteInteraction(playbackQueueToken)
     }
 
     /// Start the single idle-watch poll. One long-lived loop (not a per-interaction Task) re-checks the
@@ -11642,6 +11681,13 @@ struct PlayerScreen: View {
         let next = pendingStillWatchingEpisodeId
         pendingStillWatchingEpisodeId = nil
         noteInteraction()
+        if pendingStillWatchingQueue {
+            pendingStillWatchingQueue = false
+            if let meta = curMeta, PlaybackTitleQueue.shared.completed(playbackQueueToken, meta: meta) {
+                leavePlayback()
+            }
+            return
+        }
         if let next {
             goToEpisode(next, autoAdvance: true)
         } else {
@@ -11654,10 +11700,41 @@ struct PlayerScreen: View {
     private func stopStillWatching() {
         stillWatchingPrompt = false
         pendingStillWatchingEpisodeId = nil
+        pendingStillWatchingQueue = false
         leavePlayback()
     }
 
     private func speedLabel(_ s: Double) -> String { s == s.rounded() ? "\(Int(s))×" : String(format: "%g×", s) }
+
+    private var playbackQueueRows: [Row] {
+        let queue = PlaybackTitleQueue.shared
+        var rows: [Row] = []
+        if let meta = curMeta, let candidate = PlaybackTitleQueuePolicy.Candidate(
+            contentID: meta.libraryId, type: meta.type, title: meta.name,
+            videoIDHint: meta.type == "series" ? meta.videoId : nil,
+            episodeLabel: meta.season.flatMap { season in meta.episode.map { "S\(season)E\($0)" } }
+        ) {
+            rows.append(Row(label: "Play this item next") { _ = queue.enqueue(candidate, placement: .next) })
+            rows.append(Row(label: "Add this item to end") { _ = queue.enqueue(candidate, placement: .last) })
+        }
+        if let meta = curMeta, queue.ownsActive(playbackQueueToken, meta: meta), !queue.upcoming.isEmpty {
+            rows.append(Row(label: "Play next queued title now") {
+                if queue.nextManually(playbackQueueToken) { leavePlayback() }
+            })
+        } else if queue.canStart {
+            rows.append(Row(label: "Start queued titles now") {
+                if queue.requestNext() { leavePlayback() }
+            })
+        }
+        rows.append(Row(label: "Up next · \(queue.upcoming.count)", isHeader: true))
+        rows += queue.upcoming.map { entry in
+            Row(label: entry.candidate.title, detail: entry.candidate.episodeLabel ?? "›") {
+                openPanel(.queueItem(entry.id))
+            }
+        }
+        if !queue.upcoming.isEmpty { rows.append(Row(label: "Clear upcoming titles") { queue.clearUpcoming() }) }
+        return rows
+    }
 
     private func timeString(_ t: Double) -> String {
         guard t.isFinite, t >= 0 else { return "0:00" }

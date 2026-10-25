@@ -22,8 +22,9 @@ function contract(source) {
   }
   need(!load.includes('pendingProfileTransitions'), 'busy sync must not masquerade as a new owner');
   need(load.indexOf('let previous = values[field]') < load.indexOf('return enqueue(field'), 'capture before initial publication');
-  const enqueueStart = source.indexOf('private func enqueue(_ field: String, initial: VortxJSON? = nil,\n');
+  const enqueueStart = source.indexOf('private func enqueue(_ field: String, initial: VortxJSON? = nil, replacingSelection: Bool = true,\n');
   const enqueueEnd = source.indexOf('private func enqueueMutation(', enqueueStart);
+  need(enqueueStart >= 0 && enqueueEnd > enqueueStart, 'actual enqueue implementation missing');
   const enqueue = source.slice(enqueueStart, enqueueEnd);
   need(enqueue.includes('self?.publish([field: value], field: field, ticket: ticket)') &&
     enqueue.includes('self?.publish(result, field: field, ticket: ticket)'), 'partial/final publication ticket retained');

@@ -323,6 +323,7 @@ struct iOSDetailView: View {
     /// unchanged; this never invents a URL or bypasses the detail/source-selection path.
     var autoPlayOnAppear: Bool = false
     var randomPickPlayIntent: RandomPickPlayIntent? = nil
+    var playbackQueueToken: PlaybackTitleQueue.Token? = nil
     /// Navigation-carried Trakt offset. It is consumed by the first content play only.
     var initialResumeSeconds: Double? = nil
     var initialVideoID: String? = nil
@@ -772,6 +773,8 @@ struct iOSDetailView: View {
         /// false for an auto-pick (Watch Now / Continue-Watching resume). The player honors an explicit
         /// pick on a start-timeout (retry in place) instead of silently hopping to a lower-quality source.
         var wasExplicitPick: Bool = false
+        /// Frozen at the ordinary source-admission handoff, never re-read from a later Detail intent.
+        var playbackQueueToken: PlaybackTitleQueue.Token? = nil
     }
 
     /// A resolved TRAILER row ready to hand to PlayerScreen with `isTrailer: true` (Identifiable so the
@@ -956,6 +959,7 @@ struct iOSDetailView: View {
                             initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
                             autoPlayOnAppear: true,
                             randomPickPlayIntent: randomPickPlayIntent,
+                            playbackQueueToken: playbackQueueToken,
                             suppressPreferenceAutoPlay: randomPickPlayIntent != nil
                         )
                     }
@@ -1218,6 +1222,7 @@ struct iOSDetailView: View {
                     initialSourceAddon: launch.sourceAddon,
                     initialEnginePlayerVideoId: launch.enginePlayerVideoId,
                     initialEnginePreference: launch.enginePreference,
+                    playbackQueueToken: launch.playbackQueueToken,
                     startedFromExplicitPick: launch.wasExplicitPick,
                     // reportProgress feeds the engine Player (TimeChanged) so Continue Watching updates live and
                     // watched time is tracked. The ACCOUNT write (account.saveProgress) moved INTO PlayerScreen
@@ -2362,7 +2367,9 @@ struct iOSDetailView: View {
                                   initialStartAtSeconds: primaryResumeSeconds,
                                   initialTraktSessionID: initialTraktSessionID,
                                   initialContinueWatchingIntent: initialContinueWatchingIntent,
-                                  initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer)
+                                  initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
+                                  playbackQueueToken: playbackQueueToken?.routingToken(
+                                    contentID: m.id, videoID: primary.video.id, type: "series"))
                         } label: {
                             Label(primaryEpisodeLabel(primary.video, isResume: primary.isResume,
                                                       resumeSeconds: primaryResumeSeconds),
@@ -2397,6 +2404,9 @@ struct iOSDetailView: View {
                 // EPISODE, so it passes the same episode the Play button above would start; the chip hides
                 // itself when none has resolved, since a whole show cannot be checked into.
                 TraktCheckinChip(season: primary?.video.season, episode: primary?.video.episode)
+                if let meta, let candidate = PlaybackTitleQueuePolicy.Candidate(
+                    contentID: meta.id, type: effectiveType, title: meta.name
+                ) { PlaybackTitleQueueButton(candidate: candidate, onInteraction: { randomPickPlayIntent?.revoke() }) }
                 shareChip
             }
         }
@@ -2781,6 +2791,10 @@ struct iOSDetailView: View {
                 qualityMenu(groups)
                 movieAudioLanguageMenu
                 launchPlayerMenu
+                if let candidate = PlaybackTitleQueuePolicy.Candidate(
+                    contentID: moviePlaybackMeta.libraryId, type: moviePlaybackMeta.type,
+                    title: moviePlaybackMeta.name
+                ) { PlaybackTitleQueueButton(candidate: candidate, onInteraction: { cancelPendingQuickWatch() }) }
 
                 #if !os(tvOS)
                 // Offline (#30): open the pre-download quality picker, the offline twin of Watch Now. The chip
@@ -3440,8 +3454,11 @@ struct iOSDetailView: View {
 
     /// No suspension is allowed between this one-shot admission and the following player assignment.
     /// A rejected resolver result releases its native lease instead of escaping into playback.
-    private func admitRandomPickPlayback(quickWatchScope: CinemaQuickWatchScope?, ref: DebridPlaybackRef?) -> Bool {
-        guard let quickWatchScope else { randomPickPlayIntent?.revoke(); return true }
+    private func admitRandomPickPlayback(quickWatchScope: CinemaQuickWatchScope?, ref: DebridPlaybackRef?, meta: PlaybackMeta) -> Bool {
+        guard let quickWatchScope else {
+            randomPickPlayIntent?.revoke()
+            return admitQueuedSource(meta, ref: ref)
+        }
         if randomPickPlayIntent != nil,
            randomPickSourceReceipt.map({ sourceList.playbackReceiptIsCurrent($0, pin: sourcePin) }) != true {
             randomPickPlayIntent?.revoke()
@@ -3450,6 +3467,16 @@ struct iOSDetailView: View {
         }
         guard quickWatchScopeIsCurrent(quickWatchScope),
               randomPickPlayIntent?.consume(core: core, profiles: profiles) != false else {
+            ref?.nativeUsenetLease?.close()
+            return false
+        }
+        return admitQueuedSource(meta, ref: ref)
+    }
+
+    private func admitQueuedSource(_ meta: PlaybackMeta, ref: DebridPlaybackRef?) -> Bool {
+        guard let playbackQueueToken else { return true }
+        guard playbackQueueToken.admitResolvedSource(contentID: meta.libraryId,
+                videoID: meta.videoId, type: meta.type) else {
             ref?.nativeUsenetLease?.close()
             return false
         }
@@ -3679,7 +3706,7 @@ struct iOSDetailView: View {
                     resumeProposal,
                     currentSessionID: TraktAuth.storedSessionID
                 ) else { return }
-                guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: nil) else { return }
+                guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: nil, meta: pm) else { return }
                 presentation = .player(PlayerLaunch(url: url, title: pm.name, headers: entry.headers,
                                                     resume: admittedResume.seconds ?? 0, meta: pm,
                                                     qualityText: entry.qualityText, bingeGroup: entry.bingeGroup,
@@ -3688,7 +3715,8 @@ struct iOSDetailView: View {
                                                         infoHash: hash, torrentId: entry.debridTorrentId,
                                                         fileId: entry.debridFileId, fileIdx: entry.fileIdx),
                                                     enginePreference: launchEnginePreference,
-                                                    wasExplicitPick: true))
+                                                    wasExplicitPick: true,
+                                                    playbackQueueToken: playbackQueueToken))
                 return
             }
         }
@@ -3730,7 +3758,7 @@ struct iOSDetailView: View {
                 resumeProposal,
                 currentSessionID: TraktAuth.storedSessionID
             ) else { return }
-            guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: win.ref) else { return }
+            guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: win.ref, meta: pm) else { return }
             didTransferPlayback = true
             presentation = .player(PlayerLaunch(url: win.ref.url, title: pm.name, headers: win.stream.requestHeaders,
                                                 resume: admittedResume.seconds ?? 0, meta: pm,
@@ -3738,7 +3766,8 @@ struct iOSDetailView: View {
                                                 bingeGroup: win.stream.behaviorHints?.bingeGroup,
                                                 isTorrent: false, debridRef: win.ref,
                                                 sourceStream: win.stream,
-                                                enginePreference: launchEnginePreference))
+                                                enginePreference: launchEnginePreference,
+                                                playbackQueueToken: playbackQueueToken))
             return
         }
         // INSTANT FIRST-PLAY: the parallel-cached race above already tried every confirmed-cached candidate, so
@@ -3798,7 +3827,7 @@ struct iOSDetailView: View {
             resumeProposal,
             currentSessionID: TraktAuth.storedSessionID
         ) else { return }
-        guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: ref) else { return }
+        guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: ref, meta: pm) else { return }
         didTransferPlayback = true
         presentation = .player(PlayerLaunch(url: url, title: pm.name, headers: stream.requestHeaders,
                                             resume: admittedResume.seconds ?? 0, meta: pm,
@@ -3806,7 +3835,8 @@ struct iOSDetailView: View {
                                             bingeGroup: stream.behaviorHints?.bingeGroup,
                                             isTorrent: prime && stream.isTorrent, debridRef: ref,
                                             sourceStream: stream,
-                                            enginePreference: launchEnginePreference))
+                                            enginePreference: launchEnginePreference,
+                                            playbackQueueToken: playbackQueueToken))
     }
 
     /// #95: play a source-list TRAILER row (an `isYouTubeTrailer` `ytId` stream) the SAME reliable way the
@@ -3867,6 +3897,7 @@ struct iOSDetailView: View {
             resumeProposal,
             currentSessionID: TraktAuth.storedSessionID
         ) else { return }
+        guard admitQueuedSource(pm, ref: ref) else { return }
         presentation = .player(PlayerLaunch(url: playURL, title: pm.name, headers: stream.requestHeaders,
                                             resume: admittedResume.seconds ?? 0, meta: pm,
                                             qualityText: StreamRanking.signature(stream),
@@ -3874,7 +3905,8 @@ struct iOSDetailView: View {
                                             isTorrent: prime && stream.isTorrent, debridRef: ref,
                                             sourceStream: stream,
                                             enginePreference: enginePreference ?? launchEnginePreference,
-                                            wasExplicitPick: true))
+                                            wasExplicitPick: true,
+                                            playbackQueueToken: playbackQueueToken))
     }
 
     #if !os(tvOS)
@@ -4609,7 +4641,9 @@ struct iOSDetailView: View {
                                       : nil,
                                   initialTraktSessionID: initialTraktSessionID,
                                   initialContinueWatchingIntent: initialContinueWatchingIntent,
-                                  initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer)
+                                  initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
+                                  playbackQueueToken: playbackQueueToken?.routingToken(
+                                    contentID: m.id, videoID: v.id, type: "series"))
             } label: {
                 episodeRowLabel(v, isWatched: isWatched, progress: progress, cardWidth: cardWidth)
             }
@@ -4627,6 +4661,19 @@ struct iOSDetailView: View {
     }
 
     @ViewBuilder private func episodeActions(_ v: CoreVideo, isWatched: Bool) -> some View {
+                if let meta, let candidate = PlaybackTitleQueuePolicy.Candidate(
+                    contentID: meta.id, type: effectiveType, title: meta.name, videoIDHint: v.id,
+                    episodeLabel: "S\(v.season ?? 1)E\(v.episodeNumber) · \(v.episodeTitle)"
+                ) {
+                    Button("Play next in queue") {
+                        randomPickPlayIntent?.revoke()
+                        _ = PlaybackTitleQueue.shared.enqueue(candidate, placement: .next)
+                    }
+                    Button("Add to queue") {
+                        randomPickPlayIntent?.revoke()
+                        _ = PlaybackTitleQueue.shared.enqueue(candidate, placement: .last)
+                    }
+                }
                 Button(isWatched ? "Mark as Unwatched" : "Mark as Watched") {
                     let target = PlaybackMutationTarget.capture(core: core)
                     let expected = detailTarget
@@ -5411,6 +5458,7 @@ struct iOSEpisodeStreams: View {
     /// ordinary episode-detail route remains source-list-first unless Smart Source Selection is enabled.
     var autoPlayOnAppear: Bool = false
     var randomPickPlayIntent: RandomPickPlayIntent? = nil
+    var playbackQueueToken: PlaybackTitleQueue.Token? = nil
     var suppressPreferenceAutoPlay: Bool = false
     @VisibleCore private var core   // not observed while the player covers it (EngineObservation.swift)
     @EnvironmentObject private var account: StremioAccount
@@ -5690,6 +5738,7 @@ struct iOSEpisodeStreams: View {
                     initialSourceAddon: launch.sourceAddon,
                     initialEnginePlayerVideoId: launch.enginePlayerVideoId,
                     initialEnginePreference: launch.enginePreference,
+                    playbackQueueToken: launch.playbackQueueToken,
                     startedFromExplicitPick: launch.wasExplicitPick,
                     episodes: seasonEpisodes.map {
                         PlayerEpisodeRef(id: $0.id,
@@ -5801,8 +5850,11 @@ struct iOSEpisodeStreams: View {
     }
 
     /// The episode's existing generation/scope is checked once more at the atomic player handoff.
-    private func admitRandomPickPlayback(quickWatchScope: CinemaQuickWatchScope?, ref: DebridPlaybackRef?) -> Bool {
-        guard let quickWatchScope else { randomPickPlayIntent?.revoke(); return true }
+    private func admitRandomPickPlayback(quickWatchScope: CinemaQuickWatchScope?, ref: DebridPlaybackRef?, meta: PlaybackMeta) -> Bool {
+        guard let quickWatchScope else {
+            randomPickPlayIntent?.revoke()
+            return admitQueuedSource(meta, ref: ref)
+        }
         if randomPickPlayIntent != nil,
            randomPickSourceReceipt.map({ sourceList.playbackReceiptIsCurrent($0, pin: sourcePin) }) != true {
             randomPickPlayIntent?.revoke()
@@ -5811,6 +5863,16 @@ struct iOSEpisodeStreams: View {
         }
         guard quickWatchScopeIsCurrent(quickWatchScope),
               randomPickPlayIntent?.consume(core: core, profiles: profiles) != false else {
+            ref?.nativeUsenetLease?.close()
+            return false
+        }
+        return admitQueuedSource(meta, ref: ref)
+    }
+
+    private func admitQueuedSource(_ meta: PlaybackMeta, ref: DebridPlaybackRef?) -> Bool {
+        guard let playbackQueueToken else { return true }
+        guard playbackQueueToken.admitResolvedSource(contentID: meta.libraryId,
+                videoID: meta.videoId, type: meta.type) else {
             ref?.nativeUsenetLease?.close()
             return false
         }
@@ -6237,7 +6299,7 @@ struct iOSEpisodeStreams: View {
             resumeProposal,
             currentSessionID: TraktAuth.storedSessionID
         ) else { return }
-        guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: ref) else { return }
+        guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: ref, meta: pm) else { return }
         didTransferPlayback = true
         presentation = .player(iOSDetailView.PlayerLaunch(url: playURL, title: name, headers: stream.requestHeaders,
                                             resume: admittedResume.seconds ?? 0, meta: pm,
@@ -6248,7 +6310,8 @@ struct iOSEpisodeStreams: View {
                                             sourceAddon: sourceAddon,
                                             enginePlayerVideoId: engineVideoID,
                                             enginePreference: enginePreference ?? launchEnginePreference,
-                                            wasExplicitPick: explicit))
+                                            wasExplicitPick: explicit,
+                                            playbackQueueToken: playbackQueueToken))
     }
 
     /// AUTO-PICK play for the episode "Watch in <quality>" button: race the top few CACHED candidates
@@ -6304,7 +6367,7 @@ struct iOSEpisodeStreams: View {
                 resumeProposal,
                 currentSessionID: TraktAuth.storedSessionID
             ) else { return }
-            guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: win.ref) else { return }
+            guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: win.ref, meta: pm) else { return }
             didTransferPlayback = true
             presentation = .player(iOSDetailView.PlayerLaunch(url: win.ref.url, title: name, headers: win.stream.requestHeaders,
                                                 resume: admittedResume.seconds ?? 0, meta: pm,
@@ -6313,7 +6376,8 @@ struct iOSEpisodeStreams: View {
                                                 isTorrent: false, debridRef: win.ref,
                                                 sourceStream: win.stream,
                                                 enginePlayerVideoId: engineVideoID,
-                                                enginePreference: launchEnginePreference))
+                                                enginePreference: launchEnginePreference,
+                                                playbackQueueToken: playbackQueueToken))
             return
         }
         preparation.finish(preparingAttempt) // Release only this race before the fallback's own claim.

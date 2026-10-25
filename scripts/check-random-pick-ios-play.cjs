@@ -34,7 +34,10 @@ function contract(text) {
     for (const term of ['accountBoundaryGeneration:', 'routeGeneration:', 'taskCancelled: Task.isCancelled'])
       need(scope.includes(term), name + ': retained scope term ' + term);
     const admission = method(view, 'admitRandomPickPlayback');
-    need(admission.includes('guard let quickWatchScope else { randomPickPlayIntent?.revoke(); return true }'), name + ': manual handoff retires auto grant');
+    need(/guard let quickWatchScope else \{\s*randomPickPlayIntent\?\.revoke\(\)\s*return admitQueuedSource\(meta, ref: ref\)/.test(admission), name + ': manual handoff retires auto but validates original queue capability');
+    const queueAdmission = method(view, 'admitQueuedSource');
+    for (const term of ['guard let playbackQueueToken else { return true }', 'playbackQueueToken.admitResolvedSource(contentID: meta.libraryId', 'videoID: meta.videoId, type: meta.type', 'ref?.nativeUsenetLease?.close()']) need(queueAdmission.includes(term), name + ': queue handoff missing ' + term);
+    need(!queueAdmission.includes('await '), name + ': queue handoff stays synchronous');
     before(admission, 'quickWatchScopeIsCurrent(quickWatchScope)',
       'randomPickPlayIntent?.consume(core: core, profiles: profiles) != false', name + ': final scope before consume');
     need((admission.match(/ref\?\.nativeUsenetLease\?\.close\(\)\n            return false/g) || []).length === 2,
@@ -51,13 +54,16 @@ function contract(text) {
   }
   const forward = movie.slice(movie.indexOf('if let autoPlayEpisode, let m = meta'));
   need(forward.includes('autoPlayOnAppear: true,\n                            randomPickPlayIntent: randomPickPlayIntent'), 'series forwards same grant, no replacement');
+  need(forward.includes('randomPickPlayIntent: randomPickPlayIntent,\n                            playbackQueueToken: playbackQueueToken'), 'series forwards the immutable queue capability separately');
+  need(movie.includes('contentID: m.id, videoID: primary.video.id, type: "series"') &&
+    method(movie, 'episodeRowNavigation').includes('playbackQueueToken?.routingToken('), 'ordinary episode navigation filters immutable queue selection identity');
   need(movie.includes('cancelPendingQuickWatch(revokingRandomPlay: autoPlayEpisode == nil)'), 'parent disappearance preserves series child grant');
   need(method(movie, 'requestAutoPlayIfReady').includes('randomPickPlayIntent?.isCurrent(core: core, profiles: profiles) != false'), 'metadata-ready callback cannot rearm revoked grant');
   const ready = method(movie, 'requestAutoPlayIfReady');
   need(ready.includes('!intent.bind(meta: m, video: primary.video, core: core, profiles: profiles)') &&
     ready.includes('!intent.bind(meta: m, video: nil, core: core, profiles: profiles)'), 'Library series/movie bind actual authoritative metadata before autoplay');
   need(movie.includes('randomPickPlayIntent?.invalidateMetadata(details)') &&
-    episode.includes('.onReceive(core.$metaDetails) { randomPickPlayIntent?.invalidateMetadata($0) }'), 'raw metadata A-B-A revokes pending intent on both surfaces');
+    episode.includes('.onReceive(core.metaDetailsPublisher) { randomPickPlayIntent?.invalidateMetadata($0) }'), 'raw metadata A-B-A revokes pending intent on both surfaces');
   need(episode.includes('!intent.bind(meta: meta, video: shownVideo, core: core, profiles: profiles)'), 'episode child conserves bound exact metadata and coordinates');
   need(episode.includes('var suppressPreferenceAutoPlay: Bool = false') &&
     episode.includes('(autoPlayOnAppear || (!suppressPreferenceAutoPlay && SourcePreferences.shared.autoPickBest))'), 'ordinary preferences retained but navigation-only Open suppresses auto-pick');
@@ -81,11 +87,15 @@ function contract(text) {
   need((playMovie.match(/guard admitRandomPickPlayback\([^\n]+else \{ return \}\n(?:\s+didTransferPlayback = true\n)?\s+presentation = \.player/g) || []).length === 3,
     'all three movie admissions immediately precede publication');
   before(method(movie, 'playStream'), 'cancelPendingQuickWatch()', 'if stream.isYouTubeTrailer', 'manual source cancels before content/trailer resolution');
+  need(/guard admitQueuedSource\(pm, ref: ref\) else \{ return \}\s*presentation = \.player/.test(method(movie, 'playStream')), 'manual movie source validates queue immediately before launch');
+  need((playMovie.match(/playbackQueueToken: playbackQueueToken/g) || []).length === 3, 'three movie autoplay handoffs retain original queue token');
+  need(method(movie, 'playStream').includes('playbackQueueToken: playbackQueueToken'), 'manual movie source retains original queue token');
   before(method(movie, 'playTrailerStream'), 'cancelPendingQuickWatch()', 'await iOSDetailView.resolveTrailerLaunch', 'manual trailer cancels first');
   for (const name of ['play', 'playBest', 'playTrailerStream']) {
     const block = method(episode, name);
     before(block, 'if quickWatchScope == nil { cancelPendingAutoPick() }', 'let target = shownVideo', 'manual episode ' + name + ' retires auto before work');
     if (name !== 'playTrailerStream') need(/guard admitRandomPickPlayback\([^\n]+else \{ return \}\n\s+didTransferPlayback = true\n\s+presentation = \.player/.test(block), 'episode ' + name + ': atomic final handoff');
+    if (name !== 'playTrailerStream') need(block.includes('playbackQueueToken: playbackQueueToken'), 'episode ' + name + ': source/quality selection retains queue token');
   }
   need(playMovie.includes('if !didTransferPlayback { ref?.nativeUsenetLease?.close(); attemptPrime?.cancel() }') &&
     method(episode, 'play').includes('if !didTransferPlayback { ref?.nativeUsenetLease?.close(); attemptPrime?.cancel() }'), 'rejected attempt closes its own lease and prime');
@@ -105,9 +115,13 @@ const mutations = [
   ['quickWatchTask?.cancel()', '// obsolete task retained', 'cancel fails to stop work'],
   ['autoPlayOnAppear: true,\n                            randomPickPlayIntent: randomPickPlayIntent', 'autoPlayOnAppear: true', 'series drops shared grant'],
   ['cancelPendingQuickWatch(revokingRandomPlay: autoPlayEpisode == nil)', 'cancelPendingQuickWatch()', 'parent revokes forwarded series grant'],
-  ['guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: nil) else { return }', '', 'fast resume skips admission'],
-  ['guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: win.ref) else { return }', '', 'movie race skips admission'],
-  ['guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: ref) else { return }', '', 'movie fallback skips admission'],
+  ['guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: nil, meta: pm) else { return }', '', 'fast resume skips admission'],
+  ['guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: win.ref, meta: pm) else { return }', '', 'movie race skips admission'],
+  ['guard admitRandomPickPlayback(quickWatchScope: quickWatchScope, ref: ref, meta: pm) else { return }', '', 'movie fallback skips admission'],
+  ['return admitQueuedSource(meta, ref: ref)', 'return true', 'manual source skips original queue admission'],
+  ['guard admitQueuedSource(pm, ref: ref) else { return }', '', 'manual movie skips queue admission'],
+  ['playbackQueueToken: playbackQueueToken', 'playbackQueueToken: nil', 'accepted source loses original queue token'],
+  ['playbackQueueToken?.routingToken(\n                                    contentID: m.id, videoID: v.id, type: "series")', 'playbackQueueToken', 'unrelated manual episode inherits exact-episode queue capability'],
   ['if quickWatchScope == nil { cancelPendingQuickWatch() }', '', 'manual hero competes with auto'],
   ['cancelPendingQuickWatch()\n        // #95:', '// #95:', 'manual source competes with auto'],
   ['if quickWatchScope == nil { cancelPendingAutoPick() }', '', 'manual episode competes with auto'],

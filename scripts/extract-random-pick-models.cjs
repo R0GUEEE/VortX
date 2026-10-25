@@ -21,16 +21,17 @@ process.stdout.write('import Foundation\n' +
     fs.readFileSync(process.argv[2] + '/app/SourcesShared/VortxResourceBridge.swift', 'utf8')) +
   full('enum VortxMetaLoadingProjection {',
     fs.readFileSync(process.argv[2] + '/app/SourcesShared/VortxResourceProjection.swift', 'utf8')) +
-  full('struct CoreResourceRequest: Decodable {') + full('struct CoreResourcePath: Decodable {') +
-  full('enum CoreLoadable<T: Decodable>: Decodable {') + full('struct CoreMetaSelection: Decodable {') +
-  full('struct CoreMetaDetails: Decodable {') + full('struct CoreMetaEntry: Decodable {') +
-  prefix('struct CoreMetaItem: Decodable {', '    /// A title ID is not a version of its metadata.') +
-  full('struct CoreLink: Decodable, Equatable, Sendable {') + full('struct CoreMetaBehaviorHints: Decodable, Equatable {') +
-  full('struct CoreStreamGroup: Decodable {') +
+  full('struct CoreResourceRequest: Decodable, Sendable {') + full('struct CoreResourcePath: Decodable, Sendable {') +
+  full('enum CoreLoadable<T: Decodable>: Decodable {') +
+  full('extension CoreLoadable: Sendable where T: Sendable {') + full('struct CoreMetaSelection: Decodable, Sendable {') +
+  full('struct CoreMetaDetails: Decodable, Sendable {') + full('struct CoreMetaEntry: Decodable, Sendable {') +
+  prefix('struct CoreMetaItem: Decodable, Sendable {', '    /// A title ID is not a version of its metadata.') +
+  full('struct CoreLink: Decodable, Equatable, Sendable {') + full('struct CoreMetaBehaviorHints: Decodable, Equatable, Sendable {') +
+  full('struct CoreStreamGroup: Decodable, Sendable {') +
   fs.readFileSync(process.argv[2] + '/app/SourcesShared/DetailMetaRecoveryPolicy.swift', 'utf8') + '\n' +
-  prefix('struct CoreCWItem: Decodable, Identifiable {', '    /// 0…1 watch progress') +
-  full('struct CoreLibState: Decodable {') +
-  prefix('struct CoreVideo: Decodable, Identifiable, Equatable {', '    /// The `released` string parsed as a `Date`'));
+  prefix('struct CoreCWItem: Decodable, Identifiable, Sendable {', '    /// 0…1 watch progress') +
+  full('struct CoreLibState: Decodable, Sendable {') +
+  prefix('struct CoreVideo: Decodable, Identifiable, Equatable, Sendable {', '    /// The `released` string parsed as a `Date`'));
 // Compile the actual owner closure verbatim. The facade context below is controlled test state;
 // enqueue/session execution stays outside this fixture and is checked by the source contract.
 const facade = fs.readFileSync(process.argv[2] + '/app/SourcesShared/VortxNativeCoreFacade.swift', 'utf8');
@@ -46,7 +47,7 @@ enum ProfileStore {
 }
 enum ProfileAddonPreferencesPolicy { static func identity(_ value: String) -> String { value } }
 enum VortXSyncManager { static let appliedAddonOrder: [String] = [] }
-struct CoreStream: Decodable {}
+struct CoreStream: Decodable, Sendable {}
 enum EpisodePlaybackIdentity {
     enum Authority { case launch }
     static func appleCWSeriesInventory(from videos: [CoreVideo], authority: Authority) -> [CoreVideo]? { videos }

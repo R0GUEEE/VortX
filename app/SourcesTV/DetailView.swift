@@ -29,6 +29,7 @@ struct DetailView: View {
     let id: String
     var autoPlayOnAppear = false
     var randomPlayIntent: RandomPickPlayIntent? = nil
+    var playbackQueueToken: PlaybackTitleQueue.Token? = nil
     private struct TVRandomSeriesPlayRoute {
         let meta: CoreMetaItem
         let video: CoreVideo
@@ -248,6 +249,7 @@ struct DetailView: View {
             if let route = randomSeriesPlayRoute, let intent = randomPlayIntent {
                 CoreEpisodeStreams(meta: route.meta, video: route.video, season: route.video.season ?? 0,
                                    episodes: route.episodes, autoPlayOnAppear: true, randomPlayIntent: intent,
+                                   playbackQueueToken: playbackQueueToken,
                                    suppressPreferenceAutoPlay: true)
             }
         }
@@ -1225,7 +1227,14 @@ struct DetailView: View {
         guard autoPlayOnAppear, !didRouteRandomSeriesPlay, let intent = randomPlayIntent,
               intent.isPending else { return }
         let eligible = RandomPickPolicy.eligibleEpisodes(meta.videos ?? [], now: Date())
-        guard let video = primary.flatMap({ eligible.contains($0) ? $0 : nil }) ?? eligible.first,
+        // A queue's exact episode hint is never replaced by the first episode of a partial inventory.
+        let selected: CoreVideo?
+        if let initialVideoID {
+            selected = eligible.first(where: { $0.id == initialVideoID })
+        } else {
+            selected = primary.flatMap({ eligible.contains($0) ? $0 : nil }) ?? eligible.first
+        }
+        guard let video = selected,
               intent.bind(meta: meta, video: video, core: core, profiles: profiles) else { return }
         didRouteRandomSeriesPlay = true
         randomSeriesPlayRoute = TVRandomSeriesPlayRoute(meta: meta, video: video,
@@ -1288,10 +1297,15 @@ struct DetailView: View {
                              onDetailMove: { direction, region in
                                  handleDetailMove(direction, from: region, using: proxy)
                              })
-                        Button(action: selectRandomEpisode) {
-                            Label("Random episode", systemImage: "shuffle")
+                        HStack(spacing: Theme.Space.md) {
+                            Button(action: selectRandomEpisode) {
+                                Label("Random episode", systemImage: "shuffle")
+                            }
+                            .buttonStyle(ChipButtonStyle())
+                            if let candidate = PlaybackTitleQueuePolicy.Candidate(
+                                contentID: meta.id, type: effectiveType, title: meta.name
+                            ) { PlaybackTitleQueueButton(candidate: candidate, onInteraction: { randomPlayIntent?.revoke() }) }
                         }
-                        .buttonStyle(ChipButtonStyle())
                         .padding(.horizontal, Theme.Space.screenEdge)
                         CoreSeasonedEpisodes(meta: meta, videos: videos,
                                              orderedEpisodes: ordered,
@@ -1300,6 +1314,7 @@ struct DetailView: View {
                                              initialTraktSessionID: initialTraktNextEpisodeOffer == nil ? nil : initialTraktSessionID,
                                              initialContinueWatchingIntent: initialTraktNextEpisodeOffer == nil ? nil : initialContinueWatchingIntent,
                                              initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
+                                             playbackQueueToken: playbackQueueToken,
                                              onSeasonPickerFocus: {
                                                  proxy.scrollTo(CoreSeasonedEpisodes.seasonPickerAnchor, anchor: .center)
                                              })
@@ -1412,6 +1427,7 @@ struct DetailView: View {
                                                initialContinueWatchingIntent: initialContinueWatchingIntent,
                                                initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
                                                autoPlayOnAppear: autoPlayOnAppear, randomPlayIntent: randomPlayIntent,
+                                               playbackQueueToken: playbackQueueToken,
                                                randomPlayMetadata: fencedMeta, suppressPreferenceAutoPlay: randomPlayIntent != nil,
                                                secondaryAction: hasFullTrailer(m) ? AnyView(trailerChip(m)) : nil,
                                                onDetailMove: { direction, region in
@@ -1668,7 +1684,9 @@ struct DetailView: View {
                                                            initialStartAtSeconds: primaryResumeSeconds,
                                                            initialTraktSessionID: initialTraktSessionID,
                                                            initialContinueWatchingIntent: initialContinueWatchingIntent,
-                                                           initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer)
+                                                           initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
+                                                           playbackQueueToken: playbackQueueToken?.routingToken(
+                                                            contentID: m.id, videoID: primaryEpisode.id, type: m.type))
                                     } label: {
                                         Label(primaryEpisodeLabel(primaryEpisode, isResume: primaryIsResume,
                                                                   resumeSeconds: primaryResumeSeconds),
@@ -2131,6 +2149,7 @@ struct CoreSeasonedEpisodes: View {
     var initialTraktSessionID: TraktSessionID? = nil
     var initialContinueWatchingIntent: HomeContinueWatchingSelection.Intent? = nil
     var initialTraktNextEpisodeOffer: TraktNextEpisodeOffer? = nil
+    var playbackQueueToken: PlaybackTitleQueue.Token? = nil
     /// Scroll the season picker into the parent viewport before this view seats focus on its selected chip.
     /// Only the first episode row requests this; deeper rows keep native previous-row navigation.
     var onSeasonPickerFocus: (() -> Void)?
@@ -2614,7 +2633,9 @@ struct CoreSeasonedEpisodes: View {
             CoreEpisodeStreams(meta: meta, video: v, season: v.season ?? season, episodes: orderedEpisodes,
                                initialTraktSessionID: initialTraktSessionID,
                                initialContinueWatchingIntent: initialContinueWatchingIntent,
-                               initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer)
+                               initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
+                               playbackQueueToken: playbackQueueToken?.routingToken(
+                                contentID: meta.id, videoID: v.id, type: meta.type))
         } label: {
             // The glass episode card (2026-10-15): the still, glass chips, the frosted panel below.
             let hidden = spoilerVeiled(v, isWatched: isWatched)
@@ -2853,6 +2874,7 @@ struct CoreEpisodeStreams: View {
     let season: Int
     var autoPlayOnAppear = false
     var randomPlayIntent: RandomPickPlayIntent? = nil
+    var playbackQueueToken: PlaybackTitleQueue.Token? = nil
     var suppressPreferenceAutoPlay = false
     var episodes: [CoreVideo] = []
     var initialStartAtSeconds: Double? = nil
@@ -2887,6 +2909,7 @@ struct CoreEpisodeStreams: View {
         initialTraktNextEpisodeOffer: TraktNextEpisodeOffer? = nil,
         autoPlayOnAppear: Bool = false,
         randomPlayIntent: RandomPickPlayIntent? = nil,
+        playbackQueueToken: PlaybackTitleQueue.Token? = nil,
         suppressPreferenceAutoPlay: Bool = false
     ) {
         self.meta = meta
@@ -2899,6 +2922,7 @@ struct CoreEpisodeStreams: View {
         self.initialTraktNextEpisodeOffer = initialTraktNextEpisodeOffer
         self.autoPlayOnAppear = autoPlayOnAppear
         self.randomPlayIntent = randomPlayIntent
+        self.playbackQueueToken = playbackQueueToken
         self.suppressPreferenceAutoPlay = suppressPreferenceAutoPlay
         _currentVideo = State(initialValue: video)
     }
@@ -3014,6 +3038,7 @@ struct CoreEpisodeStreams: View {
                                    initialContinueWatchingIntent: initialContinueWatchingIntent,
                                    initialTraktNextEpisodeOffer: initialTraktNextEpisodeOffer,
                                    autoPlayOnAppear: autoPlayOnAppear, randomPlayIntent: randomPlayIntent,
+                                   playbackQueueToken: playbackQueueToken,
                                    randomPlayMetadata: meta, randomPlayVideo: currentVideo,
                                    suppressPreferenceAutoPlay: suppressPreferenceAutoPlay,
                                    onDetailMove: { direction, region in
@@ -3210,6 +3235,7 @@ struct CoreStreamList: View {
     // BEGIN TV RANDOM PLAY SOURCE INPUT
     var autoPlayOnAppear = false
     var randomPlayIntent: RandomPickPlayIntent? = nil
+    var playbackQueueToken: PlaybackTitleQueue.Token? = nil
     var randomPlayMetadata: CoreMetaItem? = nil
     var randomPlayVideo: CoreVideo? = nil
     var suppressPreferenceAutoPlay = false
@@ -3734,6 +3760,11 @@ struct CoreStreamList: View {
                         }
                     }
                     WatchlistChip()
+                    if let meta, let candidate = PlaybackTitleQueuePolicy.Candidate(
+                        contentID: meta.libraryId, type: meta.type, title: meta.name,
+                        videoIDHint: meta.type == "series" ? meta.videoId : nil,
+                        episodeLabel: meta.season.flatMap { season in meta.episode.map { "S\(season)E\($0)" } }
+                    ) { PlaybackTitleQueueButton(candidate: candidate, onInteraction: { randomPlayIntent?.revoke() }) }
                     ratingChip
                 }
             }
@@ -4080,11 +4111,19 @@ struct CoreStreamList: View {
         return videoID == episodeStreamId && generation == episodeTargetGeneration
     }
 
-    private func consumeRandomPlay(_ attempt: RandomPlayAttempt?) -> Bool {
-        guard let attempt else { return true } // Ordinary explicit rows keep their existing behavior.
-        return !Task.isCancelled && presenter.request == nil
-            && attempt.intent.consume(attempt.claim, core: core, profiles: profiles,
-                sourceIsCurrent: sourceList.playbackReceiptIsCurrent(attempt.source, pin: sourcePin))
+    private func consumeRandomPlay(_ attempt: RandomPlayAttempt?, ref: DebridPlaybackRef? = nil) -> Bool {
+        if let attempt {
+            guard !Task.isCancelled, presenter.request == nil,
+                  attempt.intent.consume(attempt.claim, core: core, profiles: profiles,
+                    sourceIsCurrent: sourceList.playbackReceiptIsCurrent(attempt.source, pin: sourcePin)) else { return false }
+        }
+        guard let playbackQueueToken else { return true }
+        guard let meta, playbackQueueToken.admitResolvedSource(contentID: meta.libraryId,
+                videoID: meta.videoId, type: meta.type) else {
+            ref?.nativeUsenetLease?.close()
+            return false
+        }
+        return true
     }
 
     private var episodeHint: DebridEpisode? {
@@ -4558,7 +4597,7 @@ struct CoreStreamList: View {
                     startProposal,
                     currentSessionID: TraktAuth.storedSessionID
                 ) else { return }
-                guard consumeRandomPlay(randomAttempt) else { return }
+                guard consumeRandomPlay(randomAttempt, ref: ref) else { return }
                 presenter.request = PlaybackRequest(url: url, title: title, meta: meta, episodes: episodes,
                                                     seriesInventoryAuthority: seriesInventoryAuthority,
                                                     sourceHint: entry.qualityText, torrent: false,
@@ -4568,7 +4607,8 @@ struct CoreStreamList: View {
                                                     debridCachedHashes: debridCache.cachedHashes,
                                                     enginePlayerVideoId: engineVideoID,
                                                     wasExplicitPick: true, wasResume: true, startFromZero: fromStart,
-                                                    startAtSeconds: admittedStart.seconds)
+                                                    startAtSeconds: admittedStart.seconds,
+                                                    playbackQueueToken: playbackQueueToken)
                 return
             }
         }
@@ -4593,7 +4633,7 @@ struct CoreStreamList: View {
                 startProposal,
                 currentSessionID: TraktAuth.storedSessionID
             ) else { return }
-            guard consumeRandomPlay(randomAttempt) else { return }
+            guard consumeRandomPlay(randomAttempt, ref: win.ref) else { return }
             randomHandedOff = true
             presenter.request = PlaybackRequest(url: win.ref.url, title: title, meta: meta, episodes: episodes,
                                                 seriesInventoryAuthority: seriesInventoryAuthority,
@@ -4605,7 +4645,8 @@ struct CoreStreamList: View {
                                                 sourceStream: win.stream,
                                                 debridCachedHashes: debridCache.cachedHashes,
                                                 enginePlayerVideoId: engineVideoID, startFromZero: fromStart,
-                                                startAtSeconds: admittedStart.seconds)
+                                                startAtSeconds: admittedStart.seconds,
+                                                playbackQueueToken: playbackQueueToken)
             return
         }
         // No parallel-cached winner: today's single-resolve path on the ranked best, unchanged. This is an
@@ -4672,7 +4713,7 @@ struct CoreStreamList: View {
                 startProposal,
                 currentSessionID: TraktAuth.storedSessionID
             ) else { return }
-            guard consumeRandomPlay(randomAttempt) else { return }
+            guard consumeRandomPlay(randomAttempt, ref: ref) else { return }
             randomHandedOff = true
             presenter.request = PlaybackRequest(url: ref.url, title: title, meta: meta, episodes: episodes,
                                                 seriesInventoryAuthority: seriesInventoryAuthority,
@@ -4686,7 +4727,8 @@ struct CoreStreamList: View {
                                             debridCachedHashes: debridCache.cachedHashes,
                                             enginePlayerVideoId: engineVideoID, wasExplicitPick: explicit,
                                             startFromZero: fromStart,
-                                            startAtSeconds: admittedStart.seconds)
+                                            startAtSeconds: admittedStart.seconds,
+                                            playbackQueueToken: playbackQueueToken)
             return
         }
         // A raw NZB URL is a descriptor for the resolver, never media bytes for the player.
@@ -4715,7 +4757,8 @@ struct CoreStreamList: View {
                                             enginePlayerVideoId: engineVideoID,
                                             wasExplicitPick: explicit,
                                             startFromZero: fromStart,
-                                            startAtSeconds: admittedStart.seconds)
+                                            startAtSeconds: admittedStart.seconds,
+                                            playbackQueueToken: playbackQueueToken)
     }
 
     private var launchPlayerLabel: String {

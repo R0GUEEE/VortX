@@ -249,6 +249,7 @@ struct TVPlayerView: View {
     var startAtSeconds: Double? = nil
     /// Publishes only a media identity that reached the first-frame commit point. The detail page uses it to
     /// return to the episode actually watched while engine Continue Watching persistence catches up.
+    var playbackQueueToken: PlaybackTitleQueue.Token? = nil
     var onPlaybackIdentityCommitted: (PlaybackMeta) -> Void = { _ in }
     var onClose: () -> Void = {}           // dismiss the dedicated player window
 
@@ -985,6 +986,7 @@ struct TVPlayerView: View {
     @State private var idleDeadline: Date = .distantFuture   // wall-clock idle deadline; pushed forward on every press
     @State private var consecutiveAutoAdvances = 0        // back-to-back auto-advances with no interaction between them
     @State private var stillWatchingPendingAdvance = false  // roll to the next episode when Continue is chosen at a binge boundary
+    @State private var pendingStillWatchingQueue = false
     private static let idleWatchTimeout: TimeInterval = 4 * 60 * 60   // 4h of no interaction -> "Still watching?"
     private static let idleAutoAdvanceLimit = 4                       // 4 back-to-back auto-advances, zero input -> same
     @State private var leftPlayback = false             // set the instant leavePlayback() runs, so a pending EOF backfill never resurrects a stopped player
@@ -1058,7 +1060,8 @@ struct TVPlayerView: View {
 
     /// Which on-screen control is currently highlighted (driven by remote left/right, not SwiftUI focus).
     private enum Control: Hashable { case close, scrub, restart, back, play, fwd, audio, subs, aspect, playback, prev, next, episodes, chapters, sources, quality, settings, skipEdit }
-    private enum PanelKind: String { case audio, audioSettings, subtitles, subtitleSettings, subtitleLanguage, aspect, playback, episodes, chapters, sources, sourceAudio, quality, playerSettings, engine, sleep, skipEditor }
+    private enum PanelKind: String { case audio, audioSettings, subtitles, subtitleSettings, subtitleLanguage, aspect, playback, episodes, chapters, sources, sourceAudio, quality, playerSettings, engine, sleep, skipEditor, queue, queueItem }
+    @State private var queueSelectedEntryID: UUID?
     @State private var selected: Control = .play
     @State private var lastButton: Control = .play     // remembered button-row spot, so up-then-down returns to it
     // Scrub-to-seek: left/right on the scrubber moves a preview playhead (accelerating on rapid/held
@@ -1312,6 +1315,12 @@ struct TVPlayerView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
             refreshAutoSkipSettings()
+        }
+        .onReceive(PlaybackTitleQueue.shared.$change) { _ in
+            guard showOptions else { return }
+            if panelKind == .queue || panelKind == .queueItem || panelKind == .playerSettings {
+                refreshPanelRowsPreservingAccessibilityFocus()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: HDRDisplayMode.userHintNotification)) { note in
             // HDRDisplayMode refused a display-mode switch because Match Dynamic Range is OFF (posted once
@@ -1696,6 +1705,10 @@ struct TVPlayerView: View {
         guard assetSanityAttempt.isAccepted(owner: loadToken),
               assetSanityStartEffectsToken != loadToken else { return }
         assetSanityStartEffectsToken = loadToken
+        if pendingAdvance == nil, assetSanityDeferredStartToken == loadToken,
+           coordinator.player?.activeLoadToken == loadToken, let meta = curMeta {
+            _ = PlaybackTitleQueue.shared.acceptStarted(playbackQueueToken, meta: meta)
+        }
         rememberAcceptedSeriesChoice()
         localTrickplayCaptureBreaker.reset()
         if !isCurrentLiveStream, pendingAdvance == nil, let m = curMeta, let u = curURL {
@@ -2757,6 +2770,8 @@ struct TVPlayerView: View {
                 case .sourceAudio:      openPanel(.sources, preferredAccessibilityID: "sources.audio")
                 case .engine:           openPanel(.playerSettings)
                 case .sleep:            openPanel(.playerSettings)
+                case .queueItem:        openPanel(.queue)
+                case .queue:            openPanel(.playerSettings)
                 default:                closePanel()
                 }
             case .upArrow: moveOption(-1)
@@ -3351,6 +3366,19 @@ struct TVPlayerView: View {
     /// row drills into a dedicated sub-panel (sync / size / colour for subtitles, sync for audio).
     private var optionRows: [OptionRow] {
         switch panelKind {
+        case .queue:
+            return playbackQueueRows
+        case .queueItem:
+            guard let id = queueSelectedEntryID,
+                  let entry = PlaybackTitleQueue.shared.upcoming.first(where: { $0.id == id }) else {
+                return [OptionRow(label: "This queued item is no longer available", isHeader: true)]
+            }
+            return [
+                OptionRow(label: entry.candidate.title, detail: entry.candidate.episodeLabel ?? "", isHeader: true),
+                OptionRow(label: "Move up") { PlaybackTitleQueue.shared.move(id, by: -1) },
+                OptionRow(label: "Move down") { PlaybackTitleQueue.shared.move(id, by: 1) },
+                OptionRow(label: "Remove") { PlaybackTitleQueue.shared.remove(id); openPanel(.queue) }
+            ]
         case .audio:
             var rows = groupedTrackRows(audioTracks) { id in
                 suppressRapidBufferingRecovery(reason: "user audio track")
@@ -4017,6 +4045,9 @@ struct TVPlayerView: View {
     /// this app suspends), the decoder choice, and the info/QR rows that used to crowd Playback.
     private func playerSettingsRows() -> [OptionRow] {
         var rows: [OptionRow] = []
+        if !isTrailer {
+            rows.append(OptionRow(label: "Playback queue", detail: "\(PlaybackTitleQueue.shared.count)  ›") { openPanel(.queue) })
+        }
         // Handoff only when the URL is self-contained. A header-gated stream needs specific request
         // headers (it is either playing through our embedded /proxy/ on a loopback URL, or as a
         // bare CDN URL whose headers live on mpv); an external player gets neither and cannot
@@ -5055,6 +5086,7 @@ struct TVPlayerView: View {
         case .engine:           return "Player Engine"
         case .sleep:            return "Sleep Timer"
         case .skipEditor:       return "Edit Skip Segment"
+        case .queue, .queueItem: return "Playback Queue"
         }
     }
 
@@ -9542,6 +9574,17 @@ struct TVPlayerView: View {
             leavePlayback()
             return
         }
+        if let meta = curMeta, PlaybackTitleQueue.shared.ownsActive(playbackQueueToken, meta: meta) {
+            if stillWatchingPromptEnabled,
+               PlaybackTitleQueue.shared.shouldConfirmAdvance(playbackQueueToken, meta: meta,
+                                                             after: stillWatchingAfterEpisodes) {
+                pendingStillWatchingQueue = true
+                presentStillWatching()
+            } else if PlaybackTitleQueue.shared.completed(playbackQueueToken, meta: meta) {
+                leavePlayback()
+            }
+            return
+        }
         if hasNextEpisode {
             // "Still watching?" binge guard: after N back-to-back auto-advances with zero remote input,
             // pause at this boundary and ask instead of rolling straight on (Continue resumes the roll).
@@ -11746,6 +11789,7 @@ struct TVPlayerView: View {
     private func noteInteraction() {
         idleDeadline = Date().addingTimeInterval(Self.idleWatchTimeout)
         consecutiveAutoAdvances = 0
+        PlaybackTitleQueue.shared.noteInteraction(playbackQueueToken)
     }
 
     /// Fire the timed prompt iff the session looks unattended AND is actually playing. Never interrupts a
@@ -11778,6 +11822,13 @@ struct TVPlayerView: View {
         stillWatchingPendingAdvance = false
         withAnimation { stillWatching = false }
         noteInteraction()
+        if pendingStillWatchingQueue {
+            pendingStillWatchingQueue = false
+            if let meta = curMeta, PlaybackTitleQueue.shared.completed(playbackQueueToken, meta: meta) {
+                leavePlayback()
+            }
+            return
+        }
         if advance {
             playNext()
         } else {
@@ -11790,8 +11841,40 @@ struct TVPlayerView: View {
     private func stopStillWatching() {
         stillWatching = false
         stillWatchingPendingAdvance = false
+        pendingStillWatchingQueue = false
         saveProgress(at: currentTime)
         leavePlayback()
+    }
+
+    private var playbackQueueRows: [OptionRow] {
+        let queue = PlaybackTitleQueue.shared
+        var rows: [OptionRow] = []
+        if let meta = curMeta, let candidate = PlaybackTitleQueuePolicy.Candidate(
+            contentID: meta.libraryId, type: meta.type, title: meta.name,
+            videoIDHint: meta.type == "series" ? meta.videoId : nil,
+            episodeLabel: meta.season.flatMap { season in meta.episode.map { "S\(season)E\($0)" } }
+        ) {
+            rows.append(OptionRow(label: "Play this item next") { _ = queue.enqueue(candidate, placement: .next) })
+            rows.append(OptionRow(label: "Add this item to end") { _ = queue.enqueue(candidate, placement: .last) })
+        }
+        if let meta = curMeta, queue.ownsActive(playbackQueueToken, meta: meta), !queue.upcoming.isEmpty {
+            rows.append(OptionRow(label: "Play next queued title now") {
+                if queue.nextManually(playbackQueueToken) { leavePlayback() }
+            })
+        } else if queue.canStart {
+            rows.append(OptionRow(label: "Start queued titles now") {
+                if queue.requestNext() { leavePlayback() }
+            })
+        }
+        rows.append(OptionRow(label: "Up next · \(queue.upcoming.count)", isHeader: true))
+        rows += queue.upcoming.map { entry in
+            OptionRow(label: entry.candidate.title, detail: entry.candidate.episodeLabel ?? "›") {
+                queueSelectedEntryID = entry.id
+                openPanel(.queueItem)
+            }
+        }
+        if !queue.upcoming.isEmpty { rows.append(OptionRow(label: "Clear upcoming titles") { queue.clearUpcoming() }) }
+        return rows
     }
 
     /// "Still watching?" modal: a dimming scrim plus a centered warm-glass card with Continue / Stop. Raised

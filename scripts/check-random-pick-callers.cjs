@@ -107,6 +107,9 @@ function contracts(files) {
   need(tv.includes('autoPlayOnAppear: Bool = false') && tv.includes('self.autoPlayOnAppear = autoPlayOnAppear'), 'episode custom initializer defaults off');
   need(tv.includes('autoPlayOnAppear: route.autoPlay') && tv.includes('randomPlayIntent: route.intent, suppressPreferenceAutoPlay: true'), 'random episode true Play / navigation-only Open');
   need(tv.includes('if randomSeriesPlayRoute == nil { randomPlayIntent?.revoke() }'), 'series child transfer preserves pending command');
+  need(tv.includes('randomPlayIntent: intent,\n                                   playbackQueueToken: playbackQueueToken'), 'series child retains immutable queue capability separately');
+  need(tv.includes('contentID: m.id, videoID: primaryEpisode.id, type: m.type') &&
+    tv.includes('contentID: meta.id, videoID: v.id, type: meta.type'), 'ordinary TV episode navigation filters immutable queue selection identity');
   const seriesRoute = method(tv, 'routeRandomSeriesPlay');
   for (const term of ['autoPlayOnAppear', '!didRouteRandomSeriesPlay', 'eligibleEpisodes', 'intent.bind(', 'didRouteRandomSeriesPlay = true']) need(seriesRoute.includes(term), 'series Play route missing ' + term);
   need(!seriesRoute.includes('initialStartAtSeconds') && !seriesRoute.includes('initialTrakt'), 'new series Play inherits no resume offer');
@@ -120,7 +123,7 @@ function contracts(files) {
   const target = method(sourceView, 'targetIsCurrent');
   for (const term of ['randomAttempt: RandomPlayAttempt? = nil', '!Task.isCancelled, presenter.request == nil', 'randomAttempt.intent.accepts(randomAttempt.claim', 'playbackReceiptIsCurrent(randomAttempt.source, pin: sourcePin)']) need(target.includes(term), 'TV async target fence missing ' + term);
   const consume = method(sourceView, 'consumeRandomPlay');
-  for (const term of ['guard let attempt else { return true }', '!Task.isCancelled && presenter.request == nil', 'attempt.intent.consume(attempt.claim', 'playbackReceiptIsCurrent(attempt.source, pin: sourcePin)']) need(consume.includes(term), 'TV final consume missing ' + term);
+  for (const term of ['if let attempt {', '!Task.isCancelled, presenter.request == nil', 'attempt.intent.consume(attempt.claim', 'playbackReceiptIsCurrent(attempt.source, pin: sourcePin)', 'guard let playbackQueueToken else { return true }', 'playbackQueueToken.admitResolvedSource(contentID: meta.libraryId', 'videoID: meta.videoId, type: meta.type', 'ref?.nativeUsenetLease?.close()']) need(consume.includes(term), 'TV final consume missing ' + term);
   for (const name of ['play', 'playBest', 'refindSources']) need(method(sourceView, name).includes('randomPlayIntent?.revoke()'), name + ' must revoke pending Play before manual work');
   const resolving = sourceView.slice(sourceView.indexOf('@MainActor private func playBestResolving'), sourceView.indexOf('private var launchPlayerLabel'));
   need(resolving.includes('DebridCoordinator.shared.resolveFirstPlayable(') && resolving.includes('await playResolving('), 'Play uses normal ranked resolver/fallback');
@@ -129,7 +132,8 @@ function contracts(files) {
   need(gates.length >= 12 && gates.every(m => m[1].includes('randomAttempt: randomAttempt')), 'every existing await/bind target fence carries claim');
   const handoffs = [...resolving.matchAll(/presenter\.request = PlaybackRequest/g)];
   need(handoffs.length === 4, 'four real TV content handoff sites');
-  for (const m of handoffs) need(resolving.slice(Math.max(0,m.index-180),m.index).includes('guard consumeRandomPlay(randomAttempt) else { return }'), 'final handoff must atomically consume');
+  for (const m of handoffs) need(/guard consumeRandomPlay\(randomAttempt(?:, ref: (?:ref|win\.ref))?\) else \{ return \}/.test(resolving.slice(Math.max(0,m.index-220),m.index)), 'final handoff must atomically consume');
+  need((resolving.match(/playbackQueueToken: playbackQueueToken/g) || []).length === 4, 'all TV accepted source handoffs freeze the original queue token');
   for (const name of ['playExtra', 'playFullTrailerInApp', 'openTrailerInYouTubeApp']) need(method(tv, name).includes('randomPlayIntent?.revoke()'), 'manual trailer revokes pending content Play');
   need(resolving.includes('!randomHandedOff { win.ref.nativeUsenetLease?.close() }') && resolving.includes('!randomHandedOff { ref.nativeUsenetLease?.close() }'), 'rejected pending resolver releases native lease');
   for (const term of ['access.isCurrent(profiles: profiles, core: core), originIsCurrent?() == true', 'RandomPickPolicy.EpisodeSource(current) == source', 'policy.consume(claim, current: current)', 'case .consumed, .revoked: return false', 'access.isNavigationCurrent(profiles: profiles, core: core)', 'access.matchesPublishedNavigationProfiles(incoming, pickedThisLaunch: pickedThisLaunch)']) need(intent.includes(term), 'shared intent missing ' + term);
@@ -182,7 +186,10 @@ const mutations = [
   ['app/SourcesTV/DetailView.swift', 'guard !suppressPreferenceAutoPlay, randomPlayIntent == nil,', 'guard', 'Open inherits preference auto-pick'],
   ['app/SourcesTV/DetailView.swift', 'sourceList.playbackReceipt(pin: sourcePin)', 'nil', 'TV bypasses settled source receipt'],
   ['app/SourcesTV/DetailView.swift', 'sourceIsCurrent: sourceList.playbackReceiptIsCurrent(randomAttempt.source, pin: sourcePin)', 'sourceIsCurrent: true', 'async source revocation omitted'],
-  ['app/SourcesTV/DetailView.swift', 'guard consumeRandomPlay(randomAttempt) else { return }', '', 'first final handoff bypasses consumption'],
+  ['app/SourcesTV/DetailView.swift', 'guard consumeRandomPlay(randomAttempt, ref: ref) else { return }', '', 'first final handoff bypasses consumption'],
+  ['app/SourcesTV/DetailView.swift', 'playbackQueueToken.admitResolvedSource(contentID: meta.libraryId', 'true /* queue admission removed */', 'TV manual source bypasses queue admission'],
+  ['app/SourcesTV/DetailView.swift', 'playbackQueueToken: playbackQueueToken', 'playbackQueueToken: nil', 'TV accepted source loses original queue token'],
+  ['app/SourcesTV/DetailView.swift', 'playbackQueueToken?.routingToken(\n                                contentID: meta.id, videoID: v.id, type: meta.type)', 'playbackQueueToken', 'unrelated TV manual episode inherits exact-episode queue capability'],
   ['app/SourcesTV/DetailView.swift', 'startProposal: startProposal,\n            randomAttempt: randomAttempt', 'startProposal: startProposal', 'fallback drops original claim'],
   ['app/SourcesTV/DetailView.swift', 'randomPlayIntent?.revoke() // A manual source/trailer selection wins over pending auto Play.', '', 'manual source loses to old auto resolver'],
   ['app/SourcesShared/RandomPickPlayIntent.swift', 'access.isCurrent(profiles: profiles, core: core), originIsCurrent?() == true', 'access.isCurrent(profiles: profiles, core: core)', 'stale ticket origin bypassed'],

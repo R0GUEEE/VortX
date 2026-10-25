@@ -199,6 +199,7 @@ struct iOSRootView: View {
 
     var body: some View {
         shellWithProfilePicker
+            .modifier(iOSPlaybackTitleQueueHost())
     }
 
     /// Keeps the base presentation subtree in its own inferred type so the root's long-lived

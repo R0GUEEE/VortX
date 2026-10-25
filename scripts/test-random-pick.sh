@@ -75,6 +75,9 @@ export OPENBLAS_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1
 export SWIFT_FRONTEND_THREADS=1
 export CLANG_MODULE_CACHE_PATH="$out/module-cache"
+random_target="$(uname -m)-apple-macosx14.0"
+random_sdk="$(xcrun --toolchain com.apple.dt.toolchain.XcodeDefault --sdk macosx --show-sdk-path)"
+printf 'target=%s\nsdk=%s\n' "$random_target" "$random_sdk" > "$out/toolchain-selection.txt"
 /usr/bin/nice -n 15 node "$checkout/scripts/check-random-pick-callers.cjs" "$checkout" > "$out/callers.log" 2>&1
 /usr/bin/nice -n 15 node "$checkout/scripts/check-random-pick-ios-play.cjs" "$checkout" > "$out/ios-play-callers.log" 2>&1
 /usr/bin/nice -n 15 node "$checkout/scripts/check-meta-loading-projection.cjs" "$checkout" > "$out/meta-loading-callers.log" 2>&1
@@ -83,7 +86,9 @@ export CLANG_MODULE_CACHE_PATH="$out/module-cache"
 /usr/bin/nice -n 15 node "$checkout/scripts/extract-random-pick-models.cjs" "$checkout" > "$out/ExtractedModels.swift" 2> "$out/extractor.log"
 /usr/bin/nice -n 15 node "$checkout/scripts/extract-random-pick-navigation.cjs" "$checkout" > "$out/ExtractedNavigation.swift" 2> "$out/navigation-extractor.log"
 /usr/bin/shasum -a 256 "$out/ExtractedModels.swift" "$out/ExtractedNavigation.swift" > "$out/generated-before.sha256"
-/usr/bin/nice -n 15 xcrun swiftc -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
+/usr/bin/nice -n 15 xcrun --toolchain com.apple.dt.toolchain.XcodeDefault --sdk macosx swiftc \
+  -target "$random_target" -sdk "$random_sdk" \
+  -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
   -j 1 -num-threads 1 -whole-module-optimization -parse-as-library \
   -module-cache-path "$out/module-cache" -module-name RandomPickPolicyHarness \
   "$out/ExtractedModels.swift" "$checkout/app/SourcesShared/RandomPickPolicy.swift" \
