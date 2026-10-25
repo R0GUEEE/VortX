@@ -180,12 +180,14 @@ final class CoreBridge: ObservableObject {
         private let state = OSAllocatedUnfairLock(initialState: UUID())
         func capture() -> UUID { state.withLock { $0 } }
         func accepts(_ original: UUID) -> Bool { state.withLock { $0 == original } }
-        func retire() {
-            // Close admission before the following owner field replacement. This short
-            // synchronous helper does NOT delay that replacement until native drain;
-            // the async install/profile-FIFO paths own their explicit drain tickets.
+        func retire() -> CredentialPublicationOutbox.SubtitleRetirement {
             let retirement = CredentialPublicationOutbox.beginSubtitleRetirement(domain: subtitleDomain)
             state.withLock { $0 = UUID() }
+            return retirement
+        }
+        /// Called only after the original outer B transaction has unlocked.
+        func completeRetirement(_ retirement: CredentialPublicationOutbox.SubtitleRetirement) {
+            CredentialPublicationOutbox.drainSubtitleRenderers(retirement)
             Task {
                 await CredentialPublicationOutbox.waitForSubtitleRetirement(retirement)
                 CredentialPublicationOutbox.finishSubtitleRetirement(retirement)
@@ -515,13 +517,16 @@ final class CoreBridge: ObservableObject {
             }.map(\.id)
             VortXSyncManager.shared.updateNativeOwnAccountAvailability(missing: missing, profiles: profiles, capture: capture)
         }
-        nativeFacadeLock.withLock {
+        let subtitleRetirement = nativeFacadeLock.withLock { () -> CredentialPublicationOutbox.SubtitleRetirement? in
+            var retirement: CredentialPublicationOutbox.SubtitleRetirement?
             if nativePublishedAccountGeneration != snapshot.generation {
-                nativePlaybackReadLifetime.retire()
+                retirement = nativePlaybackReadLifetime.retire()
                 nativeMetadataAdmissionFence.retireInstallation()
             }
             nativePublishedAccountGeneration = snapshot.generation
+            return retirement
         }
+        if let subtitleRetirement { nativePlaybackReadLifetime.completeRetirement(subtitleRetirement) }
         if shouldReloadCredentials {
             VortxNativeCredentialSelectionRelay.shared.publish {
                 projection.stillOwnsCurrentContext(core: self)
@@ -978,11 +983,13 @@ final class CoreBridge: ObservableObject {
               facade.registryBinding?.scope.ownerProfileID != id.uuidString else { throw VortxNativeError.closed }
         try await facade.mutateProfiles([.object(["type": .string("delete_profile"), "id": .string(id.uuidString)])], hostEdits: [], expectedProfileID: binding.profileID.uuidString, expectedAccountGeneration: epoch)
         guard CredentialScopeRegistry.shared.isCurrent(binding.credential), nativeFacade === facade else { throw VortxNativeError.superseded }
-        nativeFacadeLock.withLock {
-            nativePlaybackReadLifetime.retire()
+        let subtitleRetirement = nativeFacadeLock.withLock {
+            let retirement = nativePlaybackReadLifetime.retire()
             nativeMetadataAdmissionFence.retireInstallation()
             nativeInstallGeneration = UUID()
+            return retirement
         }
+        nativePlaybackReadLifetime.completeRetirement(subtitleRetirement)
         try refreshNativeProfiles()
         loadBoard(); loadLibrary()
     }
@@ -996,11 +1003,13 @@ final class CoreBridge: ObservableObject {
         try await facade.mutateProfiles([action], hostEdits: [], expectedProfileID: binding.profileID.uuidString, expectedAccountGeneration: epoch)
         guard CredentialScopeRegistry.shared.isCurrent(binding.credential),
               nativeFacadeLock.withLock({ nativeFacadeStorage === facade && nativeInstallGeneration == binding.sessionGeneration }) else { throw VortxNativeError.superseded }
-        nativeFacadeLock.withLock {
-            nativePlaybackReadLifetime.retire()
+        let subtitleRetirement = nativeFacadeLock.withLock {
+            let retirement = nativePlaybackReadLifetime.retire()
             nativeMetadataAdmissionFence.retireInstallation()
             nativeInstallGeneration = UUID()
+            return retirement
         }
+        nativePlaybackReadLifetime.completeRetirement(subtitleRetirement)
         guard let beforeClear = invalidatePublicationEpoch(), originalMetadataClearAuthorityIsCurrent(beforeClear),
               let cleared = clearNativePublishedState(authority: beforeClear),
               let expectedAccount = cleared.owner.binding?.accountGeneration else { throw VortxNativeError.superseded }
@@ -1041,13 +1050,15 @@ final class CoreBridge: ObservableObject {
         _ = ProfileStore.shared
         activateNativePresentationBoundary()
         let installGeneration = UUID()
-        nativeFacadeLock.withLock {
-            nativePlaybackReadLifetime.retire()
+        let installSubtitleRetirement = nativeFacadeLock.withLock {
+            let retirement = nativePlaybackReadLifetime.retire()
             nativeMetadataAdmissionFence.retireInstallation()
             nativeInstallGeneration = installGeneration
             nativeCallbackGeneration = installGeneration
             nativeCallbackLifetime.prepare(installGeneration)
+            return retirement
         }
+        nativePlaybackReadLifetime.completeRetirement(installSubtitleRetirement)
         NotificationCenter.default.post(name: Self.xperienceContextChangedNote, object: nil)
         guard CredentialScopeRegistry.shared.isCurrent(capture), session.scope.account == capture.namespace else {
             session.revoke(); throw VortxNativeError.invalidSnapshot
@@ -1078,14 +1089,15 @@ final class CoreBridge: ObservableObject {
                 }
             }
         } catch { facade.close(); throw error }
-        let result = nativeFacadeLock.withLock { () -> (Bool, VortxNativeCoreFacade?) in
-            guard CredentialScopeRegistry.shared.isCurrent(capture), nativeInstallGeneration == installGeneration else { return (false, nil) }
-            nativePlaybackReadLifetime.retire()
+        let result = nativeFacadeLock.withLock { () -> (Bool, VortxNativeCoreFacade?, CredentialPublicationOutbox.SubtitleRetirement?) in
+            guard CredentialScopeRegistry.shared.isCurrent(capture), nativeInstallGeneration == installGeneration else { return (false, nil, nil) }
+            let retirement = nativePlaybackReadLifetime.retire()
             nativeMetadataAdmissionFence.retireInstallation()
             let old = nativeFacadeStorage; nativeFacadeStorage = facade; nativeCredentialCapture = capture
             nativeCallbackLifetime.bind(installGeneration, credential: capture, sourceID: facade.sourceID)
-            return (true, old)
+            return (true, old, retirement)
         }
+        if let retirement = result.2 { nativePlaybackReadLifetime.completeRetirement(retirement) }
         guard result.0 else { facade.close(); throw VortxNativeError.superseded }
         guard let installOrigin = nativeInstalledSourceOrigin(producer: facade,
             installation: installGeneration, credential: capture) else {
@@ -1095,13 +1107,16 @@ final class CoreBridge: ObservableObject {
         guard nativeCallbackOriginIsCurrent(installOrigin) else { throw VortxNativeError.superseded }
         nativeAccountEditRequests.removeAll()
         nativePublishedCredentialSlot = nil
-        nativeFacadeLock.withLock {
+        let publishedSubtitleRetirement = nativeFacadeLock.withLock { () -> CredentialPublicationOutbox.SubtitleRetirement? in
+            var retirement: CredentialPublicationOutbox.SubtitleRetirement?
             if nativePublishedAccountGeneration != nil {
-                nativePlaybackReadLifetime.retire()
+                retirement = nativePlaybackReadLifetime.retire()
                 nativeMetadataAdmissionFence.retireInstallation()
             }
             nativePublishedAccountGeneration = nil
+            return retirement
         }
+        if let publishedSubtitleRetirement { nativePlaybackReadLifetime.completeRetirement(publishedSubtitleRetirement) }
         nativeProfileBaseline = hostProfiles
         try refreshNativeProfiles()
         // Native ctx is descriptor-only: never synthesize a Stremio login/token receipt.
@@ -1125,15 +1140,17 @@ final class CoreBridge: ObservableObject {
         // clear, the later async bootstrap requires a settled matching mirror.
         let originalProfileID = ProfileStore.shared.activeID
         let originalRequest = metaLoadTargetLock.withLock { nativeMetaRequestGeneration }
-        let old = nativeFacadeLock.withLock {
-            nativePlaybackReadLifetime.retire()
+        let retiredBridge = nativeFacadeLock.withLock {
+            let retirement = nativePlaybackReadLifetime.retire()
             nativeMetadataAdmissionFence.retireInstallation()
             nativeInstallGeneration = UUID(); nativeCallbackGeneration = UUID()
             nativeCallbackLifetime.retire() // checked intake mirror; under B BEFORE source release
             let old = nativeFacadeStorage
             nativeFacadeStorage = nil; nativeCredentialCapture = nil; nativePublishedAccountGeneration = nil
-            return old
+            return (old, retirement)
         }
+        nativePlaybackReadLifetime.completeRetirement(retiredBridge.1)
+        let old = retiredBridge.0
         nativeAccountEditRequests.removeAll(); nativePublishedCredentialSlot = nil
         let cancelEpoch = detachPublicationEpochStorage()
         let cancelLegacy = detachLegacyMetadataPublicationWork()

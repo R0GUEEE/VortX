@@ -167,6 +167,7 @@ struct SubtitleMountOwnerTests {
               "settled material ABA denies the old proof with no competing effect or retirement")
         check(materialHost.captureNativeSubtitleOwner(materialTarget, originalApplicationEpoch: materialEpoch) == nil,
               "material ABA cannot repair original initiation with current profile identity")
+        checks += await SubtitleRendererLifetimeTests.run()
         print("ALL PASS \(checks)")
     }
 }

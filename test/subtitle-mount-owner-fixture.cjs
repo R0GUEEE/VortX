@@ -46,6 +46,7 @@ const bridgeProof = section(bridge, '    struct NativeSubtitleOwnerProof:', '\n 
 const bridgeCapture = section(bridge, '    @MainActor\n    func captureNativeSubtitleOwner', '\n    private let nativePlaybackReadLifetime =');
 const bridgeRetire = section(bridge, '    fileprivate final class NativePlaybackReadLifetime:', '\n    /// A read predicate only, never FIFO/mutation/checkpoint/metadata authority.');
 const facadeProof = section(facade, '    struct NativeSubtitleOwnerProof:', '\n    private var sourceArchive: Data?');
+const facadeLock = section(facade, 'final class VortxNativeFacadeLock:', '\n/// Original Bridge installation/request stamps');
 const fifo = section(facade, '        let profileTransition = forceProfileTransition', '\n        // State intents are FIFO');
 const originalTransitionTypes = 'let transitionTypes: Set<String> = ["switch_profile", "delete_profile", "merge_native_sync", "patch_profile", "rebind_profile_account"]';
 once(facade, originalTransitionTypes);
@@ -59,7 +60,11 @@ if (facade.indexOf(drain) > once(facade, '                if let ownerOperation 
 const retire = 'let subtitleRetirement = CredentialPublicationOutbox.beginSubtitleRetirement(domain: nativeSubtitleDomain)';
 if (bridge.split(retire).length - 1 !== 2) throw Error('expected exact two actual retirement sites');
 once(bridge, 'let subtitle: CredentialPublicationOutbox.SubtitleRetirement');
-const fixture = `import Foundation\nimport os\n
+if (bridge.split('nativePlaybackReadLifetime.retire()').length - 1 !== 7 || bridge.split('nativePlaybackReadLifetime.completeRetirement(').length - 1 !== 7) throw Error('expected exact seven Bridge retirement/after-unlock drains');
+once(facade, 'lock.afterOutermostUnlock {\n            CredentialPublicationOutbox.drainSubtitleRenderers(retirement)');
+once(facade, 'CredentialPublicationOutbox.drainSubtitleRenderers(subtitleRetirement)\n        session.revoke()');
+const fixture = `import Foundation\nimport Darwin\nimport os\n
+${facadeLock}
 ${enumBody(credential, 'CredentialMutationResult')}
 ${enumBody(credential, 'CredentialDurableReadResult')}
 ${enumBody(credential, 'CredentialPublicationOutboxState')}
@@ -86,11 +91,12 @@ ${bridgeRetire}
   let binding = FixtureBinding(credential: capture, sessionGeneration: UUID(), profileID: facade.profileID, accountGeneration: facade.accountEpoch)
   core.binding = binding; core.nativeFacadeStorage = facade; return (core, .native(binding), facade, applicationEpoch)
  }
- @MainActor func retireActualBridgeLifetime() { nativePlaybackReadLifetime.retire() }
+ @MainActor func retireActualBridgeLifetime() { let retirement = nativeFacadeLock.withLock { nativePlaybackReadLifetime.retire() }; nativePlaybackReadLifetime.completeRetirement(retirement) }
+ @MainActor func fixtureBridgeLock() -> NSLock { nativeFacadeLock }
 }
 final class VortxNativeCoreFacade {
  struct Scope { let account: String }; struct Session { let scope: Scope }
- let lock = NSRecursiveLock(); let sourceID = UUID(), profileID = UUID()
+ let lock = VortxNativeFacadeLock(); let sourceID = UUID(), profileID = UUID()
  var accountEpoch = UUID(), watchlistProfileGeneration = UUID()
  var closed = false, checkpointReopenRequired = false, pendingProfileTransitions = 0
  var values: [String: FixtureJSON] = [:]; let session: Session
@@ -99,11 +105,20 @@ final class VortxNativeCoreFacade {
   values["native_state"] = .object(["activeProfileId": .string(profileID.uuidString)])
  }
 ${facadeProof}
+ func fixtureRetireForUncertainty() { lock.withLock { _ = retireSubtitleOwnerAfterSynchronousChangeLocked() } }
+ var fixtureLockIsUnheld: @Sendable () -> Bool { let original = lock; return { original.fixtureIsUnheld } }
+}
+extension VortxNativeFacadeLock {
+ var fixtureIsUnheld: Bool { storage.withLock { $0.depth == 0 } }
 }
 extension CredentialPublicationOutbox {
  static func fixtureDrainWaiterCount() -> Int {
   coordination.condition.lock(); defer { coordination.condition.unlock() }
   return coordination.subtitleDrainWaiters.values.reduce(0) { $0 + $1.count }
+ }
+ static func fixtureBoundaryWaiterCount() -> Int {
+  coordination.condition.lock(); defer { coordination.condition.unlock() }
+  return coordination.boundaryWaiters.count
  }
 }
 `;

@@ -172,9 +172,12 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     private var closed = false
     // A commit may have reached disk before readback failed. Keep the last acknowledged
     // projections readable, but only a new authenticated session may certify more writes.
+    private var checkpointSubtitleRetirement: CredentialPublicationOutbox.SubtitleRetirement?
     private var checkpointReopenRequired = false {
         willSet {
-            if newValue && !checkpointReopenRequired { retireSubtitleOwnerAfterSynchronousChangeLocked() }
+            if newValue && !checkpointReopenRequired {
+                checkpointSubtitleRetirement = retireSubtitleOwnerAfterSynchronousChangeLocked()
+            }
         }
     }
     // Installed only by private init, before exposure. Builders are pure local value capture;
@@ -248,12 +251,16 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     }
     /// Caller owns F; records retirement synchronously before any owner field changes.
     /// Only scalar stamps enter the coordinator. Native work and its wakeups never need F.
-    private func retireSubtitleOwnerAfterSynchronousChangeLocked() {
+    private func retireSubtitleOwnerAfterSynchronousChangeLocked() -> CredentialPublicationOutbox.SubtitleRetirement {
         let retirement = CredentialPublicationOutbox.beginSubtitleRetirement(domain: sourceID)
-        Task {
-            await CredentialPublicationOutbox.waitForSubtitleRetirement(retirement)
-            CredentialPublicationOutbox.finishSubtitleRetirement(retirement)
+        lock.afterOutermostUnlock {
+            CredentialPublicationOutbox.drainSubtitleRenderers(retirement)
+            Task {
+                await CredentialPublicationOutbox.waitForSubtitleRetirement(retirement)
+                CredentialPublicationOutbox.finishSubtitleRetirement(retirement)
+            }
         }
+        return retirement
     }
     private var sourceArchive: Data?
     private var ownerHistoryActive = false
@@ -489,6 +496,7 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
     func close() -> CredentialPublicationOutbox.SubtitleRetirement {
         let subtitleRetirement = CredentialPublicationOutbox.beginSubtitleRetirement(domain: sourceID)
         lock.lock(); closed = true; mutationFIFO.close(); let old = Array(tasks.values); tasks.removeAll(); generations.removeAll(); resourceSelections.removeAll(); resourceValueTasks.removeAll(); latestChangeSequence.removeAll(); values.removeAll(); metadataLibraryMembership = VortxLibraryMembership(); addonInventories.removeAll(); addonConfirmation = nil; addonOperation = UUID(); lock.unlock()
+        CredentialPublicationOutbox.drainSubtitleRenderers(subtitleRetirement)
         session.revoke()
         old.forEach { $0.cancel() }
         Task {
@@ -970,17 +978,28 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                     let owns = await session.usesOwnerHistory()
                     self.lock.withLock { self.ownerHistoryActive = owns }
                 }
-                self.lock.withLock { self.checkpointReopenRequired = true; self.mutationFIFO.markUncertain() }
+                let uncertainSubtitleRetirement = self.lock.withLock {
+                    self.checkpointReopenRequired = true; self.mutationFIFO.markUncertain()
+                    return self.checkpointSubtitleRetirement
+                }
+                if let uncertainSubtitleRetirement {
+                    await CredentialPublicationOutbox.waitForSubtitleRetirement(uncertainSubtitleRetirement)
+                }
                 _ = self.fail("checkpoint_uncertain_reopen_required"); completion?(.failure(VortxNativeError.checkpointUncertain))
             } catch {
                 if ownerOperation != nil || self.lock.withLock({ self.ownerHistoryActive }) {
                     let status = await session.ownerHistoryRouteStatus()
-                    self.lock.withLock {
+                    let uncertainSubtitleRetirement = self.lock.withLock { () -> CredentialPublicationOutbox.SubtitleRetirement? in
                         self.ownerHistoryActive = status.ownsHistory
                         if status.requiresAuthenticatedReopen {
                             self.checkpointReopenRequired = true
                             self.mutationFIFO.markUncertain()
+                            return self.checkpointSubtitleRetirement
                         }
+                        return nil
+                    }
+                    if let uncertainSubtitleRetirement {
+                        await CredentialPublicationOutbox.waitForSubtitleRetirement(uncertainSubtitleRetirement)
                     }
                     if status.requiresAuthenticatedReopen {
                         _ = self.fail("checkpoint_uncertain_reopen_required")
@@ -991,7 +1010,9 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                 if durableCommitted {
                     // The acknowledged snapshot exists, but its required projection failed. Do
                     // not relabel the previous/empty history as the successful new profile state.
-                    self.close(); _ = self.fail("native_projection_unavailable_reopen_required")
+                    let closeSubtitleRetirement = self.close()
+                    await CredentialPublicationOutbox.waitForSubtitleRetirement(closeSubtitleRetirement)
+                    _ = self.fail("native_projection_unavailable_reopen_required")
                 } else { _ = self.fail("native_mutation_failed") }
                 completion?(.failure(error))
             }
@@ -1060,7 +1081,13 @@ final class VortxNativeCoreFacade: @unchecked Sendable {
                 try await self.session.flushPendingProgress()
             }
             catch VortxNativeError.checkpointUncertain {
-                self.lock.withLock { self.checkpointReopenRequired = true; self.mutationFIFO.markUncertain() }
+                let uncertainSubtitleRetirement = self.lock.withLock {
+                    self.checkpointReopenRequired = true; self.mutationFIFO.markUncertain()
+                    return self.checkpointSubtitleRetirement
+                }
+                if let uncertainSubtitleRetirement {
+                    await CredentialPublicationOutbox.waitForSubtitleRetirement(uncertainSubtitleRetirement)
+                }
                 _ = self.fail("checkpoint_uncertain_reopen_required")
             } catch {
                 _ = self.fail("native_progress_flush_failed")
