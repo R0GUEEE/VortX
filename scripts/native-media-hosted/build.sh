@@ -125,6 +125,7 @@ PYTHON_TOOLCHAIN
     cp "$root/scripts/mpv-upstream-gpu-next-seek-reset.patch" "$upstream/buildscripts/patches/mpv/0003-upstream-gpu-next-seek-reset.patch"
     # Same original-source witness prerequisite as Apple; no renderer/consumer activation.
     cp "$root/scripts/mpv-original-local-file-witness.patch" "$upstream/buildscripts/patches/mpv/0004-original-local-file-witness.patch"
+    cp "$root/scripts/mpv-upstream-edition-title-lifetime.patch" "$upstream/buildscripts/patches/mpv/0005-upstream-edition-title-lifetime.patch"
     git -C "$upstream" apply --check "$root/scripts/native-media-hosted/android-assembly.patch"
     git -C "$upstream" apply "$root/scripts/native-media-hosted/android-assembly.patch"
     # Use the hosted SDK; bypass upstream download-sdk.sh's moving gas-preprocessor/master fetch.
