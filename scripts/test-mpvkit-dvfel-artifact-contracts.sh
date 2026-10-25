@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Focused source contracts and executable dirty-state fixtures for the pinned MPVKit-DVFEL
-# builder and release artifact gate. This test never downloads, compiles, or publishes an artifact.
+# builder and release artifact gate. No native artifact build, download or publication runs;
+# source verification compiles a bounded production Swift helper.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,6 +35,10 @@ grep -Fq 'FRESH_HEAD' "$BUILD" || fail "builder must assert the fresh clone reso
 grep -Fq 'matches_exact_patch_tree' "$BUILD" || fail "builder must prove the complete approved patch tree"
 grep -Fq 'exact MPVKit patch already applied' "$BUILD" || fail "builder must support an explicit exact-patch retry"
 grep -Fq 'existing generated patch differs' "$BUILD" || fail "builder must not overwrite a changed generated patch"
+grep -Fq 'diff --git a/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch b/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch' "$PATCH" ||
+  fail "approved MPVKit tree must carry the exact Swift frontend recipe correction"
+grep -Fq "+    swift_flags = ['-frontend', '-c', '-whole-module-optimization', '-sdk', macos_sdk_path," "$PATCH" ||
+  fail "one-object Swift frontend recipe must request whole-module compilation"
 
 # The Swift patch must request command output explicitly: Utility.shell returns an empty string on
 # success otherwise, which would make a correct rev/status look absent. It must also reject arbitrary
@@ -84,8 +89,8 @@ verify_line="$(grep -nF 'bash scripts/verify-mpvkit-dvfel-artifacts.sh "$DEST"' 
 
 # Exercise the production builder preflight against a tiny local Git fixture. The approved patch is
 # generated from the fixture's clean base, then the same builder is run for a clean apply, an exact
-# patched retry, an unrelated same-file edit, and an unknown untracked file. No native build tools
-# are used: the builder exits only after its checkout/patch preflight in this mode.
+# patched retry including tracked 0002, unrelated/partial recipe edits, and an unknown untracked
+# file. No native build tools are used: the builder exits only after checkout/patch preflight.
 TEST_BUILD_ROOT="$ROOT/.build"
 mkdir -p "$TEST_BUILD_ROOT"
 FIXTURE="$(mktemp -d "$TEST_BUILD_ROOT/mpvkit-contract.XXXXXX")"
@@ -125,15 +130,21 @@ git -C "$SOURCE" config user.email "fixture@example.invalid"
 mkdir -p "$SOURCE/Sources"
 printf '%s\n' 'let packageValue = "base"' >"$SOURCE/Package.swift"
 printf '%s\n' 'let sourceValue = "base"' >"$SOURCE/Sources/main.swift"
+FIXTURE_SWIFT_RECIPE='Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch'
+mkdir -p "$(dirname "$SOURCE/$FIXTURE_SWIFT_RECIPE")"
+printf '%s\n' "swift_flags = ['-frontend', '-c', '-sdk', 'fixture-sdk']" >"$SOURCE/$FIXTURE_SWIFT_RECIPE"
 cp "$SOURCE/Package.swift" "$FIXTURE/base-package.swift"
-git -C "$SOURCE" add -- Package.swift Sources/main.swift
+cp "$SOURCE/$FIXTURE_SWIFT_RECIPE" "$FIXTURE/base-swift-recipe.patch"
+git -C "$SOURCE" add -- Package.swift Sources/main.swift "$FIXTURE_SWIFT_RECIPE"
 git -C "$SOURCE" commit -q -m "fixture base"
 FIXTURE_REF="$(git -C "$SOURCE" rev-parse HEAD)"
 
 printf '%s\n' 'let packageValue = "approved"' >"$SOURCE/Package.swift"
-git -C "$SOURCE" diff --binary -- Package.swift >"$FIXTURE_PATCH"
+printf '%s\n' "swift_flags = ['-frontend', '-c', '-whole-module-optimization', '-sdk', 'fixture-sdk']" >"$SOURCE/$FIXTURE_SWIFT_RECIPE"
+git -C "$SOURCE" diff --binary -- Package.swift "$FIXTURE_SWIFT_RECIPE" >"$FIXTURE_PATCH"
 [ -s "$FIXTURE_PATCH" ] || fail "fixture patch was not generated"
 cp "$FIXTURE/base-package.swift" "$SOURCE/Package.swift"
+cp "$FIXTURE/base-swift-recipe.patch" "$SOURCE/$FIXTURE_SWIFT_RECIPE"
 [ -z "$(git -C "$SOURCE" status --porcelain --untracked-files=all)" ] ||
   fail "fixture must start clean"
 
@@ -157,7 +168,10 @@ run_builder "$FIXTURE/clean.log" || fail "clean fixture preflight failed: $(cat 
 grep -Fq 'preflight-only checkout and patch validation passed' "$FIXTURE/clean.log" ||
   fail "clean fixture did not reach the preflight success path"
 grep -Fq 'approved' "$SOURCE/Package.swift" || fail "clean fixture did not apply its approved patch"
+grep -Fq -- '-whole-module-optimization' "$SOURCE/$FIXTURE_SWIFT_RECIPE" ||
+  fail "clean fixture did not carry the approved Swift frontend recipe"
 cp "$SOURCE/Package.swift" "$FIXTURE/exact-package.swift"
+cp "$SOURCE/$FIXTURE_SWIFT_RECIPE" "$FIXTURE/exact-swift-recipe.patch"
 
 run_builder "$FIXTURE/retry.log" || fail "exact patched retry failed: $(cat "$FIXTURE/retry.log")"
 grep -Fq 'exact MPVKit patch already applied' "$FIXTURE/retry.log" ||
@@ -171,6 +185,22 @@ grep -Fq 'exact approved VortX patch' "$FIXTURE/unrelated.log" ||
   fail "unrelated same-file edit failed without the exact-tree diagnostic"
 cp "$FIXTURE/exact-package.swift" "$SOURCE/Package.swift"
 
+printf '%s\n' 'unrelated recipe edit' >>"$SOURCE/$FIXTURE_SWIFT_RECIPE"
+if run_builder "$FIXTURE/unrelated-recipe.log"; then
+  fail "unrelated edit to the approved tracked Swift recipe was accepted"
+fi
+grep -Fq 'exact approved VortX patch' "$FIXTURE/unrelated-recipe.log" ||
+  fail "unrelated recipe edit failed without the exact-tree diagnostic"
+cp "$FIXTURE/exact-swift-recipe.patch" "$SOURCE/$FIXTURE_SWIFT_RECIPE"
+
+cp "$FIXTURE/base-swift-recipe.patch" "$SOURCE/$FIXTURE_SWIFT_RECIPE"
+if run_builder "$FIXTURE/partial-recipe.log"; then
+  fail "partial approved tree with the Swift recipe missing was accepted"
+fi
+grep -Fq 'exact approved VortX patch' "$FIXTURE/partial-recipe.log" ||
+  fail "partial recipe failed without the exact-tree diagnostic"
+cp "$FIXTURE/exact-swift-recipe.patch" "$SOURCE/$FIXTURE_SWIFT_RECIPE"
+
 printf '%s\n' 'untracked fixture data' >"$SOURCE/untracked.txt"
 if run_builder "$FIXTURE/untracked.log"; then
   fail "unknown untracked file was accepted"
@@ -179,7 +209,7 @@ grep -Fq 'unexpected dirty state' "$FIXTURE/untracked.log" ||
   fail "unknown untracked file failed without the dirty-state diagnostic"
 rm -f "$SOURCE/untracked.txt"
 
-[ "$(git -C "$SOURCE" status --porcelain --untracked-files=all)" = ' M Package.swift' ] ||
+[ "$(git -C "$SOURCE" status --porcelain --untracked-files=all)" = "$(printf '%s\n' ' M Package.swift' " M $FIXTURE_SWIFT_RECIPE")" ] ||
   fail "fixture did not retain only the exact approved patch after dirty-state cases"
 
 # Compile the actual patched SpikeGit implementation extracted from the canonical MPVKit source.
@@ -191,21 +221,25 @@ CANONICAL_REF="$(git -C "$CANONICAL_MPVKIT" rev-parse HEAD)"
 [ "$CANONICAL_REF" = "2103893078c5e339073b11737b86f7f22b9c4491" ] ||
   fail "canonical MPVKit fixture source is not pinned to 2103893: $CANONICAL_REF"
 
-PATCHED_SOURCE="$FIXTURE/mpvkit-patched-source"
-mkdir -p "$PATCHED_SOURCE"
-git -C "$CANONICAL_MPVKIT" archive HEAD | tar -x -C "$PATCHED_SOURCE"
-git -C "$CANONICAL_MPVKIT" apply --unsafe-paths --directory="$PATCHED_SOURCE" "$PATCH"
-swiftc -parse "$PATCHED_SOURCE/Sources/BuildScripts/XCFrameworkBuild/main.swift" ||
+PATCHED_INDEX="$FIXTURE/mpvkit-source.index"
+PATCHED_SOURCE="$FIXTURE/mpvkit-main.swift"
+# Verify the entire approved patch in an isolated index, then emit only this input.
+# No source checkout or canonical index/working-tree edit is created.
+GIT_INDEX_FILE="$PATCHED_INDEX" git -C "$CANONICAL_MPVKIT" read-tree HEAD
+GIT_INDEX_FILE="$PATCHED_INDEX" git -C "$CANONICAL_MPVKIT" apply --cached "$PATCH"
+GIT_INDEX_FILE="$PATCHED_INDEX" git -C "$CANONICAL_MPVKIT" show :Sources/BuildScripts/XCFrameworkBuild/main.swift >"$PATCHED_SOURCE"
+swiftc -j 1 -num-threads 1 -parse "$PATCHED_SOURCE" ||
   fail "actual patched MPVKit BuildScripts source did not parse"
 SPIKE_BLOCK="$FIXTURE/spikegit-production.swift"
 sed -n '/^enum SpikeGit {/,/^private class BuildOpenSSL: ZipBaseBuild {/p' \
-  "$PATCHED_SOURCE/Sources/BuildScripts/XCFrameworkBuild/main.swift" | sed '$d' >"$SPIKE_BLOCK"
+  "$PATCHED_SOURCE" | sed '$d' >"$SPIKE_BLOCK"
 [ -s "$SPIKE_BLOCK" ] || fail "could not extract the patched production SpikeGit implementation"
 
 SWIFT_PATCH_DIR="$FIXTURE/Sources/BuildScripts/patch/fixture"
 mkdir -p "$SWIFT_PATCH_DIR"
 cp "$FIXTURE_PATCH" "$SWIFT_PATCH_DIR/0001-approved.patch"
 cp "$FIXTURE/base-package.swift" "$SOURCE/Package.swift"
+cp "$FIXTURE/base-swift-recipe.patch" "$SOURCE/$FIXTURE_SWIFT_RECIPE"
 
 SWIFT_HELPER="$FIXTURE/spikegit-fixture.swift"
 {
@@ -283,7 +317,7 @@ SWIFT_HELPER="$FIXTURE/spikegit-fixture.swift"
 } >"$SWIFT_HELPER"
 
 SWIFT_BINARY="$FIXTURE/spikegit-fixture"
-swiftc "$SWIFT_HELPER" -o "$SWIFT_BINARY" || fail "actual patched SpikeGit fixture did not compile"
+swiftc -j 1 -num-threads 1 "$SWIFT_HELPER" -o "$SWIFT_BINARY" || fail "actual patched SpikeGit fixture did not compile"
 
 run_spike() {
   local expected_sha="$1" log="$2"
@@ -309,6 +343,14 @@ fi
 grep -Fq 'conflicting, partial, or unrelated' "$FIXTURE/swift-unrelated.log" ||
   fail "compiled SpikeGit same-file rejection lacked the exact-tree diagnostic"
 cp "$FIXTURE/exact-package.swift" "$SOURCE/Package.swift"
+
+printf '%s\n' 'unrelated Swift recipe edit' >>"$SOURCE/$FIXTURE_SWIFT_RECIPE"
+if run_spike "$FIXTURE_REF" "$FIXTURE/swift-unrelated-recipe.log"; then
+  fail "compiled SpikeGit accepted an unrelated approved-recipe edit"
+fi
+grep -Fq 'conflicting, partial, or unrelated' "$FIXTURE/swift-unrelated-recipe.log" ||
+  fail "compiled SpikeGit recipe rejection lacked the exact-tree diagnostic"
+cp "$FIXTURE/exact-swift-recipe.patch" "$SOURCE/$FIXTURE_SWIFT_RECIPE"
 
 printf '%s\n' 'untracked Swift fixture data' >"$SOURCE/swift-untracked.txt"
 if run_spike "$FIXTURE_REF" "$FIXTURE/swift-untracked.log"; then

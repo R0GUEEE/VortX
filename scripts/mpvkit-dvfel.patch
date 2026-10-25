@@ -415,3 +415,24 @@ index e5f872c..dcaca5b 100644
  }
  
  private class BuildOpenSSL: ZipBaseBuild {
+diff --git a/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch b/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch
+index 8b268af..7a075b0 100644
+--- a/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch
++++ b/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch
+@@ -1,5 +1,5 @@
+ diff --git forkSrcPrefix/osdep/mac/meson.build forkDstPrefix/osdep/mac/meson.build
+-index 16605288419c54cb9d89680a6fafd6a2f315487e..a154dea05ea77243f760a05067ead7f32623b991 100644
++index 16605288419c54cb9d89680a6fafd6a2f315487e..732dcd0805a27a5f26f7a86ba3e42caa4c6ff5da 100644
+ --- forkSrcPrefix/osdep/mac/meson.build
+ +++ forkDstPrefix/osdep/mac/meson.build
+ @@ -6,12 +6,12 @@ swift_flags = ['-c', '-emit-library', '-static', '-sdk', macos_sdk_path,
+@@ -10,7 +10,8 @@ index 16605288419c54cb9d89680a6fafd6a2f315487e..a154dea05ea77243f760a05067ead7f3
+ +#if swift_ver.version_compare('<5.8')
+      message('Falling back to old swift frontend build')
+      swift_prog = find_program(run_command(xcrun, '-find', 'swift', check: true).stdout().strip())
+-     swift_flags = ['-frontend', '-c', '-sdk', macos_sdk_path,
++-    swift_flags = ['-frontend', '-c', '-sdk', macos_sdk_path,
+++    swift_flags = ['-frontend', '-c', '-whole-module-optimization', '-sdk', macos_sdk_path,
+                     '-enable-objc-interop', '-emit-objc-header', '-parse-as-library']
+ -endif
+ +#endif
