@@ -29,7 +29,7 @@ private func stream(_ json: String) throws -> CoreStream {
 }
 private func score(_ stream: CoreStream, _ prefs: SourcePreferences.Snapshot,
                    language: [String] = [], cached: Set<String> = []) -> Int {
-    SourcePreferences.$readingOverride.withValue(prefs) {
+    SourcePreferences.readingOverride.withValue(prefs) {
         TrackPreferences.$audioLanguagesOverride.withValue(language) {
             StreamRanking.score(stream, debridCachedHashes: cached)
         }
@@ -41,16 +41,36 @@ private func require(_ condition: @autoclosure () -> Bool, _ name: String) {
 }
 
 @main enum RankingCacheConcurrencyTests {
-    static func main() throws {
+    static func main() async throws {
         let base = try stream(#"{"url":"https://fixture.invalid/movie","name":"Film 2026 1080p WEB English"}"#)
         let plain = prefs(), preferred = prefs(prefer: ["web"])
         let baseline = score(base, plain)
+        // Task.detached does not inherit the caller's task locals. Install the captured
+        // snapshot inside its synchronous scope, then verify nested and final restoration.
+        let detached = SourcePreferences.readingOverride.withValue(plain) {
+            Task.detached {
+                let startedEmpty = SourcePreferences.readingOverride.get() == nil
+                let scores = SourcePreferences.readingOverride.withValue(preferred) {
+                    let first = StreamRanking.score(base)
+                    let nested = SourcePreferences.readingOverride.withValue(plain) {
+                        StreamRanking.score(base)
+                    }
+                    return (first, nested, StreamRanking.score(base))
+                }
+                return (startedEmpty, scores, SourcePreferences.readingOverride.get() == nil)
+            }
+        }
+        let detachedResult = await detached.value
+        require(detachedResult.0 && detachedResult.1.0 == baseline + 2500 &&
+                detachedResult.1.1 == baseline && detachedResult.1.2 == baseline + 2500 &&
+                detachedResult.2 && SourcePreferences.readingOverride.get() == nil,
+                "detached snapshot scopes isolate, nest and restore the actual TaskLocal key")
         let sameNameA = CoreStreamSourceGroup(id: "https://a.invalid/config", addon: "AIOStreams", streams: [base])
         let sameNameB = CoreStreamSourceGroup(id: "https://b.invalid/config", addon: "AIOStreams", streams: [base])
-        let variantsA = SourcePreferences.$readingOverride.withValue(plain) {
+        let variantsA = SourcePreferences.readingOverride.withValue(plain) {
             StreamRanking.variantOptions([sameNameA, sameNameB], tier: "1080p")
         }
-        let variantsB = SourcePreferences.$readingOverride.withValue(plain) {
+        let variantsB = SourcePreferences.readingOverride.withValue(plain) {
             StreamRanking.variantOptions([sameNameB, sameNameA], tier: "1080p")
         }
         require(variantsA.first?.groupID == sameNameA.id && variantsB.first?.groupID == sameNameB.id
@@ -127,6 +147,6 @@ private func require(_ condition: @autoclosure () -> Bool, _ name: String) {
         _ = memo.value(for: "second") { 3 }
         _ = memo.value(for: "third") { 4 }
         require(memo.value(for: "key") { 9 } == 9, "bounded capacity retires old entries without changing computation")
-        print("All 18 ranking/cache groups passed; live stores, UI/native routing and full app Swift 6 remain separate gates.")
+        print("All ranking/cache groups passed; live stores, UI/native routing and full app Swift 6 remain separate gates.")
     }
 }

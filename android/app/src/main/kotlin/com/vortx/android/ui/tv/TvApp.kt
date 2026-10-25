@@ -758,12 +758,12 @@ fun TvApp(
                                 (request == null || (request.sameIntent(pendingLibraryPlay) && isLibraryPlayCurrent(request))) &&
                                 (queuePlayRequest == null || (pendingQueuePlay === queuePlayRequest &&
                                     queueOwnerIsSelected(currentQueueOwner)))
-                            if (admitted && request != null && request.sameIntent(pendingLibraryPlay)) {
+                            if (admitted) {
                                 pendingQueuePlay = null
                                 pendingQueueAccepted = false
                                 pendingQueueAutomatic = false
                                 pendingLibraryPlay = null
-                                detailVm.abandonPlaybackRoute()
+                                detailVm.abandonPlaybackRoute(preserveRandomEpisodePick = true)
                             }
                             admitted
                         },

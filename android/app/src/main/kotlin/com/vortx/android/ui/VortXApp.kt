@@ -1746,7 +1746,9 @@ fun VortXApp(
                             pendingQueueAccepted = false
                             pendingQueueAutomatic = false
                             quickWatchIdentity = null
-                            if (request != null) detailVm.abandonPlaybackRoute()
+                            // Also retire a started Quick View resolver. Keep the episode preview
+                            // until the admitted Random Episode Open/Play action can consume it.
+                            detailVm.abandonPlaybackRoute(preserveRandomEpisodePick = true)
                             admitted
                         }
                     },

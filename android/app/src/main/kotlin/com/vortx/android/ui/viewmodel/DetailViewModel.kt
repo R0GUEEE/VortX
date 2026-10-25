@@ -1021,7 +1021,13 @@ class DetailViewModel(
      * episode auto-pick is not accidentally erased before its sources arrive.
      */
     fun abandonPlaybackRoute() {
-        clearRandomEpisodePick()
+        abandonPlaybackRoute(preserveRandomEpisodePick = false)
+    }
+
+    /** An admitted detail action may still need to consume its current Random Episode preview. */
+    internal fun abandonPlaybackRoute(preserveRandomEpisodePick: Boolean) {
+        val abandonedReady = _playback.value as? Playback.Ready
+        if (preserveRandomEpisodePick) retireRandomEpisodePlayback() else clearRandomEpisodePick()
         pendingAutoPick = false
         pendingAdvanceHint = null
         resetPlaybackAudioIntent()
@@ -1032,6 +1038,8 @@ class DetailViewModel(
             _episodeBrowseAnchor.value = EpisodeBrowseAnchor(it, ++episodeBrowseRevision)
         }
         _playback.value = Playback.Idle
+        // This Ready was discarded before handoff; normal clearPlayback still transfers its lease.
+        runCatching { abandonedReady?.playable?.playbackLease?.close() }
     }
 
     private fun canPublishPlaybackResolve(lease: PlaybackResolveFence.Lease): Boolean =

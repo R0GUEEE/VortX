@@ -613,15 +613,17 @@ extension SourcePreferences {
     }
 
     /// The off-main override for the ranker. When installed (by `SourceListModel`'s detached rank via
-    /// `$readingOverride.withValue(...)`), `reading` returns this frozen snapshot instead of the live
+    /// `readingOverride.withValue(...)`), `reading` returns this frozen snapshot instead of the live
     /// singleton, so the off-main rank cannot race the main-thread mutation. `Task.detached` does NOT
     /// inherit task-locals, so the `withValue` MUST wrap the rank inside the detached task.
-    @TaskLocal nonisolated static var readingOverride: Snapshot?
+    // Explicit checked storage keeps the key nonisolated on compilers whose TaskLocal
+    // macro does not carry the property modifier onto its synthesized backing member.
+    nonisolated static let readingOverride = TaskLocal<Snapshot?>(wrappedValue: nil)
 
     /// Worker work keeps its captured task-local preferences. Synchronous callers otherwise read the
     /// latest immutable owner publication without hopping to MainActor or touching Published storage.
     nonisolated static var reading: SourcePrefsReading {
-        if let readingOverride { return readingOverride }
+        if let readingOverride = readingOverride.get() { return readingOverride }
         if let current = readingState.withLock({ $0 }) { return current }
         let initial = initialReadingSnapshot()
         return readingState.withLock { current -> Snapshot in

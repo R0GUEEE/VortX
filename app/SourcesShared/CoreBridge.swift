@@ -5770,7 +5770,7 @@ final class CoreBridge: ObservableObject {
             self?.publishNativeLegacySample(sample, work: work, origin: origin,
                 searchToken: searchToken, cwGeneration: capturedCWGeneration)
         }
-        Task.detached(priority: .userInitiated) {
+        Task.detached(priority: .userInitiated) { @Sendable [work, publish] in
             let sample = Self.prepareNativeLegacySample(work)
             await publish(sample)
         }
@@ -7726,7 +7726,7 @@ extension CoreBridge {
         let receiver = metadataDecodeReceiver, delay = debounce ? Self.metaDetailsDebounce : 0
         previous?.cancel()
         guard nativeMetadataOperationIsCurrent(operation) else { return }
-        let task = Task.detached(priority: .userInitiated) {
+        let task = Task.detached(priority: .userInitiated) { @Sendable [value, delay, receiver, operation] in
             do {
                 if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
                 try Task.checkCancellation()
