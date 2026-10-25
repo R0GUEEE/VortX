@@ -3122,9 +3122,10 @@ actor VortxNativeSession {
         let (priorBridge, ticket, capturedEpoch, profile) = try begin(name, expectedProfileID: expectedProfileID)
         priorBridge.invalidate()
         // A native multi-addon call spends its deadline waiting for its internal slots. Schedule
-        // singleton calls here instead: each admitted leg receives its own 20s network budget.
-        // Separate two-meta/four-stream windows prevent slow metadata from starving streams.
-        // Total screen time is multiple bounded waves, not a new 20s all-provider deadline.
+        // singleton calls here instead: each admitted leg receives its own network budget.
+        // Metadata keeps 20s; stream aggregators may need up to 40s for upstream collection.
+        // Separate two-meta/four-stream windows still bound work and publish fast peers early.
+        // Queue time never consumes a leg's budget; changing screen/profile still cancels it.
         let jobs = addons.indices.flatMap { index -> [(Int, VortxResourceRequest)] in
             [(index, request)] + (stream.map { [(index, $0)] } ?? [])
         }
@@ -3176,7 +3177,8 @@ actor VortxNativeSession {
             func schedule(_ offset: Int) {
                 let job = jobs[offset], bridge = workers[offset], addon = addons[job.0]
                 group.addTask {
-                    do { return (offset, .success(try await bridge.load(ownerID: profile, request: job.1, addons: [addon], budgetMs: 20_000,
+                    do { return (offset, .success(try await bridge.load(ownerID: profile, request: job.1, addons: [addon],
+                        budgetMs: job.1.resource == .stream ? 40_000 : 20_000,
                         maxResponseBytes: 8_388_608, maxTotalResponseBytes: 33_554_432))) }
                     catch { return (offset, .failure(.from(error))) }
                 }

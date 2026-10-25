@@ -1170,7 +1170,7 @@ internal class VortxNativeSession private constructor(
                 val bridge = bridge(name, slot)
                 try {
                     bridge.load("${scope.digest}:${owner.profileID}:${owner.revision}", leg.request, listOf(leg.addon),
-                        budgetMs = NATIVE_PROVIDER_BUDGET_MS, maxResponseBytes = NATIVE_PROVIDER_BODY_BYTES).also {
+                        budgetMs = nativeProviderBudgetMs(leg.request.resource), maxResponseBytes = NATIVE_PROVIDER_BODY_BYTES).also {
                         check(current(name, slot) && bridge.accepts(it)) { "Native request superseded" }
                     }
                 } finally { retire(slot, bridge) }
