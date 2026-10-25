@@ -1691,8 +1691,11 @@ struct PlayerScreen: View {
     @ObservedObject private var apiKeys = ApiKeys.shared
     #endif
     @State private var externalLinkDead = false      // pre-flight probe found the stream URL dead before handoff
+    @State private var subtitleAlignmentNotice: String?
     @State private var subtitleLoadFailed = false    // an add-on subtitle download timed out / failed
     @State private var subtitleLoadingURL: String?   // an add-on subtitle is downloading (shows Loading… on its row)
+    @State private var subtitleAlignmentPresentation: SubtitleAlignmentPresentationRequest?
+    @State private var subtitlePresentationEpoch = UUID()
     // One-shot latch for the ADD-ON subtitle auto-select fallback (fires when the container has no track in
     // the preferred language chain but an add-on does). Reset with appliedAutoTracks so a source hop /
     // episode switch re-evaluates cleanly; latched after one attempt so a failure never loops.
@@ -2666,6 +2669,7 @@ struct PlayerScreen: View {
             }
         }
         .onDisappear {
+            invalidateSubtitleAlignmentPresentation()
             let assetSanityAccepted =
                 assetSanityAttempt.isAccepted(owner: coordinator.player?.activeLoadToken)
             invalidateEpisodeWorkForExit()
@@ -2828,9 +2832,9 @@ struct PlayerScreen: View {
             Text("That link is not responding right now. Try a different source.")
         }
         .alert("Subtitle unavailable", isPresented: $subtitleLoadFailed) {
-            Button("OK", role: .cancel) { scheduleHide() }
+            Button("OK", role: .cancel) { subtitleAlignmentNotice = nil; scheduleHide() }
         } message: {
-            Text("That subtitle source did not respond in time. Try another one.")
+            Text(subtitleAlignmentNotice ?? String(localized: "That subtitle source did not respond in time. Try another one."))
         }
         .sheet(isPresented: $showShare) { ShareSheet(items: [curURL ?? url]) }
         .sheet(item: $grabbedFrame) { ShareSheet(items: [$0.url]) }
@@ -3641,6 +3645,10 @@ struct PlayerScreen: View {
             // may still release deferred foreground work even if an intermediate pause was not observed.
             if let b = data as? Bool, !b { resumeDeferredForegroundMountRevalidation() }
             #endif
+        case "vortx-owned-subtitle-state":
+            guard callbackBelongsToCommittedMedia(loadToken) else { return }
+            refreshTracks()
+            if panelShowsSubtitleList { panelRows = rows(for: panel ?? .subtitles) }
         case MPVProperty.trackList:
             refreshTracks()
             if let loadToken, callbackBelongsToCommittedMedia(loadToken) {
@@ -5059,6 +5067,7 @@ struct PlayerScreen: View {
         withAnimation { loadFailed = false }
         bufferedTime = 0   // reload: clear the buffered-ahead band so the buffer-grace watchdog re-baselines against the new fill, not the previous source's edge
         buffering = true; hasStartedPlaying = false; isSeekable = true; appliedSize = false; loadErrorMsg = ""
+        invalidateSubtitlePresentationForReplacement()
         subtitleLoadingURL = nil   // self-heal: a subtitle load stranded by the old engine must not gate the reload's picks
         srcProbeLoadStart = Date()   // [src-probe] a reload is a fresh attempt: re-anchor the elapsed clock
         curURL = liveMountURL()   // self-heal a drifted embedded-server port before replaying the mount
@@ -6212,6 +6221,7 @@ struct PlayerScreen: View {
             buffering = true; loadFailed = false; loadErrorMsg = ""
             firstFrameRenderedAt = nil; pendingLibmpvResumeSeek = nil
             cancelPostFrameResumeSeekWatchdog()
+            invalidateSubtitlePresentationForReplacement()
             subtitleLoadingURL = nil
             srcProbeLoadStart = Date()
             bufferGraceUsed = 0; lastBufferedAtWatchdog = -1; bufferedTime = 0
@@ -6363,6 +6373,7 @@ struct PlayerScreen: View {
         // subtitles yet, so drop the added-set tracking so the picker is honest and reapply can re-add cleanly.
         appliedSize = false; appliedVolume = false; appliedAutoTracks = false
         addedSubURLs = []; addedPooledIDs = []
+        invalidateSubtitlePresentationForReplacement()
         subtitleLoadingURL = nil   // self-heal: an in-flight subtitle load died with the old engine; a stranded latch would gate every later pick
         hasStartedPlaying = false; isSeekable = true
         buffering = true; loadFailed = false; loadErrorMsg = ""
@@ -7018,6 +7029,7 @@ struct PlayerScreen: View {
         autoRetryCount = 0; reconnecting = false; autoRetryTask?.cancel(); awaitedFreshSources = false
         torrentWarmupsUsed = 0; torrentStatus = nil
         subFingerprint = nil; subFingerprintKey = ""; pooledSubs = []
+        invalidateSubtitlePresentationForReplacement()
         subtitlePoolRequests.invalidate(); subtitleLoadingURL = nil
         addedPooledIDs = []; embeddedUploadDone = false
         langContributeDone = false
@@ -9765,10 +9777,11 @@ struct PlayerScreen: View {
             guard let player = coordinator.player else { return }
             autoAddonSubTried = true
             subtitleLoadingURL = sub.url
+            let subtitlePresentationID = subtitlePresentationEpoch
             let subtitleLoadToken = player.activeLoadToken
             let subtitleVideoID = curMeta?.videoId
             player.addExternalSubtitle(url: sub.url, title: sub.displayTitle, lang: sub.lang) { ok in
-                guard permitsSubtitlePublication(loadToken: subtitleLoadToken, videoID: subtitleVideoID) else { return }
+                guard permitsSubtitlePublication(loadToken: subtitleLoadToken, videoID: subtitleVideoID, presentationID: subtitlePresentationID) else { return }
                 subtitleLoadingURL = nil
                 // Same still-live-engine gate as the manual row: never record an add the live engine never saw.
                 if ok, player === coordinator.player { addedSubURLs.insert(sub.url); hoardAddonSubtitle(sub) }
@@ -9886,10 +9899,81 @@ struct PlayerScreen: View {
         subtitleDelayAppliedLoadToken = loadToken
     }
 
+    /// Retire only the pending alignment's UI and original engine. Ordinary downloads keep
+    /// their existing latch when no alignment owns it; same-URL successor work is never cleared.
+    private func invalidateSubtitleAlignmentPresentation() {
+        guard let original = subtitleAlignmentPresentation else { return }
+        subtitleAlignmentPresentation = nil
+        subtitlePresentationEpoch = UUID()
+        if subtitleLoadingURL == original.url { subtitleLoadingURL = nil }
+        if let request = original.requestGeneration {
+            (original.player as? MPVMetalViewController)?.cancelAutomaticSubtitleAlignment(ifRequestGeneration: request)
+        }
+    }
+
+    private func invalidateSubtitlePresentationForReplacement() {
+        invalidateSubtitleAlignmentPresentation()
+        subtitlePresentationEpoch = UUID()
+        subtitlePoolRequests.invalidate()
+        subtitleLoadingURL = nil
+    }
+
     /// A subtitle request may finish after an episode load or same-episode reload replaced the player item.
     /// Require both its opaque load token and its content identity before publishing completion state.
-    private func permitsSubtitlePublication(loadToken: PlayerLoadToken?, videoID: String?) -> Bool {
-        guard let loadToken, coordinator.player?.activeLoadToken == loadToken else { return false }
+    /// Keep ordinary subtitle selection separate from this explicit automatic timing request.
+    /// Its mounted owner is captured before the first asynchronous operation, never on completion.
+    private func alignAddonSubtitle(_ sub: AddonSubtitle) {
+        invalidateSubtitleAlignmentPresentation()
+        guard subtitleLoadingURL == nil, let player = coordinator.player else { return }
+        guard let load = player.activeLoadToken else {
+            subtitleAlignmentNotice = PlayerSubtitleAlignmentResult.unavailable.failureMessage
+            subtitleLoadFailed = true
+            return
+        }
+        guard let owner = PlayerSubtitleAlignmentOwner.capture(core: core, target: playbackMutationTarget) else {
+            subtitleAlignmentNotice = PlayerSubtitleAlignmentResult.superseded.failureMessage
+            subtitleLoadFailed = true
+            return
+        }
+        let video = curMeta?.videoId
+        userPickedSubtitle = true
+        let presentation = SubtitleAlignmentPresentationRequest(player: player, url: sub.url)
+        subtitlePresentationEpoch = presentation.id
+        subtitleAlignmentPresentation = presentation
+        subtitlePoolRequests.invalidate()
+        subtitleLoadingURL = sub.url
+        if panelShowsSubtitleList { panelRows = rows(for: panel ?? .subtitles) }
+        let requestGeneration = player.alignExternalSubtitle(url: sub.url, title: sub.displayTitle, lang: sub.lang, owner: owner) { result in
+            guard subtitleAlignmentPresentation?.id == presentation.id,
+                  player === coordinator.player,
+                  permitsSubtitlePublication(loadToken: load, videoID: video, presentationID: presentation.id),
+                  subtitleLoadingURL == sub.url else { return }
+            subtitleAlignmentPresentation = nil
+            subtitleLoadingURL = nil
+            guard playbackMutationTarget.stillOwnsCurrentContext(core: core),
+                  LegacyWatchOwnership.applicationEpochIsCurrent(owner.applicationEpoch) else { return }
+            if let message = result.failureMessage {
+                subtitleAlignmentNotice = message; subtitleLoadFailed = true
+            }
+            if panelShowsSubtitleList { panelRows = rows(for: panel ?? .subtitles) }
+        }
+        // The callee returns its original request, never a later sampled generation.
+        // A synchronous rejection may already have completed and cleared this presentation.
+        if subtitleAlignmentPresentation?.id == presentation.id {
+            if let requestGeneration {
+                subtitleAlignmentPresentation?.requestGeneration = requestGeneration
+            } else {
+                subtitleAlignmentPresentation = nil
+                if subtitleLoadingURL == sub.url { subtitleLoadingURL = nil }
+                if panelShowsSubtitleList { panelRows = rows(for: panel ?? .subtitles) }
+            }
+        }
+    }
+
+    private func permitsSubtitlePublication(loadToken: PlayerLoadToken?, videoID: String?,
+                                            presentationID: UUID) -> Bool {
+        guard subtitlePresentationEpoch == presentationID,
+              let loadToken, coordinator.player?.activeLoadToken == loadToken else { return false }
         return curMeta?.videoId == videoID
     }
 
@@ -9985,19 +10069,27 @@ struct PlayerScreen: View {
     /// `auto`: a background language-chain pick (autoSelectAddonSubtitleIfNeeded tier 2), which suppresses the
     /// subtitleLoadFailed alert on failure, matching the add-on auto path and tvOS (the user did not ask).
     private func selectPooledSubtitle(_ sub: SubtitlePoolClient.PooledSubtitle, auto: Bool = false) {
+        if !auto { invalidateSubtitleAlignmentPresentation() }
         guard subtitleLoadingURL == nil, communityContentKey == sub.contentKey,
               MoatConsent.contributeAndConsume,
               VortXSyncManager.shared.isSignedIn else { return }
         let marker = sub.url.absoluteString
         let downloadID = subtitlePoolRequests.beginDownload()
+        let subtitlePresentationID = subtitlePresentationEpoch
         subtitleLoadingURL = marker
         VXProbe.log("subs", "community subtitle selected lang=\(sub.lang)")
         if panelShowsSubtitleList, let p = panel { panelRows = rows(for: p) }
         Task { @MainActor in
+            guard subtitlePresentationEpoch == subtitlePresentationID,
+                  subtitlePoolRequests.ownsDownload(downloadID) else { return }
             // The pool-hosted sub TEXT is moat-gated too, so pass the same account flag the fetch used.
             let signedIn = VortXSyncManager.shared.isSignedIn
             let publicationFence = SubtitlePoolClient.PublicationFence(contentKey: sub.contentKey)
             let downloaded = await SubtitlePoolClient.download(sub, isSignedIn: signedIn)
+            guard subtitlePresentationEpoch == subtitlePresentationID else {
+                _ = subtitlePoolRequests.finishDownload(downloadID)
+                return
+            }
             let mayPublishDownload = publicationFence.permits(
                 currentContentKey: communityContentKey,
                 isSignedIn: VortXSyncManager.shared.isSignedIn
@@ -10037,7 +10129,7 @@ struct PlayerScreen: View {
                     isSignedIn: VortXSyncManager.shared.isSignedIn
                 )
                 let loadStillCurrent = permitsSubtitlePublication(
-                    loadToken: subtitleLoadToken, videoID: subtitleVideoID
+                    loadToken: subtitleLoadToken, videoID: subtitleVideoID, presentationID: subtitlePresentationID
                 )
                 guard mayPublishExternal, loadStillCurrent else {
                     if subtitlePoolRequests.finishExternal(externalID) {
@@ -10371,6 +10463,7 @@ struct PlayerScreen: View {
             }
             return rs
         case .subtitles:
+            let aligned = coordinator.player?.alignedExternalSubtitle
             // Settings FIRST (the primary in-session action), then Off, then one row per language. Each
             // language row drills into `.subtitleLanguage`, which lists every sub in that language across
             // embedded + add-on + community sources, so a title with dozens of subs no longer forces one
@@ -10379,11 +10472,12 @@ struct PlayerScreen: View {
             let secondaryID = mpvEngine?.secondarySubtitleID ?? -1
             let dualActive = secondaryID >= 0
             let primaryID = mpvEngine?.primarySubtitleID ?? -1
-            let primaryOff = dualActive
+            let primaryOff = aligned == nil && (dualActive
                 ? (primaryID < 0)
-                : subtitleTracks.allSatisfy { !$0.selected || !$0.isSelectable }
+                : subtitleTracks.allSatisfy { !$0.selected || !$0.isSelectable })
             var rs: [Row] = [Row(label: String(localized: "Subtitle Settings"), detail: "›") { openPanel(.subtitleSettings) }]
             rs.append(Row(label: String(localized: "Off"), selected: primaryOff) {
+                invalidateSubtitleAlignmentPresentation()
                 userPickedSubtitle = true
                 VXProbe.log("subs", "selected track off")
                 coordinator.player?.setSubtitleTrack(-1)
@@ -10405,10 +10499,11 @@ struct PlayerScreen: View {
             for s in availablePooled { languageCounts[subtitleLanguageKey(s.lang), default: 0] += 1 }
             for code in languageCounts.keys.sorted(by: { langName($0) < langName($1) }) {
                 let count = languageCounts[code] ?? 0
-                let hasSelection = subtitleTracks.contains {
-                    let tSel = dualActive ? $0.id == primaryID : $0.selected
-                    return $0.isSelectable && tSel && subtitleLanguageKey($0.lang) == code
-                }
+                let hasSelection = aligned.map { subtitleLanguageKey($0.lang) == code }
+                    ?? subtitleTracks.contains {
+                        let tSel = dualActive ? $0.id == primaryID : $0.selected
+                        return $0.isSelectable && tSel && subtitleLanguageKey($0.lang) == code
+                    }
                 rs.append(Row(label: langName(code), detail: "\(count) ›", selected: hasSelection) {
                     openPanel(.subtitleLanguage(code: code, label: langName(code)))
                 })
@@ -10432,6 +10527,8 @@ struct PlayerScreen: View {
             return rs
         case .subtitleLanguage(let code, _):
             // One language's complete sub list: embedded tracks first, then add-on, then community.
+            let aligned = coordinator.player?.alignedExternalSubtitle
+            let alignmentAvailable = coordinator.player?.automaticSubtitleAlignmentAvailable == true
             let mpvEngine = coordinator.player as? MPVMetalViewController
             let secondaryID = mpvEngine?.secondarySubtitleID ?? -1
             let dualActive = secondaryID >= 0
@@ -10445,10 +10542,11 @@ struct PlayerScreen: View {
                     rs.append(Row(
                         label: t.title.isEmpty ? "Track \(i + 1)" : t.title,
                         detail: t.unavailableReason ?? "",
-                        selected: t.isSelectable && (primarySel?(t) ?? t.selected),
+                        selected: aligned == nil && t.isSelectable && (primarySel?(t) ?? t.selected),
                         isEnabled: t.isSelectable
                     ) {
                         guard t.isSelectable else { return }
+                        invalidateSubtitleAlignmentPresentation()
                         userPickedSubtitle = true
                         VXProbe.log("subs", "selected embedded track \(t.id)")
                         coordinator.player?.setSubtitleTrack(t.id)
@@ -10471,16 +10569,18 @@ struct PlayerScreen: View {
                         // reference that is nil in the engine demote/switch render gap, and an optional-chained
                         // call there would swallow the completion, stranding the latch so EVERY later subtitle
                         // pick is silently dead for the session (the "stuck on Loading…" report).
+                        invalidateSubtitleAlignmentPresentation()
                         guard subtitleLoadingURL == nil, let player = coordinator.player else { return }
                         userPickedSubtitle = true
                         subtitleLoadingURL = sub.url
                         VXProbe.log("subs", "add-on subtitle selected lang=\(sub.lang) src=\(sub.addonName)")
                         if panelShowsSubtitleList { panelRows = rows(for: panel ?? .subtitles) }   // reflect Loading… in place
+                        let subtitlePresentationID = subtitlePresentationEpoch
                         let subtitleLoadToken = player.activeLoadToken
                         let subtitleVideoID = curMeta?.videoId
                         player.addExternalSubtitle(url: sub.url, title: sub.displayTitle, lang: sub.lang) { ok in
                             guard permitsSubtitlePublication(
-                                loadToken: subtitleLoadToken, videoID: subtitleVideoID
+                                loadToken: subtitleLoadToken, videoID: subtitleVideoID, presentationID: subtitlePresentationID
                             ) else { return }
                             subtitleLoadingURL = nil
                             VXProbe.log("subs", "add-on subtitle loaded lang=\(sub.lang) ok=\(ok ? "Y" : "N")")
@@ -10495,6 +10595,14 @@ struct PlayerScreen: View {
                             if panelShowsSubtitleList { panelRows = rows(for: panel ?? .subtitles) }
                         }
                     })
+                    if URL(string: sub.url)?.pathExtension.lowercased() == "srt",
+                       alignmentAvailable {
+                        rs.append(Row(label: String(localized: "Auto-align") + " · " + sub.displayTitle,
+                            detail: String(localized: "Match timing to embedded subtitles"),
+                            selected: aligned?.url == sub.url) {
+                            alignAddonSubtitle(sub)
+                        })
+                    }
                 }
             }
             let languagePooled = TrackSelector.keepingPreferredSubtitleLanguages(
@@ -10505,6 +10613,7 @@ struct PlayerScreen: View {
                 for sub in languagePooled.prefix(60) {
                     let loading = subtitleLoadingURL == sub.url.absoluteString
                     rs.append(Row(label: pooledLabel(sub), detail: loading ? String(localized: "Loading…") : String(localized: "Community")) {
+                        invalidateSubtitleAlignmentPresentation()
                         userPickedSubtitle = true
                         selectPooledSubtitle(sub)
                     })
@@ -10521,11 +10630,13 @@ struct PlayerScreen: View {
             let primaryID = mpvEngine?.primarySubtitleID ?? -1
             var rs: [Row] = [Row(label: String(localized: "Off"), selected: secondaryID < 0) {
                 VXProbe.log("subs", "secondary subtitle off")
+                invalidateSubtitleAlignmentPresentation()
                 mpvEngine?.setSecondarySubtitleTrack(-1)
             }]
             let secondaryOptions = subtitleTracks.filter { primaryID < 0 || $0.id != primaryID }
             rs += groupedTrackRows(secondaryOptions, isSelected: { $0.id == secondaryID }) { id in
                 VXProbe.log("subs", "selected secondary subtitle track \(id)")
+                invalidateSubtitleAlignmentPresentation()
                 mpvEngine?.setSecondarySubtitleTrack(id)
             }
             return rs
@@ -11015,6 +11126,7 @@ struct PlayerScreen: View {
 
     private func adjustSubDelay(_ delta: Double) {
         guard coordinator.player?.subtitleDelayAvailable == true else { return }
+        invalidateSubtitleAlignmentPresentation()
         subDelay = ((subDelay + delta) * 10).rounded() / 10
         pooledSeededOffset = true
         applyCurrentSubtitleDelayIfReady(force: true)
@@ -11082,6 +11194,7 @@ struct PlayerScreen: View {
     /// the cover down - so a stuck load can never trap the user with a Task still spinning. Routed from
     /// the always-present pre-start close button, the error-overlay Back, and the top-bar chevron.
     @MainActor private func leavePlayback() {
+        invalidateSubtitlePresentationForReplacement()
         pendingAdvance?.debridRef?.nativeUsenetLease?.close()
         curDebridRef?.nativeUsenetLease?.close()
         // Preview time is temporary editor state, not the viewer's watch progress.
@@ -11421,6 +11534,9 @@ struct PlayerScreen: View {
     /// (mandated check 8). Off when no track is selected; otherwise an add-on / pooled external sub (matched
     /// back by language against the added set) or an embedded track (by lang/title).
     private func captureSubtitleChoice() -> SubtitleChoice {
+        if let aligned = coordinator.player?.alignedExternalSubtitle {
+            return .external(url: aligned.url, title: aligned.title, lang: aligned.lang)
+        }
         guard let sel = subtitleTracks.first(where: {
             $0.selected && $0.isSelectable
         }) else { return .off }
@@ -11458,10 +11574,11 @@ struct PlayerScreen: View {
             coordinator.player?.setSubtitleTrack(match?.id ?? -1)
         case let .external(urlStr, title, lang):
             guard let player = coordinator.player else { return }
+            let subtitlePresentationID = subtitlePresentationEpoch
             let subtitleLoadToken = player.activeLoadToken
             let subtitleVideoID = curMeta?.videoId
             player.addExternalSubtitle(url: urlStr, title: title, lang: lang) { ok in
-                guard permitsSubtitlePublication(loadToken: subtitleLoadToken, videoID: subtitleVideoID) else { return }
+                guard permitsSubtitlePublication(loadToken: subtitleLoadToken, videoID: subtitleVideoID, presentationID: subtitlePresentationID) else { return }
                 if ok, player === coordinator.player {
                     addedSubURLs.insert(urlStr)
                     applyCurrentSubtitleDelayIfReady(force: false)
