@@ -41,6 +41,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vortx.android.model.MediaType
+import com.vortx.android.model.Episode
 import com.vortx.android.model.MetaDetail
 import com.vortx.android.model.MetaItem
 import com.vortx.android.model.Playable
@@ -131,6 +132,11 @@ fun TvDetailScreen(
     onAutoWatchConsumed: () -> Boolean = { true },
     autoWatchAdmission: () -> Boolean = { true },
     onAutoWatchCancelled: () -> Boolean = { true },
+    onQueueInteraction: () -> Boolean = onAutoWatchCancelled,
+    queueCount: Int = 0,
+    queueAvailable: Boolean = false,
+    onQueueAdd: (MetaDetail, Episode?, Boolean) -> Unit = { _, _, _ -> },
+    onShowQueue: (() -> Unit)? = null,
 ) {
     val metaState by viewModel.meta.collectAsStateWithLifecycle()
     val streamsState by viewModel.streams.collectAsStateWithLifecycle()
@@ -147,6 +153,9 @@ fun TvDetailScreen(
     }
     val beginManualPlayback: (() -> Unit) -> Unit = { action ->
         if (onAutoWatchCancelled()) beginPlayback(action)
+    }
+    val beginUnqueuedPlayback: (() -> Unit) -> Unit = { action ->
+        if (onQueueInteraction()) beginPlayback(action)
     }
     val beginPlaybackWithEngine: (PlayerEngineRouter.Override, () -> Unit) -> Unit = { engine, action ->
         if (onAutoWatchCancelled()) {
@@ -199,9 +208,15 @@ fun TvDetailScreen(
                 launchEnginePreference = launchEnginePreference,
                 onSelectLaunchEngine = { launchEnginePreference = it },
                 beginPlayback = beginManualPlayback,
+                beginUnqueuedPlayback = beginUnqueuedPlayback,
                 beginPlaybackWithEngine = beginPlaybackWithEngine,
                 onOpenTitle = onOpenTitle,
                 onManualAction = onAutoWatchCancelled,
+                onQueueInteraction = onQueueInteraction,
+                queueCount = queueCount,
+                queueAvailable = queueAvailable,
+                onQueueAdd = onQueueAdd,
+                onShowQueue = onShowQueue,
             )
         }
     }
@@ -218,9 +233,15 @@ private fun TvDetailContent(
     launchEnginePreference: PlayerEngineRouter.Override,
     onSelectLaunchEngine: (PlayerEngineRouter.Override) -> Unit,
     beginPlayback: (() -> Unit) -> Unit,
+    beginUnqueuedPlayback: (() -> Unit) -> Unit,
     beginPlaybackWithEngine: (PlayerEngineRouter.Override, () -> Unit) -> Unit,
     onOpenTitle: (MetaItem) -> Unit,
     onManualAction: () -> Boolean,
+    onQueueInteraction: () -> Boolean,
+    queueCount: Int,
+    queueAvailable: Boolean,
+    onQueueAdd: (MetaDetail, Episode?, Boolean) -> Unit,
+    onShowQueue: (() -> Unit)?,
 ) {
     val context = LocalContext.current
     val colors = VortXTheme.colors
@@ -265,11 +286,13 @@ private fun TvDetailContent(
         onDispose { relatedLookupFence.invalidate() }
     }
     val openRelated: (MetaItem) -> Unit = { item ->
-        val generation = relatedLookupFence.begin()
-        relatedLookupJob?.cancel()
-        relatedLookupJob = scope.launch {
-            val resolved = resolveRelatedDetailTitle(item)
-            if (relatedLookupFence.accepts(generation)) onOpenTitle(resolved)
+        if (onQueueInteraction()) {
+            val generation = relatedLookupFence.begin()
+            relatedLookupJob?.cancel()
+            relatedLookupJob = scope.launch {
+                val resolved = resolveRelatedDetailTitle(item)
+                if (relatedLookupFence.accepts(generation)) onOpenTitle(resolved)
+            }
         }
     }
 
@@ -340,7 +363,7 @@ private fun TvDetailContent(
     if (openPerson != null) {
         TvPersonOverlay(
             seed = openPerson,
-            onOpenTitle = { onOpenTitle(it); personTarget = null },
+            onOpenTitle = { if (onQueueInteraction()) { onOpenTitle(it); personTarget = null } },
             onBack = { personTarget = null },
         )
         return
@@ -430,7 +453,7 @@ private fun TvDetailContent(
                         TvFilterChip(
                             label = "Trailer",
                             selected = false,
-                            onClick = { beginPlayback { viewModel.playTrailer() } },
+                            onClick = { beginUnqueuedPlayback { viewModel.playTrailer() } },
                             modifier = trailerModifier,
                             leadingIcon = VortXIcons.clapperboard,
                         )
@@ -484,6 +507,41 @@ private fun TvDetailContent(
                             selected = launchEnginePreference,
                             onSelect = onSelectLaunchEngine,
                         )
+                    }
+                    if (onShowQueue != null) {
+                        if (detail.type == MediaType.MOVIE || detail.type == MediaType.SERIES) {
+                            item {
+                                TvFilterChip(
+                                    label = "Add to queue",
+                                    selected = false,
+                                    enabled = queueAvailable && playback !is Playback.Resolving,
+                                    onClick = {
+                                        if (onQueueInteraction()) onQueueAdd(detail,
+                                            detail.videos.firstOrNull { it.id == selectedEpisodeId } ?: viewModel.primaryEpisode()?.first,
+                                            false)
+                                    },
+                                )
+                            }
+                            item {
+                                TvFilterChip(
+                                    label = "Play next",
+                                    selected = false,
+                                    enabled = queueAvailable && playback !is Playback.Resolving,
+                                    onClick = {
+                                        if (onQueueInteraction()) onQueueAdd(detail,
+                                            detail.videos.firstOrNull { it.id == selectedEpisodeId } ?: viewModel.primaryEpisode()?.first,
+                                            true)
+                                    },
+                                )
+                            }
+                        }
+                        item {
+                            TvFilterChip(
+                                label = "Queue ($queueCount)",
+                                selected = false,
+                                onClick = { if (onQueueInteraction()) onShowQueue() },
+                            )
+                        }
                     }
                     if (WatchlistStore.isSafeId(detail.id)) {
                         item {
@@ -591,9 +649,9 @@ private fun TvDetailContent(
             if (detail.type == MediaType.SERIES) {
                 RandomEpisodePickControls(
                     state = randomEpisodePick,
-                    onPick = { if (onManualAction()) viewModel.pickRandomEpisode() },
+                    onPick = { if (onQueueInteraction()) viewModel.pickRandomEpisode() },
                     onOpen = {
-                        if (onManualAction()) {
+                        if (onQueueInteraction()) {
                             viewModel.openRandomEpisode { episode ->
                                 focusRestoreEpisodeId = episode.id
                                 focusRestoreRevision++
@@ -601,7 +659,7 @@ private fun TvDetailContent(
                             }
                         }
                     },
-                    onPlay = { beginPlayback { viewModel.playRandomEpisode() } },
+                    onPlay = { beginUnqueuedPlayback { viewModel.playRandomEpisode() } },
                     playEnabled = playback !is Playback.Resolving,
                     tv = true,
                     modifier = Modifier.padding(horizontal = TvDimens.edge, vertical = VortXTheme.spacing.sm),
@@ -614,9 +672,9 @@ private fun TvDetailContent(
                     selectedEpisodeId = selectedEpisodeId,
                     focusRestoreEpisodeId = focusRestoreEpisodeId,
                     focusRestoreRevision = focusRestoreRevision,
-                    onSelectSeason = { season -> if (onManualAction()) viewModel.selectSeason(season) },
+                    onSelectSeason = { season -> if (onQueueInteraction()) viewModel.selectSeason(season) },
                     onSelectEpisode = { episodeId ->
-                        if (onManualAction()) {
+                        if (onQueueInteraction()) {
                             focusRestoreEpisodeId = episodeId
                             focusRestoreRevision++
                             viewModel.selectEpisode(episodeId)
@@ -631,7 +689,7 @@ private fun TvDetailContent(
             TvCastCreditsSection(
                 detail = detail,
                 castMembers = castMembers,
-                onPersonTap = { if (onManualAction()) personTarget = it },
+                onPersonTap = { if (onQueueInteraction()) personTarget = it },
             )
 
             // Where to Watch: legal region providers (TMDB, keyless edge). Gated off live content (no

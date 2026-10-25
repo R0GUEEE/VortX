@@ -195,6 +195,11 @@ fun DetailScreen(
     onAutoWatchConsumed: () -> Boolean = { true },
     autoWatchAdmission: () -> Boolean = { true },
     onAutoWatchCancelled: () -> Boolean = { true },
+    queueCount: Int = 0,
+    queueAvailable: Boolean = false,
+    onQueueAdd: (MetaDetail, Episode?, Boolean) -> Unit = { _, _, _ -> },
+    onShowQueue: (() -> Unit)? = null,
+    onQueueInteraction: () -> Boolean = onAutoWatchCancelled,
 ) {
     val metaState by viewModel.meta.collectAsStateWithLifecycle()
     val streamsState by viewModel.streams.collectAsStateWithLifecycle()
@@ -290,7 +295,7 @@ fun DetailScreen(
             seed = seed,
             onBack = { personTarget = null },
             onOpenTitle = { item ->
-                if (onAutoWatchCancelled()) {
+                if (onQueueInteraction()) {
                     viewModel.clearRandomEpisodePick()
                     titleTarget = item
                 }
@@ -454,7 +459,7 @@ fun DetailScreen(
         onDispose { relatedLookupFence.invalidate() }
     }
     val openRelated: (MetaItem) -> Unit = { item ->
-        if (onAutoWatchCancelled()) {
+        if (onQueueInteraction()) {
             viewModel.clearRandomEpisodePick()
             val generation = relatedLookupFence.begin()
             relatedLookupJob?.cancel()
@@ -479,6 +484,10 @@ fun DetailScreen(
     }
     val beginManualPlayback: (() -> Unit) -> Unit = { action ->
         if (onAutoWatchCancelled()) beginPlayback(action)
+    }
+    val beginUnqueuedPlayback: (() -> Unit) -> Unit = { action ->
+        // A preview or an explicitly different episode must not acknowledge the original queue target.
+        if (onQueueInteraction()) beginPlayback(action)
     }
     val beginPlaybackWithEngine: (PlayerEngineRouter.Override, () -> Unit) -> Unit = { engine, action ->
         if (onAutoWatchCancelled()) {
@@ -586,32 +595,47 @@ fun DetailScreen(
                         onToggleWatchlist = viewModel::toggleWatchlist,
                         onToggleWatched = { viewModel.setWatched(!(m.data.libraryItem?.isWatched ?: false)) },
                         hasTrailer = m.data.trailerYouTubeId != null,
-                        onTrailer = { beginManualPlayback { viewModel.playTrailer() } },
+                        onTrailer = { beginUnqueuedPlayback { viewModel.playTrailer() } },
                         trailerLanguageChips = trailerLanguageChips,
                         onTrailerLanguage = { language ->
                             // Queue the override, then use the exact same ViewModel entry point as Trailer.
                             TrailerCoordinator.forceNextAudioLanguage(m.data.trailerYouTubeId.orEmpty(), language)
-                            beginManualPlayback { viewModel.playTrailer() }
+                            beginUnqueuedPlayback { viewModel.playTrailer() }
                         },
                     )
                     if (m.data.type == MediaType.SERIES) {
                         RandomEpisodePickControls(
                             state = randomEpisodePick,
                             onPick = {
-                                if (onAutoWatchCancelled()) viewModel.pickRandomEpisode()
+                                if (onQueueInteraction()) viewModel.pickRandomEpisode()
                             },
                             onOpen = {
-                                if (onAutoWatchCancelled()) {
+                                if (onQueueInteraction()) {
                                     viewModel.openRandomEpisode { episode ->
                                         sourcesOpen = true
                                         restoreEpisodeFocusId = episode.id
                                     }
                                 }
                             },
-                            onPlay = { beginManualPlayback { viewModel.playRandomEpisode() } },
+                            onPlay = { beginUnqueuedPlayback { viewModel.playRandomEpisode() } },
                             playEnabled = !resolving,
                             modifier = Modifier.padding(horizontal = VortXTheme.spacing.edge, vertical = VortXTheme.spacing.sm),
                         )
+                    }
+                    if (m.data.type == MediaType.MOVIE || m.data.type == MediaType.SERIES) {
+                        onShowQueue?.let { show ->
+                            com.vortx.android.ui.components.PlaybackQueueActions(
+                                count = queueCount, enabled = queueAvailable && !resolving,
+                                onAdd = { if (onQueueInteraction()) onQueueAdd(m.data,
+                                    m.data.videos.firstOrNull { it.id == selectedEpisodeId }
+                                        ?: viewModel.primaryEpisode()?.first, false) },
+                                onPlayNext = { if (onQueueInteraction()) onQueueAdd(m.data,
+                                    m.data.videos.firstOrNull { it.id == selectedEpisodeId }
+                                        ?: viewModel.primaryEpisode()?.first, true) },
+                                onShow = { if (onQueueInteraction()) show() },
+                                modifier = Modifier.padding(horizontal = VortXTheme.spacing.edge, vertical = VortXTheme.spacing.sm),
+                            )
+                        }
                     }
                     }
                 }
@@ -707,7 +731,7 @@ fun DetailScreen(
                             m = m.data,
                             castMembers = castMembers,
                             onPersonTap = { person ->
-                                if (onAutoWatchCancelled()) {
+                                if (onQueueInteraction()) {
                                     viewModel.clearRandomEpisodePick()
                                     personTarget = person
                                 }
@@ -721,7 +745,7 @@ fun DetailScreen(
                             detail = m.data,
                             wide = wideDetail,
                             selectedSeason = selectedSeason ?: m.data.videos.first().season,
-                            onSelectSeason = { season -> if (onAutoWatchCancelled()) viewModel.selectSeason(season) },
+                            onSelectSeason = { season -> if (onQueueInteraction()) viewModel.selectSeason(season) },
                             onMarkSeasonWatched = viewModel::setSeasonWatched,
                             onMarkSeriesWatched = viewModel::setWatched,
                         )
@@ -753,7 +777,7 @@ fun DetailScreen(
                                 if (veiled) {
                                     revealedEpisodeIds = revealedEpisodeIds + episode.id
                                 } else {
-                                    if (onAutoWatchCancelled()) {
+                                    if (onQueueInteraction()) {
                                         if (viewModel.autoPickEnabled) sourcesOpen = true
                                         viewModel.selectEpisode(episode.id)
                                     }

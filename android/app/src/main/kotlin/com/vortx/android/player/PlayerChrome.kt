@@ -228,6 +228,8 @@ fun PlayerChrome(
     /// (movies, trailers, ad-hoc links). Picking one switches in place via [onSwitchEpisode].
     episodeOptions: List<Episode> = emptyList(),
     currentSource: StreamSource? = null,
+    queueCount: Int = 0,
+    onShowQueue: (() -> Unit)? = null,
     sourceSwitching: Boolean = false,
     episodeSwitchPending: Boolean = false,
     sourceSwitchError: String? = null,
@@ -952,6 +954,12 @@ fun PlayerChrome(
             ControlSheet.MORE -> ControlSelectionSheet(
                 title = "More player controls",
                 options = buildList {
+                    onShowQueue?.let { show ->
+                        add(SheetOption("Playback queue", false, detail = "$queueCount titles ›", onPick = {
+                            openSheet = ControlSheet.NONE
+                            show()
+                        }))
+                    }
                     if (PlayerChromeOverflowAction.QUALITY in overflowPlacement.overflow) {
                         add(SheetOption(qualityTitle, false, detail = "${qualityChoices.size} options ›", onPick = {
                             openMoreSubsheet(ControlSheet.QUALITY)

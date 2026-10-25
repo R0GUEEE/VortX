@@ -104,6 +104,12 @@ import com.vortx.android.player.PlayerEngineRouter
 import com.vortx.android.player.PlayerEpisodeHistoryIdentity
 import com.vortx.android.player.PlayerLaunchPolicy
 import com.vortx.android.player.PlayerScreen
+import com.vortx.android.data.ContinueWatchingOwner
+import com.vortx.android.player.queue.PlaybackQueueState
+import com.vortx.android.player.queue.PlaybackQueueToken
+import com.vortx.android.player.queue.PlaybackQueueRouteRetirement
+import com.vortx.android.ui.components.PlaybackQueueSheet
+import com.vortx.android.ui.components.rememberPlaybackQueuePresentation
 import com.vortx.android.player.PlayerEpisodeHandoffRequest
 import com.vortx.android.player.advancePlayerEpisodeHistory
 import com.vortx.android.profile.ProfileStore
@@ -376,6 +382,10 @@ fun VortXApp(
         // A picker Play is not a Continue Watching resume. Its complete, session-only witness remains
         // live after consumption so the resolver's immutable admission callback can still reject it.
         var pendingRandomTitlePlayRequest by remember { mutableStateOf<RandomTitlePlayRequest?>(null) }
+        var pendingQueueToken by remember { mutableStateOf<PlaybackQueueToken?>(null) }
+        var pendingQueueAccepted by remember { mutableStateOf(false) }
+        var pendingQueueAutomatic by remember { mutableStateOf(false) }
+        var showPlaybackQueue by remember { mutableStateOf(false) }
         val openDetail: (MetaItem?) -> Unit = open@{ item ->
             if (item?.continueWatchingAdmission?.isCurrent() == false) return@open
             if (item?.continueWatchingUnavailableMessage != null) {
@@ -386,6 +396,10 @@ fun VortXApp(
             // Continue Watching callers install their exact target immediately after opening it.
             pendingDirectResumeTarget = null
             pendingRandomTitlePlayRequest = null
+            pendingQueueToken = null
+            pendingQueueAccepted = false
+            pendingQueueAutomatic = false
+            showPlaybackQueue = false
             savedDetailId = item?.id
             savedDetailType = item?.type?.id
             liveDetailAdmission = item?.continueWatchingAdmission
@@ -599,6 +613,71 @@ fun VortXApp(
         // A scope tied to the whole shell (not the player overlay), so the end-of-playback engine write
         // (final progress tick + Player unload) still runs after the player leaves composition.
         val appScope = rememberCoroutineScope()
+        val playbackQueue = remember(appContext) {
+            (appContext as? com.vortx.android.VortXApplication)?.playbackQueue
+        }
+        val queueState by (playbackQueue?.state?.collectAsStateWithLifecycle()
+            ?: remember { mutableStateOf(PlaybackQueueState()) })
+        val queueDeparture = remember { PlaybackQueueRouteRetirement() }
+        var queuePolicyEpoch by remember(repo) { mutableStateOf(0L) }
+        val queuePolicyForComposition = queuePolicyEpoch
+        val queueProfileForComposition = profileStore?.active
+        val queueOwnerIsSelected: (ContinueWatchingOwner) -> Boolean = { owner ->
+            val store = profileStore
+            store != null && !store.needsPicker && store.active?.id == owner.profileId &&
+                store.active == queueProfileForComposition && queuePolicyEpoch == queuePolicyForComposition &&
+                !showWhosWatching && runCatching { repo.continueWatchingOwner() }.getOrNull() == owner
+        }
+        val queueOwner = runCatching { repo.continueWatchingOwner() }.getOrNull()?.takeIf(queueOwnerIsSelected)
+        LaunchedEffect(repo, playbackQueue, activeProfile, vortxSessionUi, queueState.revision) {
+            repo.ctxUpdates().onStart { emit(Unit) }.collect {
+                queuePolicyEpoch = Math.incrementExact(queuePolicyEpoch)
+                val owner = runCatching { repo.continueWatchingOwner() }.getOrNull()
+                if (owner == null) playbackQueue?.invalidate() else playbackQueue?.bindOwner(owner)
+            }
+        }
+        val visibleQueueState = rememberPlaybackQueuePresentation(queueState, repo, queueOwner,
+            queueProfileForComposition, queuePolicyForComposition)
+        val openQueuePlay: (PlaybackQueueToken, Boolean) -> Boolean = queuePlay@{ token, automatic ->
+            val queue = playbackQueue ?: return@queuePlay false
+            val store = profileStore ?: return@queuePlay false
+            val profile = store.active ?: return@queuePlay false
+            if (store.needsPicker || profile.id != token.owner.profileId ||
+                !queueOwnerIsSelected(token.owner) || !queue.accepts(token) ||
+                visibleQueueState?.let { it.ready && it.owner == token.owner && it.revision == token.revision &&
+                    it.entries.any { entry -> entry == token.entry } } != true || repo.continueWatchingOwner() != token.owner
+            ) return@queuePlay false
+            queueDeparture.retire()
+            playing = null
+            playingMeta = null
+            detailGeneration += 1
+            openDetail(token.entry.item)
+            val request = RandomTitlePlayRequest(token.entry.item.type, token.entry.item.id,
+                token.owner, profile, detailGeneration)
+            val admitted = request.isCurrent(repo.continueWatchingOwner(), store.active,
+                store.needsPicker, MediaType.entries.firstOrNull { it.id == savedDetailType },
+                savedDetailId, detailGeneration) && queue.accepts(token)
+            if (admitted) {
+                pendingRandomTitlePlayRequest = request
+                pendingQueueToken = token
+                pendingQueueAccepted = false
+                pendingQueueAutomatic = automatic
+            }
+            admitted
+        }
+        if (showPlaybackQueue && !showWhosWatching && profileStore?.needsPicker == false) {
+            val visibleQueue = visibleQueueState ?: PlaybackQueueState()
+            PlaybackQueueSheet(
+                state = visibleQueue,
+                onDismiss = { showPlaybackQueue = false },
+                onPlay = { entry -> queueOwner?.let { owner ->
+                    if (queueOwnerIsSelected(owner)) playbackQueue?.capture(owner, entry.id)?.let { openQueuePlay(it, false) }
+                } },
+                onMove = { id, delta -> queueOwner?.let { if (queueOwnerIsSelected(it)) playbackQueue?.move(it, id, delta) } },
+                onRemove = { id -> queueOwner?.let { if (queueOwnerIsSelected(it)) playbackQueue?.remove(it, id) } },
+                onRetry = { queueOwner?.let { if (queueOwnerIsSelected(it)) playbackQueue?.retryLoad(it) } },
+            )
+        }
         val playbackSessions = remember(repo, appScope) { PlaybackSessionLifecycle(repo, appScope) }
         // One AccountViewModel for the whole shell (not per-screen-visit like the catalog ViewModels):
         // Settings' Account row summary and the AccountScreen overlay both read the SAME live
@@ -812,6 +891,10 @@ fun VortXApp(
                 }
             // Hardware/gesture back pops the player overlay instead of exiting the app. It also
             // revokes an Up Next or retry resolver that may still be running behind the player.
+            DisposableEffect(advanceVm, queueDeparture) {
+                val detach = advanceVm?.let { queueDeparture.attach(it::abandonPlaybackRoute) }
+                onDispose { detach?.invoke() }
+            }
             BackHandler {
                 advanceVm?.abandonPlaybackRoute()
                 playing = null
@@ -889,6 +972,24 @@ fun VortXApp(
                     playable = playable,
                     engineOverride = playingEngineOverride,
                     onResourcesReleased = onWatchedDownloadResourcesReleased,
+                    queueCount = visibleQueueState?.entries?.size ?: 0,
+                    onShowQueue = queueOwner?.let { owner -> { if (queueOwnerIsSelected(owner)) showPlaybackQueue = true } },
+                    onQueueNaturalEnd = {
+                        val next = historyOwnerToken?.let { owner ->
+                            visibleQueueState?.takeIf { it.owner == owner && it.ready }?.entries?.firstOrNull()
+                                ?.let { playbackQueue?.capture(owner, it.id) }
+                        }
+                        if (playing !== playable || next == null || advanceVm == null || showForNext == null ||
+                            playingMeta?.id != showForNext.id || playingMeta?.type != showForNext.type ||
+                            retryingSource || episodeHandoffRequest != null ||
+                            repo.continueWatchingOwner() != historyOwnerToken) {
+                            false
+                        } else {
+                            preloadTaskOwner.cancel()
+                            preloadPolicy.invalidate()
+                            openQueuePlay(next, true)
+                        }
+                    },
                     // "Still watching?" binge boundary: how many episodes auto-advanced to reach this one.
                     autoAdvanceCount = autoAdvanceStreak[0],
                     onBingePrompted = { autoAdvanceStreak[0] = 0 },
@@ -1089,6 +1190,12 @@ fun VortXApp(
                     LaunchedEffect(retryPlayback) {
                         when (val pb = retryPlayback) {
                             is Playback.Ready -> {
+                                // An outgoing retry may already have sampled Ready when a queue action
+                                // retires the route; it still cannot remount over the newly chosen title.
+                                if (playing !== playable || !advanceVm.isRouteAdmissionCurrent()) {
+                                    pb.playable.playbackLease?.close()
+                                    return@LaunchedEffect
+                                }
                                 advanceVm.clearPlayback()
                                 // A pick made on the MANUAL fallback is the viewer's own, warned
                                 // choice: mark it userForcedSource so the player lets it play
@@ -1548,6 +1655,9 @@ fun VortXApp(
                 val randomRequestForDetail = pendingRandomTitlePlayRequest?.takeIf {
                     it.type == current.type && it.id == current.id && it.detailGeneration == detailGeneration
                 }
+                val queueTokenForDetail = pendingQueueToken?.takeIf {
+                    it.entry.item.type == current.type && it.entry.item.id == current.id && randomRequestForDetail != null
+                }
                 val randomDetailGeneration = detailGeneration
                 val randomDetailRouteIsCurrent: () -> Boolean = {
                     savedDetailType == current.type.id && savedDetailId == current.id &&
@@ -1566,7 +1676,14 @@ fun VortXApp(
                                 currentId = savedDetailId,
                                 currentDetailGeneration = detailGeneration,
                             )
+                        )) && (queueTokenForDetail == null || (
+                            pendingQueueToken === queueTokenForDetail &&
+                                (pendingQueueAccepted || playbackQueue?.accepts(queueTokenForDetail) == true)
                         ))
+                }
+                DisposableEffect(detailVm, queueDeparture) {
+                    val detach = queueDeparture.attach(detailVm::abandonPlaybackRoute)
+                    onDispose { detach() }
                 }
                 // System Back closes the detail overlay back to the browse shell. Composed BEFORE
                 // DetailScreen so the screen's own nested overlay handlers (person page / nested title,
@@ -1585,7 +1702,22 @@ fun VortXApp(
                     // DetailScreen supplies the successfully loaded MetaDetail, not the provisional
                     // deep-link MetaItem. This keeps auto-add title/poster truth tied to engine metadata.
                     onPlay = { playable, loadedMeta, requestedEngine ->
-                        if (detailVm.isRouteAdmissionCurrent()) {
+                        val queued = queueTokenForDetail
+                        if (queued != null && !com.vortx.android.player.queue.PlaybackQueueAcceptedTarget.matches(
+                                queued.entry, loadedMeta, detailVm.selectedEpisodeId.value, playable.isTrailer)) {
+                            playable.playbackLease?.close()
+                            return@DetailScreen
+                        }
+                        if (detailVm.isRouteAdmissionCurrent() && (queued == null || randomTitlePlayIsCurrent())) {
+                            val firstQueueAcceptance = queued != null && !pendingQueueAccepted
+                            if (firstQueueAcceptance) {
+                                pendingQueueAccepted = true
+                                if (playbackQueue?.consumeAfterAccepted(requireNotNull(queued)) != true) {
+                                    pendingQueueAccepted = false
+                                    playable.playbackLease?.close()
+                                    return@DetailScreen
+                                }
+                            }
                             playingEngineOverride = PlayerLaunchPolicy.effectivePreference(
                                 requested = requestedEngine,
                                 playable = playable,
@@ -1593,8 +1725,40 @@ fun VortXApp(
                             )
                             playingMeta = loadedMeta
                             playing = playable
-                            autoAdvanceStreak[0] = 0
+                            autoAdvanceStreak[0] = if (firstQueueAcceptance && pendingQueueAutomatic) autoAdvanceStreak[0] + 1 else 0
                         } else playable.playbackLease?.close()
+                    },
+                    queueCount = visibleQueueState?.entries?.size ?: 0,
+                    queueAvailable = playbackQueue != null && visibleQueueState?.ready == true &&
+                        queueState.entries.size < com.vortx.android.player.queue.PlaybackQueueModel.MAX_ENTRIES,
+                    onShowQueue = queueOwner?.let { owner -> { if (queueOwnerIsSelected(owner)) showPlaybackQueue = true } },
+                    onQueueInteraction = {
+                        val request = randomRequestForDetail
+                        val owner = queueOwner
+                        if (!randomDetailRouteIsCurrent() ||
+                            (queueTokenForDetail != null && (owner == null || !queueOwnerIsSelected(owner))) ||
+                            (request != null && !request.sameIntent(pendingRandomTitlePlayRequest))) {
+                            false
+                        } else {
+                            val admitted = request == null || randomTitlePlayIsCurrent()
+                            pendingRandomTitlePlayRequest = null
+                            pendingQueueToken = null
+                            pendingQueueAccepted = false
+                            pendingQueueAutomatic = false
+                            quickWatchIdentity = null
+                            if (request != null) detailVm.abandonPlaybackRoute()
+                            admitted
+                        }
+                    },
+                    onQueueAdd = { meta, episode, playNext ->
+                        val item = MetaItem(meta.id, meta.type, meta.name, meta.poster,
+                            preferredEpisode = episode?.let { PreferredEpisode(it.season, it.episode, it.id) })
+                        val owner = queueOwner
+                        if (owner == null || !queueOwnerIsSelected(owner) ||
+                            !detailVm.isRouteAdmissionCurrent() || !randomDetailRouteIsCurrent() ||
+                            meta.id != current.id || meta.type != current.type || playbackQueue?.add(owner, item, playNext) != true) {
+                            android.widget.Toast.makeText(appContext, "This title could not be added to the queue.", android.widget.Toast.LENGTH_SHORT).show()
+                        }
                     },
                     autoWatch = randomRequestForDetail?.consumed == false ||
                         quickWatchIdentity == "${current.type.id}:${current.id}",
@@ -1622,8 +1786,16 @@ fun VortXApp(
                         } else {
                             val admitted = randomTitlePlayIsCurrent()
                             if (randomRequestForDetail.sameIntent(pendingRandomTitlePlayRequest)) {
-                                pendingRandomTitlePlayRequest = null
+                                // Choosing a source manually still plays THIS queue entry. Retain its
+                                // owner/UUID witness until accepted onPlay, while cancelling auto-watch.
+                                val keepsQueuedPlay = queueTokenForDetail != null && admitted
+                                pendingRandomTitlePlayRequest = if (keepsQueuedPlay) randomRequestForDetail.copy(consumed = true) else null
                                 detailVm.abandonPlaybackRoute()
+                                pendingQueueAutomatic = false
+                                if (!keepsQueuedPlay) {
+                                    pendingQueueToken = null
+                                    pendingQueueAccepted = false
+                                }
                                 admitted
                             } else {
                                 false

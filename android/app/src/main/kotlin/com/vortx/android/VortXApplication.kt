@@ -75,6 +75,13 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
     /// Process-owned recovery work. A failed cleanup cannot cancel another startup child, and IO keeps
     /// encrypted preference reads, engine add-on inspection, and Worker revocation off the main thread.
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val playbackQueueDelegate = lazy {
+        com.vortx.android.player.queue.PlaybackQueueStore(this, applicationScope) {
+            catalogRepository.continueWatchingOwner()
+        }
+    }
+    internal val playbackQueue: com.vortx.android.player.queue.PlaybackQueueStore
+        get() = playbackQueueDelegate.value
 
     private val nativeAccounts: NativeAccountCoordinator by lazy { NativeAccountCoordinator(VortxJniBindings,
         VortxEncryptedCheckpointStore(java.io.File(noBackupFilesDir, "native-state"), VortxAndroidCheckpointKey::get),
@@ -100,7 +107,10 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
                 syncManager === manager && manager.sessionOwnerSnapshot() == captured && action()
             } }
             gate
-        } }, onAuthorityChanged = { com.vortx.android.library.WatchlistStore.shared(this).invalidateNativeAuthority() },
+        } }, onAuthorityChanged = {
+            com.vortx.android.library.WatchlistStore.shared(this).invalidateNativeAuthority()
+            if (playbackQueueDelegate.isInitialized()) playbackQueue.invalidate()
+        },
         onProgressMutation = { origin -> applicationScope.launch { syncManager?.onLocalNativeMutation(origin, progressOnly = true) }; Unit }) }
     internal fun nativeStreamingAccounts(): NativeAccountCoordinator = nativeAccounts
     private val nativeProfiles: NativeProfileAccess by lazy { NativeProfileAccess(

@@ -152,6 +152,10 @@ fun PlayerScreen(
     /// Defaults to [onBack] so a host without an auto-advance flow keeps the old exit-to-detail
     /// behavior; the phone shell wires it to the series Up Next auto-advance instead.
     onEnded: () -> Unit = onBack,
+    /** Optional upcoming-title queue. True means this exact natural completion accepted a queued route. */
+    onQueueNaturalEnd: (() -> Boolean)? = null,
+    queueCount: Int = 0,
+    onShowQueue: (() -> Unit)? = null,
     /// Called ONCE when the live source is judged BAD -- the engine's own hasError, the stall
     /// watchdog, or the runtime-mismatch verdict below (a file implausibly shorter than the title's
     /// expected runtime, e.g. a ~10s junk file standing in for a removed episode). The host is
@@ -209,6 +213,7 @@ fun PlayerScreen(
     val currentOnProgress by rememberUpdatedState(onProgress)
     val currentOnError by rememberUpdatedState(onError)
     val currentOnEnded by rememberUpdatedState(onEnded)
+    val currentOnQueueNaturalEnd by rememberUpdatedState(onQueueNaturalEnd)
     val currentOnSourceFailed by rememberUpdatedState(onSourceFailed)
     val currentOnSwitchSource by rememberUpdatedState(onSwitchSource)
     val currentOnSwitchEpisode by rememberUpdatedState(onSwitchEpisode)
@@ -1786,6 +1791,7 @@ fun PlayerScreen(
     // (-> the error surface + the host's retry ladder) instead of an ended signal. This is what makes
     // "play a 10-second junk file to its end" structurally unable to mark an episode watched or
     // auto-advance, whichever engine reported the EOF.
+    var queueCompletionAttempted by remember(playbackSessionKey) { mutableStateOf(false) }
     LaunchedEffect(playbackSessionKey, playerState.hasEnded, sourceSwitchState.isSwitching, playerExitRequested) {
         val s = latestState
         if (
@@ -1819,6 +1825,14 @@ fun PlayerScreen(
         if (isLocalSession) {
             exitPlayer()
             return@LaunchedEffect
+        }
+        // The queue never inherits the manual-forced-source exemption. Ordinary series Up Next keeps
+        // its existing behavior, while a queued title requires this original non-junk natural end.
+        if (!queueCompletionAttempted && !currentPlayable.isTrailer && !currentPlayable.userForcedSource &&
+            !isJunkEof(s.positionMs, s.durationMs, currentPlayable)
+        ) {
+            queueCompletionAttempted = true
+            if (currentOnQueueNaturalEnd?.invoke() == true) return@LaunchedEffect
         }
         currentOnEnded()
     }
@@ -2115,6 +2129,8 @@ fun PlayerScreen(
 
         PlayerChrome(
             playable = currentPlayable,
+            queueCount = queueCount,
+            onShowQueue = onShowQueue,
             playbackSessionRevision = sourceSwitchState.revision,
             // The watchdog's stall verdict and the runtime-mismatch verdict both ride the same
             // hasError the engines publish, so the chrome has exactly one error surface (the overlay
