@@ -197,6 +197,14 @@ fileprivate final class MPVNativeHandle: @unchecked Sendable {
 
     var isRetired: Bool { lifecycle.withLock { $0.retired } }
 
+    /// libmpv invokes this on its own threads, including synchronously during registration.
+    /// Keep the C entry point outside install's MainActor isolation; an inline closure there
+    /// inherits the actor and traps before it can reach the thread-safe relay in Swift 6 Debug.
+    private nonisolated static let wakeupCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { context in
+        guard let context else { return }
+        Unmanaged<WakeupRelay>.fromOpaque(context).takeUnretainedValue().signal()
+    }
+
     @MainActor
     func install(_ relay: WakeupRelay) {
         lifecycle.withLock {
@@ -204,10 +212,7 @@ fileprivate final class MPVNativeHandle: @unchecked Sendable {
             $0.relay = relay
         }
         let retained = Unmanaged.passRetained(relay)
-        mpv_set_wakeup_callback(handle, { context in
-            guard let context else { return }
-            Unmanaged<WakeupRelay>.fromOpaque(context).takeUnretainedValue().signal()
-        }, retained.toOpaque())
+        mpv_set_wakeup_callback(handle, MPVNativeHandle.wakeupCallback, retained.toOpaque())
     }
 
     /// Return values must be owned Swift values, never a native pointer or node view.
