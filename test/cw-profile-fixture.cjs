@@ -18,10 +18,18 @@ function exact(profiles, marker) {
 function materialize(profiles, fixture) {
     const namespace = exact(profiles, 'enum ProfileSelectionRead {');
     const projector = exact(profiles, 'private func selectionReadSnapshot()');
+    const root = path.resolve(__dirname, '..');
+    const core = fs.readFileSync(path.join(root, 'app/SourcesShared/CoreBridge.swift'), 'utf8');
+    const facade = fs.readFileSync(path.join(root, 'app/SourcesShared/VortxNativeCoreFacade.swift'), 'utf8');
+    const capability = exact(core, 'struct NativePlaybackReadCapability:');
+    const bindings = ['struct RegistryBinding:', 'struct WatchlistBinding:']
+        .map(marker => exact(facade, marker)).join('\n');
     let generated = fixture;
     for (const [marker, value] of [
         ['// PRODUCTION_HOME_PROFILE_SELECTION_READ', namespace],
         ['// PRODUCTION_HOME_PROFILE_SELECTION_PROJECTOR', projector],
+        ['// PRODUCTION_HOME_NATIVE_READ_CAPABILITY', capability],
+        ['// PRODUCTION_HOME_NATIVE_FACADE_BINDINGS', bindings],
     ]) {
         assert.equal(generated.split(marker).length, 2, 'unique actual scalar fixture marker');
         generated = generated.replace(marker, value);
@@ -33,8 +41,10 @@ function materialize(profiles, fixture) {
     return { source: generated, receipt: {
         profilesSHA256: sha256(profiles), fixtureInputSHA256: sha256(fixture),
         namespaceSHA256: sha256(namespace), projectorSHA256: sha256(projector),
+        coreSHA256: sha256(core), facadeSHA256: sha256(facade),
+        capabilitySHA256: sha256(capability), facadeBindingsSHA256: sha256(bindings),
         generatedSHA256: sha256(generated), declarationTransformations: [],
-        scope: 'Same-file real scalar/projector and MainActor RAM owner; old broad test lane language mode retained',
+        scope: 'Same-file real scalar/projector, exact native read capability and Facade binding values; explicit RAM installation/epoch/Facade collaborators, not actual B/F capture or SDK; old broad lane language mode retained',
     } };
 }
 module.exports = { materialize };

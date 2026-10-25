@@ -18,6 +18,8 @@ private struct UserProfile {
 }
 // This plain-property fixture does not call publishInitial or read the new mirror. It tests
 // legacy observer/ownership behavior only; actual Combine reentrancy and startup are separate gates.
+// Keep the real ProfileStore main-actor owner while extracting its unchanged mutation observers.
+@MainActor
 private final class LegacyProfileLifecycleHarness {
     // INSERT ACTUAL LEGACY WATCH LIFECYCLE PROJECTION
     var retirements = 0

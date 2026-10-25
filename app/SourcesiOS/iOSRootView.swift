@@ -1670,8 +1670,10 @@ struct iOSHomeView: View {
                 if let route = homeSurpriseRoute, !route.access.isNavigationCurrent(profiles: profiles, core: core) { homeSurpriseRoute = nil }
             }
             .onReceive(account.$credentialBoundaryGeneration) { _ in homeSurpriseRoute = nil }
-            .navigationDestination(item: $homeSurpriseRoute) { route in
-                HomeSurpriseDestination(route: route)
+            .navigationDestination(isPresented: homeSurprisePresented) {
+                if let route = homeSurpriseRoute {
+                    HomeSurpriseDestination(route: route).id(route.id)
+                }
             }
             .navigationDestination(for: FeaturedHeroItem.self) { item in
                 // Thread the hub card's already-resolved art so the detail hero never blanks while (or if)
@@ -2006,6 +2008,19 @@ struct iOSHomeView: View {
 
     private func forYouRailItem(_ preview: MetaPreview) -> RailItem {
         RailItem(id: preview.id, type: preview.type, name: preview.name, poster: preview.poster, progress: 0)
+    }
+
+    /// Use the existing iOS 16 boolean-destination pattern without losing item identity.
+    /// An outgoing destination may dismiss only its own route, never a newer Surprise pick.
+    private var homeSurprisePresented: Binding<Bool> {
+        let routeID = homeSurpriseRoute?.id
+        return Binding(
+            get: { routeID != nil && homeSurpriseRoute?.id == routeID },
+            set: { presented in
+                guard !presented, let routeID, homeSurpriseRoute?.id == routeID else { return }
+                homeSurpriseRoute = nil
+            }
+        )
     }
 
     /// Match the visible Home sections; hidden/disabled catalogs and private Continue Watching

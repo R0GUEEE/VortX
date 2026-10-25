@@ -7,6 +7,7 @@ cw_worker_phase=source
 cw_worker_inputs=(
  scripts/test-cw-worker-currentness.sh test/cw-worker-currentness.mjs test/xperience-harness-inputs.cjs
  app/Tests/CWWorkerCurrentnessTests.swift app/SourcesShared/Profiles.swift
+ app/SourcesShared/CoreBridge.swift app/SourcesShared/VortxNativeCoreFacade.swift
  app/SourcesShared/HomeContinueWatchingSelection.swift app/SourcesShared/TraktPlaybackShadow.swift
  app/SourcesShared/SIMKLContinueWatchingShadow.swift app/SourcesShared/PlaybackMutationOwnershipPolicy.swift
  app/SourcesShared/ContinueWatchingPreferences.swift app/SourcesShared/ProfileDiscoveryPreferences.swift
