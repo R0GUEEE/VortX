@@ -436,3 +436,45 @@ index 8b268af..7a075b0 100644
                      '-enable-objc-interop', '-emit-objc-header', '-parse-as-library']
  -endif
  +#endif
+diff --git a/Sources/BuildScripts/XCFrameworkBuild/base.swift b/Sources/BuildScripts/XCFrameworkBuild/base.swift
+index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..7f024ca942fff78307143ad48f0399ca2c8ff52f 100644
+--- a/Sources/BuildScripts/XCFrameworkBuild/base.swift
++++ b/Sources/BuildScripts/XCFrameworkBuild/base.swift
+@@ -319,7 +319,6 @@
+         let cFlags = cFlags(platform: platform, arch: arch).joined(separator: " ")
+         let ldFlags = ldFlags(platform: platform, arch: arch).joined(separator: " ")
+         let pkgConfigPath = platform.pkgConfigPath(arch: arch)
+-        let pkgConfigPathDefault = Utility.shell("pkg-config --variable pc_path pkg-config", isOutput: true)!
+         return [
+             "LC_CTYPE": "C",
+             "CC": "/usr/bin/clang",
+@@ -333,7 +332,9 @@
+             "CXXFLAGS": cFlags,
+             "ASMFLAGS": cFlags,
+             "LDFLAGS": ldFlags,
+-            "PKG_CONFIG_LIBDIR": pkgConfigPath + pkgConfigPathDefault,
++            // Resolve target metadata only; never search host defaults or ambient overrides.
++            "PKG_CONFIG_LIBDIR": pkgConfigPath,
++            "PKG_CONFIG_PATH": "",
+             "PATH": BaseBuild.defaultPath,
+         ]
+     }
+@@ -1245,14 +1246,13 @@
+     }
+ 
+     func pkgConfigPath(arch: ArchType) -> String {
+-        var pkgConfigPath = ""
++        var pkgConfigPaths: [String] = []
+         for lib in Library.allCases {
+             let path = URL.currentDirectory + [lib.rawValue, rawValue, "thin", arch.rawValue]
+-            if FileManager.default.fileExists(atPath: path.path) {
+-                pkgConfigPath += "\(path.path)/lib/pkgconfig:"
+-            }
++            // Include even absent target roots so LIBDIR is explicit and never empty.
++            pkgConfigPaths.append("\(path.path)/lib/pkgconfig")
+         }
+-        return pkgConfigPath
++        return pkgConfigPaths.joined(separator: ":")
+     }
+ }
+ 

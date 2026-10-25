@@ -148,6 +148,14 @@ cp "$FIXTURE/base-swift-recipe.patch" "$SOURCE/$FIXTURE_SWIFT_RECIPE"
 [ -z "$(git -C "$SOURCE" status --porcelain --untracked-files=all)" ] ||
   fail "fixture must start clean"
 
+# Capture the installed resolver before creating the builder-only tool stubs. The
+# target-isolation fixture must exercise real pkg-config metadata resolution.
+PKG_CONFIG_EXECUTABLE="$(command -v pkg-config)" || fail "installed pkg-config is required"
+case "$PKG_CONFIG_EXECUTABLE" in
+  /*) [ -x "$PKG_CONFIG_EXECUTABLE" ] || fail "pkg-config is not executable" ;;
+  *) fail "pkg-config must resolve to an absolute installed executable" ;;
+esac
+
 for tool in meson ninja cmake pkg-config nasm wget; do
   printf '%s\n' '#!/bin/sh' 'exit 0' >"$TOOLS/$tool"
   chmod +x "$TOOLS/$tool"
@@ -212,9 +220,8 @@ rm -f "$SOURCE/untracked.txt"
 [ "$(git -C "$SOURCE" status --porcelain --untracked-files=all)" = "$(printf '%s\n' ' M Package.swift' " M $FIXTURE_SWIFT_RECIPE")" ] ||
   fail "fixture did not retain only the exact approved patch after dirty-state cases"
 
-# Compile the actual patched SpikeGit implementation extracted from the canonical MPVKit source.
-# The fixture provides only the surrounding Foundation types and a real Process-backed Utility.shell;
-# it does not reimplement or regex-test the production validation logic.
+# Compile actual patched SpikeGit and target pkg-config getters extracted from canonical MPVKit.
+# The fixture supplies surrounding types and a Process-backed Utility, retaining production bodies.
 CANONICAL_MPVKIT="${MPVKIT_DVFEL_CANONICAL:-/Users/daksh/VortXTV/MPVKit}"
 [ -d "$CANONICAL_MPVKIT/.git" ] || fail "canonical MPVKit checkout is unavailable: $CANONICAL_MPVKIT"
 CANONICAL_REF="$(git -C "$CANONICAL_MPVKIT" rev-parse HEAD)"
@@ -223,17 +230,29 @@ CANONICAL_REF="$(git -C "$CANONICAL_MPVKIT" rev-parse HEAD)"
 
 PATCHED_INDEX="$FIXTURE/mpvkit-source.index"
 PATCHED_SOURCE="$FIXTURE/mpvkit-main.swift"
-# Verify the entire approved patch in an isolated index, then emit only this input.
+PATCHED_BASE="$FIXTURE/mpvkit-base.swift"
+# Verify the entire approved patch in an isolated index, then emit only these two inputs.
 # No source checkout or canonical index/working-tree edit is created.
 GIT_INDEX_FILE="$PATCHED_INDEX" git -C "$CANONICAL_MPVKIT" read-tree HEAD
 GIT_INDEX_FILE="$PATCHED_INDEX" git -C "$CANONICAL_MPVKIT" apply --cached "$PATCH"
 GIT_INDEX_FILE="$PATCHED_INDEX" git -C "$CANONICAL_MPVKIT" show :Sources/BuildScripts/XCFrameworkBuild/main.swift >"$PATCHED_SOURCE"
+GIT_INDEX_FILE="$PATCHED_INDEX" git -C "$CANONICAL_MPVKIT" show :Sources/BuildScripts/XCFrameworkBuild/base.swift >"$PATCHED_BASE"
 swiftc -j 1 -num-threads 1 -parse "$PATCHED_SOURCE" ||
   fail "actual patched MPVKit BuildScripts source did not parse"
 SPIKE_BLOCK="$FIXTURE/spikegit-production.swift"
 sed -n '/^enum SpikeGit {/,/^private class BuildOpenSSL: ZipBaseBuild {/p' \
   "$PATCHED_SOURCE" | sed '$d' >"$SPIKE_BLOCK"
 [ -s "$SPIKE_BLOCK" ] || fail "could not extract the patched production SpikeGit implementation"
+ENVIRONMENT_BLOCK="$FIXTURE/environment-production.swift"
+PKG_CONFIG_BLOCK="$FIXTURE/pkgconfig-production.swift"
+# These selectors end at the method's four-space closing brace, preserving each
+# complete production body without pulling unrelated SDK/build implementation in.
+sed -n '/^    func environment(platform: PlatformType, arch: ArchType) -> \[String: String\] {/,/^    }/p' \
+  "$PATCHED_BASE" >"$ENVIRONMENT_BLOCK"
+sed -n '/^    func pkgConfigPath(arch: ArchType) -> String {/,/^    }/p' \
+  "$PATCHED_BASE" >"$PKG_CONFIG_BLOCK"
+[ -s "$ENVIRONMENT_BLOCK" ] || fail "could not extract production BaseBuild.environment"
+[ -s "$PKG_CONFIG_BLOCK" ] || fail "could not extract production PlatformType.pkgConfigPath"
 
 SWIFT_PATCH_DIR="$FIXTURE/Sources/BuildScripts/patch/fixture"
 mkdir -p "$SWIFT_PATCH_DIR"
@@ -247,8 +266,8 @@ SWIFT_HELPER="$FIXTURE/spikegit-fixture.swift"
     'import Foundation' \
     'import Darwin' \
     '' \
-    'enum Library: String {' \
-    '    case fixture' \
+    'enum Library: String, CaseIterable {' \
+    '    case fixture, FFmpeg, openssl' \
     '}' \
     '' \
     'extension URL {' \
@@ -258,6 +277,10 @@ SWIFT_HELPER="$FIXTURE/spikegit-fixture.swift"
     '' \
     '    static func + (left: URL, right: String) -> URL {' \
     '        left.appendingPathComponent(right)' \
+    '    }' \
+    '' \
+    '    static func + (left: URL, right: [String]) -> URL {' \
+    '        right.reduce(left) { $0.appendingPathComponent($1) }' \
     '    }' \
     '}' \
     '' \
@@ -302,22 +325,137 @@ SWIFT_HELPER="$FIXTURE/spikegit-fixture.swift"
     '}' \
     ''
   sed -n '1,$p' "$SPIKE_BLOCK"
-  printf '%s\n' \
-    '' \
-    'let expectedSHA = CommandLine.arguments[1]' \
-    'let checkout = URL(fileURLWithPath: CommandLine.arguments[2])' \
-    'do {' \
-    '    try SpikeGit.clonePinned(url: "unused", sha: expectedSHA, library: .fixture, into: checkout)' \
-    '    print("SPIKE FIXTURE PASS")' \
-    '    exit(0)' \
-    '} catch {' \
-    '    print("SPIKE FIXTURE FAILURE: \(error.localizedDescription)")' \
-    '    exit(1)' \
-    '}'
+  cat <<'SWIFT_TYPES'
+
+enum ArchType: String { case arm64, x86_64, arm64e }
+enum PlatformType: String {
+    case xros, xrsimulator, maccatalyst, macos, isimulator, tvsimulator, tvos, ios
+SWIFT_TYPES
+  cat "$PKG_CONFIG_BLOCK"
+  cat <<'SWIFT_BASE'
+}
+
+class BaseBuild {
+    static let defaultPath = "/usr/bin:/bin:/usr/sbin:/sbin"
+    func cFlags(platform: PlatformType, arch: ArchType) -> [String] { ["fixture-cflags"] }
+    func ldFlags(platform: PlatformType, arch: ArchType) -> [String] { ["fixture-ldflags"] }
+SWIFT_BASE
+  cat "$ENVIRONMENT_BLOCK"
+  cat <<'SWIFT_ISOLATION'
+}
+
+func requireFixture(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+    guard condition() else {
+        throw NSError(domain: "TargetIsolationFixture", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+func writeModule(_ name: String, version: String = "1.0", requires: String = "", in directory: URL) throws {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let contents = """
+    Name: \(name)
+    Description: Synthetic target-isolation contract sentinel
+    Version: \(version)
+    Requires.private: \(requires)
+    Libs: -lvortx_sentinel
+
+    """
+    try contents.write(to: directory.appendingPathComponent("\(name).pc"), atomically: true, encoding: .utf8)
+}
+
+func runTargetIsolation(executable: String, root: URL) throws {
+    let manager = FileManager.default
+    try manager.createDirectory(at: root, withIntermediateDirectories: true)
+    try requireFixture(manager.changeCurrentDirectoryPath(root.path), "could not enter pkg-config fixture")
+    let hostPath = root.appendingPathComponent("host-path")
+    let hostLibdir = root.appendingPathComponent("host-libdir")
+    try requireFixture(ProcessInfo.processInfo.environment["PKG_CONFIG_PATH"] == hostPath.path,
+                       "parent PKG_CONFIG_PATH poison was not supplied")
+    try requireFixture(ProcessInfo.processInfo.environment["PKG_CONFIG_LIBDIR"] == hostLibdir.path,
+                       "parent PKG_CONFIG_LIBDIR poison was not supplied")
+    try writeModule("vortx-host-path-sentinel", in: hostPath)
+    try writeModule("vortx-host-libdir-sentinel", in: hostLibdir)
+    try writeModule("vortx-transitive-host-sentinel", in: hostPath)
+    // A duplicate target identity makes host precedence observable by its version.
+    try writeModule("vortx-target-sentinel", version: "9.0", in: hostPath)
+    let poison = ["PKG_CONFIG_PATH": hostPath.path, "PKG_CONFIG_LIBDIR": hostLibdir.path]
+    for module in ["vortx-host-path-sentinel", "vortx-host-libdir-sentinel"] {
+        _ = try Utility.launch(path: executable, arguments: ["--exists", module], environment: poison)
+    }
+
+    let cases: [(PlatformType, ArchType)] = [
+        (.tvos, .arm64), (.tvos, .arm64e), (.tvsimulator, .x86_64),
+        (.ios, .arm64), (.macos, .arm64),
+    ]
+    for (platform, arch) in cases {
+        let environment = BaseBuild().environment(platform: platform, arch: arch)
+        let getter = platform.pkgConfigPath(arch: arch)
+        try requireFixture(environment["PKG_CONFIG_LIBDIR"] == getter, "environment did not use production target getter")
+        try requireFixture(environment["PKG_CONFIG_PATH"] == "", "environment must explicitly clear PKG_CONFIG_PATH")
+        let paths = getter.components(separatedBy: ":")
+        let suffix = "\(platform.rawValue)/thin/\(arch.rawValue)/lib/pkgconfig"
+        let expected = ["fixture", "FFmpeg", "openssl"].map { root.appendingPathComponent("\($0)/\(suffix)").path }
+        try requireFixture(paths == expected, "target roots differ, contain host roots, or contain empty segments: \(getter)")
+        try requireFixture(paths.count == Library.allCases.count && !paths.contains(""), "target root list is not finite and explicit")
+        try requireFixture(paths.allSatisfy { !manager.fileExists(atPath: $0) }, "absent dependency roots were not retained")
+        let target = URL(fileURLWithPath: paths[1])
+        try writeModule("vortx-target-sentinel", in: target)
+        try writeModule("vortx-needs-host-sentinel", requires: "vortx-transitive-host-sentinel", in: target)
+        // Positive control proves the host dependency exists and can satisfy the
+        // target's private dependency if host search is accidentally permitted.
+        var contaminated = poison
+        contaminated["PKG_CONFIG_PATH"] = "\(hostPath.path):\(target.path)"
+        _ = try Utility.launch(path: executable, arguments: ["--static", "--libs", "vortx-needs-host-sentinel"], environment: contaminated)
+        let version = try Utility.launch(path: executable, arguments: ["--modversion", "vortx-target-sentinel"], isOutput: true, environment: environment)
+        try requireFixture(version == "1.0", "target metadata was missing or shadowed by the host sentinel")
+        for module in ["vortx-host-path-sentinel", "vortx-host-libdir-sentinel"] {
+            let result = try? Utility.launch(path: executable, arguments: ["--exists", module], environment: environment)
+            try requireFixture(result == nil, "host-only module leaked into target search: \(module)")
+        }
+        let transitive = try? Utility.launch(path: executable, arguments: ["--static", "--libs", "vortx-needs-host-sentinel"], environment: environment)
+        try requireFixture(transitive == nil, "missing target private dependency was satisfied by host metadata")
+    }
+
+    // No roots exist for this different platform/architecture. The getter must
+    // still set nonempty LIBDIR, and the resolver must fail despite host poison.
+    let missing = BaseBuild().environment(platform: .xrsimulator, arch: .arm64e)
+    let missingPaths = (missing["PKG_CONFIG_LIBDIR"] ?? "").components(separatedBy: ":")
+    try requireFixture(missingPaths.count == Library.allCases.count && !missingPaths.contains(""), "absent roots produced empty LIBDIR")
+    try requireFixture(missingPaths.allSatisfy { !manager.fileExists(atPath: $0) }, "missing target fixture unexpectedly exists")
+    let absent = try? Utility.launch(path: executable, arguments: ["--exists", "vortx-target-sentinel"], environment: missing)
+    try requireFixture(absent == nil, "nonexistent target roots fell back to host metadata")
+    print("TARGET ISOLATION FIXTURE PASS")
+}
+
+do {
+    if CommandLine.arguments[1] == "--target-isolation" {
+        try runTargetIsolation(executable: CommandLine.arguments[2], root: URL(fileURLWithPath: CommandLine.arguments[3]))
+    } else {
+        let expectedSHA = CommandLine.arguments[1]
+        let checkout = URL(fileURLWithPath: CommandLine.arguments[2])
+        try SpikeGit.clonePinned(url: "unused", sha: expectedSHA, library: .fixture, into: checkout)
+        print("SPIKE FIXTURE PASS")
+    }
+    exit(0)
+} catch {
+    print("PRODUCTION FIXTURE FAILURE: \(error.localizedDescription)")
+    exit(1)
+}
+SWIFT_ISOLATION
 } >"$SWIFT_HELPER"
 
 SWIFT_BINARY="$FIXTURE/spikegit-fixture"
 swiftc -j 1 -num-threads 1 "$SWIFT_HELPER" -o "$SWIFT_BINARY" || fail "actual patched SpikeGit fixture did not compile"
+
+# The Process scaffold deliberately merges its poisoned parent environment, then
+# overlays the actual production dictionary. Production Utility.launch instead
+# carries HOME/default PATH only; this fixture does not claim it inherits poison.
+PKG_CONFIG_PATH="$FIXTURE/pkg-config/host-path" \
+  PKG_CONFIG_LIBDIR="$FIXTURE/pkg-config/host-libdir" \
+  "$SWIFT_BINARY" --target-isolation "$PKG_CONFIG_EXECUTABLE" "$FIXTURE/pkg-config" \
+  >"$FIXTURE/target-isolation.log" 2>&1 ||
+  fail "compiled production target-isolation fixture failed: $(cat "$FIXTURE/target-isolation.log")"
 
 run_spike() {
   local expected_sha="$1" log="$2"
@@ -359,4 +497,4 @@ fi
 grep -Fq 'not owned by the approved patch set' "$FIXTURE/swift-untracked.log" ||
   fail "compiled SpikeGit untracked rejection lacked the ownership diagnostic"
 
-echo "PASS: compiled production SpikeGit and MPVKit-DVFEL pin/dirty-state, FFmpeg/Libmpv capability, exact slices, TLS, and post-fetch artifact contracts"
+echo "PASS: compiled production SpikeGit and target pkg-config isolation, MPVKit-DVFEL pin/dirty-state, FFmpeg/Libmpv capability, exact slices, TLS, and post-fetch artifact contracts"
