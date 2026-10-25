@@ -30,11 +30,6 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
-      diagnose_startup:
-        description: "Operational startup-only diagnosis on the approved native integration branch. No compiler, package, artifact or publication."
-        required: false
-        type: boolean
-        default: false
       publish_existing_055:
         description: "One-shot, independently reviewed publication recovery for the existing 0.5.5/274 CI bytes. No app build. Only the pinned v0.5.5-publication.1 operational tag is admitted."
         required: false
@@ -88,7 +83,7 @@ on:
         type: string
         default: ""
       recovery_source_commit:
-        description: "Main-only packaging recovery of immutable v0.5.0-beta.1 (844782d29a93ae51991bfadc639d50bc3619d40b, draft 407572242) or v0.5.0-beta.3 (bf4aad976aa7ad21e8d77b1b13c1d2a556b5dd39, draft 408568690). Cannot combine with a resume or player override."
+        description: "Main-only historical immutable Beta1/Beta3 recovery, or exact artifact-only Beta7/01d recovery on the approved native integration branch. Beta7 requires blank release tag/ID and all publication/player/resume overrides disabled."
         required: false
         type: string
         default: ""
@@ -179,7 +174,7 @@ jobs:
           NODE
 
   build-tvos:
-    if: github.event_name != 'release' && inputs.resume_handoff == '' && inputs.publish_existing_055 != true && inputs.diagnose_startup != true
+    if: github.event_name != 'release' && inputs.resume_handoff == '' && inputs.publish_existing_055 != true
     outputs:
       source_sha: ${{ env.BUILD_SOURCE_SHA }}
       apps_id: ${{ steps.apps_handoff.outputs.artifact-id }}
@@ -233,8 +228,27 @@ jobs:
           TVOS_TEST_ONLY: ${{ inputs.tvos_test_only }}
           MPVKIT_URL: ${{ inputs.mpvkit_artifacts_url }}
           MPVKIT_SHA: ${{ inputs.mpvkit_artifacts_sha256 }}
+          RECOVERY_INPUTS_JSON: ${{ toJSON(inputs) }}
         run: |
           set -euo pipefail
+          if [ "$BUILD_SOURCE_SHA" = 01d3ec566b32f8fa943d9bcfe6c4a8abf8a40f63 ]; then
+            [ "$GH_REPO" = VortXTV/VortX ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" = refs/heads/beta-native-engine-integration-20261008 ] || exit 1
+            # Exact artifact-only operational recovery; unknown or mistyped input values fail.
+            jq -en --argjson actual "$RECOVERY_INPUTS_JSON" '
+              ({release_tag:"",recovery_source_commit:"",resume_handoff:"",mpvkit_artifacts_url:"",mpvkit_artifacts_sha256:"",release_id:"",altstore_note:""} + $actual) ==
+              {publish_existing_055:false,native_only:true,mpvkit_artifacts_url:"",mpvkit_artifacts_sha256:"",tvos_test_only:false,release_tag:"",altstore_note:"",publish_release:false,apple_only:false,release_id:"",resume_handoff:"",recovery_source_commit:"01d3ec566b32f8fa943d9bcfe6c4a8abf8a40f63"}' >/dev/null
+            [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ] && [ -z "$(git status --porcelain)" ] || exit 1
+            [ "$(gh api --jq '.object.sha' -- "repos/$GH_REPO/git/ref/heads/beta-native-engine-integration-20261008")" = "$GITHUB_SHA" ] || exit 1
+            gh api -- "repos/$GH_REPO/compare/$BUILD_SOURCE_SHA...$GITHUB_SHA" | jq -e --arg source "$BUILD_SOURCE_SHA" '
+              .status == "ahead" and .merge_base_commit.sha == $source and
+              ([.files[].filename] == [".github/workflows/release-tvos.yml"])' >/dev/null
+            gh api -- "repos/$GH_REPO/git/ref/tags/v0.5.6-beta.7" | jq -e '.object.type == "tag" and .object.sha == "8460493f719db34b39c824edb4202255ef32efde"' >/dev/null
+            gh api -- "repos/$GH_REPO/git/tags/8460493f719db34b39c824edb4202255ef32efde" | jq -e '.object.type == "commit" and .object.sha == "01d3ec566b32f8fa943d9bcfe6c4a8abf8a40f63"' >/dev/null
+            echo "source_sha=$BUILD_SOURCE_SHA" >> "$GITHUB_OUTPUT"
+            echo 'native_revision=2ea2e0f27dd2e53b7b28228435ca35a70f92831f' >> "$GITHUB_OUTPUT"
+            echo 'cargo_env_repair=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           [ "$GH_REPO" = VortXTV/VortX ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" = refs/heads/main ] || exit 1
           [ "$(gh api --jq '.object.sha' -- "repos/$GH_REPO/git/ref/heads/main")" = "$GITHUB_SHA" ] || { echo '::error::recovery must execute current main'; exit 1; }
           case "$BUILD_SOURCE_SHA:$TAG:$RELEASE_ID" in
@@ -290,6 +304,21 @@ jobs:
         run: |
           set -euo pipefail
           [ "$(git rev-parse HEAD)" = "$BUILD_SOURCE_SHA" ] && [ -z "$(git status --porcelain)" ] || exit 1
+          if [ "$BUILD_SOURCE_SHA" = 01d3ec566b32f8fa943d9bcfe6c4a8abf8a40f63 ]; then
+            # All original nine source-contract files, including this frozen checkout's workflow.
+            shasum -a 256 -c - <<'FROZEN_SOURCE_PINS'
+          ffd11e731c1074dcf34d46b0937a00db44787c588ac94e2b9bf3d4d11f466de9  scripts/verify-ci-direct-beta.py
+          e7be6516af574c143934b1099e3343d88a32cc55fc0df13b69e17a213d96b37e  scripts/verify-apple-direct-test-release.py
+          fc5f52893f465290aed4ae0f9cf5336c2773541aba45396f38f7fb085434c41a  scripts/verify-native-apple-package.py
+          bac45663675eea461dc574a1e18ea056afabe1972318e8779e1c403ce44aff36  scripts/verify-android-release-signing.sh
+          84f78dd288ee6f0af415abc302bc77f15a2bfbeeb0639db305879bf4e3257580  scripts/verify-android-release-version.sh
+          b1f5644941a8661f6f33dc8af8108075bdeebbe48b415538c693b72f3994bcbc  .github/workflows/release-tvos.yml
+          ff90493bfc3ce55ec6e45954a1dbee32edec39d28f84192611e6b1e7c77af403  .github/workflows/android-release.yml
+          c365c9549f4c6b62239b9663f78624ae393643ea8869d349ef2600ba52c63602  app/project.yml
+          dbca414c5d11615f314ead9020c7e067dfc094a29ccc7b32e6d18030dd8d94f6  android/app/build.gradle.kts
+          FROZEN_SOURCE_PINS
+            exit 0
+          fi
           # Authenticate each frozen workflow's recorded pin; effective recovery selection
           # remains the separately admitted historical engine, never this checkout's default.
           case "$BUILD_SOURCE_SHA" in
@@ -322,7 +351,7 @@ jobs:
           else
             [ "$RECOVERY_OUTCOME" = success ] && [ "$RECOVERY_SOURCE" = "$BUILD_SOURCE_SHA" ] && [ "$ADMITTED_SOURCE" = "$BUILD_SOURCE_SHA" ] || exit 1
             case "$ADMITTED_SOURCE:$ADMITTED_NATIVE_REVISION" in
-              844782d29a93ae51991bfadc639d50bc3619d40b:0c201563c6aa54eeb0545b55ad01582c0c3bcae3|bf4aad976aa7ad21e8d77b1b13c1d2a556b5dd39:0c201563c6aa54eeb0545b55ad01582c0c3bcae3) ;;
+              844782d29a93ae51991bfadc639d50bc3619d40b:0c201563c6aa54eeb0545b55ad01582c0c3bcae3|bf4aad976aa7ad21e8d77b1b13c1d2a556b5dd39:0c201563c6aa54eeb0545b55ad01582c0c3bcae3|01d3ec566b32f8fa943d9bcfe6c4a8abf8a40f63:2ea2e0f27dd2e53b7b28228435ca35a70f92831f) ;;
               *) exit 1 ;;
             esac
             NATIVE_REVISION="$ADMITTED_NATIVE_REVISION"
@@ -596,6 +625,182 @@ jobs:
       # Vendor/VortxEngine.xcframework, so project generation + every build need it present). Built from
       # the vortx-core workspace in this checkout; VORTX_ENGINE_DIR can repoint the step if the engine
       # workspace lives elsewhere. The step fails fast with a clear message if crates/ffi is missing.
+      - name: Repair missing optional Cargo environment initializer
+        if: steps.recovery.outputs.cargo_env_repair == 'true'
+        run: |
+          set -euo pipefail
+          umask 077
+          cat > "$RUNNER_TEMP/beta7-cargo-env-repair.py" <<'CARGO_ENV_REPAIR_PY'
+          """Exact Beta7 ephemeral-runner repair. Never changes app or native source."""
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import stat
+          import sys
+          
+          SOURCE = "01d3ec566b32f8fa943d9bcfe6c4a8abf8a40f63"
+          NATIVE = "2ea2e0f27dd2e53b7b28228435ca35a70f92831f"
+          REF = "refs/heads/beta-native-engine-integration-20261008"
+          STANDARD = "8566c299618b2cd21dd0c2bf98b416819a05bc484418691b72635cca342f7343"
+          EMPTY = hashlib.sha256(b"").hexdigest()
+          
+          
+          def require(value):
+              if not value:
+                  raise ValueError("repair contract differs")
+          
+          
+          def serialize(value):
+              return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+          
+          
+          def identity():
+              require(os.environ["GITHUB_REPOSITORY"] == "VortXTV/VortX")
+              require(os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch")
+              require(os.environ["GITHUB_REF"] == REF)
+              require(os.environ["BUILD_SOURCE_SHA"] == SOURCE)
+              require(os.environ["VORTX_ENGINE_SOURCE_REVISION"] == NATIVE)
+              workflow = os.environ["GITHUB_SHA"]
+              require(re.fullmatch("[0-9a-f]{40}", workflow) and workflow != SOURCE)
+              run, attempt = int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"])
+              require(run > 0 and attempt > 0)
+              return {"schemaVersion": 1, "kind": "beta7-missing-optional-cargo-env",
+                      "sourceCommit": SOURCE, "workflowCommit": workflow, "ref": REF, "tag": "",
+                      "nativeRevision": NATIVE, "runId": run, "attempt": attempt,
+                      "initializer": "rustup-optional-shell-env"}
+          
+          
+          def target():
+              home = Path(os.environ["HOME"])
+              for directory in (home, home / ".cargo"):
+                  item = directory.lstat()
+                  require(stat.S_ISDIR(item.st_mode) and item.st_uid == os.getuid())
+              return home / ".cargo" / "env"
+          
+          
+          def snapshot(path):
+              try:
+                  item = path.lstat()
+              except FileNotFoundError:
+                  return None, None
+              require(stat.S_ISREG(item.st_mode) and item.st_uid == os.getuid())
+              require(stat.S_IMODE(item.st_mode) <= 0o777)
+              descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+              try:
+                  opened = os.fstat(descriptor)
+                  require((opened.st_dev, opened.st_ino) == (item.st_dev, item.st_ino))
+                  require(opened.st_size <= 1024)
+                  data = os.read(descriptor, 1025)
+                  require(len(data) == opened.st_size)
+              finally:
+                  os.close(descriptor)
+              return {"state": "regular", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                      "mode": stat.S_IMODE(opened.st_mode)}, [opened.st_dev, opened.st_ino]
+          
+          
+          def write_new(path, data, mode):
+              descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+              try:
+                  os.fchmod(descriptor, mode)
+                  with os.fdopen(descriptor, "wb", closefd=False) as output:
+                      output.write(data)
+              finally:
+                  os.close(descriptor)
+          
+          
+          def read_owned(path):
+              item = path.lstat()
+              require(stat.S_ISREG(item.st_mode) and item.st_uid == os.getuid())
+              descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+              try:
+                  opened = os.fstat(descriptor)
+                  require((opened.st_dev, opened.st_ino) == (item.st_dev, item.st_ino))
+                  require(opened.st_size <= 16384)
+                  data = os.read(descriptor, 16385)
+                  require(len(data) == opened.st_size)
+                  return data, [opened.st_dev, opened.st_ino]
+              finally:
+                  os.close(descriptor)
+          
+          
+          def update_receipt(path, final, expected_inode, expected_hash):
+              descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+              try:
+                  opened = os.fstat(descriptor)
+                  require(stat.S_ISREG(opened.st_mode) and opened.st_uid == os.getuid())
+                  require([opened.st_dev, opened.st_ino] == expected_inode and opened.st_size <= 16384)
+                  require(hashlib.sha256(os.read(descriptor, 16385)).hexdigest() == expected_hash)
+                  os.lseek(descriptor, 0, os.SEEK_SET)
+                  os.ftruncate(descriptor, 0)
+                  with os.fdopen(descriptor, "wb", closefd=False) as output:
+                      output.write(final)
+              finally:
+                  os.close(descriptor)
+              actual, inode = read_owned(path)
+              require(inode == expected_inode and actual == final)
+          
+          
+          def main():
+              require(len(sys.argv) == 2 and sys.argv[1] in ("prepare", "verify"))
+              binding = identity()
+              path = target()
+              receipt_path = Path("out/native-ci-environment-repair.json")
+              guard_path = Path(os.environ["RUNNER_TEMP"]) / "beta7-cargo-env-repair-state.json"
+              if sys.argv[1] == "prepare":
+                  require(not receipt_path.exists() and not receipt_path.is_symlink())
+                  before, original_inode = snapshot(path)
+                  created = before is None
+                  if created:
+                      before = {"state": "absent", "bytes": None, "sha256": None, "mode": None}
+                      # O_EXCL/O_NOFOLLOW forbids overwrite or a symlink race; create no bytes.
+                      write_new(path, b"", 0o600)
+                  else:
+                      require(before["bytes"] == 300 and before["sha256"] == STANDARD)
+                      before = {**before, "state": "existing"}
+                  after, inode = snapshot(path)
+                  expected = {"state": "regular", "bytes": 0, "sha256": EMPTY, "mode": 0o600} if created else {
+                      **before, "state": "regular"}
+                  require(after == expected and (created or inode == original_inode))
+                  receipt = {**binding, "created": created, "before": before, "after": after,
+                             "afterRuntime": None, "runtimeVerified": False}
+                  raw = serialize(receipt)
+                  write_new(receipt_path, raw, 0o644)
+                  actual, receipt_inode = read_owned(receipt_path)
+                  require(actual == raw)
+                  digest = hashlib.sha256(raw).hexdigest()
+                  write_new(guard_path, serialize({"binding": binding, "inode": inode,
+                            "receiptInode": receipt_inode, "initialSha256": digest}), 0o600)
+                  print("VORTX_CARGO_ENV_REPAIR_PREPARED_SHA256=" + digest)
+              else:
+                  guard_raw, _ = read_owned(guard_path)
+                  guard = json.loads(guard_raw)
+                  raw, receipt_inode = read_owned(receipt_path)
+                  require(receipt_inode == guard["receiptInode"])
+                  require(hashlib.sha256(raw).hexdigest() == guard["initialSha256"])
+                  require(guard["binding"] == binding)
+                  receipt = json.loads(raw)
+                  require(all(receipt[key] == value for key, value in binding.items()))
+                  require(receipt["afterRuntime"] is None and receipt["runtimeVerified"] is False)
+                  current, inode = snapshot(path)
+                  require(current == receipt["after"] and inode == guard["inode"])
+                  receipt["afterRuntime"], receipt["runtimeVerified"] = current, True
+                  final = serialize(receipt)
+                  # This is the one receipt owned by this helper, not the initializer or any existing file.
+                  update_receipt(receipt_path, final, receipt_inode, guard["initialSha256"])
+                  print("VORTX_CARGO_ENV_REPAIR_VERIFIED_SHA256=" + hashlib.sha256(final).hexdigest())
+          
+          
+          try:
+              main()
+          except Exception as error:
+              print("VORTX_CARGO_ENV_REPAIR_ERROR=" + type(error).__name__, file=sys.stderr)
+              sys.exit(1)
+          CARGO_ENV_REPAIR_PY
+          printf '%s  %s\n' ed451db7adf0c87852826b05740fec9d07b7f6bd73cae657a3db7e8c2b43bdf7 "$RUNNER_TEMP/beta7-cargo-env-repair.py" | shasum -a 256 -c -
+          python3 "$RUNNER_TEMP/beta7-cargo-env-repair.py" prepare
+
       - name: Cache vortx-ffi xcframework
         id: cache-ffi-xcframework
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1397,6 +1602,13 @@ jobs:
             --name "$RELEASE_NAME" --note "${ALTSTORE_NOTE:-$RELEASE_BODY}" --release-id "$RELEASE_ID"
           jq -e --arg tag "$TAG" --arg commit "$BUILD_SOURCE_SHA" --arg id "$RELEASE_ID" '.tag == $tag and .sourceCommit == $commit and (.releaseId | tostring) == $id and .android == null' feed-artifact/manifest.json >/dev/null
           test -s feed-artifact/source.json -a -s feed-artifact/appcast.json -a -s feed-artifact/manifest.json -a -s feed-artifact/SHA256SUMS-ci.txt
+
+      - name: Verify optional Cargo environment repair after runtime gates
+        if: steps.recovery.outputs.cargo_env_repair == 'true'
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' ed451db7adf0c87852826b05740fec9d07b7f6bd73cae657a3db7e8c2b43bdf7 "$RUNNER_TEMP/beta7-cargo-env-repair.py" | shasum -a 256 -c -
+          python3 "$RUNNER_TEMP/beta7-cargo-env-repair.py" verify
 
       - name: Upload the immutable app handoff
         id: apps_handoff
@@ -2530,243 +2742,3 @@ jobs:
           grep -Eiq '^content-type: application/json' "$RUNNER_TEMP/source.headers" || exit 1
           grep -Eiq '^cache-control: public, max-age=120, s-maxage=120, must-revalidate' "$RUNNER_TEMP/source.headers" || exit 1
           echo "published event $RELEASE_ID verified without performing release or feed writes"
-
-  diagnose-native-startup:
-    if: inputs.diagnose_startup == true && github.repository == 'VortXTV/VortX' && github.event_name == 'workflow_dispatch'
-      && github.ref == 'refs/heads/beta-native-engine-integration-20261008' && inputs.native_only == true && inputs.publish_existing_055
-      != true && inputs.tvos_test_only != true && inputs.publish_release != true && inputs.apple_only != true && inputs.release_tag
-      == '' && inputs.altstore_note == '' && inputs.mpvkit_artifacts_url == '' && inputs.mpvkit_artifacts_sha256 == '' && inputs.release_id
-      == '' && inputs.resume_handoff == '' && inputs.recovery_source_commit == ''
-    runs-on: macos-26
-    environment: engine-ci
-    timeout-minutes: 20
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      with:
-        ref: 01d3ec566b32f8fa943d9bcfe6c4a8abf8a40f63
-        persist-credentials: false
-    - name: Verify exact frozen public source before any private fetch
-      run: |
-        set -euo pipefail
-        [ "$GITHUB_REPOSITORY" = VortXTV/VortX ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" = refs/heads/beta-native-engine-integration-20261008 ]
-        [ "$(git rev-parse HEAD)" = 01d3ec566b32f8fa943d9bcfe6c4a8abf8a40f63 ]
-        printf '%s  %s\n' 33212807d8b4243baa68311feda394d2ca704e6f906806b1223d671e20d85000 scripts/build-ffi-xcframework.sh 6c261682d60d2a58197ba471a9f988c3cda80cb3555a8e2b8e64b5932fff1cb6 scripts/resolve-native-engine.sh | shasum -a 256 -c -
-    - name: Preflight the engine token (fail closed)
-      env:
-        ENGINE_REPO_TOKEN: ${{ secrets.ENGINE_REPO_TOKEN }}
-      run: |
-        set -euo pipefail
-        if [ -z "${ENGINE_REPO_TOKEN:-}" ]; then
-          echo "::error::ENGINE_REPO_TOKEN secret is not set; CI cannot fetch the private engine repo (VortXTV/vortx-core)"
-          exit 1
-        fi
-    - name: Fetch vortx-core (private monorepo, pinned)
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      with:
-        repository: VortXTV/vortx-core
-        ref: 2ea2e0f27dd2e53b7b28228435ca35a70f92831f
-        token: ${{ secrets.ENGINE_REPO_TOKEN }}
-        path: _vortx_core_src
-        persist-credentials: false
-    - name: Promote the vortx-core engine workspace + verify it (fail closed)
-      env:
-        EXPECTED_NATIVE_REVISION: 2ea2e0f27dd2e53b7b28228435ca35a70f92831f
-      run: |
-        set -euo pipefail
-        [[ "$EXPECTED_NATIVE_REVISION" =~ ^[0-9a-f]{40}$ ]] || exit 1
-        NATIVE_REVISION="$(git -C _vortx_core_src rev-parse 'HEAD^{commit}')"
-        [ "$NATIVE_REVISION" = "$EXPECTED_NATIVE_REVISION" ] || { echo "::error::native source checkout differs from reviewed pin"; exit 1; }
-        echo "VORTX_ENGINE_SOURCE_REVISION=$NATIVE_REVISION" >> "$GITHUB_ENV"
-        rm -rf vortx-core
-        mv _vortx_core_src/vortx-core vortx-core
-        rm -rf _vortx_core_src
-        test -f vortx-core/Cargo.toml || { echo "::error::vortx-core engine workspace missing after promote (vortx-core/Cargo.toml)"; exit 1; }
-        test -d vortx-core/crates     || { echo "::error::vortx-core engine crates/ missing after promote (vortx-core/crates)"; exit 1; }
-        echo "engine fetched: vortx-core@$NATIVE_REVISION (promoted from monorepo subdir)"
-    - name: Select the newest Xcode on the runner
-      run: |
-        # Pick the newest Xcode whose toolchain ACTUALLY WORKS, then resolve it to its REAL path. A
-        # rotated runner image ships a newest-by-version entry (e.g. Xcode_26.3.0.app) that is a SYMLINK
-        # to a real bundle. `xcodebuild -version` works through the symlink at selection time, but the
-        # disk-free cleanup below then deletes the symlink's real TARGET (it only spared the symlink path
-        # by name), leaving Contents/Developer dangling, so the build dies with "missing DEVELOPER_DIR
-        # path" (the Beta-14 failure: same workflow passed on a runner with a real Xcode_26.6 and failed
-        # on one where 26.3.0 was a symlink). Fix: resolve the chosen app to its canonical directory and
-        # pin THAT, so DEVELOPER_DIR points at the real bundle and the cleanup compares real paths.
-        XCODE=""
-        for c in $(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -Vr); do
-          dev="$c/Contents/Developer"
-          xb="$dev/usr/bin/xcodebuild"
-          if [ -d "$dev" ] && [ -x "$xb" ] && DEVELOPER_DIR="$dev" "$xb" -version >/dev/null 2>&1; then
-            XCODE="$c"; break
-          fi
-          echo "Skipping $c (no working toolchain at $dev)"
-        done
-        if [ -z "$XCODE" ]; then XCODE="$(dirname "$(dirname "$(xcode-select -p)")")"; fi
-        # Canonicalize: if $XCODE is a symlink, follow it to the real .app so the cleanup can't orphan it.
-        XCODE_REAL="$(cd "$XCODE" && pwd -P)"
-        echo "Selected Xcode: $XCODE -> $XCODE_REAL ($("$XCODE_REAL/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | head -1))"
-        XCODE="$XCODE_REAL"
-        sudo xcode-select -s "$XCODE"
-        # Pin it for EVERY later step via DEVELOPER_DIR (xcodebuild honors it over the global
-        # xcode-select state), so a runner-image default flip or the disk-free cleanup can never
-        # drop the build onto /Library/Developer/CommandLineTools (the Beta-13 build-126 failure).
-        # SELECTED_XCODE guards the cleanup step so it can't delete the Xcode we just selected.
-        echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
-        echo "SELECTED_XCODE=$XCODE" >> "$GITHUB_ENV"
-    - name: Show toolchain
-      id: toolchain
-      run: |
-        set -euo pipefail
-        # Release floor established by the known-launching Beta 3 lane. Image rotation may add or
-        # remove toolchains, so the runner label alone is not authority: reject any silent downgrade.
-        XCODE_FLOOR="26.6"
-        TVOS_SDK_FLOOR="26.5"
-  
-        version_at_least() {
-          /usr/bin/awk -v actual="$1" -v floor="$2" 'BEGIN {
-            actual_count = split(actual, actual_parts, ".")
-            floor_count = split(floor, floor_parts, ".")
-            count = actual_count > floor_count ? actual_count : floor_count
-            for (i = 1; i <= count; i++) {
-              actual_part = i <= actual_count ? actual_parts[i] + 0 : 0
-              floor_part = i <= floor_count ? floor_parts[i] + 0 : 0
-              if (actual_part > floor_part) exit 0
-              if (actual_part < floor_part) exit 1
-            }
-            exit 0
-          }'
-        }
-  
-        XCODE_INFO="$(xcodebuild -version)"
-        XCODE_VERSION="$(printf '%s\n' "$XCODE_INFO" | /usr/bin/awk 'NR == 1 { print $2 }')"
-        TVOS_SDK="$(xcrun --sdk appletvos --show-sdk-version)"
-        printf '%s\n' "$XCODE_INFO"
-        echo "tvOS SDK $TVOS_SDK"
-  
-        VERSION_RE='^[0-9]+(\.[0-9]+)*$'
-        if ! [[ "$XCODE_VERSION" =~ $VERSION_RE ]]; then
-          echo "::error::could not parse selected Xcode version: '$XCODE_VERSION'"
-          exit 1
-        fi
-        if ! [[ "$TVOS_SDK" =~ $VERSION_RE ]]; then
-          echo "::error::could not parse selected tvOS SDK version: '$TVOS_SDK'"
-          exit 1
-        fi
-        if ! version_at_least "$XCODE_VERSION" "$XCODE_FLOOR"; then
-          echo "::error::Xcode $XCODE_VERSION is below the release floor $XCODE_FLOOR"
-          exit 1
-        fi
-        if ! version_at_least "$TVOS_SDK" "$TVOS_SDK_FLOOR"; then
-          echo "::error::tvOS SDK $TVOS_SDK is below the release floor $TVOS_SDK_FLOOR"
-          exit 1
-        fi
-        echo "toolchain floor verified: Xcode $XCODE_VERSION >= $XCODE_FLOOR; tvOS SDK $TVOS_SDK >= $TVOS_SDK_FLOOR"
-        echo "xcode_version=$(printf '%s\n' "$XCODE_INFO" | tr ' \n' '-')" >> "$GITHUB_OUTPUT"
-        echo "tvos_sdk=$TVOS_SDK" >> "$GITHUB_OUTPUT"
-    - name: Free disk space while preserving the tvOS launch-smoke runtime
-      run: |
-        echo "Before:"; df -h /
-        # The launch smoke below needs one installed tvOS runtime, so keep simulator state until its
-        # verdict-preserving cleanup. Unused Xcodes and stale DerivedData are still safe to reclaim now.
-        sudo rm -rf ~/Library/Developer/Xcode/DerivedData/* || true
-        # Keep the Xcode selected above ($SELECTED_XCODE, already canonicalized to its real path);
-        # never delete the active one by re-deriving its path (the brittle string-compare that deleted
-        # it on build 126). Compare REAL paths so a leftover symlink-Xcode and the real bundle it points
-        # to are both spared: deleting the symlink's target (which is $SELECTED_XCODE) was the Beta-14
-        # "missing DEVELOPER_DIR path" failure. skip the entry whenever its resolved path matches.
-        for x in /Applications/Xcode_*.app; do
-          xr="$(cd "$x" 2>/dev/null && pwd -P || echo "$x")"
-          [ "$xr" = "$SELECTED_XCODE" ] || sudo rm -rf "$x"
-        done
-        echo "After:"; df -h /
-    - name: Install XcodeGen (pinned release artifact, sha256-verified)
-      env:
-        XCODEGEN_VERSION: 2.46.0
-        XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      run: |
-        set -euo pipefail
-        # `brew install xcodegen` installs whatever the formula's HEAD resolves to -- a MOVING
-        # version with no clean per-formula pin -- so the release build tool could shift under this
-        # runtime-proven lane with no diff in this file. Instead fetch the EXACT release zip, verify
-        # the sha256 recorded above before trusting a byte of it (fail closed on mismatch), and put
-        # its bin on PATH. The release bundle keeps bin/ and share/ as siblings, so the binary
-        # resolves its SettingPresets from ../share with no separate install step or sudo.
-        workdir="$(mktemp -d)"
-        url="https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
-        curl -fsSL --retry 3 -o "$workdir/xcodegen.zip" "$url"
-        printf '%s  %s\n' "$XCODEGEN_SHA256" "$workdir/xcodegen.zip" > "$workdir/xcodegen.sha256"
-        shasum -a 256 -c "$workdir/xcodegen.sha256"
-        unzip -q "$workdir/xcodegen.zip" -d "$workdir"
-        "$workdir/xcodegen/bin/xcodegen" --version
-        echo "$workdir/xcodegen/bin" >> "$GITHUB_PATH"
-    - name: Rust nightly with rust-src (tvOS is a tier 3 target)
-      run: |
-        rustup toolchain install nightly-2026-07-19 --profile minimal --component rust-src
-        rustup +nightly-2026-07-19 target add aarch64-apple-ios aarch64-apple-ios-sim
-    - name: Cache cargo
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-        key: cargo-${{ runner.os }}-${{ hashFiles('vortx-core/Cargo.lock', 'vortx-core/Cargo.toml') }}
-        restore-keys: cargo-${{ runner.os }}-
-    - name: Fetch subtitle fonts
-      run: ./scripts/fetch-server-deps.sh
-    - name: Observe genuine startup only; all compiler code excluded
-      env:
-        VORTX_ENGINE_DIR: vortx-core
-      run: |
-        mkdir -p out
-        python3 - <<'PYCODE'
-        import hashlib, json, os, pathlib, signal, subprocess, tempfile, shutil
-        root=pathlib.Path.cwd()
-        original=(root/'scripts/build-ffi-xcframework.sh').read_bytes()
-        resolver=(root/'scripts/resolve-native-engine.sh').read_bytes()
-        assert hashlib.sha256(original).hexdigest()=='33212807d8b4243baa68311feda394d2ca704e6f906806b1223d671e20d85000'
-        assert hashlib.sha256(resolver).hexdigest()=='6c261682d60d2a58197ba471a9f988c3cda80cb3555a8e2b8e64b5932fff1cb6'
-        text=original.decode(); assert text.count('\nBUILDSTD=')==1
-        prefix=text.split('\nBUILDSTD=',1)[0]
-        assert prefix.rstrip().endswith('echo "engine workspace: $ENGINE_DIR (mode: $MODE)"')
-        suffix='\nprintf "%s\\n" VORTX_STARTUP_PREFIX_COMPLETE\n'
-        hook='set -T\ntrap \'vx_status=$?; case "${BASH_SOURCE[0]##*/}" in .native-startup-*|resolve-native-engine.sh|env) printf "VXTRACE %s %s %s\\n" "${BASH_SOURCE[0]##*/}" "$LINENO" "$vx_status" >&"$VX_STARTUP_TRACE_FD" ;; *) printf "VXTRACE external %s %s\\n" "$LINENO" "$vx_status" >&"$VX_STARTUP_TRACE_FD" ;; esac\' DEBUG\ntrap \'vx_exit=$?; printf "VXEXIT %s\\n" "$vx_exit" >&"$VX_STARTUP_TRACE_FD"\' EXIT\n'
-        # Truncate before all compiler/toolchain/build code: telemetry cannot accidentally build anything.
-        # No HOME, PATH or Cargo initialization mutation. Both controls use the genuine promoted workspace.
-        shell=shutil.which('bash'); assert shell
-        version=subprocess.check_output([shell,'--version'],timeout=5,stderr=subprocess.DEVNULL).splitlines()[0].decode('ascii','replace')
-        assert len(version)<200
-        cargo_env=pathlib.Path(os.environ['HOME'])/'.cargo/env'
-        assert cargo_env.stat().st_size<1024*1024
-        cargo_bytes=cargo_env.read_bytes()
-        interpreter={'bash_path':shell,'bash_version':version,'bash_sha256':hashlib.sha256(pathlib.Path(shell).read_bytes()).hexdigest(),'cargo_env_bytes':len(cargo_bytes),'cargo_env_sha256':hashlib.sha256(cargo_bytes).hexdigest()}
-        report=[]
-        for mode in ('shebang-control','system-bash-control','shebang-line-trace'):
-            fd, name=tempfile.mkstemp(prefix='.native-startup-',suffix='.sh',dir=root/'scripts')
-            path=pathlib.Path(name)
-            body=prefix+suffix
-            if mode=='shebang-line-trace':
-                lines=body.splitlines(True); lines.insert(1,hook); body=''.join(lines)
-            os.write(fd,body.encode()); os.close(fd); path.chmod(0o700)
-            trace=root/'out'/('startup-'+mode+'.trace')
-            try:
-                with trace.open('wb') as output:
-                    # Dedicated inherited numeric FD survives the original Cargo-source stderr redirection.
-                    args=[str(path),'--resource-host'] if mode!='system-bash-control' else ['/bin/bash',str(path),'--resource-host']
-                    process=subprocess.Popen(args,cwd=root,env={**os.environ,'VORTX_ENGINE_DIR':'vortx-core','VX_STARTUP_TRACE_FD':str(output.fileno())},stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,pass_fds=(output.fileno(),))
-                    timeout=False
-                    try: out,err=process.communicate(timeout=15)
-                    except subprocess.TimeoutExpired:
-                        timeout=True; os.killpg(process.pid,signal.SIGKILL); out,err=process.communicate()
-                row={'mode':mode,'exit':process.returncode,'timeout':timeout,'marker':b'VORTX_STARTUP_PREFIX_COMPLETE' in out.splitlines(),'stdout_bytes':len(out),'stdout_sha256':hashlib.sha256(out).hexdigest(),'stderr_bytes':len(err),'stderr_sha256':hashlib.sha256(err).hexdigest(),'prefix_sha256':hashlib.sha256(body.encode()).hexdigest()}
-                report.append(row)
-                for line in trace.read_text().splitlines():
-                    # Never print command strings, paths, environment values or private file contents.
-                    fields=line.split(); assert len(fields) in (2,4) and fields[0] in ('VXTRACE','VXEXIT')
-                    assert (len(fields)==2 and fields[1].isdigit()) or (len(fields)==4 and all(v.isdigit() for v in fields[2:]))
-                    print(line)
-            finally: path.unlink(missing_ok=True)
-        print(json.dumps({'diagnostic_only':True,'public_source':'01d3ec566b32f8fa943d9bcfe6c4a8abf8a40f63','native_revision':'2ea2e0f27dd2e53b7b28228435ca35a70f92831f','interpreter':interpreter,'trace_inserted_lines':3,'observations':report},sort_keys=True))
-        PYCODE
-    permissions:
-      contents: read
