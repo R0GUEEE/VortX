@@ -334,8 +334,29 @@ jobs:
         run: npm run typecheck && npm test && npm run build
 
   native-media-candidates:
-    if: github.event_name == 'workflow_dispatch' && inputs.native_media_candidates
+    if: github.event_name == 'workflow_dispatch' && inputs.native_media_candidates && (inputs.native_media_apple || inputs.native_media_android)
     uses: ./.github/workflows/native-media-candidates.yml
     with:
       apple: ${{ inputs.native_media_apple }}
       android: ${{ inputs.native_media_android }}
+
+
+  native-startup-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.native_media_candidates && !inputs.native_media_apple && !inputs.native_media_android
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Observe frozen native startup before toolchain setup (no compilation)
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin refs/tags/v0.5.6-beta.7:refs/tags/v0.5.6-beta.7
+          python3 scripts/probe-native-startup.py before-rustup
+      - name: Reproduce the pinned Rust installation only (no compilation)
+        run: |
+          rustup toolchain install nightly-2026-07-19 --profile minimal --component rust-src
+          rustup +nightly-2026-07-19 target add aarch64-apple-ios aarch64-apple-ios-sim
+      - name: Observe frozen native startup after toolchain setup (no compilation)
+        run: python3 scripts/probe-native-startup.py after-rustup
