@@ -867,18 +867,28 @@ class MpvPlayer private constructor(
         for ((name, value) in SubtitleStyle.current(appContext).mpvOptions()) {
             mpv.setPropertyString(name, value)
         }
-        // WHY audit 13: this existing live style refresh is the settings-to-mpv property bridge. Re-read the
-        // persisted toggle here so enabling or disabling late-night normalization does not require a restart.
+    }
+
+    /// Re-read the persisted late-night normalizer and apply it to this exact live mpv session. The
+    /// existing load-identity/session-audio ordering is retained: invalidate the published preset first,
+    /// write the current `af` value (including empty-off cleanup), then reconcile once against the admitted
+    /// load. No new native bridge or retry loop is introduced.
+    override fun applyLoudnessNormalization() {
         synchronized(subtitleGenerationGate) {
             if (released.get()) return
-            sessionAudioPreset.loading()
-            audioPresetReconciledRead = null
-            publishSessionAudioPresetLocked()
-            for ((name, value) in LoudnessNormalizationSetting.mpvOptions(appContext)) {
-                mpv.setPropertyString(name, value)
-            }
-            reconcileSessionAudioPresetLocked()
+            applyLoudnessNormalizationLocked()
         }
+    }
+
+    /** Call only under [subtitleGenerationGate]; no suspension. */
+    private fun applyLoudnessNormalizationLocked() {
+        sessionAudioPreset.loading()
+        audioPresetReconciledRead = null
+        publishSessionAudioPresetLocked()
+        for ((name, value) in LoudnessNormalizationSetting.mpvOptions(appContext)) {
+            mpv.setPropertyString(name, value)
+        }
+        reconcileSessionAudioPresetLocked()
     }
 
     /// Apply the device audio-output mode live. `audio-channels` / `audio-spdif` are best-effort mid-file

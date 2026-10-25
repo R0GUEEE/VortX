@@ -889,18 +889,25 @@ fun PlayerScreen(
     }
 
     // Settings can change while the player remains mounted (including profile sync/restore). Keep one
-    // retained listener for the shared prefs file, refresh the delay immediately, and invalidate only the
-    // in-flight countdown; Off still leaves the manual Skip action available.
+    // retained listener for the shared prefs file. Auto-skip changes refresh the delay and invalidate only
+    // the in-flight countdown; the exact loudness key refreshes the exact mounted, owner-bound engine.
     val autoSkipPreferences = context.applicationContext
         .getSharedPreferences("vortx_settings", Context.MODE_PRIVATE)
     DisposableEffect(autoSkipPreferences, autoSkipIdentity, playbackSessionKey, engine) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            if (
+            when {
                 key == PlaybackBehaviorSettings.AUTO_SKIP_DELAY_SECONDS_KEY ||
-                    key == PlaybackBehaviorSettings.AUTO_SKIP_KEY
-            ) {
-                autoSkipDelaySeconds = PlaybackBehaviorSettings.autoSkipDelaySeconds(context.applicationContext)
-                invalidateAutoSkipPending(engine.state.value.positionMs)
+                    key == PlaybackBehaviorSettings.AUTO_SKIP_KEY -> {
+                    autoSkipDelaySeconds = PlaybackBehaviorSettings.autoSkipDelaySeconds(context.applicationContext)
+                    invalidateAutoSkipPending(engine.state.value.positionMs)
+                }
+                key == LoudnessNormalizationSetting.KEY -> {
+                    if (originalPlaybackOwner?.isActive == true &&
+                        builtEngine === engine && engineHolder.get() === engine
+                    ) {
+                        engine.applyLoudnessNormalization()
+                    }
+                }
             }
         }
         autoSkipPreferences.registerOnSharedPreferenceChangeListener(listener)
@@ -1096,6 +1103,14 @@ fun PlayerScreen(
         if (engine.hardwareDecodingAvailable && !hardwareDecoding) {
             engine.setHardwareDecoding(false)
         }
+    }
+
+    // Apply the persisted normalizer only after this exact asynchronously-built engine is published.
+    // The original owner and holder identity fence this effect from an ambient successor replacement.
+    // ExoPlayer/Media3 reaches the PlayerEngine default no-op; no DSP capability is claimed.
+    LaunchedEffect(engine, originalPlaybackOwner) {
+        if (originalPlaybackOwner?.isActive != true || builtEngine !== engine || engineHolder.get() !== engine) return@LaunchedEffect
+        engine.applyLoudnessNormalization()
     }
 
     // SLEEP TIMER (timed leg). When armed for a number of minutes, pause playback once after that time (only

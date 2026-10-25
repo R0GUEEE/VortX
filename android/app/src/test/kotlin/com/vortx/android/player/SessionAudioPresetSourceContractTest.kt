@@ -35,7 +35,7 @@ class SessionAudioPresetSourceContractTest {
             "metadataLoadIdentity.accepts", "sessionAudioPreset.receive")
         val release = player.substringAfter("override fun release()")
             .substringBefore("private fun refreshTracks(")
-        assertOrdered(release, "released.compareAndSet", "synchronized(subtitleGenerationGate)",
+        assertOrdered(release, "synchronized(subtitleGenerationGate)", "released.compareAndSet",
             "sessionAudioPreset.reset()", "mpv.destroy()")
         assertTrue(player.contains("if (audioPresetReconciledRead == read) return false"))
         assertTrue(player.contains("return applySessionAudioPresetLocked(sessionAudioPreset.wanted)"))

@@ -138,6 +138,11 @@ interface PlayerEngine {
     /// that renders no subtitles. Mirrors Apple `applySubtitleStyle`.
     fun applySubtitleStyle() {}
 
+    /// Re-read the persisted [LoudnessNormalizationSetting] and apply it to the live engine. The
+    /// libmpv implementation refreshes its `af` property and re-runs the existing session-audio
+    /// reconciliation; unsupported engines (including stock Media3) deliberately no-op.
+    fun applyLoudnessNormalization() {}
+
     /// Re-read the persisted HDR tone-map policy (`stremiox.hdrToneMapMode`) and apply it to the live engine
     /// (libmpv `target-trc` / `target-prim`). A documented no-op on ExoPlayer, whose HDR/DV passthrough is
     /// hardware. Mirrors Apple applying the tone-map decision on the mpv lane.
