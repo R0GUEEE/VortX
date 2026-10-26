@@ -7,6 +7,7 @@ import java.net.URI
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
@@ -24,6 +25,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.currentCoroutineContext
@@ -61,6 +64,7 @@ internal class NativeCatalogRepository(
     private val captureReclaimAdmission: ((VortxNativeSession, VortxNativeOwner) -> ((() -> Boolean) -> Boolean)?)? = null,
     private val withReclaimLifecycle: ((() -> Boolean) -> Boolean) = { action -> action() },
     private val nzbSourceAggregator: NzbSourceAggregator? = null,
+    private val sourceIndexSource: NativeSourceIndexSource? = null,
     /** Mirrors a deliberate save or removal to Trakt/SIMKL watchlists once the native checkpoint persisted it
      *  (Apple `ScrobbleCoordinator.addedToLibrary` / `removedFromLibrary`): added, type, id. */
     private val mirrorLibrary: (Boolean, MediaType, String) -> Unit = { _, _, _ -> },
@@ -93,14 +97,49 @@ internal class NativeCatalogRepository(
     private data class DurableWatchProof(val owner: VortxNativeOwner, val token: PlaybackSessionToken, val watchedAt: Long,
                                         val admit: (() -> Boolean) -> Boolean)
     private val durableWatchReceipts = java.util.IdentityHashMap<DurableWatchedPlaybackReceipt, DurableWatchProof>()
-    private class SourceBinding(val owner: VortxNativeOwner, @Volatile var context: PlaybackContext)
+    private class SourceBinding(val owner: VortxNativeOwner, @Volatile var context: PlaybackContext,
+        val pooled: NativeSourceIndexBinding? = null)
     private sealed interface StreamEvent {
         data class Providers(val update: NativeProviderUpdate, val ticket: java.util.UUID,
             val accepted: CompletableDeferred<Unit>) : StreamEvent
         data class Indexer(val result: Result<NzbSourceAggregation>) : StreamEvent
+        data class Pool(val result: NativeSourceIndexResult?) : StreamEvent
+        data object PoolRevoked : StreamEvent
         data object ProvidersFinished : StreamEvent
     }
     private var foregroundSources: SourceContext? = null
+    private val sourcePublications = mutableMapOf<String, java.lang.ref.WeakReference<SourceContext>>()
+    private data class SourceInvalidation(val sequence: Long, val publicationId: String)
+    private var sourceInvalidationSequence = 0L
+    private val sourceInvalidations = MutableStateFlow<SourceInvalidation?>(null)
+    override fun sourceInvalidations(): Flow<String> = sourceInvalidations.filterNotNull().map { it.publicationId }
+    override fun isSourcePoolPublicationCurrent(sourcePublicationId: String): Boolean = synchronized(this) {
+        val context = sourcePublications[sourcePublicationId]?.get()
+        if (context == null) { sourcePublications.remove(sourcePublicationId); false }
+        else !context.isPoolRetired()
+    }
+
+    private fun revokePool(context: SourceContext) {
+        val retired = synchronized(this) {
+            val jobs = listOfNotNull(context.poolJob, context.hoardJob)
+            context.poolJob = null
+            context.hoardJob = null
+            context.poolResult = null
+            sourcePublications.remove(context.sourcePublicationId)
+            context.poolTokens.forEach(context.bindings::remove)
+            context.poolTokens.clear()
+            context.latestGroups = context.latestGroups.filterNot { it.base == com.vortx.android.singularity.SourceIndexClient.GROUP_ID }
+            val notification = if (foregroundSources === context)
+                SourceInvalidation(++sourceInvalidationSequence, context.sourcePublicationId) else null
+            Triple(jobs, context.poolRevoked, notification)
+        }
+        // Job cancellation can invoke a blocking transport disconnect; never do it under repository/host locks.
+        retired.first.forEach { it.cancel() }
+        retired.second?.invoke()
+        retired.third?.let { notification -> sourceInvalidations.update { previous ->
+            if (previous == null || previous.sequence < notification.sequence) notification else previous
+        } }
+    }
 
     /** Loading, bindings and resolver authority are private to one source consumer. */
     private inner class SourceContext(
@@ -116,6 +155,17 @@ internal class NativeCatalogRepository(
         val addons = registry(read)
         // Capture nullable scope before any provider suspension; never retarget an absent participant.
         val indexerScope = nzbSourceAggregator?.captureNativeScope(read.owner)
+        private var poolAuthorization: com.vortx.android.singularity.SourceIndexAuthorization? = null
+        private var poolCaptureAttempted = false
+        override val sourcePublicationId: String = java.util.UUID.randomUUID().toString()
+        @Volatile var poolTarget: NativeSourceIndexTarget? = null
+        @Volatile var poolResult: NativeSourceIndexResult? = null
+        val poolTokens = mutableSetOf<String>()
+        @Volatile var poolJob: Job? = null
+        @Volatile var hoardJob: Job? = null
+        var hoardPending = emptyList<com.vortx.android.singularity.SourceIndexClient.Descriptor>()
+        @Volatile var poolRevoked: (() -> Unit)? = null
+        private var poolRetirement: AutoCloseable? = null
         val bindings = mutableMapOf<String, SourceBinding>()
         val resolutionSequence = AtomicLong()
         var ticket: java.util.UUID? = null
@@ -124,13 +174,45 @@ internal class NativeCatalogRepository(
         var adopted = false
         var latestGroups = emptyList<StreamGroup>()
         var indexerResult = NzbSourceAggregation.empty()
+        @Volatile private var preparedPoolSelection: NativeSourceIndexBinding? = null
+        fun capturePoolOnce() {
+            // sourceUpdates runs on IO. Capture once before provider suspension, not on a UI preparation call.
+            if (poolCaptureAttempted) return
+            poolCaptureAttempted = true
+            val captured = sourceIndexSource?.capture(session, read.owner)
+            val admitted = synchronized(this@NativeCatalogRepository) {
+                if (closed) false else {
+                    poolAuthorization = captured
+                    if (!isPoolRetired()) sourcePublications[sourcePublicationId] = java.lang.ref.WeakReference(this)
+                    true
+                }
+            }
+            if (!admitted) { sourceIndexSource?.retire(captured); return }
+            poolRetirement = captured?.onRevoked {
+                com.vortx.android.singularity.SourceIndexLifecycle.dispatchTeardown { revokePool(this@SourceContext) }
+            }
+        }
+        fun poolAdmission() = poolAuthorization?.takeIf { it.isCurrent() }
+        // Pending authorized publications must stay eligible before their asynchronous pool result arrives.
+        fun isPoolRetired(): Boolean = poolAuthorization?.isRetired() != false
+        fun retirePool() {
+            sourceIndexSource?.retire(poolAuthorization)
+            synchronized(this@NativeCatalogRepository) { sourcePublications.remove(sourcePublicationId) }
+            poolRetirement?.close()
+            poolRetirement = null
+            com.vortx.android.singularity.SourceIndexLifecycle.dispatchTeardown { revokePool(this@SourceContext) }
+        }
         override val owner: ContinueWatchingOwner get() = owner(read.owner)
-        override val groups: List<StreamGroup> get() = synchronized(this@NativeCatalogRepository) { latestGroups }
+        private fun visibleGroups(groups: List<StreamGroup>): List<StreamGroup> =
+            if (poolResult?.isRetired(poolTarget) != false)
+                groups.filterNot { it.base == com.vortx.android.singularity.SourceIndexClient.GROUP_ID } else groups
+        override val groups: List<StreamGroup> get() = synchronized(this@NativeCatalogRepository) { visibleGroups(latestGroups) }
 
         override fun isCurrent(): Boolean = runCatching {
             session.owned(read.owner) { synchronized(this@NativeCatalogRepository) {
                 sessionProvider() === session && !closed && (!adopted || foregroundSources === this) &&
-                    (nzbSourceAggregator?.isAdmitted(indexerResult) != false)
+                    (nzbSourceAggregator?.isAdmitted(indexerResult) != false) &&
+                    (!prepared || preparedPoolSelection?.isRetired() != true)
             } }
         }.getOrDefault(false)
 
@@ -140,23 +222,31 @@ internal class NativeCatalogRepository(
             check(isCurrent()) { "Native preparation expired" }
             val binding = synchronized(this@NativeCatalogRepository) { bindings[source.nativePlaybackToken] }
             check(binding != null && binding.owner == read.owner && binding.context.videoId == episodeId) { "Native prepared source expired" }
-            resolveOwned(session, read, source, episode, binding, this, resolutionSequence)
-                .copy(playbackContext = binding.context)
+            val playable = resolveOwned(session, read, source, episode, binding, this, resolutionSequence)
+            preparedPoolSelection = binding.pooled
+            playable.copy(playbackContext = binding.context)
         }
 
         override fun adopt(): SourcePreparationAdoption? = runCatching {
             session.owned(read.owner) { synchronized(this@NativeCatalogRepository) {
-                if (!prepared || adopted || !isCurrent() || latestGroups.isEmpty()) return@owned null
+                if (!prepared || adopted || !isCurrent() || latestGroups.isEmpty() ||
+                    preparedPoolSelection?.isRetired() == true) return@owned null
                 val previous = foregroundSources
                 adopted = true
                 foregroundSources = this
                 resolveSequence.incrementAndGet()
                 object : SourcePreparationAdoption {
-                    override val groups = latestGroups
+                    private val adoptedGroups = latestGroups
+                    override val groups: List<StreamGroup> get() = synchronized(this@NativeCatalogRepository) { visibleGroups(adoptedGroups) }
+                    override val sourcePublicationId = this@SourceContext.sourcePublicationId
                     private var rolledBack = false
+                    private val published = java.util.concurrent.atomic.AtomicBoolean(false)
+                    override fun commitPublished() {
+                        if (published.compareAndSet(false, true)) previous?.takeIf { it !== this@SourceContext }?.retirePool()
+                    }
                     override fun rollback() {
                         synchronized(this@NativeCatalogRepository) {
-                            if (rolledBack) return
+                            if (rolledBack || published.get()) return
                             rolledBack = true
                             if (foregroundSources === this@SourceContext) {
                                 foregroundSources = previous
@@ -165,6 +255,7 @@ internal class NativeCatalogRepository(
                             closed = true
                             resolutionSequence.incrementAndGet()
                         }
+                        retirePool()
                         retireTicket()
                     }
                 }
@@ -183,6 +274,7 @@ internal class NativeCatalogRepository(
                 resolutionSequence.incrementAndGet()
             }
             retireTicket()
+            retirePool()
         }
     }
 
@@ -542,6 +634,7 @@ internal class NativeCatalogRepository(
             check(!context.started && !context.closed) { "Native source consumer already used" }
             context.started = true
         }
+        context.capturePoolOnce()
         val session = context.session; val read = context.read; val addons = context.addons
         val type = context.type; val id = context.id; val episodeId = context.episodeId
         val indexerScope = context.indexerScope
@@ -583,9 +676,16 @@ internal class NativeCatalogRepository(
             // indexer query. Wait for this request's identity-checked, parental-approved metadata.
             if (currentDetail != null) approvedSearch = nativeNzbSearch(currentDetail, type, id, episodeId)
             val rawGroups = EngineState.parseStreamGroups(projection, episodeId ?: id)
+            if (currentDetail != null) {
+                val target = nativeSourceIndexTarget(currentDetail, type, id, episodeId, context.episode)
+                val prior = context.poolTarget
+                if (prior != null && prior != target) context.retirePool()
+                else if (prior == null && target != null) context.poolTarget = target
+            }
             val selectedEpisode = detail?.videos?.find { it.id == episodeId }
             val indexerGroups = if (nzbSourceAggregator?.isAdmitted(direct, coroutine.isActive) == true) direct.groups else emptyList()
-            val combined = mergeNzbGroups(rawGroups, indexerGroups)
+            val pooled = context.poolResult?.takeIf { it.isCurrent(context.poolTarget) }
+            val combined = mergeNzbGroups(rawGroups, indexerGroups) + (pooled?.groups() ?: emptyList())
             val groups = if (parental(read)) combined.map { group -> group.copy(streams = group.streams.filter {
                 StreamRanking.passesUserFilters(it, com.vortx.android.sources.SourcePrefsSnapshot.DEFAULT.copy(isKids = true))
             }) } else combined
@@ -596,6 +696,7 @@ internal class NativeCatalogRepository(
                 if (detail != null) detailCache[type to id] = read.owner to detail
                 if (!initializedBindings) {
                     if (!context.prepared) {
+                        foregroundSources?.takeIf { it !== context }?.retirePool()
                         foregroundSources = context
                         resolveSequence.incrementAndGet()
                     }
@@ -603,12 +704,16 @@ internal class NativeCatalogRepository(
                 }
                 groups.map { group -> group.copy(streams = group.streams.map { source ->
                     // A later partial must not revoke the source token already being resolved.
-                    val token = tokens.getOrPut(source.addon to source.id) { java.util.UUID.randomUUID().toString() }
+                    val poolBinding = if (group.base == com.vortx.android.singularity.SourceIndexClient.GROUP_ID)
+                        requireNotNull(pooled?.binding(source)) { "Unadmitted pooled source" } else null
+                    val tokenKey = if (poolBinding != null) "repository-pool" to source.id else source.addon to source.id
+                    val token = tokens.getOrPut(tokenKey) { java.util.UUID.randomUUID().toString() }
                     val playbackContext = PlaybackContext(
                         PlaybackContext.Owner(read.owner.profileID, true), id, episodeId ?: id, type.id,
                         selectedEpisode?.season, selectedEpisode?.episode, detail?.name ?: id, detail?.poster,
                         PlaybackContext.Provenance(source.addon, source.quality, false, null, null), nativeSessionRevision = read.owner.revision)
-                    val binding = context.bindings.getOrPut(token) { SourceBinding(read.owner, playbackContext) }
+                    val binding = context.bindings.getOrPut(token) { SourceBinding(read.owner, playbackContext, poolBinding) }
+                    if (poolBinding != null) context.poolTokens += token
                     check(binding.owner == read.owner && binding.context.identityKey == playbackContext.identityKey) { "Native source identity changed" }
                     // Metadata may arrive after this stream. Enrich the stable binding, never replace its
                     // admission identity or revoke a resolver that already captured that exact object.
@@ -616,17 +721,50 @@ internal class NativeCatalogRepository(
                     source.copy(nativePlaybackToken = token)
                 }) }
             }
+            val authorization = context.poolAdmission()
             synchronized(this@NativeCatalogRepository) {
                 context.latestGroups = bound
                 context.indexerResult = direct
+                if (context.poolResult?.isRetired(context.poolTarget) == false) {
+                    sourcePublications[context.sourcePublicationId] = java.lang.ref.WeakReference(context)
+                }
+                val target = context.poolTarget
+                val sourceIndex = sourceIndexSource
+                if (target != null && authorization != null && sourceIndex != null && rawGroups.isNotEmpty()) {
+                    context.hoardPending = com.vortx.android.singularity.SourceIndexClient.descriptors(rawGroups)
+                    if (context.hoardJob?.isActive != true) {
+                        val nextWorker = sourceIndex.launch(start = CoroutineStart.LAZY) {
+                            val worker = currentCoroutineContext()[Job]
+                            while (authorization.isCurrent()) {
+                                val descriptors = synchronized(this@NativeCatalogRepository) {
+                                    if (context.hoardPending.isEmpty()) {
+                                        // Release the worker slot with the empty decision, before Job completion.
+                                        if (context.hoardJob === worker) context.hoardJob = null
+                                        null
+                                    } else context.hoardPending.also { context.hoardPending = emptyList() }
+                                }
+                                if (descriptors == null) break
+                                sourceIndex.hoard(target, descriptors, authorization)
+                            }
+                        }
+                        // Install ownership before IO can finish the worker body or release its slot.
+                        context.hoardJob = nextWorker
+                        nextWorker.start()
+                    }
+                }
             }
             StreamLoadUpdate(bound, update.settled, update.total, terminal,
                 selectionReady = terminal || indexerFinished && bound.any { it.streams.isNotEmpty() } &&
-                    update.resourceSettled(VortxResourceRequest.Resource.STREAM, addons.size))
+                    update.resourceSettled(VortxResourceRequest.Resource.STREAM, addons.size),
+                sourcePublicationId = context.sourcePublicationId)
         }
         try { coroutineScope {
             val events = Channel<StreamEvent>(capacity = 1)
+            val coordinatorScope = this
             var indexerJob: Job? = null
+            var poolStarted = false
+            var poolFinished = context.poolAdmission() == null
+            context.poolRevoked = { coordinatorScope.launch { runCatching { events.send(StreamEvent.PoolRevoked) } } }
             val ownerWatcher = launch {
                 session.updates.first { !session.accepts(read.owner) || sessionProvider() !== session }
                 error("Native account changed")
@@ -645,7 +783,7 @@ internal class NativeCatalogRepository(
                 events.send(StreamEvent.ProvidersFinished)
             }
             try {
-                while (!providersFinished || !indexerFinished) {
+                while (!providersFinished || !indexerFinished || !poolFinished) {
                     val event = events.receive()
                     when (event) {
                         is StreamEvent.Providers -> {
@@ -666,27 +804,54 @@ internal class NativeCatalogRepository(
                                     events.send(StreamEvent.Indexer(result))
                                 }
                             }
+                            if (!poolStarted && !poolFinished) context.poolTarget?.let { target ->
+                                val authorization = context.poolAdmission()
+                                if (authorization == null) poolFinished = true else {
+                                    poolStarted = true
+                                    context.poolJob = launch {
+                                        val result = try { sourceIndexSource?.load(target, authorization) }
+                                        catch (cancelled: CancellationException) {
+                                            currentCoroutineContext().ensureActive()
+                                            null
+                                        } catch (_: Exception) { null }
+                                        events.send(StreamEvent.Pool(result))
+                                    }
+                                }
+                            }
                             snapshot?.let { emit(it) }
                             event.accepted.complete(Unit)
                         }
                         is StreamEvent.Indexer -> { direct = event.result.getOrThrow(); indexerFinished = true }
+                        is StreamEvent.Pool -> {
+                            context.poolResult = event.result?.takeIf { it.isCurrent(context.poolTarget) }
+                            poolFinished = true
+                        }
+                        StreamEvent.PoolRevoked -> { context.poolResult = null; poolFinished = true }
                         StreamEvent.ProvidersFinished -> {
                             providersFinished = true
                             // No current approved metadata: suppress, rather than retarget, the query.
                             if (!indexerStarted) indexerFinished = true
+                            if (!poolStarted) poolFinished = true
                         }
                     }
                     if (event !is StreamEvent.Providers) {
                         // A provider may have advanced its receipt just before sending its event.
                         // Defer that one partial; the queued callback will publish the retained direct
                         // result with the newer receipt. Slot/owner replacement still throws.
-                        publish(lastUpdate, requireNotNull(lastTicket), providersFinished && indexerFinished)?.let { emit(it) }
+                        lastTicket?.let { ticket ->
+                            publish(lastUpdate, ticket, providersFinished && indexerFinished && poolFinished)?.let { emit(it) }
+                        }
                     }
                 }
             } finally {
                 providers.cancel(); indexerJob?.cancel(); ownerWatcher.cancel(); events.cancel()
+                context.poolJob?.cancel()
+                context.poolRevoked = null
             }
-        } } finally { context.retireTicket() }
+        } } finally {
+            context.retireTicket()
+            if (!initializedBindings) context.retirePool()
+        }
     }.flowOn(Dispatchers.IO)
     suspend fun subtitles(type: MediaType, videoID: String, extra: List<Pair<String, String>> = emptyList()): Result<String> = attempt {
         val session = session(); val read = session.read(); val addons = registry(read)
@@ -1092,29 +1257,29 @@ internal class NativeCatalogRepository(
                     context.type == "movie" && context.videoId == context.contentId && row.optStringOrNull("videoId") == null)
         }.maxOfOrNull { it.getLong("updatedAt") }
 
-    override suspend fun endPlaybackSessionWithDurableWatchReceipt(token: PlaybackSessionToken, positionMs: Long, durationMs: Long): Result<DurableWatchedPlaybackReceipt?> = attempt {
-        val session = session(); val current = synchronized(this) { playing } ?: return@attempt null
-        if (current.token != token) return@attempt null
+    override suspend fun endPlaybackSessionWithDurableWatchReceipt(session: PlaybackSessionToken, positionMs: Long, durationMs: Long): Result<DurableWatchedPlaybackReceipt?> = attempt {
+        val nativeSession = this@NativeCatalogRepository.session(); val current = synchronized(this) { playing } ?: return@attempt null
+        if (current.token != session) return@attempt null
         if (!nativePlaybackIdentityCanRecord(current.context)) return@attempt null
         require(positionMs >= 0 && durationMs >= 0)
-        session.owned(current.owner) { synchronized(this) {
+        nativeSession.owned(current.owner) { synchronized(this) {
             if (playing !== current) return@owned null
             val query = JSONObject().put("kind", "profile_playback").put("profileId", current.owner.profileID)
-            val prior = watchedStamp(session.resolve(query, current.owner), current.context, false) ?: 0L
+            val prior = watchedStamp(nativeSession.resolve(query, current.owner), current.context, false) ?: 0L
             try {
-                session.dispatch(listOf(action("report_progress").put("metaId", current.context.contentId).put("videoId", current.context.videoId)
+                nativeSession.dispatch(listOf(action("report_progress").put("metaId", current.context.contentId).put("videoId", current.context.videoId)
                     .put("name", current.context.title).put("positionMs", positionMs).put("durationMs", durationMs)
                     .put("metadata", JSONObject().put("type", current.context.type).put("poster", current.context.poster))), current.owner)
-                val committed = session.resolveCommitted(query, current.owner)
+                val committed = nativeSession.resolveCommitted(query, current.owner)
                 check(committed.getString("kind") == "profile_playback" && committed.getString("profileId") == current.owner.profileID)
                 val stamp = watchedStamp(committed, current.context, true)
                 // The kernel alone decides completion. A prior watch plus a partial/zero terminal
                 // report is not a new durable finish from this playback session.
-                val admission = if (stamp != null && stamp > prior && durationMs > 0L) captureReclaimAdmission?.invoke(session, current.owner) else null
+                val admission = if (stamp != null && stamp > prior && durationMs > 0L) captureReclaimAdmission?.invoke(nativeSession, current.owner) else null
                 if (stamp == null || admission == null) null else {
                     if (durableWatchReceipts.size >= 128) durableWatchReceipts.clear()
                     DurableWatchedPlaybackReceipt(current.context, owner(current.owner)).also {
-                        durableWatchReceipts[it] = DurableWatchProof(current.owner, token, stamp, admission)
+                        durableWatchReceipts[it] = DurableWatchProof(current.owner, session, stamp, admission)
                     }
                 }
             } finally { if (playing === current) playing = null }
@@ -1144,6 +1309,7 @@ internal class NativeCatalogRepository(
         val context = synchronized(this) { foregroundSources }
         val binding = synchronized(this) { context?.bindings?.get(source.nativePlaybackToken) }
         check(binding != null && binding.owner == read.owner) { "Native source selection expired; reload sources" }
+        check(binding.pooled == null || binding.pooled.accepts(source, context?.poolTarget)) { "Pooled source admission expired" }
         check(episode == null || episode.id == binding.context.videoId) { "Native episode selection changed" }
         resolveOwned(session, read, source, episode, binding, context).copy(playbackContext = binding.context)
     }
@@ -1162,7 +1328,11 @@ internal class NativeCatalogRepository(
                 check(context != null && context.isCurrent() && context.bindings[sourceToken] === binding &&
                     (sequenceOwner !== resolveSequence || foregroundSources === context)) { "Native source selection expired" }
             }
+            binding?.pooled?.let { pooled ->
+                check(pooled.accepts(source, context?.poolTarget)) { "Pooled source admission expired" }
+            }
         }
+        session.owned(read.owner) { requireCurrent() }
         val playable = try {
             playbackResolver.resolve(source, episode,
                 isCurrent = { try { session.owned(read.owner) { requireCurrent(); true } } catch (_: Exception) { false } },

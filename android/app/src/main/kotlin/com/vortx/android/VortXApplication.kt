@@ -65,6 +65,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.collect
 
 /// Owns the process-lifetime VortX engine session ([NativeAccountCoordinator]) and the repositories built on
 /// it. An `Activity` can be torn down and recreated within the same process, so every `MainActivity.onCreate`
@@ -90,16 +91,16 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
             runNativeRetirementAttempt(close) {
                 Log.w(TAG, "Native retirement could not finish; the previous writer remains reserved")
             }
-        }; Unit },
+        } },
         { withContext(Dispatchers.Main) {
             ProfileStore.sharedOrNull()?.attachNativeGateway(nativeProfiles)
         } },
-        { origin -> applicationScope.launch { syncManager?.onLocalNativeMutation(origin) }; Unit },
+        { origin -> applicationScope.launch { syncManager?.onLocalNativeMutation(origin) } },
         { applicationScope.launch(Dispatchers.Main) {
             if (runCatching { nativeAccounts.session() }.isFailure) {
                 ProfileStore.sharedOrNull()?.clearNativeProjection()
             }
-        }; Unit },
+        } },
         ownCredentials = com.vortx.android.engine.NativeOwnAccountCredentials.shared(this),
         captureOwnAccountAdmission = { captured -> syncManager?.let { manager ->
             val admission = manager.captureLocalLibraryMutationAdmission() ?: return@let null
@@ -108,10 +109,11 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
             } }
             gate
         } }, onAuthorityChanged = {
+            com.vortx.android.singularity.SourceIndexLifecycle.invalidateDeferred()
             com.vortx.android.library.WatchlistStore.shared(this).invalidateNativeAuthority()
             if (playbackQueueDelegate.isInitialized()) playbackQueue.invalidate()
         },
-        onProgressMutation = { origin -> applicationScope.launch { syncManager?.onLocalNativeMutation(origin, progressOnly = true) }; Unit }) }
+        onProgressMutation = { origin -> applicationScope.launch { syncManager?.onLocalNativeMutation(origin, progressOnly = true) } }) }
     internal fun nativeStreamingAccounts(): NativeAccountCoordinator = nativeAccounts
     private val nativeProfiles: NativeProfileAccess by lazy { NativeProfileAccess(
         publicationAdmission = { runtime, action ->
@@ -131,6 +133,8 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
                 manager::captureLocalLibraryMutationAdmission) }
         },
         withReclaimLifecycle = { action -> DownloadManager.withWatchedReclaimAdmission(this, action) },
+        sourceIndexSource = com.vortx.android.engine.NativeSourceIndexSource(applicationScope,
+            ::captureNativeSourceIndexAuthorization),
         captureAddonPublication = { session, update ->
             nativeAccounts.accountFor(session)?.let { account ->
                 { action: () -> Unit ->
@@ -200,9 +204,8 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
         // folds into are stood up: construct VortXSyncManager, wire its push seams, and add the foreground
         // pull. Fail-soft inside; a no-op when signed out, and never on the critical launch path.
         wireAccountSync()
-        // Connect the give-to-get MOAT groundwork now that the session manager (read below) exists. This only
-        // makes the moat-token client available + wires the reserved SourceIndexClient hook; the Singularity
-        // SERVE it feeds stays DORMANT behind its own compile-time gate. Fail-soft + off the critical path.
+        // Connect the issuer and live consent observer. The repository's typed owner authorization is the
+        // only Source Index network entrance; the old Boolean/frontend entrance remains closed.
         wireMoatGroundwork()
         runCatching { MediaServerRepository.init(this) }
             .onFailure { Log.w(TAG, "Media-server store init failed; the feature stays dormant", it) }
@@ -288,23 +291,37 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
     /// so its debounced auto-push scope and the roster/overlay seams it installed on [ProfileStore] live for
     /// the whole process. Nullable + fail-soft: sync is OFF the critical launch path (VortX works fully
     /// signed out), so a null here degrades to "no cross-device sync this launch", never a crash.
+    private var sourceIndexSessionObserver: kotlinx.coroutines.Job? = null
+    private var sourceIndexConsentObserver: android.content.SharedPreferences.OnSharedPreferenceChangeListener? = null
     var syncManager: VortXSyncManager? = null
         private set(value) {
-            if (field !== value) com.vortx.android.player.PlaybackOwnerEpoch.transition { field = value }
+            if (field !== value) {
+                com.vortx.android.singularity.SourceIndexLifecycle.invalidateDeferred()
+                com.vortx.android.player.PlaybackOwnerEpoch.transition { field = value }
+                com.vortx.android.singularity.SourceIndexLifecycle.invalidateDeferred()
+                sourceIndexSessionObserver?.cancel()
+                sourceIndexSessionObserver = value?.let { manager -> applicationScope.launch(Dispatchers.IO) {
+                    var observed = runCatching { manager.sessionOwnerSnapshot() }.getOrNull()
+                    manager.sessionUiState.collect { state ->
+                        if (syncManager !== manager) return@collect
+                        val current = runCatching { manager.sessionOwnerSnapshot() }.getOrNull()
+                        if (current != observed || state !is VortXSyncManager.SessionUiState.SignedIn) {
+                            com.vortx.android.singularity.SourceIndexLifecycle.invalidateDeferred()
+                        }
+                        observed = current
+                    }
+                } }
+            }
         }
 
     /**
-     * Wire the give-to-get MOAT groundwork, kept DORMANT exactly like Apple ships it gated. The Singularity
-     * SERVE consumer ([SourceIndexClient]) stays behind its own compile-time `isEnabled = false` gate pending a
-     * separately security-signed-off lane; this only makes the moat-token client ([MoatToken]) available and
-     * connects the reserved `moatTokenProvider` hook, so the token flows the same way Apple wires
-     * `MoatToken.shared` into `SourceIndexClient.fetchPooled` once SERVE re-enables. Because that gate is
-     * closed, the provider is never invoked at runtime today: nothing here mints or reaches the network.
+     * Wire the VortX-account issuer and live consent invalidation. Legacy Source Index Boolean methods
+     * remain closed; the repository-owned path supplies a captured native/account authorization.
      *
      * [MoatToken] reads the VortX account session bearer live through [sessionProvider], sourced from the
      * already-built [syncManager] (the api.vortx.tv identity, NOT the Stremio authKey). A null manager (sync
      * unavailable this launch) or a signed-out / opted-out device yields no credential, so the client stays
-     * fully dormant and fail-soft.
+     * fail-closed and fail-soft.
      */
     private fun wireMoatGroundwork() {
         MoatToken.appContext = applicationContext
@@ -313,10 +330,44 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
                 MoatToken.SessionCredential(bearer = session.token, accountId = session.account.id)
             }
         }
-        // The reserved hook is invoked only after the login-only SERVE gate has already passed, so isSignedIn is
-        // known true at that point (SourceIndexClient re-checks the flag before calling the provider).
+        // Compatibility hook for the closed legacy API. The typed path uses its captured account admission.
         SourceIndexClient.moatTokenProvider = { MoatToken.current(isSignedIn = true) }
+        val preferences = getSharedPreferences("vortx_settings", Context.MODE_PRIVATE)
+        sourceIndexConsentObserver = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == com.vortx.android.moat.MoatConsent.KEY) {
+                com.vortx.android.singularity.SourceIndexLifecycle.invalidateDeferred()
+            }
+        }.also(preferences::registerOnSharedPreferenceChangeListener)
     }
+
+    /** Typed native mount plus persistence-backed VortX credential epoch, captured before any query. */
+    private fun captureNativeSourceIndexAuthorization(session: VortxNativeSession,
+        owner: com.vortx.android.engine.VortxNativeOwner): com.vortx.android.singularity.SourceIndexAuthorization? = runCatching {
+        val manager = syncManager ?: return@runCatching null
+        session.owned(owner) {
+            val account = nativeAccounts.accountFor(session) ?: return@owned null
+            if (manager.sessionOwnerSnapshot() != account ||
+                com.vortx.android.integrations.NativeProviderVault.scope(account) != owner.scope.accountID) return@owned null
+            val admission = manager.captureLocalLibraryMutationAdmission() ?: return@owned null
+            com.vortx.android.singularity.SourceIndexLifecycle.issue(
+                isCurrent = {
+                    runCatching {
+                        // Existing lock order: Session -> captured authenticated account -> mounted lifecycle.
+                        session.owned(owner) {
+                            admission {
+                                syncManager === manager && manager.sessionOwnerSnapshot() == account &&
+                                    nativeAccounts.withMountedSession(session, account) {
+                                        com.vortx.android.moat.MoatConsent.contributeAndConsume(this) &&
+                                            SourceIndexClient.serveEnabled && RemoteConfig.isFeatureOn("sourceIndex", true)
+                                    }
+                            }
+                        }
+                    }.getOrDefault(false)
+                },
+                moatProvider = { MoatToken.current(isSignedIn = true) },
+            )
+        }
+    }.getOrNull()
 
     /**
      * Activate the account sync engine: construct the (dormant-until-now) [VortXSyncManager], wire its push
