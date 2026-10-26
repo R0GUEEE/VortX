@@ -1,0 +1,2 @@
+package android.content
+internal interface SharedPreferences

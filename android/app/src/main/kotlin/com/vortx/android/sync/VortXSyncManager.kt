@@ -2230,7 +2230,7 @@ class VortXSyncManager internal constructor(context: Context, private val scope:
             val result = if (profileStore != null) profileStore.withoutNativePreferenceCapture { apply() } else apply()
             // Re-project profile-owned flat keys only after releasing the auth lock. Remote global
             // settings must not mint local profile edits or introduce auth-lock/runtime-lock inversion.
-            if (result && profileStore != null && previousSettings != settingsPrefs.all && isSyncLeaseCurrent(lease) && publicationCurrent()) profileStore.refreshNativeProjection(forceSettings = true)
+            if (result && profileStore != null && previousSettings != settingsPrefs.all && isSyncLeaseCurrent(lease) && publicationCurrent()) profileStore.refreshNativeProjectionInBackground(forceSettings = true)
             result && publicationCurrent()
         }
     }

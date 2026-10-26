@@ -248,5 +248,7 @@ fun main() {
     closedRecoveryAndAccountFailuresRejectBeforePublication()
     nullableResultAndFreshProjectionArePreserved()
     migrationMutationStillRequiresFreshSaveReadbackAndNestedPublication()
-    println("PASS projection_boundary_packet_complete cases=15")
+    runBootstrapBoundaryCases()
+    runForYouReloadBoundaryCases()
+    println("PASS projection_boundary_packet_complete prior_cases=15 bootstrap_schedules=6 foryou_schedule=1")
 }

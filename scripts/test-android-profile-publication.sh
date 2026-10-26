@@ -23,6 +23,11 @@ nice -n 15 "$java_bin" -XX:ActiveProcessorCount=1 -Xmx512m -cp "$compiler_cp" or
     "$packet/tests-extracted/NativeProfileAccess.kt" "$packet/tests-extracted/ProfileStoreBoundary.kt" \
     "$packet/tests-extracted/NativeProfileGateway.kt" "$packet/tests-extracted/ContinueWatchingOwnerGate.kt" \
     "$packet/tests-session-fixture.kt" "$packet/tests-profile-fixture.kt" "$packet/tests-main.kt" \
+    "$packet/tests-extracted/ProfileBootstrapBoundary.kt" "$packet/tests-extracted/ContinueWatchingMigration.kt" \
+    "$packet/tests-extracted/ProfilePresentationBoundary.kt" "$packet/tests-sync-fixture.kt" \
+    "$packet/tests-provider-fixture.kt" "$packet/tests-home-fixture.kt" "$packet/tests-bootstrap-main.kt" \
+    "$packet/tests-extracted/ForYouReloadBoundary.kt" "$packet/tests-android-prefs-fixture.kt" \
+    "$packet/tests-json-fixture.kt" "$packet/tests-foryou-fixture.kt" "$packet/tests-foryou-main.kt" \
     -d "$receipt/classes" 2>&1 | tee "$receipt/compiler.log"
 nice -n 15 "$java_bin" -XX:ActiveProcessorCount=1 -Xmx128m -cp "$receipt/classes:$runtime_cp" \
     com.vortx.android.engine.ProjectionBoundaryPacket 2>&1 | tee "$receipt/result.log"

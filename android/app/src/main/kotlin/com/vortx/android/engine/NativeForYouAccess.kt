@@ -24,12 +24,16 @@ internal class NativeForYouAccess(private val accounts: NativeAccountCoordinator
         }
     }
 
-    override fun read(): Result<Pair<String, JSONObject>> = runCatching {
-        val read = accounts.session().read()
+    override fun capture(): Result<ForYouNativeGateway.Snapshot> = runCatching {
+        val session = accounts.session()
+        session.withCurrentRead { read ->
         val all = read.state.getJSONObject("nativeHostPreferenceState").getJSONObject("document")
             .getJSONObject("profiles").optJSONObject(read.owner.profileID)?.getJSONObject("fields") ?: JSONObject()
-        read.owner.profileID to JSONObject().also { fields ->
+        val fields = JSONObject().also { fields ->
             all.keys().asSequence().filter { it.startsWith(ForYouSync.PREFIX) }.forEach { fields.put(it, all.getJSONObject(it)) }
+        }
+        val publication = accounts.captureProfilePresentation(session)
+        ForYouNativeGateway.Snapshot(read.owner.profileID, fields, publication::publishIfCurrent)
         }
     }
 

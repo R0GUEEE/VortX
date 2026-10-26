@@ -92,9 +92,7 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
                 Log.w(TAG, "Native retirement could not finish; the previous writer remains reserved")
             }
         } },
-        { withContext(Dispatchers.Main) {
-            ProfileStore.sharedOrNull()?.attachNativeGateway(nativeProfiles)
-        } },
+        { candidate -> ProfileStore.sharedOrNull()?.attachNativeGateway(nativeProfiles, candidate) },
         { origin -> applicationScope.launch { syncManager?.onLocalNativeMutation(origin) } },
         { applicationScope.launch(Dispatchers.Main) {
             if (runCatching { nativeAccounts.session() }.isFailure) {
@@ -111,15 +109,27 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
         } }, onAuthorityChanged = {
             com.vortx.android.singularity.SourceIndexLifecycle.invalidateDeferred()
             com.vortx.android.library.WatchlistStore.shared(this).invalidateNativeAuthority()
+            com.vortx.android.foryou.ForYouStore.shared(this).invalidateNativeAuthority()
             if (playbackQueueDelegate.isInitialized()) playbackQueue.invalidate()
         },
-        onProgressMutation = { origin -> applicationScope.launch { syncManager?.onLocalNativeMutation(origin, progressOnly = true) } }) }
+        onProgressMutation = { origin -> applicationScope.launch { syncManager?.onLocalNativeMutation(origin, progressOnly = true) } },
+        captureProfilePresentationAdmission = { captured -> syncManager?.let { manager ->
+            // Read-only UI capability only. Persistent identity is verified on IO at capture;
+            // admission retains the exact authenticated session, owner epoch and operation generation.
+            val admission = manager.captureLocalLibraryMutationAdmission() ?: return@let null
+            if (manager.sessionOwnerSnapshot() != captured) return@let null
+            val gate: (() -> Boolean) -> Boolean = { action -> admission {
+                syncManager === manager && manager.sessionUiState.value is VortXSyncManager.SessionUiState.SignedIn && action()
+            } }
+            gate
+        } }) }
     internal fun nativeStreamingAccounts(): NativeAccountCoordinator = nativeAccounts
     private val nativeProfiles: NativeProfileAccess by lazy { NativeProfileAccess(
         publicationAdmission = { runtime, action ->
             val account = nativeAccounts.accountFor(runtime)
             account != null && nativeAccounts.withProfileMutation(runtime, account, action)
         },
+        capturePreparedPublication = nativeAccounts::captureProfilePresentation,
         session = { nativeAccounts.session() },
     ) }
     private val nativeWatchlist by lazy { com.vortx.android.engine.NativeWatchlistAccess(nativeAccounts) }
@@ -159,7 +169,7 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
                 ),
             )
         }) {
-        nativeAccounts.session().also { it.read() }
+        nativeAccounts.session()
     } }
 
 
@@ -419,7 +429,7 @@ class VortXApplication : Application(), SingletonImageLoader.Factory {
         syncManager = manager
         manager.attachNativeGateway(nativeAccounts)
         // For You switches between the account's synced fields and the signed-out local copy on sign-in.
-        applicationScope.launch { manager.account.collect { com.vortx.android.foryou.ForYouStore.shared(this@VortXApplication).reload() } }
+        applicationScope.launch { manager.account.collect { com.vortx.android.foryou.ForYouStore.shared(this@VortXApplication).reload(invalidate = true) } }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             /// Count of currently-started activities. Touched only from the main thread (every
             /// ActivityLifecycleCallbacks callback is delivered on the main looper), so a plain Int is safe.

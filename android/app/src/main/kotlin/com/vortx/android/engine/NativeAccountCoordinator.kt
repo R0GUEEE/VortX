@@ -38,6 +38,8 @@ internal class NativeAccountCoordinator(
     /** A committed playback-progress report; defaults to the ordinary mutation callback. */
     private val onProgressMutation: (SessionOwnerSnapshot.Account) -> Unit = onMutation,
     private val historyBindings: NativeOwnerHistoryBindings = NativeOwnerHistoryJniBindings,
+    /** Read-only metadata admission, captured on IO. Never reused for a native mutation. */
+    private val captureProfilePresentationAdmission: (SessionOwnerSnapshot.Account) -> (((() -> Boolean) -> Boolean)?) = captureOwnAccountAdmission,
 ) : NativeAccountGateway {
     private data class Mounted(val account: SessionOwnerSnapshot.Account, val session: VortxNativeSession)
     private val mounted = AtomicReference<Mounted?>()
@@ -202,6 +204,34 @@ internal class NativeAccountCoordinator(
     ) {
         fun publishIfCurrent(action: () -> Unit): Boolean = admission(action)
     }
+
+    /** Captured while Session is held by the worker, admitted later without reacquiring it.
+     * The exact Mounted object, authenticated generation and both monotone stamps reject ABA. */
+    internal fun captureProfilePresentation(session: VortxNativeSession): com.vortx.android.profile.NativeProfileGateway.PreparedProjection =
+        synchronized(session) {
+            // Read-only failure handoff also retains a qualified migration witness after checkpoint
+            // uncertainty. It never grants a command capability or reports recovery as success.
+            val read = session.read()
+            val current = checkNotNull(mounted.get()) { "Native account changed" }
+            check(current.session === session && accountCurrent(current.account)) { "Native account changed" }
+            val epoch = changes.value
+            val version = session.updates.value
+            val recovery = session.requiresRecovery()
+            val authenticated = captureProfilePresentationAdmission(current.account)
+            check(authenticated != null || ownCredentials == null) { "Native profile authentication unavailable" }
+            com.vortx.android.profile.NativeProfileGateway.PreparedProjection(NativeProfileAccess.projection(read), recovery) { action ->
+                val publish = {
+                    synchronized(lifecycleLock) {
+                        if (mounted.get() === current && changes.value == epoch && session.updates.value == version) {
+                            action(); true
+                        } else false
+                    }
+                }
+                // Production admission is already captured. Neither secure persistence nor Session
+                // is consulted in the Main window. The fallback is for deterministic fixtures only.
+                if (authenticated != null) authenticated(publish) else accountCurrent(current.account) && publish()
+            }
+        }
 
     /** Expensive work belongs to the caller's background refresh lane, never a Compose/init callback.
      * One native read supplies all three views. Final publication checks only auth, mount identity
