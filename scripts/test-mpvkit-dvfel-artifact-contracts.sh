@@ -14,6 +14,7 @@ GENERATION_PATCH="$ROOT/scripts/ffmpeg-response-generation.patch"
 OBSERVATION_PATCH="$ROOT/scripts/mpv-completed-response-observation.patch"
 SENT_FFMPEG_PATCH="$ROOT/scripts/ffmpeg-sent-request-evidence.patch"
 SENT_MPV_PATCH="$ROOT/scripts/mpv-sent-request-evidence.patch"
+PREFIX_PATCH="$ROOT/scripts/mpv-bounded-prefix-request.patch"
 VERIFY="$ROOT/scripts/verify-mpvkit-dvfel-artifacts.sh"
 WORKFLOW="$ROOT/.github/workflows/release-tvos.yml"
 
@@ -95,6 +96,11 @@ grep -Fq 'copy_exact "$SENT_MPV_PATCH" "$GENERATED_SENT_MPV_PATCH"' "$BUILD" ||
   fail "Apple must retain the exact MPV sent-request generated copy"
 grep -Fq 'native-media-hosted/evidence.py" apple-sent-abi "$STAGED_DEST"' "$BUILD" ||
   fail "future Apple component must run its additional real sent-request ABI gate"
+PREFIX_HASH="$(shasum -a 256 "$PREFIX_PATCH")"
+[ "${PREFIX_HASH%% *}" = "edcfdc7d9d8da7f8a44b19d326a809de844be968cc8061b80744229da801331e" ] ||
+  fail "MPV bounded-prefix request carrier differs from the reviewed source"
+grep -Fq 'copy_exact "$PREFIX_PATCH" "$GENERATED_PREFIX_PATCH"' "$BUILD" ||
+  fail "Apple must retain the exact bounded-prefix generated copy"
 
 # The artifact verifier must inspect content, not only checksums or mtimes.
 grep -Fq 'LIBAVCODEC_VERSION_MAJOR' "$VERIFY" || fail "artifact gate must inspect libavcodec major"
@@ -247,7 +253,7 @@ grep -Fq 'generated response-witness patch must not be a symlink' "$FIXTURE/resp
 rm -f "$FIXTURE_RESPONSE_PATCH"
 
 # Each generated path has the same exact-file and no-symlink retry contract.
-for kind in generation observation sent_ffmpeg sent_mpv; do
+for kind in generation observation sent_ffmpeg sent_mpv prefix; do
   if [ "$kind" = generation ]; then
     canonical="$GENERATION_PATCH"
     generated="$SOURCE/Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch"
@@ -260,10 +266,14 @@ for kind in generation observation sent_ffmpeg sent_mpv; do
     canonical="$SENT_FFMPEG_PATCH"
     generated="$SOURCE/Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch"
     label="sent-request evidence"
-  else
+  elif [ "$kind" = sent_mpv ]; then
     canonical="$SENT_MPV_PATCH"
     generated="$SOURCE/Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch"
     label="sent-request evidence"
+  else
+    canonical="$PREFIX_PATCH"
+    generated="$SOURCE/Sources/BuildScripts/patch/libmpv/0017-bounded-prefix-request.patch"
+    label="bounded-prefix request"
   fi
   mkdir -p "$(dirname "$generated")"
   cp "$canonical" "$generated"
@@ -420,6 +430,24 @@ grep -Fq "if host_machine.system() == 'android'" "$FIXTURE/native-sent-meson.bui
   fail "native-only link roots must be conditional on Android"
 grep -Fq "gnu_symbol_visibility: 'hidden'" "$FIXTURE/native-sent-meson.build" ||
   fail "native-only helpers must retain hidden visibility"
+# Apply material preparation only after the exact sent-request prerequisite.
+PREFIX_PRE_TREE="$(native_git write-tree)"
+native_git apply --cached "$PREFIX_PATCH"
+[ "$(native_git diff --cached --name-only "$PREFIX_PRE_TREE" --)" = "$(printf '%s\n' \
+  meson.build stream/reference_source.h stream/stream_lavf.c)" ] ||
+  fail "native bounded-prefix carrier changed unexpected source paths"
+check_native_source stream/stream_lavf.c 721c0e25e8de5d5207c064d328f577dbdf0f3c345bd8ab4caadf410dcdfb6e83
+check_native_source stream/reference_source.h 868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933
+check_native_source stream/vortx_http_request.h 81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765
+native_git show :meson.build >"$FIXTURE/native-prefix-meson.build"
+[ "$(grep -c -- '-Wl,--undefined=stream_reference_' "$FIXTURE/native-prefix-meson.build")" = 7 ] ||
+  fail "Android material carrier must retain seven native-only roots"
+grep -Fq "'-Wl,--undefined=stream_reference_source_prepare_prefix_request'" "$FIXTURE/native-prefix-meson.build" ||
+  fail "Android material carrier must retain its private preparation helper"
+grep -Fq "if host_machine.system() == 'android'" "$FIXTURE/native-prefix-meson.build" ||
+  fail "prefix material link root must remain Android-only"
+grep -Fq "gnu_symbol_visibility: 'hidden'" "$FIXTURE/native-prefix-meson.build" ||
+  fail "prefix material helper must remain hidden"
 [ "$(shasum -a 256 "$NATIVE_REAL_INDEX")" = "$NATIVE_INDEX_BEFORE" ] ||
   fail "native canonical index changed during the isolated carrier contract"
 

@@ -67,7 +67,8 @@ SENT_MPV_FUNCTIONS = (
     'stream_reference_source_revalidate_sent_request',
     'stream_reference_sent_request_cancelled',
     'stream_reference_sent_request_copy_values',
-    'stream_reference_sent_request_values_clear', 'stream_reference_sent_request_release')
+    'stream_reference_sent_request_values_clear', 'stream_reference_sent_request_release',
+    'stream_reference_source_prepare_prefix_request')
 
 
 def required_elf_functions(text, required, role):
@@ -288,12 +289,13 @@ def android(out, upstream, sdk, *, readelf=None):
 # Exact source-evidence profile for FUTURE successful native candidates. This
 # carries source bytes, including new/untracked patch outputs, rather than
 # substituting tracked diffs for a complete corresponding-source snapshot.
-CURRENT_SOURCE_PROFILE = 'original-http-sent-request-evidence-v1'
+CURRENT_SOURCE_PROFILE = 'original-http-bounded-prefix-material-v1'
 CURRENT_RECIPE_PATHS = {
     'scripts/assemble-mpvkit-dvfel.sh', 'scripts/build-mpvkit-dvfel.sh',
     'scripts/ffmpeg-response-witness.patch', 'scripts/ffmpeg-response-generation.patch',
     'scripts/mpv-completed-response-observation.patch',
     'scripts/ffmpeg-sent-request-evidence.patch', 'scripts/mpv-sent-request-evidence.patch',
+    'scripts/mpv-bounded-prefix-request.patch',
     'scripts/mpv-coreaudio-hotplug-lifecycle.patch', 'scripts/mpv-http-seek-interrupt.patch',
     'scripts/mpv-moltenvk-resize.patch', 'scripts/mpv-original-http-reference-recipe.patch',
     'scripts/mpv-original-http-cancel-lifetime.patch', 'scripts/mpv-original-local-file-witness.patch',
@@ -318,8 +320,8 @@ CURRENT_NATIVE_PINS = {'mpv': '8c67647b50059406c5c0444903597281b81516cf',
 CURRENT_CANCEL_FILES = {
     'misc/thread_tools.c': '151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9',
     'misc/thread_tools.h': '62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f',
-    'stream/stream_lavf.c': '174cdaa923dad4b97926ac9f80ba8cabbba8be9e850824fb6939e317cd9c8f29',
-    'stream/reference_source.h': 'd48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e',
+    'stream/stream_lavf.c': '721c0e25e8de5d5207c064d328f577dbdf0f3c345bd8ab4caadf410dcdfb6e83',
+    'stream/reference_source.h': '868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933',
                      'stream/vortx_http_request.h': '81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765',
 }
 CURRENT_RESPONSE_FILES = {'libavformat/http.c': '24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe'}
@@ -343,6 +345,7 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
                                    'buildscripts/include/download-lua.sh': 'bdfb58aa6fc85ec4dabd095bf11c760482fbbff86b94abbe835044ea49f06f93',
                                    'buildscripts/patches/ffmpeg/0004-sent-request-evidence.patch': '085b66cb5623ed8087481d3217b65da587b2970cd345a45896e7e87823dec9c9',
                                    'buildscripts/patches/mpv/0011-sent-request-evidence.patch': 'e3840084725be1f4948fb90c6fec87c35d55665f8310854713ebff496e1358bf',
+                                   'buildscripts/patches/mpv/0012-bounded-prefix-request.patch': 'edcfdc7d9d8da7f8a44b19d326a809de844be968cc8061b80744229da801331e',
                                    'buildscripts/patches/ffmpeg/0003-response-generation.patch': 'ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098',
                                    'buildscripts/patches/mpv/0010-completed-response-observation.patch': 'c038924be4c9b0ef187e1e9336d201b866dfa6f13457817c6e8c2d484e882e8e',
                                    'buildscripts/patches/ffmpeg/0002-response-witness.patch': '6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b',
@@ -369,12 +372,13 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
              'mbedtls': {},
              'mpv': {'player/owned_subtitle.c': '875d9f0192cd5f45acca2654765bdc667df5d12dd6eabf9aef5caec5cdec821d',
                      'player/owned_subtitle.h': '2e9e64d92938e41c14c3397c9fbe7d064c2fe8aa5d2dcd05db4b9a74f4bad22e',
-                     'stream/reference_source.h': 'd48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e',
+                     'stream/reference_source.h': '868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933',
                      'stream/vortx_http_request.h': '81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765',
                      'sub/owned_text_slot.h': 'b5f99151efb15ba937f630d1c2589c1e6634a4bebb744a161283cb70b3e250b6'}},
  'apple': {'FFmpeg-9.0.2-946fcce0': {'libavformat/vortx_http_request.h': '81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765'},
            '_native-mpvkit': {'Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch': '085b66cb5623ed8087481d3217b65da587b2970cd345a45896e7e87823dec9c9',
                               'Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch': 'e3840084725be1f4948fb90c6fec87c35d55665f8310854713ebff496e1358bf',
+                              'Sources/BuildScripts/patch/libmpv/0017-bounded-prefix-request.patch': 'edcfdc7d9d8da7f8a44b19d326a809de844be968cc8061b80744229da801331e',
                               'Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch': 'ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098',
                               'Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch': 'c038924be4c9b0ef187e1e9336d201b866dfa6f13457817c6e8c2d484e882e8e',
                               'Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch': '6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b',
@@ -391,7 +395,7 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
                               'Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch': '778b58c05129e397ed2f90408718f6b3a3feca84492485657d89e784bbee5722'},
            'libmpv-master-8c67647b': {'player/owned_subtitle.c': '875d9f0192cd5f45acca2654765bdc667df5d12dd6eabf9aef5caec5cdec821d',
                                       'player/owned_subtitle.h': '2e9e64d92938e41c14c3397c9fbe7d064c2fe8aa5d2dcd05db4b9a74f4bad22e',
-                                      'stream/reference_source.h': 'd48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e',
+                                      'stream/reference_source.h': '868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933',
                      'stream/vortx_http_request.h': '81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765',
                                       'sub/owned_text_slot.h': 'b5f99151efb15ba937f630d1c2589c1e6634a4bebb744a161283cb70b3e250b6',
                                       'video/out/vulkan/context_moltenvk.m': '00d2842ddb0dca5070feaf890c0190a0fe62beef9b29ec36e94e329d29a3da5e'},
@@ -649,7 +653,7 @@ def capture_current_source_evidence(lane, out, upstream, roots, legacy, staged):
             raise ValueError('duplicate or malformed recipe hash')
         inputs[source_name(name)] = value
     if set(inputs) != CURRENT_RECIPE_PATHS:
-        raise ValueError('not the exact 31-input sent-request-evidence source family')
+        raise ValueError('not the exact 32-input bounded-prefix-material source family')
     names = sorted(inputs | {'scripts/native-media-hosted/inputs.sha256': digest(manifest),
                              '.github/workflows/native-media-candidates.yml': None})
     entries = []

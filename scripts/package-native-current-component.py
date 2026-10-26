@@ -17,13 +17,14 @@ import zipfile
 
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
-PROFILE = "original-http-sent-request-evidence-v1"
-PROFILE_MANIFEST_SHA256 = "a7a346afe05c68696448e98ac3a3c9722c14226410e83f3f906c13487877c1a0"  # Filled only with the reviewed producer profile.
+PROFILE = "original-http-bounded-prefix-material-v1"
+PROFILE_MANIFEST_SHA256 = "e46043132d9c2a95ed11cbec85dc3d3b03aee0dec9d208db3a99d08272dd4c18"  # Filled only with the reviewed producer profile.
 RECIPE_PATHS = frozenset("""
 scripts/assemble-mpvkit-dvfel.sh scripts/build-mpvkit-dvfel.sh
 scripts/ffmpeg-response-witness.patch scripts/ffmpeg-response-generation.patch
 scripts/mpv-completed-response-observation.patch
 scripts/ffmpeg-sent-request-evidence.patch scripts/mpv-sent-request-evidence.patch
+scripts/mpv-bounded-prefix-request.patch
 scripts/mpv-coreaudio-hotplug-lifecycle.patch scripts/mpv-http-seek-interrupt.patch
 scripts/mpv-moltenvk-resize.patch scripts/mpv-original-http-cancel-lifetime.patch
 scripts/mpv-original-http-reference-recipe.patch scripts/mpv-original-local-file-witness.patch
@@ -62,8 +63,8 @@ WRAPPER = {"apple": "2103893078c5e339073b11737b86f7f22b9c4491",
 # Full-file postcomposition hashes retain cancellation plus owned observation.
 CANCEL = {"misc/thread_tools.c": "151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9",
           "misc/thread_tools.h": "62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f",
-          "stream/stream_lavf.c": "174cdaa923dad4b97926ac9f80ba8cabbba8be9e850824fb6939e317cd9c8f29",
-          "stream/reference_source.h": "d48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e",
+          "stream/stream_lavf.c": "721c0e25e8de5d5207c064d328f577dbdf0f3c345bd8ab4caadf410dcdfb6e83",
+          "stream/reference_source.h": "868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933",
           "stream/vortx_http_request.h": "81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765"}
 RESPONSE = {"libavformat/http.c": "24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe"}
 GITLINKS = {"3rdparty/Vulkan-Headers": "74d8a6cb930c68ef617b202c3ff3c59d919e086b",
@@ -91,7 +92,8 @@ PATCH_COPIES = [
     ("0013-original-http-reference-recipe.patch", "0008-original-http-reference-recipe.patch", "mpv-original-http-reference-recipe.patch"),
     ("0014-original-http-cancel-lifetime.patch", "0009-original-http-cancel-lifetime.patch", "mpv-original-http-cancel-lifetime.patch"),
     ("0015-completed-response-observation.patch", "0010-completed-response-observation.patch", "mpv-completed-response-observation.patch"),
-    ("0016-sent-request-evidence.patch", "0011-sent-request-evidence.patch", "mpv-sent-request-evidence.patch")]
+    ("0016-sent-request-evidence.patch", "0011-sent-request-evidence.patch", "mpv-sent-request-evidence.patch"),
+    ("0017-bounded-prefix-request.patch", "0012-bounded-prefix-request.patch", "mpv-bounded-prefix-request.patch")]
 
 
 def untracked(lane, row, recipe):
@@ -567,9 +569,9 @@ def package(args):
                 checksum, name = line.split("  ")
                 need(name not in recipe, "Duplicate reviewed input")
                 recipe[path(name)] = checksum
-            need(set(recipe) == RECIPE_PATHS and len(recipe) == 31, "Exact 31 reviewed recipe identities")
+            need(set(recipe) == RECIPE_PATHS and len(recipe) == 32, "Exact 32 reviewed recipe identities")
             producer = declared(meta["producerFiles"], "producer")
-            need(set(producer) == {"producer/" + name for name in RECIPE_PATHS | {INPUT_MANIFEST, WORKFLOW}}, "Exact 33 producer files")
+            need(set(producer) == {"producer/" + name for name in RECIPE_PATHS | {INPUT_MANIFEST, WORKFLOW}}, "Exact 34 producer files")
             for name, row in producer.items():
                 need(row == git_blob(args.repo, args.source_commit, name.removeprefix("producer/")) and row["kind"] == "file", "Immutable producer Git blob/mode")
                 relative = name.removeprefix("producer/")

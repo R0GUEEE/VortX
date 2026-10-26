@@ -29,7 +29,7 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertNotIn(name, names)
             names.add(name)
             self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), expected)
-        self.assertEqual(len(names), 31)
+        self.assertEqual(len(names), 32)
         self.assertEqual(names, {
             'scripts/assemble-mpvkit-dvfel.sh',
             'scripts/build-mpvkit-dvfel.sh',
@@ -38,6 +38,7 @@ class NativeMediaProducer(unittest.TestCase):
             'scripts/mpv-completed-response-observation.patch',
             'scripts/ffmpeg-sent-request-evidence.patch',
             'scripts/mpv-sent-request-evidence.patch',
+            'scripts/mpv-bounded-prefix-request.patch',
             'scripts/mpv-coreaudio-hotplug-lifecycle.patch',
             'scripts/mpv-http-seek-interrupt.patch',
             'scripts/mpv-moltenvk-resize.patch',
@@ -106,10 +107,14 @@ class NativeMediaProducer(unittest.TestCase):
                 ("mpv-original-http-reference-recipe.patch", "0013-original-http-reference-recipe.patch", "0008-original-http-reference-recipe.patch"),
                 ("mpv-original-http-cancel-lifetime.patch", "0014-original-http-cancel-lifetime.patch", "0009-original-http-cancel-lifetime.patch"),
                 ("mpv-completed-response-observation.patch", "0015-completed-response-observation.patch", "0010-completed-response-observation.patch"),
-                ("mpv-sent-request-evidence.patch", "0016-sent-request-evidence.patch", "0011-sent-request-evidence.patch")]:
+                ("mpv-sent-request-evidence.patch", "0016-sent-request-evidence.patch", "0011-sent-request-evidence.patch"),
+                ("mpv-bounded-prefix-request.patch", "0017-bounded-prefix-request.patch", "0012-bounded-prefix-request.patch")]:
             if source == "mpv-sent-request-evidence.patch":
                 self.assertIn('SENT_MPV_PATCH="$REPO/scripts/' + source + '"', apple)
                 self.assertIn('copy_exact "$SENT_MPV_PATCH" "$GENERATED_SENT_MPV_PATCH"', apple)
+            elif source == "mpv-bounded-prefix-request.patch":
+                self.assertIn('PREFIX_PATCH="$REPO/scripts/' + source + '"', apple)
+                self.assertIn('copy_exact "$PREFIX_PATCH" "$GENERATED_PREFIX_PATCH"', apple)
             else:
                 self.assertIn('copy_exact "$REPO/scripts/' + source + '"', apple)
             self.assertIn('"$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/' + apple_number + '"', apple)
@@ -231,8 +236,8 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertLess(android.index(copy), android.index("bash patch.sh"))
         for recipe in (apple, android):
             for afterimage in ("24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe",
-                               "174cdaa923dad4b97926ac9f80ba8cabbba8be9e850824fb6939e317cd9c8f29",
-                               "d48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e"):
+                               "721c0e25e8de5d5207c064d328f577dbdf0f3c345bd8ab4caadf410dcdfb6e83",
+                               "868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933"):
                 self.assertIn(afterimage, recipe)
         # Source contracts only. This does not exercise an HTTP owner or reader.
 
@@ -280,15 +285,42 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertIn('native-media-hosted/evidence.py" apple-sent-abi "$STAGED_DEST"', apple)
         self.assertIn('evidence.py apple-sent-abi "$out/MPVKit-DVFEL"', android)
 
+    def test_bounded_prefix_material_carrier_is_exact_private_and_ordered(self):
+        material = (ROOT / "scripts/mpv-bounded-prefix-request.patch").read_bytes()
+        self.assertEqual(hashlib.sha256(material).hexdigest(),
+                         "edcfdc7d9d8da7f8a44b19d326a809de844be968cc8061b80744229da801331e")
+        text = material.decode()
+        self.assertEqual([line for line in text.splitlines() if line.startswith("+++ ")],
+                         ["+++ b/stream/reference_source.h", "+++ b/stream/stream_lavf.c",
+                          "+++ b/meson.build"])
+        symbol = "stream_reference_source_prepare_prefix_request"
+        self.assertIn(symbol, MODULE.SENT_MPV_FUNCTIONS)
+        self.assertEqual(text.count("+        '-Wl,--undefined=" + symbol + "',"), 1)
+        self.assertNotIn("--export-dynamic", text)
+        self.assertNotIn("--dynamic-list", text)
+        self.assertNotIn("avio_open", text)
+        self.assertNotIn("avformat_open_input", text)
+        apple = (ROOT / "scripts/build-mpvkit-dvfel.sh").read_text()
+        android = (ROOT / "scripts/native-media-hosted/build.sh").read_text()
+        self.assertLess(apple.index('copy_exact "$SENT_MPV_PATCH" "$GENERATED_SENT_MPV_PATCH"'),
+                        apple.index('copy_exact "$PREFIX_PATCH" "$GENERATED_PREFIX_PATCH"'))
+        copy = 'cp "$root/scripts/mpv-bounded-prefix-request.patch" "$upstream/buildscripts/patches/mpv/0012-bounded-prefix-request.patch"'
+        self.assertLess(android.index('cp "$root/scripts/mpv-sent-request-evidence.patch"'), android.index(copy))
+        self.assertLess(android.index(copy), android.index("bash patch.sh"))
+        for lane, groups in MODULE.CURRENT_SOURCE_ROOTS.items():
+            native = next(name for name, pin in groups.items() if pin == MODULE.CURRENT_NATIVE_PINS["mpv"])
+            self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES[lane][native]["stream/reference_source.h"],
+                             "868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933")
+
     def test_response_witness_source_evidence_profile_preserves_exact_capture_and_consumer(self):
         spec = importlib.util.spec_from_file_location(
             "current_native_response_packager", ROOT / "scripts/package-native-current-component.py")
         consumer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(consumer)
         self.assertEqual(MODULE.CURRENT_SOURCE_PROFILE, consumer.PROFILE)
-        self.assertEqual(consumer.PROFILE, "original-http-sent-request-evidence-v1")
+        self.assertEqual(consumer.PROFILE, "original-http-bounded-prefix-material-v1")
         self.assertEqual(MODULE.CURRENT_RECIPE_PATHS, consumer.RECIPE_PATHS)
-        self.assertEqual(len(consumer.RECIPE_PATHS), 31)
+        self.assertEqual(len(consumer.RECIPE_PATHS), 32)
         manifest = ROOT / "scripts/native-media-hosted/inputs.sha256"
         self.assertEqual(hashlib.sha256(manifest.read_bytes()).hexdigest(), consumer.PROFILE_MANIFEST_SHA256)
         recipe = dict((name, checksum) for checksum, name in
@@ -726,6 +758,18 @@ class SentRequestABISynthetic(unittest.TestCase):
                      self.nm_text(MODULE.SENT_FFMPEG_FUNCTIONS).replace('_avpriv_', '__avpriv_', 1)):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 MODULE.required_macho_functions(text, MODULE.SENT_FFMPEG_FUNCTIONS, 'defined-code')
+
+    def test_apple_material_abi_rejects_old_component_missing_private_helper(self):
+        required = MODULE.SENT_MPV_FUNCTIONS
+        symbol = "stream_reference_source_prepare_prefix_request"
+        self.assertIn(symbol, required)
+        old = tuple(name for name in required if name != symbol)
+        with self.assertRaisesRegex(ValueError, "missing required"):
+            MODULE.required_macho_functions(self.nm_text(old), required, 'defined-code')
+        for kind in ('U', 'D', 'W'):
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                MODULE.required_macho_functions(self.nm_text(old) + self.nm_text((symbol,), kind),
+                                                required, 'defined-code')
 
     def test_real_android_producer_records_default_reader_and_six_symbol_roles(self):
         with tempfile.TemporaryDirectory() as directory:

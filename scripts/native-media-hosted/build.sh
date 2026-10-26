@@ -138,6 +138,8 @@ PYTHON_TOOLCHAIN
     # Owned observation only; INITIAL_REQUEST_ONLY and reader admission remain unchanged.
     cp "$root/scripts/mpv-completed-response-observation.patch" "$upstream/buildscripts/patches/mpv/0010-completed-response-observation.patch"
     cp "$root/scripts/mpv-sent-request-evidence.patch" "$upstream/buildscripts/patches/mpv/0011-sent-request-evidence.patch"
+    # Private bounded request material only; no duplicate open or reader activation.
+    cp "$root/scripts/mpv-bounded-prefix-request.patch" "$upstream/buildscripts/patches/mpv/0012-bounded-prefix-request.patch"
     # FFmpeg's sorted sequence keeps the existing TLS distrust patch first.
     # The same source bytes as Apple add optional paired response metadata only.
     cp "$root/scripts/ffmpeg-response-witness.patch" "$upstream/buildscripts/patches/ffmpeg/0002-response-witness.patch"
@@ -174,9 +176,9 @@ PYTHON_TOOLCHAIN
     printf '%s  %s\n' 24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe \
         deps/ffmpeg/libavformat/http.c | shasum -a 256 -c -
     [[ $(git -C deps/mpv rev-parse HEAD) == 8c67647b50059406c5c0444903597281b81516cf ]] || exit 1
-    printf '%s  %s\n' 174cdaa923dad4b97926ac9f80ba8cabbba8be9e850824fb6939e317cd9c8f29 \
+    printf '%s  %s\n' 721c0e25e8de5d5207c064d328f577dbdf0f3c345bd8ab4caadf410dcdfb6e83 \
         deps/mpv/stream/stream_lavf.c | shasum -a 256 -c -
-    printf '%s  %s\n' d48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e \
+    printf '%s  %s\n' 868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933 \
         deps/mpv/stream/reference_source.h | shasum -a 256 -c -
     for private_header in deps/ffmpeg/libavformat/vortx_http_request.h deps/mpv/stream/vortx_http_request.h; do
         [[ -f "$private_header" && ! -L "$private_header" ]] || exit 1
