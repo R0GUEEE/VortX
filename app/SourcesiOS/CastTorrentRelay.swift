@@ -132,6 +132,7 @@ final class CastTorrentRelay: @unchecked Sendable {
         var task: URLSessionDataTask?
         var method = "GET"
         var headersSent = false
+        var rejecting = false
         var closed = false
         var pendingSends = 0
         var upstreamFinished = false
@@ -180,7 +181,12 @@ final class CastTorrentRelay: @unchecked Sendable {
             let task = session.dataTask(with: upstream); self.task = task; task.resume()
         }
         func reject() {
-            guard !closed else { return }
+            guard !closed, !rejecting else { return }
+            // Own the terminal response before upstream cancellation can complete synchronously.
+            // Its completion/body callbacks must not send another 404 or close this write early.
+            rejecting = true
+            headerDeadline?.cancel(); headerDeadline = nil
+            task?.cancel(); task = nil; session?.invalidateAndCancel(); session = nil
             connection.send(content: Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8),
                             completion: .contentProcessed { [weak self] _ in self?.cancel() })
         }
@@ -197,11 +203,11 @@ final class CastTorrentRelay: @unchecked Sendable {
         }
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                         completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
-            guard valid(), !closed, let http = response as? HTTPURLResponse,
+            guard valid(), !closed, !rejecting, let http = response as? HTTPURLResponse,
                   http.url == source, [200, 206, 416].contains(http.statusCode),
                   http.statusCode == 416 || http.mimeType?.lowercased() == "video/mp4",
                   let length = http.value(forHTTPHeaderField: "Content-Length") ?? (http.statusCode == 416 ? "0" : nil), UInt64(length) != nil else {
-                completionHandler(.cancel); reject(); return
+                reject(); completionHandler(.cancel); return
             }
             var headers = "HTTP/1.1 \(http.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: http.statusCode))\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n"
             for name in ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"] {
@@ -216,7 +222,8 @@ final class CastTorrentRelay: @unchecked Sendable {
             })
         }
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-            guard !closed, valid() else { cancel(); return }
+            guard !closed, !rejecting, headersSent else { return }
+            guard valid() else { cancel(); return }
             // Bound queued bytes by applying backpressure to URLSession until NWConnection consumes each
             // delegate chunk. No whole-movie Data, disk copy, range arithmetic, or unlimited buffered reader.
             dataTask.suspend(); pendingSends += 1
@@ -229,7 +236,7 @@ final class CastTorrentRelay: @unchecked Sendable {
             })
         }
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-            guard !closed else { return }
+            guard !closed, !rejecting else { return }
             upstreamFinished = true
             if !headersSent { reject() }
             else if error != nil || pendingSends == 0 { cancel() }
