@@ -649,6 +649,17 @@ jobs:
           rustup component add llvm-tools-preview 2>/dev/null || true
           ./scripts/verify-apple-engine-artifacts.sh
 
+      # Persist only the already-proved native SDK component, not an app/test result.
+      # All ABI/runtime/package checks below remain mandatory on restored SDK bytes.
+      - name: Save verified native SDK component before unrelated later gates
+        if: steps.cache-ffi-xcframework.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0, exact existing cache action source
+        with:
+          path: |
+            app/Vendor/VortxEngine.xcframework
+            app/Vendor/engine-prelocalize/VortxEngine
+          key: vortx-ffi-resource-host-v1-${{ runner.os }}-${{ steps.toolchain.outputs.xcode_version }}-${{ env.VORTX_ENGINE_SOURCE_REVISION }}-${{ hashFiles('vortx-core/Cargo.toml', 'vortx-core/Cargo.lock', 'vortx-core/rust-toolchain.toml', 'vortx-core/crates/**', 'scripts/build-ffi-xcframework.sh', 'scripts/native-rust-toolchain-env.sh', 'scripts/verify-native-engine-abi.sh') }}
+
       - name: Verify native account and episode ABI against the reviewed engine
         run: |
           set -euo pipefail

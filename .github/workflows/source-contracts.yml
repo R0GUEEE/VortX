@@ -74,6 +74,9 @@ on:
       - "scripts/test-native-apple-project.rb"
       - "scripts/verify-native-apple-package.py"
       - "scripts/tests/test_native_apple_package.py"
+      - "scripts/build-ffi-xcframework.sh"
+      - "scripts/build-mac-server.sh"
+      - "scripts/tests/test_native_builder_startup.py"
       - "scripts/tests/test_release_native_snapshot_argv.py"
       - "scripts/verify-android-release-version.sh"
       - "scripts/tests/test_android_release_version.py"
@@ -156,6 +159,9 @@ on:
       - "scripts/test-native-apple-project.rb"
       - "scripts/verify-native-apple-package.py"
       - "scripts/tests/test_native_apple_package.py"
+      - "scripts/build-ffi-xcframework.sh"
+      - "scripts/build-mac-server.sh"
+      - "scripts/tests/test_native_builder_startup.py"
       - "scripts/tests/test_release_native_snapshot_argv.py"
       - "scripts/verify-android-release-version.sh"
       - "scripts/tests/test_android_release_version.py"
@@ -228,6 +234,8 @@ jobs:
         if: ${{ !cancelled() && steps.apple_prerequisites.outcome == 'success' }}
         run: git fetch --no-tags --depth=1 origin f9c45518ba6b8d779343c076da9f0dbcda129a30
       - run: bash scripts/test-next-preparation-attempt.sh
+        if: ${{ !cancelled() && steps.apple_prerequisites.outcome == 'success' }}
+      - run: python3 scripts/tests/test_native_builder_startup.py
         if: ${{ !cancelled() && steps.apple_prerequisites.outcome == 'success' }}
       - run: python3 scripts/tests/test_native_apple_package.py
         if: ${{ !cancelled() && steps.apple_prerequisites.outcome == 'success' }}
