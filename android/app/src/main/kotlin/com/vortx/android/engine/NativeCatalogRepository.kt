@@ -334,7 +334,7 @@ internal class NativeCatalogRepository(
         } }
         return descriptors.filterNot { AddonOrder.normalize(it.getString("transportUrl")) in disabled }.map {
             // Transport is the stable membership identity; duplicate manifest IDs are valid configurations.
-            VortxResourceAddon(it.getString("transportUrl"), it.getString("transportUrl"), it.getJSONObject("manifest").toString())
+            VortxResourceAddon.fromTransportUrl(it.getString("transportUrl"), it.getJSONObject("manifest").toString())
         }
     }
     private fun catalogs(read: VortxNativeRead) = catalogs(registry(read))
@@ -1101,7 +1101,7 @@ internal class NativeCatalogRepository(
     override suspend fun installAddon(url: String) = attempt {
         val session = session(); val read = session.read(); val normalized = requireNotNull(normalizedAddonUrl(url))
         check(addonOwner(read) == read.owner.profileID) { "Shared profiles customize visibility; install add-ons from the owner profile" }
-        val addon = VortxResourceAddon(normalized, normalized)
+        val addon = VortxResourceAddon.fromTransportUrl(normalized)
         val response = session.load("install", read.owner, listOf(VortxResourceRequest(VortxResourceRequest.Resource.MANIFEST, "", "") to listOf(addon))).single()
         requireSettled(response)
         val manifest = response.groups.single().items(VortxResourceRequest.Resource.MANIFEST).single()
@@ -1128,7 +1128,7 @@ internal class NativeCatalogRepository(
         val targetKey = AddonOrder.normalize(target)
         require(targetKey == oldKey || before.none { AddonOrder.normalize(it.getString("transportUrl")) == targetKey }) { "Replacement endpoint is already installed" }
         val response = session.load("addon-replacement", read.owner,
-            listOf(VortxResourceRequest(VortxResourceRequest.Resource.MANIFEST, "", "") to listOf(VortxResourceAddon(target, target)))).single()
+            listOf(VortxResourceRequest(VortxResourceRequest.Resource.MANIFEST, "", "") to listOf(VortxResourceAddon.fromTransportUrl(target)))).single()
         requireSettled(response)
         val manifest = response.groups.single().items(VortxResourceRequest.Resource.MANIFEST).single()
         require(listOf("id", "name", "version").all { manifest.get(it) is String && manifest.getString(it).isNotBlank() }) { "Invalid replacement manifest" }
