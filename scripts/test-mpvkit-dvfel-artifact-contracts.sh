@@ -122,7 +122,7 @@ READER_FFMPEG_HASH="$(shasum -a 256 "$READER_FFMPEG_PATCH")"
 [ "${READER_FFMPEG_HASH%% *}" = "6927705a432e987d2e13e2d5922756cb6c395d5c060268191cf6c1d94063b2df" ] ||
   fail "FFmpeg finite-reader carrier differs from the reviewed source"
 READER_MPV_HASH="$(shasum -a 256 "$READER_MPV_PATCH")"
-[ "${READER_MPV_HASH%% *}" = "d902f2637c535c92ed135e0cdda659355bcf08f492b1586cdbe537f01f8cb991" ] ||
+[ "${READER_MPV_HASH%% *}" = "c8752eb80824a5487f5d80addc473da09778d6dd8cb1adac899079aa2bc211f2" ] ||
   fail "MPV finite-reader carrier differs from the reviewed source"
 grep -Fq 'copy_exact "$READER_FFMPEG_PATCH" "$GENERATED_READER_FFMPEG_PATCH"' "$BUILD" ||
   fail "Apple must retain the exact finite-reader FFmpeg generated copy"
@@ -577,7 +577,7 @@ native_git apply --cached "$READER_MPV_PATCH"
 check_native_source demux/demux.c e5f08305137ed3f7b28fa24ee431e19222153a6cfed10f12d109b92da55567a4
 check_native_source demux/demux.h bee52b38477ce7c8efd9a50e778f720ea8c9eec577afab29998682c26ffe75e2
 check_native_source demux/demux_lavf.c d945ae1699d383c3d645d2ab963abb166fd0c19f10a4ab144505e7fbfb0408fb
-check_native_source demux/reference_reader.c 6947238ab25a71d7de74d75ce9c2e4590ad0d83e1e9c8ca898d561f74461df7e
+check_native_source demux/reference_reader.c 322fa3a90ad9a461c549b2aaebf50adba07b9862d11b8690355a6d789571c752
 check_native_source demux/reference_reader.h 4894866fc49f8ab7af9f4d5b3a29bfc7d1ac4153483fd04354db3e89e55cad03
 check_native_source demux/reference_reader_internal.h 6b21e2b72c87c49d609fdfca0252c32635d50054abe4eaae33340fc5b7da1a9c
 check_native_source meson.build 316e9aca3c4960701eab42e62ca1005379e082e1a21b4788b7581811ca360147

@@ -383,7 +383,7 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertEqual(hashlib.sha256(ffmpeg).hexdigest(),
                          '6927705a432e987d2e13e2d5922756cb6c395d5c060268191cf6c1d94063b2df')
         self.assertEqual(hashlib.sha256(mpv).hexdigest(),
-                         'd902f2637c535c92ed135e0cdda659355bcf08f492b1586cdbe537f01f8cb991')
+                         'c8752eb80824a5487f5d80addc473da09778d6dd8cb1adac899079aa2bc211f2')
         self.assertEqual([line for line in ffmpeg.decode().splitlines() if line.startswith('+++ ')],
                          ['+++ b/libavformat/' + name for name in
                           ('http.c', 'url.h', 'avio.c', 'tcp.c', 'tls.c',

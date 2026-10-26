@@ -74,3 +74,53 @@ The existing INITIAL_REQUEST_ONLY and second-take rejection remain. Real
 external destinations/TLS handshakes, public command/OSD lifecycle, Swift and
 account admission, full matched platform packages and end-to-end automatic
 alignment are separate gates. This source enrollment adds none of those claims.
+
+## Additional controlled public-command fixture
+
+The four additional literal files are public_reader_fixture.c,
+client_fixture.c, decoder_fixture.c and public_fixture.h. They preserve the
+original public-command fixture, including its assertions, observers and result
+scope flags. The creation-time SOURCE ONLY / UNCOMPILED / UNRUN comment remains
+unchanged; it is not a statement about later retained operator receipts.
+
+public_reader_fixture.c includes genuine_reader_fixture.c through the mandatory
+VPR_GENUINE_RIG_SOURCE macro and renames the old direct main without calling it.
+The literal mux, real HTTP server and framing checks are reused; the 39 direct
+cases are not rerun by this additional main. client_fixture.c includes the
+whole matching player/client.c through VPR_ACTUAL_CLIENT_C and adds only the
+typed fixture getter. decoder_fixture.c includes the whole matching sub/dec_sub.c
+through VPR_ACTUAL_DEC_SUB_C; its mutex observer delegates every lock to the real
+native mutex. These macros have no default source path. Source-relative values
+are genuine_reader_fixture.c, player/client.c and sub/dec_sub.c with this fixture
+directory and the matching MPV source root on the respective include paths.
+
+This fixture still requires the matched-producer admission above, plus the
+actual public reader/command/owned-OSD source profile. A future host composition
+must retain exactly one current client and decoder owner, omitting their
+original archive members when using the two whole-TU adapters. Existing HTTP,
+TCP and MPV fixture helpers remain genuine linked dependencies. This document
+does not add a runner, compiler invocation, native producer target or CI gate.
+
+The controlled schedules submit real public async READ, PREPARE, COMMIT and
+REVOKE commands and check their exact original reply IDs and typed node maps.
+They require the original nine muxed timing pairs and scalar ownership witness.
+The external-text PREPARE payload is a deliberate complete fixture cue, not a
+private-estimator or Swift query result. Real OSD rendering must produce bounded
+nonzero subtitle pixels. The held-reader schedule observes the real decoder
+lock and OSD reader count, then invokes the exact synchronous revoke handler on
+the already-held genuine core; it does not wait for a synchronous public command
+while holding core and decoder locks. Exact owned-object, decoder and source
+holder cleanup is checked after reader release, manual subtitle delay, public
+revoke and natural last-client termination. A separate async abort schedule
+requires a positive native body-read wait, a negative original reply and real
+duplicate-socket closure while preserving the original playback capability.
+
+One retained operator result reports 165 checks, zero failures and normal
+completion for these original sources against the repaired unknown-stream-start
+reader, with actual public async commands, OSD pixels, held-reader cleanup and
+loopback traffic. This source enrollment does not rerun or independently certify
+that receipt, and 165 is that execution's assertion count, not a promised case
+count for every platform or configuration. Timer-driven pending-grant expiry,
+natural termination with a deliberately held reader, external network/TLS
+handshakes, Swift/account admission, matched shipping SDKs, app/device acceptance
+and end-to-end automatic alignment remain unproved by this fixture.

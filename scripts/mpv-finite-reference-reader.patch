@@ -749,8 +749,8 @@ diff --git a/demux/reference_reader.c b/demux/reference_reader.c
 new file mode 100644
 --- /dev/null
 +++ b/demux/reference_reader.c
-@@ -0,0 +1,448 @@
-+/* Proposed native-only bounded reference decoder, UNCOMPILED/UNRUN.
+@@ -0,0 +1,485 @@
++/* Native-only bounded reference decoder with owned source authority.
 + * Source recipe captures no live owner pointers; reader owns small buffers.
 + * Same LGPL terms as demux_lavf.c. No raw subtitle text is retained in result. */
 +#include <math.h>
@@ -777,6 +777,10 @@ new file mode 100644
 +    AVCodecParameters *codecpar;
 +    int64_t deadline_ns;
 +    bool decoded;
++    // Worker-only evidence from this SAME finite duplicate, not a new origin.
++    // Consumer reads it only after the worker has joined and decode succeeded.
++    bool worker_stream_start_observed;
++    int64_t worker_stream_start_time;
 +    struct demux_reference_result result;
 +};
 +
@@ -854,7 +858,6 @@ new file mode 100644
 +        !codec_equal(spec->codecpar, spec->codecpar) ||
 +        !isfinite(spec->demux_start_time) || !isfinite(spec->consumer_ts_offset) ||
 +        !isfinite(spec->demux_start_time + spec->consumer_ts_offset) ||
-+        spec->stream_start_time == AV_NOPTS_VALUE ||
 +        (spec->format_start_time == AV_NOPTS_VALUE ? spec->demux_start_time != 0 :
 +         spec->demux_start_time != spec->format_start_time / (double)AV_TIME_BASE) ||
 +        spec->time_base.num <= 0 || spec->time_base.den <= 0)
@@ -862,6 +865,7 @@ new file mode 100644
 +    struct mp_reference_reader_job *job = av_mallocz(sizeof(*job));
 +    if (!job)
 +        return NULL;
++    job->worker_stream_start_time = AV_NOPTS_VALUE;
 +    job->deadline_ns = deadline_ns;
 +    job->spec = *spec;
 +    job->spec.codecpar = NULL; // never retain the borrowed original parameters
@@ -888,6 +892,18 @@ new file mode 100644
 +    return job;
 +}
 +
++static bool owner_stream_start_matches(const struct mp_reference_reader_job *job,
++                                        int64_t current_start)
++{
++    if (job->spec.stream_start_time != AV_NOPTS_VALUE)
++        return current_start == job->spec.stream_start_time;
++    // Unknown original metadata is not a wildcard. Only a successful joined
++    // worker can certify its actual selected stream's one observed value.
++    return job->decoded && job->worker_stream_start_observed &&
++        (current_start == AV_NOPTS_VALUE ||
++         current_start == job->worker_stream_start_time);
++}
++
 +bool mp_reference_reader_job_matches(
 +    const struct mp_reference_reader_job *job,
 +    const struct mp_reference_track_spec *s)
@@ -898,7 +914,7 @@ new file mode 100644
 +        s->num_streams == p->num_streams &&
 +        s->time_base.num == p->time_base.num && s->time_base.den == p->time_base.den &&
 +        s->format_start_time == p->format_start_time &&
-+        s->stream_start_time == p->stream_start_time &&
++        owner_stream_start_matches(job, s->stream_start_time) &&
 +        s->stream_index == p->stream_index && s->demuxer_id == p->demuxer_id &&
 +        s->ff_index == p->ff_index && s->av_stream_id == p->av_stream_id &&
 +        s->source_origin == p->source_origin &&
@@ -945,7 +961,24 @@ new file mode 100644
 +    return AVERROR(EPERM);
 +}
 +
-+static bool duplicate_matches(const struct mp_reference_reader_job *job,
++static bool worker_stream_start_matches(struct mp_reference_reader_job *job,
++                                         int64_t current_start, bool require_start)
++{
++    // Preserve the known-original exact rule, including the pre-packet unknown
++    // allowance. No timestamp in either original or duplicate is written.
++    if (job->spec.stream_start_time != AV_NOPTS_VALUE)
++        return current_start == job->spec.stream_start_time ||
++            (!require_start && current_start == AV_NOPTS_VALUE);
++    if (job->worker_stream_start_observed)
++        return current_start == job->worker_stream_start_time;
++    if (current_start == AV_NOPTS_VALUE)
++        return !require_start;
++    job->worker_stream_start_time = current_start;
++    job->worker_stream_start_observed = true;
++    return true;
++}
++
++static bool duplicate_matches(struct mp_reference_reader_job *job,
 +                              const AVFormatContext *fmt, bool require_start)
 +{
 +    const struct mp_reference_track_spec *p = &job->spec;
@@ -956,8 +989,7 @@ new file mode 100644
 +        return false;
 +    const AVStream *s = fmt->streams[p->ff_index];
 +    return s->index == p->ff_index && s->id == p->av_stream_id &&
-+        (s->start_time == p->stream_start_time ||
-+         (!require_start && s->start_time == AV_NOPTS_VALUE)) &&
++        worker_stream_start_matches(job, s->start_time, require_start) &&
 +        s->time_base.num == p->time_base.num &&
 +        s->time_base.den == p->time_base.den && codec_equal(job->codecpar, s->codecpar);
 +}
@@ -1056,6 +1088,9 @@ new file mode 100644
 +    if (!job || job->decoded || !interrupt || !interrupt->callback ||
 +        mp_reference_reader_job_cancelled(job))
 +        return false;
++    // A failed earlier attempt must not lend evidence to a different duplicate.
++    job->worker_stream_start_observed = false;
++    job->worker_stream_start_time = AV_NOPTS_VALUE;
 +    struct reader_io io = {.job = job, .interrupt = interrupt};
 +    AVIOInterruptCB cb = {.callback = reader_interrupt, .opaque = &io};
 +    AVFormatContext *fmt = NULL;
@@ -1157,6 +1192,8 @@ new file mode 100644
 +    avsubtitle_free(&flushed);
 +    struct avpriv_vortx_reference_stats stats = {0};
 +    if (!complete || !drained || !job->result.num_pairs || reader_interrupt(&io) ||
++        (job->spec.stream_start_time == AV_NOPTS_VALUE &&
++         !job->worker_stream_start_observed) ||
 +        avpriv_vortx_reference_stats_v1(io.reader, &stats, sizeof(stats)) < 0 ||
 +        stats.terminal_error || stats.body_bytes > VORTX_REFERENCE_READER_MAX_BYTES ||
 +        (pb && pb->error && pb->error != AVERROR_EOF))
