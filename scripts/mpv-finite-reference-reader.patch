@@ -1,15 +1,16 @@
 diff --git a/demux/demux.c b/demux/demux.c
 --- a/demux/demux.c
 +++ b/demux/demux.c
-@@ -47,6 +47,7 @@
+@@ -47,6 +47,8 @@
  #include "packet_pool.h"
  #include "timeline.h"
  #include "stheader.h"
 +#include "reference_reader_internal.h"
++#include "reference_mkv_sparse_planner.h"
  #include "cue.h"
  
  // Demuxer list
-@@ -162,6 +163,16 @@
+@@ -162,6 +164,16 @@
      .get_sub_options = get_demux_sub_opts,
  };
  
@@ -26,7 +27,7 @@ diff --git a/demux/demux.c b/demux/demux.c
  struct demux_internal {
      struct mp_log *log;
      struct mpv_global *global;
-@@ -187,6 +198,10 @@
+@@ -187,6 +199,10 @@
      bool thread_terminate;
      bool threading;
      bool shutdown_async;
@@ -37,7 +38,7 @@ diff --git a/demux/demux.c b/demux/demux.c
      void (*wakeup_cb)(void *ctx);
      void *wakeup_cb_ctx;
  
-@@ -938,6 +953,8 @@
+@@ -938,6 +954,8 @@
  {
      struct demux_internal *in = demuxer->in;
      mp_mutex_lock(&in->lock);
@@ -46,14 +47,10 @@ diff --git a/demux/demux.c b/demux/demux.c
      in->ts_offset = offset;
      mp_mutex_unlock(&in->lock);
  }
-@@ -1074,14 +1091,450 @@
-     struct demux_internal *in = demuxer->in;
-     mp_mutex_lock(&in->lock);
-     int r = in->num_streams;
-+    mp_mutex_unlock(&in->lock);
-+    return r;
-+}
-+
+@@ -1078,11 +1096,468 @@
+     return r;
+ }
+ 
 +// No demuxer/stream/AVIO/cancel pointer is retained here. Consumer and queued
 +// owner each own one reference; the sole worker borrows the retained consumer
 +// request only until its synchronous run returns and the caller joins it.
@@ -193,28 +190,49 @@ diff --git a/demux/demux.c b/demux/demux.c
 +            in->reference_lifetime == r->owner &&
 +            !demux_reference_request_cancelled(r) &&
 +            !mp_cancel_test(in->d_thread->cancel) &&
-+            in->d_thread->desc == &demuxer_desc_lavf &&
++            (in->d_thread->desc == &demuxer_desc_lavf ||
++             in->d_thread->desc == &demuxer_desc_matroska) &&
 +            !in->seeking && !in->tracks_switched && !in->back_demuxing;
-+        struct sh_stream *selected = NULL;
-+        unsigned subtitles = 0;
++        struct sh_stream *reference = NULL;
++        unsigned references = 0;
 +        for (int n = 0; current && n < in->num_streams; n++) {
 +            struct sh_stream *s = in->streams[n];
-+            if (s->type == STREAM_SUB && s->ds->selected) {
-+                subtitles++;
-+                if (s->index == r->stream_index)
-+                    selected = s;
++            if (s->type == STREAM_SUB && s->index == r->stream_index) {
++                references++;
++                reference = s;
 +            }
 +        }
-+        current = current && subtitles == 1 && selected;
++        current = current && references == 1 && reference;
 +        if (current && r->reader_state == DEMUX_REFERENCE_READER_PENDING) {
-+            r->job = demux_lavf_reference_capture(in->d_thread, selected,
-+                                                  in->ts_offset, r->deadline_ns);
++            if (in->d_thread->desc == &demuxer_desc_matroska) {
++                struct mkv_sparse_snapshot *snapshot = NULL;
++                if (demux_mkv_reference_sparse_capture(in->d_thread, reference,
++                        in->ts_offset, &snapshot)) {
++                    r->job = mp_reference_reader_job_create_mkv_sparse(
++                        in->d_thread->stream, snapshot, r->deadline_ns);
++                }
++                demux_mkv_reference_sparse_snapshot_free(&snapshot);
++            } else {
++                r->job = demux_lavf_reference_capture(in->d_thread, reference,
++                                                      in->ts_offset, r->deadline_ns);
++            }
 +            current = r->job && !mp_reference_reader_job_cancelled(r->job);
 +            r->reader_state = current ? DEMUX_REFERENCE_READER_CAPTURED :
 +                                       DEMUX_REFERENCE_READER_UNAVAILABLE;
 +        } else if (current && r->reader_state == DEMUX_REFERENCE_READER_REVALIDATING) {
-+            current = r->job && demux_lavf_reference_revalidate(in->d_thread,
-+                                                   selected, in->ts_offset, r->job);
++            if (in->d_thread->desc == &demuxer_desc_matroska) {
++                const struct mkv_sparse_snapshot *snapshot =
++                    mp_reference_reader_job_mkv_snapshot(r->job);
++                current = r->job && snapshot &&
++                    demux_mkv_reference_sparse_revalidate(in->d_thread, reference,
++                        in->ts_offset, snapshot) &&
++                    mp_reference_reader_job_revalidate(r->job, in->d_thread->stream) &&
++                    demux_mkv_reference_sparse_revalidate(in->d_thread, reference,
++                        in->ts_offset, snapshot);
++            } else {
++                current = r->job && demux_lavf_reference_revalidate(in->d_thread,
++                                                       reference, in->ts_offset, r->job);
++            }
 +            r->reader_state = current ? DEMUX_REFERENCE_READER_READY :
 +                                       DEMUX_REFERENCE_READER_UNAVAILABLE;
 +        } else {
@@ -299,8 +317,8 @@ diff --git a/demux/demux.c b/demux/demux.c
 +        // directly, without calling thread_work or initiating reads/seeks.
 +        finish_reference_request(in, true);
 +    }
-     mp_mutex_unlock(&in->lock);
-     return r;
++    mp_mutex_unlock(&in->lock);
++    return r;
 +}
 +
 +struct demux_reference_request *demux_reference_reader_request(
@@ -408,8 +426,8 @@ diff --git a/demux/demux.c b/demux/demux.c
 +        decoded ? DEMUX_REFERENCE_READER_DECODED : DEMUX_REFERENCE_READER_UNAVAILABLE;
 +    mp_mutex_unlock(&r->lock);
 +    return decoded && !cancelled;
- }
- 
++}
++
 +bool demux_reference_reader_revalidate(struct demuxer *demuxer,
 +                                      struct demux_reference_request *r)
 +{
@@ -489,15 +507,16 @@ diff --git a/demux/demux.c b/demux/demux.c
  static void demux_shutdown(struct demux_internal *in)
  {
      struct demuxer *demuxer = in->d_user;
-+
+ 
 +    mp_mutex_lock(&in->lock);
 +    reference_owner_retire(in);
 +    finish_reference_request(in, false);
 +    mp_mutex_unlock(&in->lock);
- 
++
      if (in->recorder) {
          mp_recorder_destroy(in->recorder);
-@@ -1111,6 +1564,8 @@
+         in->recorder = NULL;
+@@ -1111,6 +1586,8 @@
  
  static void demux_dealloc(struct demux_internal *in)
  {
@@ -506,7 +525,7 @@ diff --git a/demux/demux.c b/demux/demux.c
      for (int n = 0; n < in->num_streams; n++)
          talloc_free(in->streams[n]);
      mp_mutex_destroy(&in->lock);
-@@ -1148,6 +1603,8 @@
+@@ -1148,6 +1625,8 @@
      mp_mutex_lock(&in->lock);
      in->thread_terminate = true;
      in->shutdown_async = true;
@@ -515,7 +534,7 @@ diff --git a/demux/demux.c b/demux/demux.c
      mp_cond_signal(&in->wakeup);
      mp_mutex_unlock(&in->lock);
  
-@@ -1217,6 +1674,8 @@
+@@ -1217,6 +1696,8 @@
      if (in->threading) {
          mp_mutex_lock(&in->lock);
          in->thread_terminate = true;
@@ -524,7 +543,7 @@ diff --git a/demux/demux.c b/demux/demux.c
          mp_cond_signal(&in->wakeup);
          mp_mutex_unlock(&in->lock);
          mp_thread_join(in->thread);
-@@ -2521,6 +2980,7 @@
+@@ -2521,6 +3002,7 @@
  
  static void execute_seek(struct demux_internal *in)
  {
@@ -532,7 +551,7 @@ diff --git a/demux/demux.c b/demux/demux.c
      int flags = in->seek_flags;
      double pts = in->seek_pts;
      in->eof = false;
-@@ -2666,12 +3126,19 @@
+@@ -2666,12 +3148,19 @@
      stats_register_thread_cputime(in->stats, "thread");
  
      while (!in->thread_terminate) {
@@ -552,7 +571,7 @@ diff --git a/demux/demux.c b/demux/demux.c
      if (in->shutdown_async) {
          mp_mutex_unlock(&in->lock);
          demux_shutdown(in);
-@@ -3640,6 +4107,7 @@
+@@ -3640,6 +4129,7 @@
      mp_assert(demuxer == in->d_user);
  
      mp_mutex_lock(&in->lock);
@@ -560,7 +579,7 @@ diff --git a/demux/demux.c b/demux/demux.c
      clear_reader_state(in, true);
      for (int n = 0; n < in->num_ranges; n++)
          clear_cached_range(in, in->ranges[n]);
-@@ -3931,6 +4399,7 @@
+@@ -3931,6 +4421,7 @@
  static bool queue_seek(struct demux_internal *in, double seek_pts, int flags,
                         bool clear_back_state)
  {
@@ -568,7 +587,7 @@ diff --git a/demux/demux.c b/demux/demux.c
      if (seek_pts == MP_NOPTS_VALUE)
          return false;
  
-@@ -4049,12 +4518,18 @@
+@@ -4049,12 +4540,18 @@
      if (start_ts == MP_NOPTS_VALUE || !seekable)
          return;
  
@@ -581,18 +600,18 @@ diff --git a/demux/demux.c b/demux/demux.c
 +        MP_VERBOSE(in, "can't issue refresh seek\n");
 +        return;
 +    }
-+
+ 
 +    // demuxer_refresh_track can reach this without select_track/queue_seek.
 +    // Invalidate retained readers NOW, under in->lock, after every refusal
 +    // check and before either successful branch clears queues or sets seeking.
 +    // execute_seek is later; READY take must already fail before it can run.
 +    reference_epoch_advance(in);
- 
++
 +    if (!normal_seek) {
          for (int n = 0; n < in->num_streams; n++) {
              struct demux_stream *ds = in->streams[n]->ds;
  
-@@ -4134,6 +4609,7 @@
+@@ -4134,6 +4631,7 @@
      struct demux_stream *ds = stream->ds;
      if (ds->selected == selected)
          return false;
@@ -600,7 +619,7 @@ diff --git a/demux/demux.c b/demux/demux.c
      MP_VERBOSE(in, "%sselect track %d\n", selected ? "" : "de", stream->index);
      ds->selected = selected;
      update_stream_selection_state(in, ds);
-@@ -4831,3 +5307,7 @@
+@@ -4831,3 +5329,7 @@
      *sub = demuxer_list[index]->options;
      return true;
  }
@@ -749,7 +768,7 @@ diff --git a/demux/reference_reader.c b/demux/reference_reader.c
 new file mode 100644
 --- /dev/null
 +++ b/demux/reference_reader.c
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,535 @@
 +/* Native-only bounded reference decoder with owned source authority.
 + * Source recipe captures no live owner pointers; reader owns small buffers.
 + * Same LGPL terms as demux_lavf.c. No raw subtitle text is retained in result. */
@@ -765,6 +784,7 @@ new file mode 100644
 +#include "stream/stream.h"
 +#include "stream/vortx_reference_reader_stream.h"
 +#include "reference_reader_internal.h"
++#include "reference_mkv_sparse_planner.h"
 +
 +#define REFERENCE_PACKET_LIMIT 100000u
 +#define REFERENCE_PACKET_BYTES (64 * 1024)
@@ -775,6 +795,7 @@ new file mode 100644
 +    struct stream_reference_reader_grant *grant;
 +    struct mp_reference_track_spec spec;
 +    AVCodecParameters *codecpar;
++    struct mkv_sparse_snapshot *mkv; // owned immutable native-only descriptor
 +    int64_t deadline_ns;
 +    bool decoded;
 +    // Worker-only evidence from this SAME finite duplicate, not a new origin.
@@ -846,7 +867,35 @@ new file mode 100644
 +    *out = NULL;
 +    stream_reference_reader_release(&job->grant);
 +    avcodec_parameters_free(&job->codecpar);
++    av_free(job->mkv);
 +    av_free(job);
++}
++
++struct mp_reference_reader_job *mp_reference_reader_job_create_mkv_sparse(
++    struct stream *source, const struct mkv_sparse_snapshot *snapshot,
++    int64_t deadline_ns)
++{
++    if (!source || !snapshot || snapshot->spec.version != DEMUX_MKV_REFERENCE_VERSION ||
++        snapshot->hint_count > MKV_SPARSE_MAX_CAPTURE_HINTS)
++        return NULL;
++    struct mp_reference_reader_job *job = av_mallocz(sizeof(*job));
++    if (!job)
++        return NULL;
++    job->deadline_ns = deadline_ns;
++    job->mkv = av_memdup(snapshot, sizeof(*snapshot));
++    if (!job->mkv || !stream_reference_reader_capture(source, deadline_ns, &job->grant) ||
++        !stream_reference_reader_witness(job->grant, &job->result.source_generation,
++            &job->result.source_epoch, &job->result.response_generation)) {
++        mp_reference_reader_job_free(&job);
++        return NULL;
++    }
++    return job;
++}
++
++const struct mkv_sparse_snapshot *mp_reference_reader_job_mkv_snapshot(
++    const struct mp_reference_reader_job *job)
++{
++    return job ? job->mkv : NULL; // immutable job-owned scalars, no live source
 +}
 +
 +struct mp_reference_reader_job *mp_reference_reader_job_create(
@@ -908,7 +957,7 @@ new file mode 100644
 +    const struct mp_reference_reader_job *job,
 +    const struct mp_reference_track_spec *s)
 +{
-+    const struct mp_reference_track_spec *p = job ? &job->spec : NULL;
++    const struct mp_reference_track_spec *p = job && !job->mkv ? &job->spec : NULL;
 +    return s && p && !mp_reference_reader_job_cancelled(job) &&
 +        s->format == p->format && s->format_flags == p->format_flags &&
 +        s->num_streams == p->num_streams &&
@@ -1091,6 +1140,26 @@ new file mode 100644
 +    // A failed earlier attempt must not lend evidence to a different duplicate.
 +    job->worker_stream_start_observed = false;
 +    job->worker_stream_start_time = AV_NOPTS_VALUE;
++    if (job->mkv) {
++        struct demux_reference_result value = {0};
++        const struct mkv_sparse_snapshot *s = job->mkv;
++        bool ok = demux_mkv_reference_sparse_run(job->grant, &s->spec, sizeof(s->spec),
++            s->original_origin_ns, s->hints, s->hint_count, job->deadline_ns,
++            interrupt, &value, sizeof(value));
++        job->decoded = ok && value.complete && value.num_pairs &&
++            value.source_generation == job->result.source_generation &&
++            value.source_epoch == job->result.source_epoch &&
++            value.response_generation == job->result.response_generation &&
++            !mp_reference_reader_job_cancelled(job) && !interrupt->callback(interrupt->opaque);
++        if (job->decoded) {
++            job->result = value;
++        } else {
++            job->result.complete = false;
++            job->result.num_pairs = 0;
++            memset(job->result.pairs, 0, sizeof(job->result.pairs));
++        }
++        return job->decoded;
++    }
 +    struct reader_io io = {.job = job, .interrupt = interrupt};
 +    AVIOInterruptCB cb = {.callback = reader_interrupt, .opaque = &io};
 +    AVFormatContext *fmt = NULL;
@@ -1239,7 +1308,7 @@ diff --git a/demux/reference_reader.h b/demux/reference_reader.h
 new file mode 100644
 --- /dev/null
 +++ b/demux/reference_reader.h
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,91 @@
 +/* Native-only proposed finite reader. UNCOMPILED/UNRUN; no public mpv ABI. */
 +#pragma once
 +#include <stdbool.h>
@@ -1254,16 +1323,18 @@ new file mode 100644
 +    uint64_t source_epoch;
 +    unsigned demux_epoch;
 +    int stream_index, demuxer_id, ff_index, av_stream_id, source_origin;
-+    int format_kind; // 1 exact lavf Matroska/WebM; 2 exact lavf MOV/MP4
++    int format_kind; // 1 lavf Matroska/WebM; 2 lavf MOV/MP4; 3 strict native MKV
 +    int codec_id, time_base_num, time_base_den;
 +    double origin_seconds; // actual demux start + consumer timestamp offset
 +    int64_t prefix_start_ms, prefix_end_ms;
 +    uint64_t input_bytes;
 +    unsigned packets_seen, num_pairs;
-+    // Complete bounded sequential selected-track prefix through first observed
-+    // PTS>=1080 (or admitted genuine entity EOF), not a whole-movie absence
-+    // proof. Every observed backward PTS fails; unseen future packets are not
-+    // claimed checked after the intentional early stop. Equal/overlap survive.
++    // Kinds1/2: complete bounded sequential prefix through first observed
++    // PTS>=1080 or genuine entityEOF; no unseen future-packet claim. Kind3:
++    // actual Segment chain/all relevant native Block headers through the
++    // finite window; skipped late Clusters require matched strict native
++    // timestamp policy and integer lower bound. No whole-file validity claim.
++    // Every retained backward PTS fails. Equal/overlap occurrences survive.
 +    bool complete;
 +    struct demux_reference_pair pairs[DEMUX_REFERENCE_MAX_PAIRS];
 +};
@@ -1279,7 +1350,10 @@ new file mode 100644
 +};
 +
 +// Consumer thread, live demux only: capture is queued to its actual owner.
-+// index must name the sole actually selected text subtitle. Deadline is an
++// index must name exactly one embedded STREAM_SUB in the original owner's
++// inventory. It is a reference identity independent of visible primary and
++// secondary selection; this API never selects or mounts that track. Genuine
++// owner codec/format/native-UID/source validation remains mandatory. Deadline is an
 +// absolute mp_time_ns, >now and <=30s for ENTIRE capture/read/decode/revalidate.
 +// No URL, headers, current AVIO, sh_stream, or demux lifetime is borrowed.
 +struct demux_reference_request *demux_reference_reader_request(
@@ -1295,7 +1369,7 @@ new file mode 100644
 +bool demux_reference_reader_run(struct demux_reference_request *request);
 +
 +// Original consumer, AFTER worker joined. Enqueue final source/response/peer/
-+// selected-track/format/origin revalidation on SAME actual demux owner queue.
++// exact reference-track/format/origin revalidation on SAME actual demux owner queue.
 +// Different demuxes, seek/track ABA, teardown/expiry, or busy slot refuse.
 +// After the one-time timing take, keep the request retained: the same grant may
 +// be revalidated again from READY before later native prepare/commit admission.
@@ -1330,7 +1404,7 @@ diff --git a/demux/reference_reader_internal.h b/demux/reference_reader_internal
 new file mode 100644
 --- /dev/null
 +++ b/demux/reference_reader_internal.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,57 @@
 +/* Owner/worker implementation boundary, never installed or public. */
 +#pragma once
 +#include <libavformat/avformat.h>
@@ -1338,6 +1412,12 @@ new file mode 100644
 +struct stream;
 +struct sh_stream;
 +struct mp_reference_reader_job;
++struct mkv_sparse_snapshot;
++struct mp_reference_reader_job *mp_reference_reader_job_create_mkv_sparse(
++    struct stream *source, const struct mkv_sparse_snapshot *snapshot,
++    int64_t deadline_ns);
++const struct mkv_sparse_snapshot *mp_reference_reader_job_mkv_snapshot(
++    const struct mp_reference_reader_job *job);
 +
 +// Borrowed only within synchronous owner capture/revalidation calls. create
 +// deep-copies codecpar; AVInputFormat is immutable library-static storage.
@@ -1385,21 +1465,19 @@ new file mode 100644
 diff --git a/stream/stream_lavf.c b/stream/stream_lavf.c
 --- a/stream/stream_lavf.c
 +++ b/stream/stream_lavf.c
-@@ -33,6 +33,7 @@
+@@ -33,6 +33,8 @@
  #include "stream.h"
  #include "network.h"
  #include "vortx_http_request.h"
 +#include "vortx_reference_reader_stream.h"
++#include "vortx_reference_sparse.h"
  #include "options/m_config.h"
  #include "options/m_option.h"
  
-@@ -848,9 +849,114 @@
-     av_free(copy_url);
-     av_free(headers);
-     av_dict_free(&copy_options);
-+    return false;
-+}
-+
+@@ -851,6 +853,133 @@
+     return false;
+ }
+ 
 +// Owned grant, separate from INITIAL_REQUEST_ONLY and sent evidence. Only
 +// capture/revalidate touch live p->avio, on the actual demux/stream owner.
 +struct stream_reference_reader_grant {
@@ -1465,7 +1543,7 @@ diff --git a/stream/stream_lavf.c b/stream/stream_lavf.c
 +    av_free(url);
 +    av_dict_free(&options);
 +    stream_reference_reader_release(&grant);
-     return false;
++    return false;
 +}
 +
 +bool stream_reference_reader_revalidate(
@@ -1479,8 +1557,8 @@ diff --git a/stream/stream_lavf.c b/stream/stream_lavf.c
 +        &grant->sent->sent, sizeof(grant->sent->sent), grant->recipe) == 0 &&
 +        stream_reference_source_revalidate_sent_request(s, grant->sent) &&
 +        !stream_reference_reader_cancelled(grant);
- }
- 
++}
++
 +bool stream_reference_reader_witness(
 +    const struct stream_reference_reader_grant *grant,
 +    int64_t *source_generation, uint64_t *epoch, int64_t *response_generation)
@@ -1505,13 +1583,35 @@ diff --git a/stream/stream_lavf.c b/stream/stream_lavf.c
 +        avpriv_vortx_reference_open_prefix_v1(grant->recipe, interrupt, out) == 0;
 +}
 +
++bool stream_reference_reader_sparse_budget(
++    const struct stream_reference_reader_grant *grant,
++    const AVIOInterruptCB *interrupt,
++    struct avpriv_vortx_reference_sparse_budget **out)
++{
++    // Same job/worker lifetime as the prefix open: grant and owned callback
++    // storage remain alive through every handle close AND budget release.
++    // No live AVIO, initial lease or mutable option is returned to the worker.
++    if (!out || *out || !interrupt || !interrupt->callback ||
++        stream_reference_reader_cancelled(grant) ||
++        !stream_reference_reader_current(grant) ||
++        avpriv_vortx_reference_sparse_budget_create_v1(
++            grant->recipe, interrupt, out) < 0)
++        return false;
++    if (stream_reference_reader_cancelled(grant) ||
++        !stream_reference_reader_current(grant)) {
++        avpriv_vortx_reference_sparse_budget_release_v1(out);
++        return false;
++    }
++    return true;
++}
++
  static int interrupt_cb(void *ctx);
  
  static bool reopen_at(stream_t *s, int64_t offset)
 diff --git a/stream/reference_source.h b/stream/reference_source.h
 --- a/stream/reference_source.h
 +++ b/stream/reference_source.h
-@@ -167,3 +167,33 @@
+@@ -167,3 +167,42 @@
  bool stream_reference_source_prepare_prefix_request(
      struct stream *s, const struct stream_reference_sent_request *request,
      uint32_t max_bytes, char **url, struct AVDictionary **options);
@@ -1545,6 +1645,15 @@ diff --git a/stream/reference_source.h b/stream/reference_source.h
 +    const struct AVIOInterruptCB *interrupt,
 +    struct avpriv_vortx_reference_reader **out);
 +void stream_reference_reader_release(struct stream_reference_reader_grant **grant);
++
++struct avpriv_vortx_reference_sparse_budget;
++// Utility job retains grant/callback through last close AND budget release.
++// No recipe/live-owner pointer is exposed, and INITIAL_REQUEST_ONLY cannot
++// enter this distinct captured/current reader-grant path.
++bool stream_reference_reader_sparse_budget(
++    const struct stream_reference_reader_grant *grant,
++    const struct AVIOInterruptCB *interrupt,
++    struct avpriv_vortx_reference_sparse_budget **out);
 diff --git a/stream/vortx_reference_reader_stream.h b/stream/vortx_reference_reader_stream.h
 new file mode 100644
 --- /dev/null
@@ -1650,18 +1759,29 @@ new file mode 100644
 diff --git a/meson.build b/meson.build
 --- a/meson.build
 +++ b/meson.build
-@@ -99,6 +99,7 @@
+@@ -99,6 +99,10 @@
      'demux/demux_disc.c',
      'demux/demux_edl.c',
      'demux/demux_lavf.c',
 +    'demux/reference_reader.c',
++    'demux/reference_mkv_reader.c',
++    'demux/reference_mkv_sparse_planner.c',
++    'demux/reference_mkv_sparse_worker.c',
      'demux/demux_mf.c',
      'demux/demux_mkv.c',
      'demux/demux_mkv_timeline.c',
 diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
 --- a/player/owned_subtitle.c
 +++ b/player/owned_subtitle.c
-@@ -13,6 +13,7 @@
+@@ -5,6 +5,7 @@
+ #include <assert.h>
+ #include <limits.h>
+ #include <math.h>
++#include <stdatomic.h>
+ #include <string.h>
+ 
+ #include "config.h"
+@@ -13,6 +14,7 @@
  #include "common/common.h"
  #include "common/playlist.h"
  #include "demux/demux.h"
@@ -1669,15 +1789,27 @@ diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
  #include "demux/stheader.h"
  #include "input/cmd.h"
  #include "misc/json.h"
-@@ -36,6 +37,7 @@
+@@ -34,9 +36,19 @@
  
+ #define OWNED_JSON_LIMIT (9 * 1024 * 1024)
+ 
++// Internal real descriptor identity; no name/ordinal-derived native authority.
++extern const demuxer_desc_t demuxer_desc_matroska;
++extern const demuxer_desc_t demuxer_desc_lavf;
++
  struct owned_witness {
      int64_t intent, entry, source;
 +    int64_t reference_grant;
      int sid, ff_index, play_dir;
++    int reference_stream_index;
++    int native_stream_index, native_demuxer_id;
++    int primary_sid, secondary_sid;
++    bool primary_external, secondary_external, secondary_visible;
++    bool native_mkv;
      double origin, video_fps;
      bool visible;
-@@ -46,6 +48,12 @@
+ };
+@@ -46,6 +58,12 @@
      bool preparing, closing;
      struct vortx_owned_text *ready;
      struct owned_witness ready_witness, active_witness;
@@ -1690,7 +1822,7 @@ diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
      struct vortx_owned_text *retired[2];
      int retired_count;
      int64_t reaping_tickets[2];
-@@ -61,6 +69,10 @@
+@@ -61,6 +79,10 @@
  };
  
  static void kick_reaper(struct MPContext *mpctx);
@@ -1701,7 +1833,7 @@ diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
  
  static void retire_object(struct vortx_owned_subtitle *s,
                            struct vortx_owned_text *object)
-@@ -78,6 +90,7 @@
+@@ -78,6 +100,7 @@
      struct vortx_owned_subtitle *s = mpctx->vortx_owned_subtitle;
      if (!s)
          return;
@@ -1709,23 +1841,103 @@ diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
      if (mpctx->osd)
          retire_object(s, osd_vortx_owned_text_exchange(mpctx->osd, NULL));
      retire_object(s, s->ready);
-@@ -115,7 +128,8 @@
+@@ -115,17 +138,100 @@
      return co && co->data && co->opt->type == CONF_TYPE_BOOL && !*(bool *)co->data;
  }
  
 -static bool capture(struct MPContext *mpctx, struct owned_witness *out)
++static bool reference_track_id_unique(struct MPContext *mpctx, const struct track *track)
+ {
++    if (!track || track->type != STREAM_SUB || track->user_tid <= 0)
++        return false;
++    unsigned matches = 0;
++    bool present = false;
++    for (int n = 0; n < mpctx->num_tracks; n++) {
++        const struct track *t = mpctx->tracks[n];
++        if (t && t->type == STREAM_SUB && t->user_tid == track->user_tid)
++            matches++;
++        present |= t == track;
++    }
++    return present && matches == 1;
++}
++
++static bool reference_track_eligible(struct MPContext *mpctx, struct demuxer *d,
++                                      struct track *track, bool native_mkv)
++{
++    if (!reference_track_id_unique(mpctx, track) || track->is_external ||
++        track->demuxer != d || !track->stream || track->stream->type != STREAM_SUB ||
++        track->ff_index < 0 || track->ff_index >= 128 ||
++        track->stream->index < 0 || track->stream->index >= 1024 ||
++        track->dependent_track || track->stream->dependent_track ||
++        track->stream->missing_timestamps || track->stream->group ||
++        !track->stream->codec || track->stream->codec->frame_based ||
++        !track_is_visible(mpctx, track) ||
++        (native_mkv && track->stream->demuxer_id <= 0))
++        return false;
++    // Eligibility hint only. Real owner capture still validates the codec,
++    // source and (for native MKV) raw TrackNumber/UID and exact UTF8 policy.
++    // These admitted descriptors publish static codec-name storage.
++    const char *codec = atomic_load_explicit(&track->stream->codec->codec,
++                                             memory_order_acquire);
++    if (!codec)
++        return false;
++    if (native_mkv)
++        return !strcmp(codec, "subrip");
++    if (d->desc != &demuxer_desc_lavf)
++        return false;
++    static const char *const text[] = {"ass", "ssa", "subrip", "text", "webvtt", "mov_text"};
++    for (unsigned n = 0; n < MP_ARRAY_SIZE(text); n++) {
++        if (!strcmp(codec, text[n]))
++            return true;
++    }
++    return false;
++}
++
++static bool reference_track_preferred(const struct track *a, const struct track *b)
++{
++    if (a->forced_track != b->forced_track)
++        return !a->forced_track;
++    if (a->commentary_track != b->commentary_track)
++        return !a->commentary_track;
++    if (a->default_track != b->default_track)
++        return a->default_track;
++    return a->user_tid < b->user_tid;
++}
++
++static struct track *choose_reference_track(struct MPContext *mpctx, struct demuxer *d,
++                                             bool native_mkv)
++{
++    struct track *primary = mpctx->current_track[0][STREAM_SUB];
++    if (primary && primary->selected &&
++        reference_track_eligible(mpctx, d, primary, native_mkv))
++        return primary;
++    struct track *best = NULL;
++    for (int n = 0; n < mpctx->num_tracks; n++) {
++        struct track *t = mpctx->tracks[n];
++        if (reference_track_eligible(mpctx, d, t, native_mkv) &&
++            (!best || reference_track_preferred(t, best)))
++            best = t;
++    }
++    return best;
++}
++
 +static bool capture_base(struct MPContext *mpctx, bool remote,
 +                          struct owned_witness *out)
- {
++{
      struct vortx_owned_subtitle *s = mpctx->vortx_owned_subtitle;
      struct MPOpts *o = mpctx->opts;
-@@ -124,8 +138,11 @@
+     struct demuxer *d = mpctx->demuxer;
++    // Local-file publication remains lavf-only. The remote reader additionally
++    // admits the real native descriptor, whose raw identity is owned/revalidated
++    // by the common request on the original demux queue.
++    bool native_mkv = remote && d && d->desc == &demuxer_desc_matroska;
+     if (!s || s->closing || !mpctx->osd ||
          !osd_vortx_owned_text_available(mpctx->osd) ||
          s->intent <= 0 || s->intent == INT64_MAX || mpctx->stop_play ||
          !mpctx->playback_initialized || !mpctx->playing || mpctx->playing->id <= 0 ||
 -        !d || !d->original_local_file_identity || d->original_local_file_generation <= 0 ||
 -        d->is_network || d->is_streaming || strcmp(d->desc->name, "lavf") ||
-+        !d || strcmp(d->desc->name, "lavf") ||
++        !d || (!native_mkv && d->desc != &demuxer_desc_lavf) ||
 +        (!remote && (!d->original_local_file_identity ||
 +                     d->original_local_file_generation <= 0 ||
 +                     d->is_network || d->is_streaming)) ||
@@ -1733,16 +1945,51 @@ diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
          !isfinite(d->start_time) || fabs(d->start_time) > 86400 ||
          mpctx->num_option_callbacks || mpctx->num_tracks < 1 || mpctx->num_tracks > 128 ||
          !o->rebase_start_time || o->subs_shared->sub_delay[0] != 0 ||
-@@ -165,7 +182,7 @@
+@@ -145,18 +251,13 @@
+         return false;
+ #endif
+     struct track *primary = mpctx->current_track[0][STREAM_SUB];
+-    if (!primary || primary->type != STREAM_SUB || !primary->selected ||
+-        primary->is_external || primary->demuxer != d || !primary->stream ||
+-        primary->user_tid <= 0 || primary->ff_index < 0 || primary->ff_index >= 128 ||
+-        mpctx->current_track[1][STREAM_SUB] == primary)
++    struct track *secondary = mpctx->current_track[1][STREAM_SUB];
++    if ((primary && (!primary->selected || !reference_track_id_unique(mpctx, primary))) ||
++        (secondary && (!secondary->selected || !reference_track_id_unique(mpctx, secondary))) ||
++        (primary && primary == secondary))
+         return false;
+-    int matches = 0;
+-    for (int n = 0; n < mpctx->num_tracks; n++) {
+-        struct track *t = mpctx->tracks[n];
+-        if (t->type == STREAM_SUB && t->user_tid == primary->user_tid)
+-            matches++;
+-    }
+-    if (matches != 1)
++    struct track *reference = choose_reference_track(mpctx, d, native_mkv);
++    if (!reference)
+         return false;
+     struct track *video = mpctx->current_track[0][STREAM_VIDEO];
+     double fps = video && video->stream && video->stream->codec ?
+@@ -165,18 +266,42 @@
          return false;
      *out = (struct owned_witness){
          .intent = s->intent, .entry = mpctx->playing->id,
 -        .source = d->original_local_file_generation,
+-        .sid = primary->user_tid, .ff_index = primary->ff_index,
 +        .source = remote ? 0 : d->original_local_file_generation,
-         .sid = primary->user_tid, .ff_index = primary->ff_index,
++        .sid = reference->user_tid, .ff_index = reference->ff_index,
++        .reference_stream_index = reference->stream->index,
++        .native_mkv = native_mkv,
++        .native_stream_index = native_mkv ? reference->stream->index : 0,
++        .native_demuxer_id = native_mkv ? reference->stream->demuxer_id : 0,
++        .primary_sid = primary ? primary->user_tid : 0,
++        .secondary_sid = secondary ? secondary->user_tid : 0,
++        .primary_external = primary && primary->is_external,
++        .secondary_external = secondary && secondary->is_external,
++        .secondary_visible = o->subs_shared->sub_visibility[1],
          .origin = d->start_time, .visible = o->subs_shared->sub_visibility[0],
          .play_dir = mpctx->play_dir, .video_fps = fps,
-@@ -173,9 +190,15 @@
+     };
      return true;
  }
  
@@ -1756,9 +2003,72 @@ diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
      return a->intent == b->intent && a->entry == b->entry &&
 +        a->reference_grant == b->reference_grant &&
          a->source == b->source && a->sid == b->sid && a->ff_index == b->ff_index &&
++        a->reference_stream_index == b->reference_stream_index &&
++        a->primary_sid == b->primary_sid && a->secondary_sid == b->secondary_sid &&
++        a->primary_external == b->primary_external &&
++        a->secondary_external == b->secondary_external &&
++        a->secondary_visible == b->secondary_visible &&
++        a->native_mkv == b->native_mkv &&
++        (!a->native_mkv ||
++         (a->native_stream_index == b->native_stream_index &&
++          a->native_demuxer_id == b->native_demuxer_id)) &&
          a->origin == b->origin && a->visible == b->visible &&
          a->play_dir == b->play_dir && a->video_fps == b->video_fps;
-@@ -365,6 +388,8 @@
+ }
+@@ -184,14 +309,34 @@
+ static bool args_match(struct mp_cmd_ctx *cmd, int offset,
+                        const struct owned_witness *s)
+ {
++    int64_t flags = cmd->args[offset + 7].v.i64;
++    int64_t expected = (s->primary_external ? INT64_C(1) : 0) |
++                       (s->visible ? INT64_C(2) : 0);
+     return cmd->args[offset].v.i64 == s->intent &&
+         cmd->args[offset + 1].v.i64 == s->entry &&
+         cmd->args[offset + 2].v.i64 == s->source &&
+         cmd->args[offset + 3].v.i64 == s->sid &&
+         cmd->args[offset + 4].v.i64 == s->ff_index &&
+-        cmd->args[offset + 5].v.d == s->origin;
++        cmd->args[offset + 5].v.i64 == s->reference_stream_index &&
++        cmd->args[offset + 6].v.i64 == s->primary_sid &&
++        flags >= 0 && flags <= 3 && flags == expected &&
++        (s->primary_sid != 0 || !(flags & INT64_C(1))) &&
++        cmd->args[offset + 8].v.d == s->origin;
+ }
+ 
++static void capture_node(struct mpv_node *node, const struct owned_witness *s)
++{
++    node_map_add_int64(node, "intent-generation", s->intent);
++    node_map_add_int64(node, "entry-id", s->entry);
++    node_map_add_int64(node, "reference-sid", s->sid);
++    node_map_add_int64(node, "reference-command-index", s->ff_index);
++    node_map_add_int64(node, "reference-stream-index", s->reference_stream_index);
++    node_map_add_double(node, "demux-origin", s->origin);
++    node_map_add_int64(node, "primary-sid", s->primary_sid);
++    node_map_add_flag(node, "primary-external", s->primary_external);
++    node_map_add_flag(node, "primary-visible", s->visible);
++}
++
+ int mp_property_vortx_owned_subtitle(void *p, struct m_property *prop,
+                                     int action, void *arg)
+ {
+@@ -207,14 +352,9 @@
+         return M_PROPERTY_NOT_IMPLEMENTED;
+     struct mpv_node *r = arg;
+     node_init(r, MPV_FORMAT_NODE_MAP, NULL);
+-    node_map_add_int64(r, "version", 1);
+-    node_map_add_int64(r, "intent-generation", s.intent);
+-    node_map_add_int64(r, "entry-id", s.entry);
++    node_map_add_int64(r, "version", 2);
++    capture_node(r, &s);
+     node_map_add_int64(r, "source-generation", s.source);
+-    node_map_add_int64(r, "sid", s.sid);
+-    node_map_add_int64(r, "ff-index", s.ff_index);
+-    node_map_add_double(r, "origin", s.origin);
+-    node_map_add_flag(r, "primary-visible", s.visible);
+     struct vortx_owned_text *active = osd_vortx_owned_text_current(mpctx->osd);
+     node_map_add_int64(r, "active-ticket", active ? active->ticket : 0);
+     return M_PROPERTY_OK;
+@@ -365,6 +505,8 @@
      return decoder;
  }
  
@@ -1767,7 +2077,43 @@ diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
  void cmd_vortx_owned_subtitle_prepare(void *p)
  {
      struct mp_cmd_ctx *cmd = p;
-@@ -478,7 +503,10 @@
+@@ -387,7 +529,7 @@
+     // spawn_thread's outstanding_async hold keeps mpctx/global/config/log alive.
+     // No core/admission/OSD/decoder lock remains held while fonts and cues decode.
+     mp_core_unlock(mpctx);
+-    struct dec_sub *decoder = decode_payload(global, attachments, cmd->args[6].v.s,
++    struct dec_sub *decoder = decode_payload(global, attachments, cmd->args[9].v.s,
+         original.play_dir, original.video_fps, cmd->abort->cancel, deadline);
+     struct vortx_owned_text *ready = NULL;
+     if (decoder) {
+@@ -409,7 +551,7 @@
+     s->ready = ready;
+     s->ready_witness = original;
+     node_init(&cmd->result, MPV_FORMAT_NODE_MAP, NULL);
+-    node_map_add_int64(&cmd->result, "version", 1);
++    node_map_add_int64(&cmd->result, "version", 2);
+     node_map_add_int64(&cmd->result, "ticket", ticket);
+     cmd->success = true;
+ }
+@@ -433,7 +575,7 @@
+     s->ready = NULL;
+     s->active_witness = current;
+     node_init(&cmd->result, MPV_FORMAT_NODE_MAP, NULL);
+-    node_map_add_int64(&cmd->result, "version", 1);
++    node_map_add_int64(&cmd->result, "version", 2);
+     node_map_add_int64(&cmd->result, "ticket", ready->ticket);
+     node_map_add_flag(&cmd->result, "committed", true);
+     cmd->success = true;
+@@ -462,7 +604,7 @@
+         }
+     }
+     node_init(&cmd->result, MPV_FORMAT_NODE_MAP, NULL);
+-    node_map_add_int64(&cmd->result, "version", 1);
++    node_map_add_int64(&cmd->result, "version", 2);
+     node_map_add_flag(&cmd->result, "released", released);
+     if (released) {
+         mp_notify_property(mpctx, "vortx-owned-subtitle-state");
+@@ -478,7 +620,10 @@
      // nor OSD; old render readers finish their complete bitmap copies first.
      osd_vortx_owned_text_wait_quiescent(work->osd);
      for (int n = 0; n < work->count; n++) {
@@ -1779,7 +2125,7 @@ diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
          talloc_free(work->objects[n]);
      }
      struct MPContext *mpctx = work->mpctx;
-@@ -512,10 +540,10 @@
+@@ -512,10 +657,10 @@
      s->retired_count = 0;
      s->reaping_count = work->count;
      mpctx->outstanding_async++;
@@ -1794,7 +2140,7 @@ diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
      bool queued = mp_thread_pool_queue(mpctx->thread_pool, reap_worker, work);
      mp_assert(queued);
  }
-@@ -525,17 +553,44 @@
+@@ -525,17 +670,44 @@
      struct vortx_owned_subtitle *s = mpctx->vortx_owned_subtitle;
      if (!s)
          return;
@@ -1843,7 +2189,7 @@ diff --git a/player/owned_subtitle.c b/player/owned_subtitle.c
          mp_vortx_owned_subtitle_retire(mpctx);
      kick_reaper(mpctx);
  }
-@@ -579,7 +634,8 @@
+@@ -579,7 +751,8 @@
          return;
      // mp_shutdown_clients joined outstanding preparation/reaper leases; outputs
      // have joined before command_uninit. Nothing owned may survive into osd_free.
@@ -1882,40 +2228,68 @@ diff --git a/player/command.c b/player/command.c
      {"file-size", mp_property_file_size},
      {"path", mp_property_path},
      {"media-title", mp_property_media_title},
-@@ -8026,6 +8028,28 @@
+@@ -8013,20 +8015,52 @@
+     { "notify-property", cmd_notify_property, { {"property", OPT_STRING(v.s)} } },
+     { "vortx-subtitle-owned-prepare", cmd_vortx_owned_subtitle_prepare, {
+         {"intent", OPT_INT64(v.i64)}, {"entry", OPT_INT64(v.i64)},
+-        {"source", OPT_INT64(v.i64)}, {"sid", OPT_INT64(v.i64)},
+-        {"ff-index", OPT_INT64(v.i64)}, {"origin", OPT_DOUBLE(v.d)},
++        {"source", OPT_INT64(v.i64)}, {"reference-sid", OPT_INT64(v.i64)},
++        {"reference-command-index", OPT_INT64(v.i64)}, {"reference-stream-index", OPT_INT64(v.i64)},
++        {"primary-sid", OPT_INT64(v.i64)}, {"primary-flags", OPT_INT64(v.i64)},
++        {"demux-origin", OPT_DOUBLE(v.d)},
+         {"payload", OPT_STRING(v.s)},
+     }, .spawn_thread = true, .can_abort = true, .abort_on_playback_end = true,
+        .redact_args = true },
+     { "vortx-subtitle-owned-commit", cmd_vortx_owned_subtitle_commit, {
+         {"ticket", OPT_INT64(v.i64)}, {"intent", OPT_INT64(v.i64)},
+         {"entry", OPT_INT64(v.i64)}, {"source", OPT_INT64(v.i64)},
+-        {"sid", OPT_INT64(v.i64)}, {"ff-index", OPT_INT64(v.i64)},
+-        {"origin", OPT_DOUBLE(v.d)},
++        {"reference-sid", OPT_INT64(v.i64)}, {"reference-command-index", OPT_INT64(v.i64)},
++        {"reference-stream-index", OPT_INT64(v.i64)}, {"primary-sid", OPT_INT64(v.i64)},
++        {"primary-flags", OPT_INT64(v.i64)},
++        {"demux-origin", OPT_DOUBLE(v.d)},
      } },
      { "vortx-subtitle-owned-revoke", cmd_vortx_owned_subtitle_revoke, {
          {"ticket", OPT_INT64(v.i64)},
-+    } },
+     } },
 +    { "vortx-subtitle-reference-read", cmd_vortx_subtitle_reference_read, {
 +        {"intent", OPT_INT64(v.i64)}, {"entry", OPT_INT64(v.i64)},
-+        {"sid", OPT_INT64(v.i64)}, {"ff-index", OPT_INT64(v.i64)},
++        {"reference-sid", OPT_INT64(v.i64)}, {"reference-command-index", OPT_INT64(v.i64)},
++        {"reference-stream-index", OPT_INT64(v.i64)}, {"primary-sid", OPT_INT64(v.i64)},
++        {"primary-flags", OPT_INT64(v.i64)},
 +        {"demux-origin", OPT_DOUBLE(v.d)},
 +    }, .spawn_thread = true, .can_abort = true, .abort_on_playback_end = true,
 +       .redact_args = true },
 +    { "vortx-subtitle-reference-prepare", cmd_vortx_subtitle_reference_prepare, {
 +        {"grant", OPT_INT64(v.i64)}, {"intent", OPT_INT64(v.i64)},
 +        {"entry", OPT_INT64(v.i64)}, {"source", OPT_INT64(v.i64)},
-+        {"sid", OPT_INT64(v.i64)}, {"ff-index", OPT_INT64(v.i64)},
++        {"reference-sid", OPT_INT64(v.i64)}, {"reference-command-index", OPT_INT64(v.i64)},
++        {"reference-stream-index", OPT_INT64(v.i64)}, {"primary-sid", OPT_INT64(v.i64)},
++        {"primary-flags", OPT_INT64(v.i64)},
 +        {"demux-origin", OPT_DOUBLE(v.d)}, {"payload", OPT_STRING(v.s)},
 +    }, .spawn_thread = true, .can_abort = true, .abort_on_playback_end = true,
 +       .redact_args = true },
 +    { "vortx-subtitle-reference-commit", cmd_vortx_subtitle_reference_commit, {
 +        {"ticket", OPT_INT64(v.i64)}, {"grant", OPT_INT64(v.i64)},
 +        {"intent", OPT_INT64(v.i64)}, {"entry", OPT_INT64(v.i64)},
-+        {"source", OPT_INT64(v.i64)}, {"sid", OPT_INT64(v.i64)},
-+        {"ff-index", OPT_INT64(v.i64)}, {"demux-origin", OPT_DOUBLE(v.d)},
++        {"source", OPT_INT64(v.i64)}, {"reference-sid", OPT_INT64(v.i64)},
++        {"reference-command-index", OPT_INT64(v.i64)}, {"reference-stream-index", OPT_INT64(v.i64)},
++        {"primary-sid", OPT_INT64(v.i64)}, {"primary-flags", OPT_INT64(v.i64)},
++        {"demux-origin", OPT_DOUBLE(v.d)},
 +    }, .spawn_thread = true, .can_abort = true, .abort_on_playback_end = true },
 +    { "vortx-subtitle-reference-revoke", cmd_vortx_subtitle_reference_revoke, {
 +        {"grant", OPT_INT64(v.i64)},
-     } },
++    } },
  
      {0}
+ };
 diff --git a/player/reference_owned.inc b/player/reference_owned.inc
 new file mode 100644
 --- /dev/null
 +++ b/player/reference_owned.inc
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,474 @@
 +/* Included only by owned_subtitle.c. Internal node transport; no public ABI.
 + * All functions enter/leave with the core locked. Unlocked phases retain only
 + * the command's outstanding_async core hold and genuinely owned request data.
@@ -2050,19 +2424,14 @@ new file mode 100644
 +static void reference_capture_node(struct mpv_node *node,
 +                                    const struct owned_witness *w)
 +{
-+    node_map_add_int64(node, "intent-generation", w->intent);
-+    node_map_add_int64(node, "entry-id", w->entry);
-+    node_map_add_int64(node, "sid", w->sid);
-+    node_map_add_int64(node, "ff-index", w->ff_index);
-+    node_map_add_double(node, "demux-origin", w->origin);
-+    node_map_add_flag(node, "primary-visible", w->visible);
++    capture_node(node, w);
 +}
 +
 +int mp_property_vortx_subtitle_reference(void *p, struct m_property *prop,
 +                                        int action, void *arg)
 +{
 +    struct owned_witness w;
-+    if (!capture_base(p, true, &w) || !w.visible)
++    if (!capture_base(p, true, &w))
 +        return M_PROPERTY_UNAVAILABLE;
 +    if (action == M_PROPERTY_GET_TYPE) {
 +        *(struct m_option *)arg = (struct m_option){.type = CONF_TYPE_NODE};
@@ -2072,7 +2441,7 @@ new file mode 100644
 +        return M_PROPERTY_NOT_IMPLEMENTED;
 +    struct mpv_node *node = arg;
 +    node_init(node, MPV_FORMAT_NODE_MAP, NULL);
-+    node_map_add_int64(node, "version", 1);
++    node_map_add_int64(node, "version", 2);
 +    reference_capture_node(node, &w);
 +    return M_PROPERTY_OK;
 +}
@@ -2095,7 +2464,7 @@ new file mode 100644
 +        return M_PROPERTY_NOT_IMPLEMENTED;
 +    struct mpv_node *node = arg;
 +    node_init(node, MPV_FORMAT_NODE_MAP, NULL);
-+    node_map_add_int64(node, "version", 1);
++    node_map_add_int64(node, "version", 2);
 +    node_map_add_int64(node, "grant", r->grant);
 +    node_map_add_int64(node, "ticket", active->ticket);
 +    reference_capture_node(node, &w);
@@ -2106,11 +2475,36 @@ new file mode 100644
 +static bool reference_read_args(struct mp_cmd_ctx *cmd,
 +                                const struct owned_witness *w)
 +{
++    int64_t flags = cmd->args[6].v.i64;
++    int64_t expected = (w->primary_external ? INT64_C(1) : 0) |
++                       (w->visible ? INT64_C(2) : 0);
 +    return cmd->args[0].v.i64 == w->intent &&
 +        cmd->args[1].v.i64 == w->entry &&
 +        cmd->args[2].v.i64 == w->sid &&
 +        cmd->args[3].v.i64 == w->ff_index &&
-+        cmd->args[4].v.d == w->origin;
++        cmd->args[4].v.i64 == w->reference_stream_index &&
++        cmd->args[5].v.i64 == w->primary_sid &&
++        flags >= 0 && flags <= 3 && flags == expected &&
++        (w->primary_sid != 0 || !(flags & INT64_C(1))) &&
++        cmd->args[7].v.d == w->origin;
++}
++
++// Called only after the existing current-owner/intent checks, native queue
++// revalidation and one-time timing take. Raw native UID/metadata stay in that
++// request's private snapshot; these core scalars do not grant source authority.
++static bool reference_result_matches(const struct owned_witness *original,
++                                     const struct demux_reference_result *result)
++{
++    if (result->stream_index != original->reference_stream_index)
++        return false;
++    if (!original->native_mkv)
++        return result->ff_index == original->ff_index; // existing lavf rule
++    // The native parser's emulated ff_index is only the existing command token.
++    // Never pretend it is a lavf AVStream index or write it into native output.
++    return result->format_kind == 3 && result->ff_index == -1 &&
++        result->av_stream_id == -1 &&
++        result->stream_index == original->native_stream_index &&
++        result->demuxer_id == original->native_demuxer_id;
 +}
 +
 +void cmd_vortx_subtitle_reference_read(void *p)
@@ -2123,16 +2517,15 @@ new file mode 100644
 +    if (!s || s->preparing || s->reading_request || s->reference || s->ready ||
 +        s->retired_count || s->reaping_count || s->sequence == INT64_MAX ||
 +        mp_cancel_test(cmd->abort->cancel) ||
-+        !capture_base(mpctx, true, &original) || !original.visible ||
++        !capture_base(mpctx, true, &original) ||
 +        !reference_read_args(cmd, &original))
 +        return;
-+    struct track *primary = mpctx->current_track[0][STREAM_SUB];
 +    // Identity comparison only after reacquiring the core; the unlocked worker
 +    // never dereferences this pointer and the request owns no live demux borrow.
 +    struct demuxer *original_demux = mpctx->demuxer;
 +    int64_t deadline = mp_time_ns() + MP_TIME_S_TO_NS(30);
 +    struct demux_reference_request *request = demux_reference_reader_request(
-+        mpctx->demuxer, primary->stream->index, deadline);
++        mpctx->demuxer, original.reference_stream_index, deadline);
 +    if (!request)
 +        return;
 +    struct mp_cancel *abort_link = mp_cancel_try_new(NULL);
@@ -2181,7 +2574,7 @@ new file mode 100644
 +        result.complete && result.source_generation > 0 &&
 +        result.response_generation > 0 && result.source_epoch > 0 &&
 +        result.source_epoch <= INT64_MAX && result.demux_epoch > 0 &&
-+        result.ff_index == original.ff_index && isfinite(result.origin_seconds) &&
++        reference_result_matches(&original, &result) && isfinite(result.origin_seconds) &&
 +        fabs(result.origin_seconds) <= 86400 && result.prefix_start_ms == 0 &&
 +        result.prefix_end_ms == 1080000 && result.num_pairs > 0 &&
 +        result.num_pairs <= DEMUX_REFERENCE_MAX_PAIRS && !s->reference;
@@ -2207,7 +2600,7 @@ new file mode 100644
 +    // poll or inherit this operation timeout.
 +    mp_wakeup_core(mpctx);
 +    node_init(&cmd->result, MPV_FORMAT_NODE_MAP, NULL);
-+    node_map_add_int64(&cmd->result, "version", 1);
++    node_map_add_int64(&cmd->result, "version", 2);
 +    node_map_add_int64(&cmd->result, "grant", grant);
 +    reference_capture_node(&cmd->result, &original);
 +    node_map_add_int64(&cmd->result, "source-generation", result.source_generation);
@@ -2253,7 +2646,7 @@ new file mode 100644
 +        int64_t deadline = MPMIN(r->deadline_ns,
 +                                 mp_time_ns() + SUB_OWNED_TEXT_MAX_WORK_NS);
 +        mp_core_unlock(mpctx);
-+        decoder = decode_payload(global, attachments, cmd->args[7].v.s,
++        decoder = decode_payload(global, attachments, cmd->args[10].v.s,
 +            original.play_dir, original.video_fps, cmd->abort->cancel, deadline);
 +        mp_core_lock(mpctx);
 +    }
@@ -2278,7 +2671,7 @@ new file mode 100644
 +    s->ready = object;
 +    s->ready_witness = original;
 +    node_init(&cmd->result, MPV_FORMAT_NODE_MAP, NULL);
-+    node_map_add_int64(&cmd->result, "version", 1);
++    node_map_add_int64(&cmd->result, "version", 2);
 +    node_map_add_int64(&cmd->result, "grant", r->grant);
 +    node_map_add_int64(&cmd->result, "ticket", ticket);
 +    cmd->success = true;
@@ -2320,7 +2713,7 @@ new file mode 100644
 +    retire_object(s, osd_vortx_owned_text_exchange(mpctx->osd, object));
 +    s->active_witness = current;
 +    node_init(&cmd->result, MPV_FORMAT_NODE_MAP, NULL);
-+    node_map_add_int64(&cmd->result, "version", 1);
++    node_map_add_int64(&cmd->result, "version", 2);
 +    node_map_add_int64(&cmd->result, "grant", r->grant);
 +    node_map_add_int64(&cmd->result, "ticket", object->ticket);
 +    node_map_add_flag(&cmd->result, "committed", true);
@@ -2363,7 +2756,7 @@ new file mode 100644
 +        }
 +    }
 +    node_init(&cmd->result, MPV_FORMAT_NODE_MAP, NULL);
-+    node_map_add_int64(&cmd->result, "version", 1);
++    node_map_add_int64(&cmd->result, "version", 2);
 +    node_map_add_flag(&cmd->result, "released", released);
 +    if (released) {
 +        kick_reaper(mpctx);
@@ -2441,3 +2834,2155 @@ diff --git a/sub/dec_sub.h b/sub/dec_sub.h
  // starts and start < end <= MAX_END_MS. Overlaps/markup are preserved through the
  // real FFmpeg SubRip -> ASS converter. Returns only a completely decoded object.
  // play_dir is a captured +1/-1; video_fps is captured finite >= 0. Cue/language
+diff --git a/demux/demux_mkv.c b/demux/demux_mkv.c
+--- a/demux/demux_mkv.c
++++ b/demux/demux_mkv.c
+@@ -24,6 +24,7 @@
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <inttypes.h>
++#include <limits.h>
+ #include <stdbool.h>
+ #include <math.h>
+ #include <assert.h>
+@@ -58,6 +59,9 @@
+ #include "dovi_split.h"
+ #include "packet_pool.h"
+ #include "stheader.h"
++#include "reference_mkv.h"
++#include "reference_mkv_sparse.h"
++#include "reference_mkv_sparse_planner.h"
+ #include "ebml.h"
+ #include "matroska.h"
+ #include "codec_tags.h"
+@@ -100,6 +104,12 @@
+ typedef struct mkv_track {
+     int tnum;
+     uint64_t uid;
++    // Optional reference identity is recorded BEFORE narrowing or private-data
++    // decoding. It changes no normal playback parsing or selection behavior.
++    uint64_t reference_track_number;
++    uint64_t reference_codec_delay_ns, reference_default_duration_ns;
++    unsigned reference_codec_delay_present, reference_default_duration_present;
++    bool reference_number_valid, reference_utf8_eligible;
+     char *name;
+     struct sh_stream *stream;
+ 
+@@ -238,6 +248,12 @@
+     int num_packets;
+ 
+     bool probably_webm_dash_init;
++    bool reference_simple_open;
++    bool reference_timing_invalid;
++    bool reference_cluster_known_end, reference_cluster_timestamp_seen;
++    uint64_t reference_cluster_body_start;
++    bool reference_origin_valid;
++    int64_t reference_origin_ns;
+ } mkv_demuxer_t;
+ 
+ #define OPT_BASE_STRUCT struct demux_mkv_opts
+@@ -882,6 +898,25 @@
+     struct mkv_track *track = talloc_zero(NULL, struct mkv_track);
+     track->last_index_entry = (size_t)-1;
+     track->parser_tmp = talloc_new(track);
++
++    track->reference_track_number = entry->track_number;
++    track->reference_number_valid = entry->n_track_number == 1 &&
++        entry->track_number > 0 && entry->track_number <= INT_MAX;
++    track->reference_codec_delay_ns = entry->codec_delay;
++    track->reference_default_duration_ns = entry->default_duration;
++    track->reference_codec_delay_present = entry->n_codec_delay;
++    track->reference_default_duration_present = entry->n_default_duration;
++    track->reference_utf8_eligible = track->reference_number_valid &&
++        entry->n_track_uid == 1 && entry->track_uid != 0 &&
++        entry->n_track_type == 1 && entry->track_type == MATROSKA_TRACK_SUBTITLE &&
++        entry->n_codec_id == 1 && entry->codec_id &&
++        !strcmp(entry->codec_id, "S_TEXT/UTF8") &&
++        !entry->n_codec_private && !entry->n_content_encodings &&
++        entry->n_track_timecode_scale <= 1 &&
++        (!entry->n_track_timecode_scale || entry->track_timecode_scale == 1.0) &&
++        entry->n_codec_delay <= 1 && entry->n_default_duration <= 1 &&
++        entry->codec_delay <= 60000000000ULL &&
++        entry->default_duration <= 3600000000000ULL;
+ 
+     track->tnum = entry->track_number;
+     if (track->tnum) {
+@@ -2512,6 +2547,10 @@
+     mkv_d->tc_scale = 1000000;
+     mkv_d->a_skip_preroll = 1;
+     mkv_d->skip_to_timecode = INT64_MIN;
++    mkv_d->reference_simple_open = !demuxer->params ||
++        (!demuxer->params->timeline && !demuxer->params->init_fragment.len &&
++         !demuxer->params->matroska_num_wanted_uids &&
++         !demuxer->params->matroska_wanted_segment);
+ 
+     if (demuxer->params)
+         mkv_d->probably_webm_dash_init = demuxer->params->init_fragment.len > 0;
+@@ -3097,7 +3136,13 @@
+ 
+     if (block->simple)
+         block->keyframe = header_flags & 0x80;
+-    block->timecode = time * mkv_d->tc_scale + mkv_d->cluster_tc;
++    int64_t relative = time * mkv_d->tc_scale;
++    if ((relative > 0 && mkv_d->cluster_tc > INT64_MAX - relative) ||
++        (relative < 0 && mkv_d->cluster_tc < INT64_MIN - relative)) {
++        mkv_d->reference_timing_invalid = true;
++        goto exit;
++    }
++    block->timecode = relative + mkv_d->cluster_tc;
+     for (int i = 0; i < mkv_d->num_tracks; i++) {
+         if (mkv_d->tracks[i]->tnum == num) {
+             block->track = mkv_d->tracks[i];
+@@ -3263,6 +3308,10 @@
+             block->duration = ebml_read_uint(s);
+             if (block->duration == EBML_UINT_INVALID)
+                 goto error;
++            if (block->duration > INT64_MAX / mkv_d->tc_scale) {
++                mkv_d->reference_timing_invalid = true;
++                goto error;
++            }
+             block->duration *= mkv_d->tc_scale;
+             block->duration_known = true;
+             break;
+@@ -3317,6 +3366,38 @@
+     return -1;
+ }
+ 
++static bool mkv_reference_read_timestamp(stream_t *s, struct mkv_demuxer *p,
++                                        uint64_t *out)
++{
++    int64_t pos = stream_tell(s);
++    if (pos < 0 || (p->reference_cluster_known_end &&
++                   (uint64_t)pos >= p->cluster_end))
++        return false;
++    uint8_t first = 0;
++    if (stream_read_peek(s, &first, 1) != 1 || !first)
++        return false;
++    unsigned width = 1;
++    for (unsigned mask = 0x80; !(first & mask); mask >>= 1)
++        width++;
++    if (p->reference_cluster_known_end && width > p->cluster_end - pos)
++        return false;
++    uint64_t bytes = ebml_read_length(s);
++    pos = stream_tell(s);
++    if (bytes == EBML_UINT_INVALID || bytes > 8 || pos < 0 ||
++        (p->reference_cluster_known_end &&
++         ((uint64_t)pos > p->cluster_end || bytes > p->cluster_end - pos)))
++        return false;
++    uint64_t value = 0;
++    for (uint64_t i = 0; i < bytes; i++) {
++        int byte = stream_read_char(s);
++        if (byte == STREAM_EOF)
++            return false;
++        value = (value << 8) | byte;
++    }
++    *out = value;
++    return value != EBML_UINT_INVALID;
++}
++
+ static int read_next_block_into_queue(demuxer_t *demuxer)
+ {
+     mkv_demuxer_t *mkv_d = (mkv_demuxer_t *) demuxer->priv;
+@@ -3328,56 +3409,95 @@
+             int64_t start_filepos = stream_tell(s);
+             switch (ebml_read_id(s)) {
+             case MATROSKA_ID_TIMECODE: {
+-                uint64_t num = ebml_read_uint(s);
+-                if (num == EBML_UINT_INVALID)
+-                    goto find_next_cluster;
++                if (mkv_d->reference_cluster_timestamp_seen) {
++                    mkv_d->reference_timing_invalid = true;
++                    goto reject_cluster;
++                }
++                uint64_t num = 0;
++                if (!mkv_reference_read_timestamp(s, mkv_d, &num)) {
++                    mkv_d->reference_timing_invalid = true;
++                    goto reject_cluster;
++                }
++                if (num > INT64_MAX / mkv_d->tc_scale) {
++                    mkv_d->reference_timing_invalid = true;
++                    goto reject_cluster;
++                }
+                 mkv_d->cluster_tc = num * mkv_d->tc_scale;
++                mkv_d->reference_cluster_timestamp_seen = true;
+                 break;
+             }
+ 
+             case MATROSKA_ID_BLOCKGROUP: {
++                if (!mkv_d->reference_cluster_timestamp_seen) {
++                    mkv_d->reference_timing_invalid = true;
++                    goto reject_cluster;
++                }
+                 uint64_t end = ebml_read_length(s);
+                 if (end == EBML_UINT_INVALID)
+-                    goto find_next_cluster;
++                    goto reject_cluster;
+                 end += stream_tell(s);
+                 if (end > mkv_d->cluster_end)
+-                    goto find_next_cluster;
++                    goto reject_cluster;
+                 int res = read_block_group(demuxer, end, &block);
+                 if (res > 0)
+                     goto add_block;
+                 free_block(&block);
+                 if (res < 0)
+-                    goto find_next_cluster;
++                    goto reject_cluster;
+                 break;
+             }
+ 
+             case MATROSKA_ID_SIMPLEBLOCK: {
++                if (!mkv_d->reference_cluster_timestamp_seen) {
++                    mkv_d->reference_timing_invalid = true;
++                    goto reject_cluster;
++                }
+                 block = (struct block_info){ .simple = true };
+                 int res = read_block(demuxer, mkv_d->cluster_end, &block);
+                 if (res > 0)
+                     goto add_block;
+                 free_block(&block);
+                 if (res < 0)
+-                    goto find_next_cluster;
++                    goto reject_cluster;
+                 break;
+             }
+ 
+             case MATROSKA_ID_CLUSTER:
++                if (mkv_d->reference_cluster_known_end &&
++                    start_filepos >= mkv_d->reference_cluster_body_start &&
++                    start_filepos < mkv_d->cluster_end) {
++                    // This is a malformed nested level1 element, not a second
++                    // timeline hidden inside a declared Cluster payload.
++                    mkv_d->reference_timing_invalid = true;
++                    goto reject_cluster;
++                }
+                 mkv_d->cluster_start = start_filepos;
+                 goto next_cluster;
+ 
+             case EBML_ID_INVALID:
+-                goto find_next_cluster;
++                goto reject_cluster;
+ 
+             default: ;
+                 if (ebml_read_skip(demuxer->log, mkv_d->cluster_end, s) != 0)
+-                    goto find_next_cluster;
++                    goto reject_cluster;
+                 break;
+             }
+-        }
+-
++            if (mkv_d->reference_cluster_known_end && stream_tell(s) > mkv_d->cluster_end) {
++                mkv_d->reference_timing_invalid = true;
++                goto reject_cluster;
++            }
++        }
++
++        goto find_next_cluster; // natural boundary or actual external seek
++    reject_cluster:
++        mkv_d->reference_timing_invalid = true;
++        if (mkv_d->reference_cluster_known_end &&
++            stream_tell(s) != mkv_d->cluster_end &&
++            !stream_seek_skip(s, mkv_d->cluster_end))
++            return -1;
+     find_next_cluster:
+         mkv_d->cluster_end = 0;
++        mkv_d->reference_cluster_known_end = false;
+         for (;;) {
+             mkv_d->cluster_start = stream_tell(s);
+             uint32_t id = ebml_read_id(s);
+@@ -3402,14 +3522,36 @@
+             }
+         }
+     next_cluster:
+-        mkv_d->cluster_end = ebml_read_length(s);
+-        // mkv files for "streaming" can have this legally
+-        if (mkv_d->cluster_end != EBML_UINT_INVALID)
+-            mkv_d->cluster_end += stream_tell(s);
++        ;
++        int64_t size_pos = stream_tell(s);
++        uint64_t length = ebml_read_length(s);
++        int64_t size_width = stream_tell(s) - size_pos;
++        if (length == EBML_UINT_INVALID || size_width < 1 || size_width > 8)
++            return -1;
++        uint64_t unknown = (UINT64_C(1) << (7 * size_width)) - 1;
++        mkv_d->reference_cluster_timestamp_seen = false;
++        mkv_d->reference_cluster_known_end = length != unknown;
++        mkv_d->reference_cluster_body_start = stream_tell(s);
++        if (mkv_d->reference_cluster_known_end) {
++            if (stream_tell(s) < 0 || length > INT64_MAX - stream_tell(s)) {
++                mkv_d->reference_timing_invalid = true;
++                return -1;
++            }
++            mkv_d->cluster_end = stream_tell(s) + length;
++        } else {
++            // Unknown-size Clusters remain legal, but never gain a declared
++            // extent that a sparse reader could use as an absence witness.
++            mkv_d->cluster_end = UINT64_MAX;
++        }
+     }
+     MP_ASSERT_UNREACHABLE();
+ 
+ add_block:
++    if (mkv_d->reference_cluster_known_end && stream_tell(s) > mkv_d->cluster_end) {
++        mkv_d->reference_timing_invalid = true;
++        free_block(&block);
++        goto reject_cluster;
++    }
+     index_block(demuxer, &block);
+     MP_TARRAY_APPEND(mkv_d, mkv_d->blocks, mkv_d->num_blocks, block);
+     return 1;
+@@ -3589,6 +3731,13 @@
+ {
+     mkv_demuxer_t *mkv_d = demuxer->priv;
+     int64_t old_pos = stream_tell(demuxer->stream);
++    // Generic reset clears packet/parser queues, not a still-current Cluster's
++    // grammar. A no-index seek may scan, then resume at this exact old byte.
++    uint64_t old_start = mkv_d->cluster_start, old_end = mkv_d->cluster_end;
++    uint64_t old_body = mkv_d->reference_cluster_body_start;
++    int64_t old_tc = mkv_d->cluster_tc;
++    bool old_known = mkv_d->reference_cluster_known_end;
++    bool old_seen = mkv_d->reference_cluster_timestamp_seen;
+     uint64_t v_tnum = -1;
+     uint64_t a_tnum = -1;
+     bool st_active[STREAM_TYPE_COUNT] = {0};
+@@ -3628,8 +3777,14 @@
+                 index = seek_with_cues(demuxer, -1, target_timecode, flags);
+         }
+ 
+-        if (!index)
+-            stream_seek(demuxer->stream, old_pos);
++        if (!index && stream_seek(demuxer->stream, old_pos)) {
++            mkv_d->cluster_start = old_start;
++            mkv_d->cluster_end = old_end;
++            mkv_d->cluster_tc = old_tc;
++            mkv_d->reference_cluster_body_start = old_body;
++            mkv_d->reference_cluster_known_end = old_known;
++            mkv_d->reference_cluster_timestamp_seen = old_seen;
++        }
+ 
+         if (flags & SEEK_FORWARD) {
+             mkv_d->skip_to_timecode = target_timecode;
+@@ -3759,7 +3914,11 @@
+     if (!mkv_d->opts->probe_start_time)
+         return;
+ 
+-    read_next_block_into_queue(demuxer);
++    int rc = read_next_block_into_queue(demuxer);
++    if (rc > 0 && !mkv_d->reference_timing_invalid) {
++        mkv_d->reference_origin_ns = mkv_d->cluster_tc;
++        mkv_d->reference_origin_valid = true;
++    }
+ 
+     demuxer->start_time = mkv_d->cluster_tc / 1e9;
+ 
+@@ -3793,3 +3952,236 @@
+     return (!memcmp(a->segment, b->segment, 16) &&
+             a->edition == b->edition);
+ }
++
++static bool mkv_reference_make_spec(struct demuxer *d, struct sh_stream *sh,
++    double offset, struct demux_mkv_reference_spec *out)
++{
++    if (!d || d->desc != &demuxer_desc_matroska || !d->priv || !d->stream ||
++        !sh || sh->type != STREAM_SUB || !sh->codec || !sh->codec->codec ||
++        strcmp(sh->codec->codec, "subrip") || sh->codec->extradata_size ||
++        sh->codec->lav_codecpar || sh->missing_timestamps || sh->group ||
++        !isfinite(offset) || offset != 0 || !isfinite(d->start_time) ||
++        d->start_time < 0 || d->matroska_data.ordered_chapters ||
++        d->matroska_data.num_ordered_chapters ||
++        d->matroska_data.uid.edition || d->edition_is_track_mapping)
++        return false;
++    struct mkv_demuxer *p = d->priv;
++    if (!p->reference_simple_open || p->reference_timing_invalid ||
++        !p->opts || !p->opts->probe_start_time ||
++        p->edition_id != -1 || p->num_tracks < 1 || p->num_tracks > 1024 ||
++        p->tc_scale <= 0 || p->tc_scale > 1000000000LL ||
++        !d->stream_origin || (d->stream_origin & ~STREAM_ORIGIN_MASK))
++        return false;
++    struct mkv_track *selected = NULL;
++    unsigned same_uid = 0;
++    for (int i = 0; i < p->num_tracks; i++) {
++        struct mkv_track *t = p->tracks[i];
++        if (!t || !t->reference_number_valid)
++            return false; // even an unselected narrowed alias could steal blocks
++        for (int j = 0; j < i; j++) {
++            if (p->tracks[j]->reference_track_number == t->reference_track_number)
++                return false;
++        }
++        if (t->stream == sh) {
++            if (selected)
++                return false;
++            selected = t;
++        }
++    }
++    if (!selected || !selected->reference_utf8_eligible ||
++        selected->type != MATROSKA_TRACK_SUBTITLE ||
++        selected->tnum != selected->reference_track_number ||
++        selected->uid == 0 || selected->private_size || selected->num_encodings ||
++        !selected->codec_id || strcmp(selected->codec_id, "S_TEXT/UTF8") ||
++        selected->codec_delay != selected->reference_codec_delay_ns / 1e9 ||
++        selected->default_duration != selected->reference_default_duration_ns / 1e9 ||
++        sh->demuxer_id != selected->tnum)
++        return false;
++    for (int i = 0; i < p->num_tracks; i++)
++        same_uid += p->tracks[i]->uid == selected->uid;
++    if (same_uid != 1)
++        return false;
++    *out = (struct demux_mkv_reference_spec){
++        .version = DEMUX_MKV_REFERENCE_VERSION,
++        .num_tracks = p->num_tracks,
++        .track_number = selected->reference_track_number, .track_uid = selected->uid,
++        .codec_delay_ns = selected->reference_codec_delay_ns,
++        .default_duration_ns = selected->reference_default_duration_ns,
++        .codec_delay_present = selected->reference_codec_delay_present,
++        .default_duration_present = selected->reference_default_duration_present,
++        .timecode_scale = p->tc_scale, .segment_start = p->segment_start,
++        .segment_end = p->segment_end, .demux_start_time = d->start_time,
++        .consumer_ts_offset = offset, .source_origin = d->stream_origin,
++        .owner_stream_index = sh->index, .owner_demuxer_id = sh->demuxer_id,
++    };
++    memcpy(out->segment_uid, d->matroska_data.uid.segment, sizeof(out->segment_uid));
++    return true;
++}
++
++static bool mkv_reference_equal(const struct demux_mkv_reference_spec *a,
++    const struct demux_mkv_reference_spec *b, bool same_owner)
++{
++    return a && b && a->version == DEMUX_MKV_REFERENCE_VERSION &&
++        b->version == a->version && a->num_tracks == b->num_tracks &&
++        a->track_number == b->track_number && a->track_uid == b->track_uid &&
++        a->codec_delay_ns == b->codec_delay_ns &&
++        a->default_duration_ns == b->default_duration_ns &&
++        a->codec_delay_present == b->codec_delay_present &&
++        a->default_duration_present == b->default_duration_present &&
++        a->timecode_scale == b->timecode_scale &&
++        a->segment_start == b->segment_start && a->segment_end == b->segment_end &&
++        a->demux_start_time == b->demux_start_time &&
++        a->consumer_ts_offset == b->consumer_ts_offset &&
++        a->source_origin == b->source_origin &&
++        !memcmp(a->segment_uid, b->segment_uid, sizeof(a->segment_uid)) &&
++        (!same_owner || (a->owner_stream_index == b->owner_stream_index &&
++                        a->owner_demuxer_id == b->owner_demuxer_id));
++}
++
++bool demux_mkv_reference_capture_spec(struct demuxer *d, struct sh_stream *sh,
++    double offset, struct demux_mkv_reference_spec *out, size_t out_size)
++{
++    if (!out || out_size != sizeof(*out) || out->version)
++        return false;
++    struct demux_mkv_reference_spec value = {0};
++    if (!mkv_reference_make_spec(d, sh, offset, &value))
++        return false;
++    *out = value;
++    return true;
++}
++
++bool demux_mkv_reference_revalidate_spec(struct demuxer *d, struct sh_stream *sh,
++    double offset, const struct demux_mkv_reference_spec *expected, size_t size)
++{
++    struct demux_mkv_reference_spec current = {0};
++    return expected && size == sizeof(*expected) &&
++        mkv_reference_make_spec(d, sh, offset, &current) &&
++        mkv_reference_equal(expected, &current, true);
++}
++
++struct sh_stream *demux_mkv_reference_find_duplicate(struct demuxer *d,
++    const struct demux_mkv_reference_spec *expected, size_t size)
++{
++    if (!d || d->desc != &demuxer_desc_matroska || !d->priv || !expected ||
++        size != sizeof(*expected) || expected->version != DEMUX_MKV_REFERENCE_VERSION)
++        return NULL;
++    struct mkv_demuxer *p = d->priv;
++    struct sh_stream *found = NULL;
++    for (int i = 0; i < p->num_tracks; i++) {
++        struct mkv_track *t = p->tracks[i];
++        if (!t || t->reference_track_number != expected->track_number ||
++            t->uid != expected->track_uid)
++            continue;
++        struct demux_mkv_reference_spec current = {0};
++        if (found || !mkv_reference_make_spec(d, t->stream, 0, &current) ||
++            !mkv_reference_equal(expected, &current, false))
++            return NULL;
++        found = t->stream;
++    }
++    return found;
++}
++
++bool demux_mkv_reference_sparse_origin(struct demuxer *d, struct sh_stream *sh,
++    double offset, int64_t *origin_ns, size_t size)
++{
++    if (!origin_ns || size != sizeof(*origin_ns))
++        return false;
++    struct demux_mkv_reference_spec current = {0};
++    if (!mkv_reference_make_spec(d, sh, offset, &current))
++        return false;
++    struct mkv_demuxer *p = d->priv;
++    if (!p->reference_origin_valid || p->reference_origin_ns < 0 ||
++        (uint64_t)p->reference_origin_ns > MKV_SPARSE_MAX_EXACT_NS ||
++        d->start_time != p->reference_origin_ns / 1e9)
++        return false;
++    *origin_ns = p->reference_origin_ns;
++    return true;
++}
++
++static bool mkv_sparse_add_hint(struct mkv_sparse_snapshot *value,
++    uint64_t *set, uint64_t at, uint64_t segment_start)
++{
++    if (at < segment_start || at > INT64_MAX)
++        return false;
++    uint64_t hash = (at ^ (at >> 33)) * UINT64_C(0xff51afd7ed558ccd);
++    size_t slot = hash & 16383u;
++    // Bounded collisions refuse optional capture; no adversarial unbounded
++    // work on the original owner and no duplicate per-track Cue exhaustion.
++    for (unsigned probe = 0; probe < 64; probe++, slot = (slot + 1) & 16383u) {
++        if (set[slot] == at)
++            return true;
++        if (!set[slot]) {
++            if (value->hint_count == MKV_SPARSE_MAX_CAPTURE_HINTS)
++                return false;
++            set[slot] = at;
++            value->hints[value->hint_count++] = at;
++            return true;
++        }
++    }
++    return false;
++}
++
++bool demux_mkv_reference_sparse_capture(struct demuxer *d, struct sh_stream *sh,
++    double offset, struct mkv_sparse_snapshot **out)
++{
++    if (!out || *out)
++        return false;
++    struct demux_mkv_reference_spec spec = {0};
++    int64_t origin = 0;
++    if (!demux_mkv_reference_capture_spec(d, sh, offset, &spec, sizeof(spec)) ||
++        !demux_mkv_reference_sparse_origin(d, sh, offset, &origin, sizeof(origin)))
++        return false;
++    struct mkv_demuxer *p = d->priv;
++    if (p->num_headers < 0 || p->num_headers > 1024 || p->num_indexes > 65536)
++        return false;
++    struct mkv_sparse_snapshot *value = calloc(1, sizeof(*value));
++    uint64_t *set = calloc(16384, sizeof(*set));
++    if (!value || !set) {
++        free(set);
++        free(value);
++        return false;
++    }
++    value->spec = spec;
++    value->original_origin_ns = origin;
++    for (size_t i = 0; i < p->num_indexes; i++) {
++        uint64_t at = p->indexes[i].filepos;
++        if (!mkv_sparse_add_hint(value, set, at, p->segment_start)) {
++            free(set);
++            free(value);
++            return false;
++        }
++    }
++    for (int i = 0; i < p->num_headers; i++) {
++        const struct header_elem *h = &p->headers[i];
++        if (h->id == MATROSKA_ID_CUES &&
++            !mkv_sparse_add_hint(value, set, h->pos, p->segment_start)) {
++            free(set);
++            free(value);
++            return false;
++        }
++    }
++    // No seek, deferred parsing, raw pointer or new source authority. The
++    // existing original-owner source epoch and grant are captured separately.
++    free(set);
++    *out = value;
++    return true;
++}
++
++bool demux_mkv_reference_sparse_revalidate(struct demuxer *d, struct sh_stream *sh,
++    double offset, const struct mkv_sparse_snapshot *expected)
++{
++    int64_t origin = 0;
++    return expected && expected->hint_count <= MKV_SPARSE_MAX_CAPTURE_HINTS &&
++        demux_mkv_reference_revalidate_spec(d, sh, offset,
++            &expected->spec, sizeof(expected->spec)) &&
++        demux_mkv_reference_sparse_origin(d, sh, offset, &origin, sizeof(origin)) &&
++        origin == expected->original_origin_ns;
++}
++
++void demux_mkv_reference_sparse_snapshot_free(struct mkv_sparse_snapshot **out)
++{
++    if (out && *out) {
++        free(*out);
++        *out = NULL;
++    }
++}
+diff --git a/demux/reference_mkv.h b/demux/reference_mkv.h
+new file mode 100644
+--- /dev/null
++++ b/demux/reference_mkv.h
+@@ -0,0 +1,61 @@
++/* Source-private same-parser MKV reference seam. UNCOMPILED/UNRUN.
++ * This value is track/timestamp identity, never source or network authority. */
++#pragma once
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <libavformat/avio.h>
++#include "reference_reader.h"
++
++struct demuxer;
++struct sh_stream;
++struct stream;
++struct mp_reference_reader_job;
++struct stream_reference_reader_grant;
++
++#define DEMUX_MKV_REFERENCE_VERSION 1u
++struct demux_mkv_reference_spec {
++    unsigned version, num_tracks;
++    uint64_t track_number, track_uid, codec_delay_ns, default_duration_ns;
++    unsigned codec_delay_present, default_duration_present;
++    int64_t timecode_scale, segment_start, segment_end;
++    double demux_start_time, consumer_ts_offset;
++    int source_origin, owner_stream_index, owner_demuxer_id;
++    unsigned char segment_uid[16];
++};
++
++/* Actual original native-MKV owner only, excluded from seek/track/close.
++ * out must be zero initialized, and size is checked before any write. All
++ * output is owned scalar data. No emulated ff_index/title/language matching.
++ * Initial subset: UTF8 text, no private bytes/encodings/ordered timeline,
++ * known raw TrackNumber/UID/scale/delay and unmodified consumer timestamps. */
++bool demux_mkv_reference_capture_spec(struct demuxer *demuxer,
++    struct sh_stream *selected, double consumer_ts_offset,
++    struct demux_mkv_reference_spec *out, size_t out_size);
++bool demux_mkv_reference_revalidate_spec(struct demuxer *demuxer,
++    struct sh_stream *selected, double consumer_ts_offset,
++    const struct demux_mkv_reference_spec *expected, size_t expected_size);
++
++/* Only a new duplicate demuxer owned by this worker. Search by real raw
++ * TrackNumber+UID, then compare all admitted codec/timestamp facts. The
++ * returned pointer belongs to that duplicate and never leaves the worker.
++ * This comparison alone never proves that two resources are the same. */
++struct sh_stream *demux_mkv_reference_find_duplicate(struct demuxer *duplicate,
++    const struct demux_mkv_reference_spec *expected, size_t expected_size);
++
++/* One synchronous utility worker. Its existing owned grant must already carry
++ * current-response/entity/peer/TLS/budget authority; INITIAL_REQUEST_ONLY is
++ * not accepted here. Callback storage and grant outlive the entire call.
++ * Creates its own config/global/stream/demux/decoder and closes them all.
++ * out zero initialized; all partial pairs remain private and are cleared on
++ * failure. Caller still queues original-owner revalidation and core admission.
++ * The inherited native parser uses MPV mandatory-OOM allocation primitives;
++ * bounded worker allocation/error testing remains an explicit activation gate. */
++bool demux_mkv_reference_run(struct stream_reference_reader_grant *grant,
++    const struct demux_mkv_reference_spec *expected, size_t expected_size,
++    int64_t deadline_ns, const AVIOInterruptCB *interrupt,
++    struct demux_reference_result *out, size_t out_size);
++
++/* The concrete sparse owner snapshot/job/worker route is declared in
++ * reference_mkv_sparse_planner.h + reference_reader_internal.h. The old
++ * composition-prose-only constructor is deliberately not advertised here. */
+diff --git a/demux/reference_mkv_reader.c b/demux/reference_mkv_reader.c
+new file mode 100644
+--- /dev/null
++++ b/demux/reference_mkv_reader.c
+@@ -0,0 +1,346 @@
++/* Proposed private native-MKV worker; source only, UNCOMPILED/UNRUN.
++ * Uses the actual MPV MKV parser, fresh config/global and one bounded stream.
++ * No original owner/global/stream/AVIO/options or packet is borrowed. */
++#include <errno.h>
++#include <math.h>
++#include <string.h>
++#include <libavcodec/avcodec.h>
++#include <libavutil/error.h>
++#include "mpv_talloc.h"
++#include "common/global.h"
++#include "common/msg.h"
++#include "common/stats.h"
++#include "misc/thread_tools.h"
++#include "options/m_config_core.h"
++#include "options/options.h"
++#include "osdep/timer.h"
++#include "stream/stream.h"
++#include "stream/vortx_reference_reader_stream.h"
++#include "demux.h"
++#include "packet_pool.h"
++#include "reference_mkv.h"
++#include "reference_mkv_sparse_planner.h"
++
++#define MKV_REFERENCE_WINDOW_MS 1080000LL
++#define MKV_REFERENCE_PACKET_LIMIT 100000u
++#define MKV_REFERENCE_PACKET_BYTES 65536u
++
++struct mkv_reference_io {
++    struct stream_reference_reader_grant *grant;
++    struct avpriv_vortx_reference_reader *reader;
++    const AVIOInterruptCB *interrupt;
++    int64_t deadline_ns;
++    bool failed;
++};
++
++static int mkv_reference_interrupt(void *opaque)
++{
++    struct mkv_reference_io *io = opaque;
++    return mp_time_ns() >= io->deadline_ns ||
++        stream_reference_reader_cancelled(io->grant) ||
++        io->interrupt->callback(io->interrupt->opaque);
++}
++
++static int mkv_reference_fill(struct stream *s, void *buffer, int bytes)
++{
++    struct mkv_reference_io *io = s->priv;
++    if (mkv_reference_interrupt(io)) {
++        io->failed = true;
++        return 0;
++    }
++    int rc = avpriv_vortx_reference_read_v1(io->reader, buffer, bytes);
++    if (mkv_reference_interrupt(io) || (rc < 0 && rc != AVERROR_EOF)) {
++        io->failed = true;
++        return 0;
++    }
++    return rc == AVERROR_EOF ? 0 : rc;
++}
++
++static int mkv_reference_stream_open(struct stream *s,
++                                   const struct stream_open_args *args)
++{
++    if (!args->special_arg)
++        return STREAM_ERROR;
++    s->priv = args->special_arg; // worker stack, alive through free_stream
++    s->fill_buffer = mkv_reference_fill;
++    s->requested_buffer_size = 32768;
++    s->seekable = false;
++    s->streaming = s->is_network = true;
++    s->access_references = false;
++    return STREAM_OK; // no seek/size/URL callback, no nested source/open
++}
++
++static const stream_info_t mkv_reference_stream_info = {
++    .name = "reference-mkv-owned",
++    .open2 = mkv_reference_stream_open,
++};
++
++static struct mpv_global *mkv_reference_global(void)
++{
++    // Isolated defaults, not a copy or borrow of the player's mutable global.
++    // These are real MPV constructors, including their mandatory-OOM policy.
++    struct mpv_global *g = talloc_zero(NULL, struct mpv_global);
++    g->log = mp_null_log;
++    g->config = m_config_shadow_new(&mp_opt_root);
++    talloc_steal(g, g->config);
++    demux_packet_pool_init(g);
++    stats_global_init(g);
++    struct m_config_cache *cache = m_config_cache_alloc(NULL, g, &demux_conf);
++    struct demux_opts *o = cache->opts;
++    o->enable_cache = 0;
++    m_config_cache_write_opt(cache, &o->enable_cache);
++    o->disk_cache = false;
++    m_config_cache_write_opt(cache, &o->disk_cache);
++    o->access_references = false;
++    m_config_cache_write_opt(cache, &o->access_references);
++    o->create_ccs = false;
++    m_config_cache_write_opt(cache, &o->create_ccs);
++    o->force_seekable = false;
++    m_config_cache_write_opt(cache, &o->force_seekable);
++    o->max_bytes = 1024 * 1024;
++    m_config_cache_write_opt(cache, &o->max_bytes);
++    o->max_bytes_bw = 0;
++    m_config_cache_write_opt(cache, &o->max_bytes_bw);
++    talloc_free(cache);
++    return g;
++}
++
++static bool mkv_reference_decode(struct demux_reference_result *result,
++    AVCodecContext *decoder, AVPacket *packet, const struct demux_packet *dp,
++    double relative)
++{
++    if (av_new_packet(packet, (int)dp->len) < 0)
++        return false;
++    memcpy(packet->data, dp->buffer, dp->len);
++    packet->pts = llrint(dp->pts * 1000.0);
++    packet->dts = AV_NOPTS_VALUE;
++    packet->duration = dp->duration * 1000.0; // same lavc_conv truncation
++    if (packet->pts < 0)
++        packet->pts = 0;
++    AVSubtitle sub = {0};
++    int got = 0;
++    int consumed = avcodec_decode_subtitle2(decoder, &sub, &got, packet);
++    bool good = consumed == packet->size && got && sub.num_rects > 0 &&
++        sub.start_display_time != UINT32_MAX && sub.end_display_time != UINT32_MAX;
++    for (unsigned i = 0; good && i < sub.num_rects; i++) {
++        const AVSubtitleRect *r = sub.rects[i];
++        good = r && r->type == SUBTITLE_ASS && r->ass && !r->w && !r->h;
++    }
++    double start = relative + sub.start_display_time / 1000.0;
++    double end = relative + sub.end_display_time / 1000.0;
++    if (sub.end_display_time == packet->duration)
++        end = relative + dp->duration; // never narrow a boundary-crossing cue
++    good &= isfinite(start) && isfinite(end) && end > start;
++    if (good && start >= 0 && end <= MKV_REFERENCE_WINDOW_MS / 1000.0) {
++        int64_t a = llrint(start * 1000), b = llrint(end * 1000);
++        unsigned n = result->num_pairs;
++        good = n < DEMUX_REFERENCE_MAX_PAIRS && b > a &&
++            (!n || a >= result->pairs[n - 1].start_ms);
++        if (good)
++            result->pairs[result->num_pairs++] = (struct demux_reference_pair){a, b};
++    }
++    avsubtitle_free(&sub);
++    av_packet_unref(packet);
++    return good;
++}
++
++bool demux_mkv_reference_sparse_decode(const struct mkv_sparse_planner *planner,
++    const struct demux_mkv_reference_spec *spec, size_t spec_size,
++    const AVIOInterruptCB *interrupt,
++    struct demux_reference_result *out, size_t out_size)
++{
++    if (!spec || spec_size != sizeof(*spec) || spec->version != DEMUX_MKV_REFERENCE_VERSION ||
++        !interrupt || !interrupt->callback || !out || out_size != sizeof(*out) ||
++        out->complete || out->num_pairs || interrupt->callback(interrupt->opaque))
++        return false;
++    size_t count = 0;
++    const struct mkv_sparse_text *text = mkv_sparse_planner_text(planner, &count);
++    if (!text || !count || count > 10000)
++        return false;
++    AVCodecContext *decoder = NULL;
++    AVPacket *packet = NULL;
++    AVDictionary *options = NULL;
++    struct demux_reference_result value = {0};
++    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_SUBRIP);
++    bool ok = false;
++    if (!codec || (codec->capabilities & AV_CODEC_CAP_DELAY))
++        goto done;
++    decoder = avcodec_alloc_context3(codec);
++    packet = av_packet_alloc();
++    if (!decoder || !packet || av_dict_set(&options, "sub_text_format", "ass", 0) < 0 ||
++        av_dict_set(&options, "flags2", "+ass_ro_flush_noop", 0) < 0)
++        goto done;
++    decoder->thread_count = 1;
++    if (avcodec_open2(decoder, codec, &options) < 0)
++        goto done;
++    av_dict_free(&options);
++    decoder->time_base = decoder->pkt_timebase = (AVRational){1, 1000};
++    decoder->sub_charenc_mode = FF_SUB_CHARENC_MODE_IGNORE;
++    for (size_t i = 0; i < count; i++) {
++        if (interrupt->callback(interrupt->opaque) || !text[i].data || !text[i].bytes || text[i].bytes > 65536 ||
++            text[i].pts_ns < 0 || !text[i].duration_ns)
++            goto done;
++        // Same original native conversion order: block_ns/1e9 - codec_delay.
++        double pts = (text[i].pts_ns + spec->codec_delay_ns) / 1e9 -
++            spec->codec_delay_ns / 1e9;
++        struct demux_packet dp = {.buffer = (unsigned char *)text[i].data,
++            .len = text[i].bytes, .pts = pts, .duration = text[i].duration_ns / 1e9};
++        double relative = pts - spec->demux_start_time;
++        if (!isfinite(relative) || relative < 0 ||
++            !mkv_reference_decode(&value, decoder, packet, &dp, relative))
++            goto done;
++    }
++    AVSubtitle flushed = {0};
++    AVPacket empty = {0};
++    int got = 0;
++    int rc = avcodec_decode_subtitle2(decoder, &flushed, &got, &empty);
++    bool drained = rc == 0 && !got && !flushed.num_rects;
++    avsubtitle_free(&flushed);
++    if (!drained || !value.num_pairs || interrupt->callback(interrupt->opaque))
++        goto done;
++    // Deliberately tentative: this helper grants no source witness/completion.
++    *out = value;
++    ok = true;
++done:
++    av_dict_free(&options);
++    av_packet_free(&packet);
++    avcodec_free_context(&decoder);
++    return ok;
++}
++
++bool demux_mkv_reference_run(struct stream_reference_reader_grant *grant,
++    const struct demux_mkv_reference_spec *spec, size_t spec_size,
++    int64_t deadline, const AVIOInterruptCB *interrupt,
++    struct demux_reference_result *out, size_t out_size)
++{
++    int64_t now = mp_time_ns();
++    if (!grant || !spec || spec_size != sizeof(*spec) ||
++        spec->version != DEMUX_MKV_REFERENCE_VERSION || !interrupt ||
++        !interrupt->callback || !out || out_size != sizeof(*out) ||
++        out->complete || out->num_pairs || deadline <= now ||
++        deadline - now > 30000000000LL)
++        return false;
++    struct demux_reference_result value = {0};
++    struct mkv_reference_io io = {.grant = grant, .interrupt = interrupt,
++                                  .deadline_ns = deadline};
++    AVIOInterruptCB cb = {.callback = mkv_reference_interrupt, .opaque = &io};
++    struct mpv_global *g = NULL;
++    struct stream *s = NULL;
++    struct demuxer *d = NULL;
++    struct mp_cancel *cancel = NULL;
++    AVCodecContext *decoder = NULL;
++    AVPacket *packet = NULL;
++    AVDictionary *options = NULL;
++    struct demux_packet *dp = NULL;
++    bool ok = false, complete = false, seen = false;
++    double previous = -INFINITY;
++    if (mkv_reference_interrupt(&io) ||
++        !stream_reference_reader_witness(grant, &value.source_generation,
++            &value.source_epoch, &value.response_generation) ||
++        !stream_reference_reader_open(grant, &cb, &io.reader))
++        goto done;
++    g = mkv_reference_global();
++    cancel = mp_cancel_new(NULL);
++    struct stream_open_args args = {.global = g, .cancel = cancel,
++        .url = "reference-mkv-owned://", .flags = STREAM_READ | STREAM_SILENT |
++        spec->source_origin, .sinfo = &mkv_reference_stream_info, .special_arg = &io};
++    if (stream_create_with_args(&args, &s) != STREAM_OK)
++        goto done;
++    char format[] = "mkv";
++    struct demuxer_params params = {.force_format = format, .external_stream = s,
++        .disable_timeline = true, .allow_playlist_create = false};
++    d = demux_open_url(NULL, &params, cancel, g);
++    struct sh_stream *selected = d ? demux_mkv_reference_find_duplicate(d, spec, spec_size) : NULL;
++    if (!selected || io.failed || mkv_reference_interrupt(&io))
++        goto done;
++    demuxer_select_track(d, selected, MP_NOPTS_VALUE, true);
++    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_SUBRIP);
++    if (!codec || (codec->capabilities & AV_CODEC_CAP_DELAY))
++        goto done;
++    decoder = avcodec_alloc_context3(codec);
++    packet = av_packet_alloc();
++    if (!decoder || !packet || av_dict_set(&options, "sub_text_format", "ass", 0) < 0 ||
++        av_dict_set(&options, "flags2", "+ass_ro_flush_noop", 0) < 0)
++        goto done;
++    decoder->thread_count = 1;
++    if (avcodec_open2(decoder, codec, &options) < 0)
++        goto done;
++    av_dict_free(&options);
++    decoder->time_base = decoder->pkt_timebase = (AVRational){1, 1000};
++    decoder->sub_charenc_mode = FF_SUB_CHARENC_MODE_IGNORE;
++    for (;;) {
++        if (io.failed || mkv_reference_interrupt(&io) ||
++            value.packets_seen >= MKV_REFERENCE_PACKET_LIMIT)
++            goto done;
++        dp = demux_read_any_packet(d); // real non-threaded native demux/cache
++        if (io.failed || mkv_reference_interrupt(&io) ||
++            demux_mkv_reference_find_duplicate(d, spec, spec_size) != selected)
++            goto done;
++        if (!dp) {
++            struct avpriv_vortx_reference_stats stats = {0};
++            complete = avpriv_vortx_reference_stats_v1(io.reader, &stats, sizeof(stats)) == 0 &&
++                !stats.terminal_error && stats.complete_entity && stats.reached_entity_eof && seen;
++            break;
++        }
++        value.packets_seen++;
++        double relative = dp->pts - spec->demux_start_time;
++        if (dp->stream != selected->index || dp->segmented || dp->is_wrapped_avframe ||
++            dp->is_cached || !dp->buffer || !dp->len || dp->len > MKV_REFERENCE_PACKET_BYTES ||
++            !isfinite(dp->pts) || fabs(dp->pts) > (double)INT64_MAX / 2000.0 ||
++            !isfinite(dp->duration) || dp->duration <= 0 ||
++            dp->duration * 1000.0 >= UINT32_MAX || !isfinite(relative) ||
++            relative < 0 || relative < previous || (!seen && relative > 30) ||
++            (dp->avpacket && (dp->avpacket->flags & (AV_PKT_FLAG_CORRUPT | AV_PKT_FLAG_DISCARD))))
++            goto done;
++        seen = true;
++        previous = relative;
++        if (relative >= MKV_REFERENCE_WINDOW_MS / 1000.0) {
++            complete = true;
++            break;
++        }
++        if (!mkv_reference_decode(&value, decoder, packet, dp, relative))
++            goto done;
++        free_demux_packet(dp);
++        dp = NULL;
++    }
++    AVSubtitle flushed = {0};
++    AVPacket empty = {0};
++    int got = 0;
++    int rc = avcodec_decode_subtitle2(decoder, &flushed, &got, &empty);
++    bool drained = rc == 0 && !got && !flushed.num_rects;
++    avsubtitle_free(&flushed);
++    struct avpriv_vortx_reference_stats stats = {0};
++    if (!complete || !drained || !value.num_pairs || io.failed || mkv_reference_interrupt(&io) ||
++        avpriv_vortx_reference_stats_v1(io.reader, &stats, sizeof(stats)) < 0 ||
++        stats.terminal_error || stats.body_bytes > VORTX_REFERENCE_READER_MAX_BYTES)
++        goto done;
++    value.stream_index = spec->owner_stream_index;
++    value.demuxer_id = spec->owner_demuxer_id;
++    value.ff_index = value.av_stream_id = -1; // native TrackNumber is not an AVStream index
++    value.format_kind = 3; // native same-parser Matroska, never lavf Matroska
++    value.codec_id = AV_CODEC_ID_SUBRIP;
++    value.time_base_num = 1;
++    value.time_base_den = 1000;
++    value.source_origin = spec->source_origin;
++    value.origin_seconds = spec->demux_start_time;
++    value.prefix_end_ms = MKV_REFERENCE_WINDOW_MS;
++    value.input_bytes = stats.body_bytes;
++    value.complete = true;
++    ok = true;
++done:
++    free_demux_packet(dp);
++    av_dict_free(&options);
++    av_packet_free(&packet);
++    avcodec_free_context(&decoder);
++    demux_free(d);
++    free_stream(s); // external stream: demux_free deliberately does not own it
++    talloc_free(cancel);
++    talloc_free(g);
++    avpriv_vortx_reference_reader_close_v1(&io.reader);
++    if (ok && !io.failed && !mkv_reference_interrupt(&io))
++        *out = value;
++    else
++        ok = false;
++    // A failed call never writes partial cue values into caller storage.
++    return ok;
++}
+diff --git a/demux/reference_mkv_sparse.h b/demux/reference_mkv_sparse.h
+new file mode 100644
+--- /dev/null
++++ b/demux/reference_mkv_sparse.h
+@@ -0,0 +1,94 @@
++/* Proposed sparse primitives and original-owner integer-origin API.
++ * SOURCE ONLY, UNCOMPILED/UNRUN; no sparse network reader is activated. */
++#pragma once
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <limits.h>
++
++#define MKV_SPARSE_MAX_REQUESTS 256u
++#define MKV_SPARSE_MAX_SPANS 1024u
++#define MKV_SPARSE_MAX_HTTP_BYTES (128u * 1024u * 1024u)
++#define MKV_SPARSE_MAX_BATCH_PAYLOAD (4u * 1024u * 1024u)
++#define MKV_SPARSE_MAX_SPAN_BYTES (1024u * 1024u)
++#define MKV_SPARSE_HEADER_WINDOW 512u
++#define MKV_SPARSE_MAX_CLUSTER_HINTS 8192u
++#define MKV_SPARSE_MAX_ACTIVE_CLUSTERS 1024u
++#define MKV_SPARSE_MAX_EXACT_NS (UINT64_C(1) << 53)
++
++struct demuxer;
++struct sh_stream;
++/* Same original native owner exclusion as capture_spec. No I/O. Size checked
++ * before write; failure leaves caller scalar unchanged. This is the ACTUAL
++ * probe-first-timestamp cluster integer used by the original parser, not a
++ * reconstructed double or an indexed time. No authority follows from it. */
++bool demux_mkv_reference_sparse_origin(struct demuxer *demuxer,
++    struct sh_stream *selected, double consumer_ts_offset,
++    int64_t *origin_ns, size_t origin_size);
++
++struct mkv_sparse_span { uint64_t start, bytes; };
++struct mkv_sparse_origin {
++    int64_t first_cluster_ns; /* real original native integer before /1e9 */
++    int64_t timecode_scale;
++    uint64_t codec_delay_ns;
++    uint64_t entity_total; /* supplied only by the immutable FF recipe */
++    uint64_t segment_start, segment_end;
++    uint64_t track_number, track_uid;
++    int64_t window_end_ms;
++};
++enum mkv_sparse_phase {
++    MKV_SPARSE_DISCOVER_HEADERS,
++    MKV_SPARSE_VERIFY_SEGMENT_CHAIN,
++    MKV_SPARSE_WALK_CHILDREN,
++    MKV_SPARSE_NEED_BATCH,
++    MKV_SPARSE_NEED_SELECTED_PAYLOAD,
++    MKV_SPARSE_COMPLETE,
++    MKV_SPARSE_UNAVAILABLE,
++};
++
++/* A scalar prerequisite only. It NEVER proves hierarchy, resource identity,
++ * source authority, response completeness or that a Cluster header was real.
++ * Caller must separately prove actual Timestamp before Blocks and known-size
++ * strict hierarchy. Refusal means WALK, not absence. No floating conversion. */
++static inline bool mkv_sparse_time_excludes_window(
++    const struct mkv_sparse_origin *o, uint64_t cluster_ticks)
++{
++    if (!o || o->first_cluster_ns < 0 ||
++        (uint64_t)o->first_cluster_ns > MKV_SPARSE_MAX_EXACT_NS ||
++        o->timecode_scale < 1 || o->timecode_scale > 1000000000LL ||
++        o->codec_delay_ns > 60000000000ULL ||
++        o->window_end_ms < 1 || o->window_end_ms > 1080000 ||
++        cluster_ticks > MKV_SPARSE_MAX_EXACT_NS / (uint64_t)o->timecode_scale)
++        return false;
++    uint64_t cluster_ns = cluster_ticks * (uint64_t)o->timecode_scale;
++    uint64_t negative_relative = UINT64_C(32768) * (uint64_t)o->timecode_scale;
++    uint64_t correction = negative_relative + o->codec_delay_ns;
++    if (cluster_ns < correction)
++        return false;
++    uint64_t boundary = (uint64_t)o->first_cluster_ns +
++        (uint64_t)o->window_end_ms * 1000000u + 1000000u;
++    return cluster_ns - correction > boundary;
++}
++
++/* Only request shape/bounds, never a transport authority check. Native planner
++ * sorts and merges overlap/adjacency first; a proposed batch must fit atomically.
++ * A root integration must bind this shape to the actual FF budget transaction. */
++static inline bool mkv_sparse_spans_valid(const struct mkv_sparse_span *spans,
++    size_t count, uint64_t known_total)
++{
++    if (!spans || !count || count > MKV_SPARSE_MAX_SPANS ||
++        !known_total || known_total > INT64_MAX)
++        return false;
++    uint64_t sum = 0, previous_end = 0;
++    for (size_t i = 0; i < count; i++) {
++        uint64_t start = spans[i].start, bytes = spans[i].bytes;
++        if (!bytes || bytes > MKV_SPARSE_MAX_SPAN_BYTES || start >= known_total ||
++            bytes > known_total - start || (i && start <= previous_end))
++            return false;
++        sum += bytes;
++        if (sum > MKV_SPARSE_MAX_BATCH_PAYLOAD)
++            return false;
++        previous_end = start + bytes; /* exclusive, also refuses unmerged adjacency */
++    }
++    return true;
++}
+diff --git a/demux/reference_mkv_sparse_planner.c b/demux/reference_mkv_sparse_planner.c
+new file mode 100644
+--- /dev/null
++++ b/demux/reference_mkv_sparse_planner.c
+@@ -0,0 +1,671 @@
++/* Actual resumable sparse EBML planner. Source proposal, UNCOMPILED/UNRUN.
++ * No socket, URL, AVIO, owner, global config or cancel pointer is borrowed. */
++#include <math.h>
++#include <stdlib.h>
++#include <string.h>
++#include "reference_mkv_sparse_planner.h"
++
++#define SP_MAX_CLUSTERS 8192u
++#define SP_MAX_TEXT 10000u
++#define SP_MAX_TEXT_BYTES (8u * 1024u * 1024u)
++#define SP_MAX_METADATA (1024u * 1024u)
++#define SP_MAX_STEPS 4000000u
++#define SP_SEGMENT 0x18538067u
++#define SP_CLUSTER 0x1f43b675u
++#define SP_INFO 0x1549a966u
++#define SP_TRACKS 0x1654ae6bu
++#define SP_CUES 0x1c53bb6bu
++#define SP_SEEKHEAD 0x114d9b74u
++
++struct sp_element { uint32_t id; uint64_t start, body, end; bool unknown; };
++struct sp_cache { struct mkv_sparse_bytes bytes; unsigned char *owned; };
++struct sp_cluster {
++    uint64_t start, body, end, cursor, ticks;
++    uint64_t group_end, block_position, payload_start, duration;
++    uint32_t payload_bytes;
++    int16_t relative;
++    bool header, accepted, timestamp, done, excluded, invalid_hint, first_known_block;
++    bool group, block, selected, duration_seen, forbidden;
++};
++struct mkv_sparse_planner {
++    struct demux_mkv_reference_spec spec;
++    struct mkv_sparse_origin origin;
++    bool (*abort_requested)(void *); void *abort_opaque;
++    struct mkv_sparse_progress progress;
++    struct sp_cluster *clusters; size_t cluster_count;
++    struct mkv_sparse_text *text; size_t text_count; uint64_t text_bytes;
++    struct sp_cache cache[MKV_SPARSE_MAX_SPANS]; size_t cache_count;
++    struct mkv_sparse_span need[MKV_SPARSE_MAX_SPANS], pending[MKV_SPARSE_MAX_SPANS];
++    size_t need_count, pending_count; uint64_t batch_id;
++    uint64_t boot_pos, chain_pos, segment_end, cues_pos;
++    uint64_t origin_frontier, track_numbers[1024]; size_t track_count;
++    unsigned boot, metadata_seen, steps;
++    bool cues_done, pending_active, origin_verified;
++};
++static bool sp_fail(struct mkv_sparse_planner *p)
++{ p->progress.failed = true; return false; }
++static bool sp_live(struct mkv_sparse_planner *p)
++{
++    return !p->progress.failed &&
++        (!p->abort_requested || !p->abort_requested(p->abort_opaque)) &&
++        p->steps++ < SP_MAX_STEPS ? true : sp_fail(p);
++}
++static void sp_clear_cache(struct mkv_sparse_planner *p)
++{
++    for (size_t i = 0; i < p->cache_count; i++) free(p->cache[i].owned);
++    p->cache_count = 0;
++}
++static const unsigned char *sp_data(struct mkv_sparse_planner *p,
++    uint64_t at, uint64_t bytes)
++{
++    if (!bytes || at >= p->origin.entity_total || bytes > p->origin.entity_total - at)
++        return NULL;
++    for (size_t i = 0; i < p->cache_count; i++) {
++        struct mkv_sparse_bytes *c = &p->cache[i].bytes;
++        if (at >= c->start && at - c->start <= c->bytes &&
++            bytes <= c->bytes - (at - c->start))
++            return c->data + (at - c->start);
++    }
++    return NULL;
++}
++static void sp_need(struct mkv_sparse_planner *p, uint64_t at,
++                    uint64_t bytes, uint64_t parent_end)
++{
++    if (at >= parent_end || parent_end > p->origin.entity_total ||
++        !bytes || bytes > MKV_SPARSE_MAX_SPAN_BYTES) { sp_fail(p); return; }
++    uint64_t n = bytes < 512 ? 512 : bytes;
++    if (n > parent_end - at) n = parent_end - at;
++    if (n < bytes) { sp_fail(p); return; }
++    for (size_t i = 0; i < p->need_count; i++)
++        if (p->need[i].start == at && p->need[i].bytes >= n) return;
++    if (p->need_count < MKV_SPARSE_MAX_SPANS)
++        p->need[p->need_count++] = (struct mkv_sparse_span){at, n};
++}
++static unsigned sp_width(unsigned char first, unsigned maximum)
++{
++    if (!first) return 0;
++    unsigned n = 1;
++    for (unsigned mask = 0x80; !(first & mask); mask >>= 1) n++;
++    return n <= maximum ? n : 0;
++}
++/* 1 parsed, 0 missing admitted bytes, -1 invalid. Parent bounds are checked
++ * before every ID/size access and before converting a length into an offset. */
++static int sp_element(struct mkv_sparse_planner *p, uint64_t at,
++    uint64_t parent_end, struct sp_element *out)
++{
++    if (at >= parent_end || parent_end > p->origin.entity_total) return -1;
++    const unsigned char *b = sp_data(p, at, 1);
++    if (!b) { sp_need(p, at, 1, parent_end); return 0; }
++    unsigned idn = sp_width(b[0], 4);
++    if (!idn || idn > parent_end - at) return -1;
++    b = sp_data(p, at, idn + 1);
++    if (!b) { sp_need(p, at, idn + 1, parent_end); return 0; }
++    unsigned sn = sp_width(b[idn], 8);
++    if (!sn || idn + sn > parent_end - at) return -1;
++    b = sp_data(p, at, idn + sn);
++    if (!b) { sp_need(p, at, idn + sn, parent_end); return 0; }
++    uint32_t id = 0; uint64_t size = b[idn] & (0xffu >> sn);
++    for (unsigned i = 0; i < idn; i++) id = (id << 8) | b[i];
++    for (unsigned i = 1; i < sn; i++) size = (size << 8) | b[idn + i];
++    uint64_t body = at + idn + sn;
++    bool unknown = size == (UINT64_C(1) << (7 * sn)) - 1;
++    if (!unknown && size > parent_end - body) return -1;
++    *out = (struct sp_element){id, at, body, unknown ? parent_end : body + size, unknown};
++    return 1;
++}
++/* Strict memory EBML used only on a completely copied bounded metadata body. */
++static bool sp_memory_element(const unsigned char *b, size_t size, size_t *at,
++    uint32_t *id, const unsigned char **value, size_t *bytes)
++{
++    if (*at >= size) return false;
++    unsigned a = sp_width(b[*at], 4);
++    if (!a || a >= size - *at) return false;
++    unsigned n = sp_width(b[*at + a], 8);
++    if (!n || a + n > size - *at) return false;
++    uint64_t z = b[*at + a] & (0xffu >> n); *id = 0;
++    for (unsigned i = 0; i < a; i++) *id = (*id << 8) | b[*at + i];
++    for (unsigned i = 1; i < n; i++) z = (z << 8) | b[*at + a + i];
++    if (z == (UINT64_C(1) << (7 * n)) - 1 || z > size - *at - a - n) return false;
++    *at += a + n; *value = b + *at; *bytes = z; *at += z; return true;
++}
++static bool sp_uint(const unsigned char *b, size_t n, uint64_t *v)
++{
++    if (n > 8) return false;
++    *v = 0; for (size_t i = 0; i < n; i++) *v = (*v << 8) | b[i];
++    return true;
++}
++static bool sp_info(struct mkv_sparse_planner *p, const unsigned char *b, size_t n)
++{
++    size_t at = 0; unsigned scale_seen = 0, uid_seen = 0;
++    uint64_t scale = 1000000; unsigned char uid[16] = {0};
++    while (at < n) {
++        if(!sp_live(p))return false;
++        uint32_t id; const unsigned char *v; size_t z;
++        if (!sp_memory_element(b, n, &at, &id, &v, &z)) return false;
++        if (id == 0x2ad7b1) { if (scale_seen++ || !sp_uint(v, z, &scale)) return false; }
++        if (id == 0x73a4) { if (uid_seen++ || z != 16) return false; memcpy(uid, v, 16); }
++        if (id == 0x3cb923 || id == 0x3eb923) return false; // linked Segments
++    }
++    return scale == (uint64_t)p->spec.timecode_scale &&
++        !memcmp(uid, p->spec.segment_uid, 16);
++}
++static bool sp_track(struct mkv_sparse_planner *p, const unsigned char *b, size_t n,
++                     uint64_t *number, uint64_t *uid, bool *selected)
++{
++    size_t at = 0; unsigned ns = 0, us = 0, ts = 0, cs = 0, ds = 0, fs = 0, ss = 0;
++    uint64_t type = 0, delay = 0, duration = 0; bool utf8 = false, prohibited = false;
++    *number = *uid = 0;
++    while (at < n) {
++        if(!sp_live(p))return false;
++        uint32_t id; const unsigned char *v; size_t z; uint64_t u;
++        if (!sp_memory_element(b, n, &at, &id, &v, &z)) return false;
++        switch (id) {
++        case 0xd7: if (ns++ || !sp_uint(v,z,number)) return false; break;
++        case 0x73c5: if (us++ || !sp_uint(v,z,uid)) return false; break;
++        case 0x83: if (ts++ || !sp_uint(v,z,&type)) return false; break;
++        case 0x86: if (cs++) return false; utf8 = z == 11 && !memcmp(v,"S_TEXT/UTF8",11); break;
++        case 0x56aa: if (ds++ || !sp_uint(v,z,&delay)) return false; break;
++        case 0x23e383: if (fs++ || !sp_uint(v,z,&duration)) return false; break;
++        case 0x63a2: case 0x6d80: case 0x537f: prohibited = true; break;
++        case 0x23314f:
++            u = 0;
++            if (ss++ || !sp_uint(v,z,&u) || !((z == 4 && u == 0x3f800000u) ||
++                (z == 8 && u == UINT64_C(0x3ff0000000000000)))) prohibited = true;
++            break;
++        default: break;
++        }
++    }
++    if (ns != 1 || !*number || *number > INT_MAX) return false;
++    *selected = *number == p->spec.track_number;
++    if (!*selected) return true;
++    return us == 1 && *uid == p->spec.track_uid && ts == 1 && type == 17 &&
++        cs == 1 && utf8 && !prohibited && delay == p->spec.codec_delay_ns &&
++        duration == p->spec.default_duration_ns && ds == p->spec.codec_delay_present &&
++        fs == p->spec.default_duration_present;
++}
++static bool sp_tracks(struct mkv_sparse_planner *p, const unsigned char *b, size_t n)
++{
++    uint64_t numbers[1024], uids[1024]; size_t at = 0, count = 0; unsigned selected = 0;
++    while (at < n) {
++        if(!sp_live(p))return false;
++        uint32_t id; const unsigned char *v; size_t z; bool match;
++        if (!sp_memory_element(b,n,&at,&id,&v,&z)) return false;
++        if (id == 0xbf || id == 0xec) continue;
++        if (id != 0xae || count == 1024 || !sp_track(p,v,z,&numbers[count],&uids[count],&match)) return false;
++        for (size_t i = 0; i < count; i++) if (numbers[i] == numbers[count]) return false;
++        selected += match; count++;
++    }
++    unsigned same_uid = 0;
++    for (size_t i = 0; i < count; i++) same_uid += uids[i] == p->spec.track_uid;
++    if(count != p->spec.num_tracks || selected != 1 || same_uid != 1)return false;
++    memcpy(p->track_numbers,numbers,count*sizeof(*numbers));p->track_count=count;
++    return true;
++}
++static struct sp_cluster *sp_cluster(struct mkv_sparse_planner *p, uint64_t at)
++{
++    if (at < (uint64_t)p->spec.segment_start || at >= p->segment_end) return NULL;
++    for (size_t i = 0; i < p->cluster_count; i++) if (p->clusters[i].start == at) return &p->clusters[i];
++    if (p->cluster_count == SP_MAX_CLUSTERS) { sp_fail(p); return NULL; }
++    struct sp_cluster *c = &p->clusters[p->cluster_count++]; *c = (struct sp_cluster){.start=at}; return c;
++}
++static bool sp_cue_positions(struct mkv_sparse_planner *p, const unsigned char *b,
++                            size_t n, unsigned depth)
++{
++    if (depth > 4) return false;
++    size_t at = 0;
++    while (at < n) {
++        if(!sp_live(p))return false;
++        uint32_t id; const unsigned char *v; size_t z; uint64_t pos;
++        if (!sp_memory_element(b,n,&at,&id,&v,&z)) return false;
++        if (id == 0xbb || id == 0xb7) {
++            if (!sp_cue_positions(p,v,z,depth+1)) return false;
++        } else if (id == 0xf1) {
++            if (!sp_uint(v,z,&pos) || pos > p->segment_end - p->spec.segment_start) return false;
++            if (!sp_cluster(p, p->spec.segment_start + pos)) return false;
++        }
++    }
++    return true;
++}
++static bool sp_seekhead(struct mkv_sparse_planner *p, const unsigned char *b, size_t n)
++{
++    size_t at = 0;
++    while (at < n) {
++        if(!sp_live(p))return false;
++        uint32_t id; const unsigned char *v; size_t z;
++        if (!sp_memory_element(b,n,&at,&id,&v,&z)) return false;
++        if (id != 0x4dbb) continue;
++        size_t a = 0; uint64_t which = 0, position = UINT64_MAX; unsigned is = 0, ps = 0;
++        while (a < z) {
++            if(!sp_live(p))return false;
++            uint32_t child; const unsigned char *cv; size_t cz;
++            if (!sp_memory_element(v,z,&a,&child,&cv,&cz)) return false;
++            if (child == 0x53ab && (is++ || !sp_uint(cv,cz,&which))) return false;
++            if (child == 0x53ac && (ps++ || !sp_uint(cv,cz,&position))) return false;
++        }
++        if (which == SP_CUES && is == 1 && ps == 1) {
++            if (position >= p->segment_end - p->spec.segment_start) return false;
++            uint64_t absolute = p->spec.segment_start + position;
++            if (p->cues_pos && p->cues_pos != absolute) return false;
++            p->cues_pos = absolute;
++        }
++    }
++    return true;
++}
++static int sp_metadata(struct mkv_sparse_planner *p, struct sp_element e, bool speculative)
++{
++    uint64_t n = e.end - e.body;
++    if (e.unknown || e.end-e.start > SP_MAX_METADATA || !n) return -1;
++    const unsigned char *b = sp_data(p,e.body,n);
++    // Retry must retain the element header together with its body. Asking for
++    // body-only bytes would evict that header and alternate NEED forever.
++    if (!b) { sp_need(p,e.start,e.end-e.start,e.end); return 0; }
++    if (e.id == SP_CUES) {
++        if (!sp_cue_positions(p,b,n,0)) return -1;
++        p->cues_done = true; return 1;
++    }
++    if (speculative) return -1;
++    unsigned bit = e.id == SP_INFO ? 1 : e.id == SP_TRACKS ? 2 : 0;
++    if (bit && (p->metadata_seen & bit)) return -1;
++    bool ok = e.id == SP_INFO ? sp_info(p,b,n) : e.id == SP_TRACKS ? sp_tracks(p,b,n) :
++        e.id == SP_SEEKHEAD ? sp_seekhead(p,b,n) : true;
++    if (ok) p->metadata_seen |= bit;
++    return ok ? 1 : -1;
++}
++static bool sp_boot(struct mkv_sparse_planner *p)
++{
++    struct sp_element e; int r;
++    if (!p->boot) {
++        r = sp_element(p,0,p->origin.entity_total,&e);
++        if (r <= 0) return r < 0 ? sp_fail(p) : false;
++        if (e.id != 0x1a45dfa3 || e.unknown || e.end - e.body > 65536) return sp_fail(p);
++        const unsigned char *b = sp_data(p,e.body,e.end-e.body);
++        if (!b) { sp_need(p,e.start,e.end-e.start,e.end); return false; }
++        size_t at=0; unsigned docs=0; bool valid=false;
++        while(at < e.end-e.body) {
++            if(!sp_live(p))return sp_fail(p);
++            uint32_t id; const unsigned char *v; size_t z; uint64_t u;
++            if (!sp_memory_element(b,e.end-e.body,&at,&id,&v,&z)) return sp_fail(p);
++            if (id == 0x4282) { docs++; valid=(z==8&&!memcmp(v,"matroska",8))||(z==4&&!memcmp(v,"webm",4)); }
++            if ((id==0x42f7||id==0x4285) && (!sp_uint(v,z,&u)||u>2)) return sp_fail(p);
++        }
++        if (docs != 1 || !valid) return sp_fail(p);
++        p->boot_pos=e.end; p->boot=1;
++    }
++    if (p->boot==1) {
++        r=sp_element(p,p->boot_pos,p->origin.entity_total,&e);
++        if (r<=0) return r<0?sp_fail(p):false;
++        if(e.id!=SP_SEGMENT||e.body!=(uint64_t)p->spec.segment_start||
++           (!e.unknown&&e.end!=(uint64_t)p->spec.segment_end)) return sp_fail(p);
++        p->segment_end=e.end; p->origin.segment_end=e.end; p->chain_pos=e.body; p->boot=2;
++    }
++    return true;
++}
++static bool sp_chain(struct mkv_sparse_planner *p)
++{
++    bool moved=false;
++    while (p->chain_pos < p->segment_end && sp_live(p)) {
++        struct sp_element e; int r=0;
++        /* A once-admitted speculative header is immutable same-entity data.
++         * It becomes a real Cluster ONLY when the contiguous chain reaches
++         * its exact start; this avoids refetching each Cue-seeded header. */
++        for(size_t i=0;i<p->cluster_count;i++) {
++            struct sp_cluster *c=&p->clusters[i];
++            if(c->start==p->chain_pos&&c->header&&!c->invalid_hint) {
++                e=(struct sp_element){SP_CLUSTER,c->start,c->body,c->end,false};r=1;break;
++            }
++        }
++        if(!r)r=sp_element(p,p->chain_pos,p->segment_end,&e);
++        if(r==0) return moved;
++        if(r<0||e.unknown) return sp_fail(p);
++        if(e.id==SP_CLUSTER) {
++            struct sp_cluster *c=sp_cluster(p,e.start); if(!c) return sp_fail(p);
++            if(c->header&&(c->body!=e.body||c->end!=e.end)) return sp_fail(p);
++            c->header=true;c->accepted=true;c->body=e.body;c->end=e.end;
++            if(!c->cursor)c->cursor=e.body;
++            if(!p->origin_frontier)p->origin_frontier=e.start;
++        } else if(e.id==SP_INFO||e.id==SP_TRACKS||e.id==SP_SEEKHEAD||e.id==SP_CUES) {
++            r=sp_metadata(p,e,false); if(!r)return moved;if(r<0)return sp_fail(p);
++        } else if(e.id!=0x1254c367&&e.id!=0x1043a770&&e.id!=0x1941a469&&e.id!=0xec&&e.id!=0xbf)
++            return sp_fail(p); // known level1 only; no resync into unknown payload
++        p->chain_pos=e.end;moved=true;
++    }
++    if(p->chain_pos==p->segment_end)p->progress.chain_complete=true;
++    return moved;
++}
++static int sp_scalar(struct mkv_sparse_planner *p,struct sp_element e,uint64_t *v)
++{
++    if(e.unknown||e.end-e.body>8)return -1;
++    const unsigned char *b=sp_data(p,e.body,e.end-e.body);
++    if(!b&&e.end!=e.body){sp_need(p,e.start,e.end-e.start,e.end);return 0;}
++    return sp_uint(b,e.end-e.body,v)&&*v!=UINT64_MAX?1:-1;
++}
++static int sp_reference_block(struct mkv_sparse_planner *p,struct sp_element e)
++{
++    uint64_t n=e.end-e.body,value=0;
++    if(e.unknown||n>8)return -1;
++    const unsigned char *b=sp_data(p,e.body,n);
++    if(!b&&n){sp_need(p,e.start,e.end-e.start,e.end);return 0;}
++    if(!sp_uint(b,n,&value))return -1;
++    // ebml_read_int sign-extends shorter encodings. Only this eight-byte
++    // value equals its EBML_INT_INVALID sentinel; -1 remains a valid reference.
++    return n==8&&value==INT64_MAX?-1:1;
++}
++static int sp_lace_byte(struct mkv_sparse_planner *p,uint64_t request_start,
++    uint64_t begin,uint64_t at,uint64_t end,unsigned char *out)
++{
++    if(at>=end||at-begin>=65536)return -1;
++    const unsigned char *b=sp_data(p,at,1);
++    if(!b){
++        uint64_t want=at-request_start+512;
++        if(want>end-request_start)want=end-request_start;
++        uint64_t limit=begin-request_start+65536;
++        if(want>limit)want=limit;
++        sp_need(p,request_start,want,end);return 0;
++    }
++    *out=*b;return 1;
++}
++static int sp_lace_vint(struct mkv_sparse_planner *p,uint64_t request_start,
++    uint64_t begin,uint64_t *at,uint64_t end,uint64_t *out,unsigned *width)
++{
++    unsigned char first;int r=sp_lace_byte(p,request_start,begin,*at,end,&first);if(r<=0)return r;
++    unsigned n=sp_width(first,8);if(!n||n>end-*at)return -1;
++    uint64_t value=first&(0xffu>>n);
++    for(unsigned i=1;i<n;i++){
++        unsigned char b;r=sp_lace_byte(p,request_start,begin,*at+i,end,&b);if(r<=0)return r;
++        value=(value<<8)|b;
++    }
++    *at+=n;*out=value;*width=n;return 1;
++}
++/* Native read_block parses lacing BEFORE track selection. Validate that same
++ * geometry even for skipped audio/video, so malformed unselected data cannot
++ * conceal a real native Cluster rejection before a later selected occurrence.
++ * Only the small lace table is fetched, never the media frames. */
++static int sp_lacing(struct mkv_sparse_planner *p,uint64_t request_start,
++                     uint64_t begin,uint64_t end,unsigned type)
++{
++    if(type==0)return end-begin<=(1u<<30)?1:-1;
++    unsigned char count;int r=sp_lace_byte(p,request_start,begin,begin,end,&count);if(r<=0)return r;
++    unsigned laces=(unsigned)count+1;uint64_t at=begin+1,total=0,sizes[256]={0};
++    if(type==2){
++        uint64_t rest=end-at;
++        return rest%laces==0&&rest/laces<=(1u<<30)?1:-1;
++    }
++    if(type==1){
++        for(unsigned i=0;i+1<laces;i++){
++            unsigned char b;
++            do{
++                r=sp_lace_byte(p,request_start,begin,at,end,&b);if(r<=0)return r;at++;
++                if(at>=end||sizes[i]>UINT32_MAX-b)return -1;
++                sizes[i]+=b;
++            }while(b==255);
++            total+=sizes[i];
++        }
++    }else if(type==3){
++        uint64_t value;unsigned width;
++        r=sp_lace_vint(p,request_start,begin,&at,end,&value,&width);if(r<=0)return r;
++        if(at>=end||value>UINT32_MAX)return -1;
++        sizes[0]=value;total=value;
++        for(unsigned i=1;i+1<laces;i++){
++            r=sp_lace_vint(p,request_start,begin,&at,end,&value,&width);if(r<=0)return r;
++            if(at>=end)return -1;
++            int64_t delta=(int64_t)value-((INT64_C(1)<<(7*width-1))-1);
++            int64_t size=(int64_t)sizes[i-1]+delta;
++            if(size<0||size>UINT32_MAX)return -1;
++            sizes[i]=size;total+=sizes[i];
++        }
++        // With a single lace the native loop overwrites size[0] with the
++        // remaining-minus-initial value, then requires exact end consumption.
++        if(laces==1&&value!=0)return -1;
++    }else return -1;
++    if(total>end-at)return -1;
++    sizes[laces-1]=end-at-total;
++    for(unsigned i=0;i<laces;i++)if(sizes[i]>(1u<<30))return -1;
++    return 1;
++}
++static int sp_block_header(struct mkv_sparse_planner *p,struct sp_cluster *c,struct sp_element e)
++{
++    uint64_t z=e.end-e.body;if(e.unknown||z<4||z>500000000)return -1;
++    const unsigned char *b=sp_data(p,e.body,1);
++    if(!b){sp_need(p,e.start,e.body-e.start+(z<11?z:11),e.end);return 0;}
++    unsigned w=sp_width(b[0],8);if(!w||w+3>z)return -1;
++    b=sp_data(p,e.body,w+3);if(!b){sp_need(p,e.start,e.body-e.start+w+3,e.end);return 0;}
++    uint64_t track=b[0]&(0xffu>>w);for(unsigned i=1;i<w;i++)track=(track<<8)|b[i];
++    if(!track||track==(UINT64_C(1)<<(7*w))-1)return -1;
++    int lace=sp_lacing(p,e.start,e.body+w+3,e.end,(b[w+2]>>1)&3);
++    if(lace<=0)return lace;
++    p->progress.block_headers++;
++    for(size_t i=0;i<p->track_count;i++)
++        if(track==p->track_numbers[i])c->first_known_block=true;
++    if(c->block)return -1;
++    c->block=true;c->selected=track==p->spec.track_number;c->block_position=e.start;
++    if(c->selected){
++        if(b[w+2]!=0||z-w-3==0||z-w-3>65536)return -1;
++        c->relative=(int16_t)((unsigned)b[w]<<8|b[w+1]);
++        c->payload_start=e.body+w+3;c->payload_bytes=z-w-3;
++    }
++    return 1;
++}
++static int sp_record(struct mkv_sparse_planner *p,struct sp_cluster *c)
++{
++    if(!c->selected)return 1;
++    if(!c->duration_seen||!c->duration||c->forbidden||c->duration>=UINT32_MAX*1000000ULL)return -1;
++    p->progress.selected_occurrences++;
++    int64_t cluster_ns=c->ticks*p->spec.timecode_scale;
++    int64_t offset=(int64_t)c->relative*p->spec.timecode_scale;
++    if((offset>0&&cluster_ns>INT64_MAX-offset)||(offset<0&&cluster_ns<INT64_MIN-offset))return -1;
++    int64_t pts=cluster_ns+offset;
++    if(pts<0||(uint64_t)pts<p->spec.codec_delay_ns)return -1;
++    pts-=p->spec.codec_delay_ns;
++    if(pts<p->origin.first_cluster_ns)return -1;
++    if(pts-p->origin.first_cluster_ns>=p->origin.window_end_ms*1000000LL)return 1;
++    const unsigned char *b=sp_data(p,c->payload_start,c->payload_bytes);
++    if(!b){p->progress.selected_occurrences--;sp_need(p,c->payload_start,c->payload_bytes,c->group_end);return 0;}
++    if(p->text_count==SP_MAX_TEXT||c->payload_bytes>SP_MAX_TEXT_BYTES-p->text_bytes)return -1;
++    unsigned char *copy=malloc(c->payload_bytes);if(!copy)return -1;memcpy(copy,b,c->payload_bytes);
++    p->text[p->text_count++]=(struct mkv_sparse_text){c->block_position,pts,c->duration,c->payload_bytes,copy};
++    p->text_bytes+=c->payload_bytes;return 1;
++}
++static bool sp_walk(struct mkv_sparse_planner *p,struct sp_cluster *c)
++{
++    bool moved=false;
++    if(c->done||c->invalid_hint)return false;
++    if(!c->header){
++        struct sp_element e;int r=sp_element(p,c->start,p->segment_end,&e);
++        if(!r)return false;
++        if(r>0&&e.id==SP_CUES&&!e.unknown){
++            r=sp_metadata(p,e,true);
++            if(!r)return false;
++            c->invalid_hint=true;return true;
++        }
++        if(r<0||e.id!=SP_CLUSTER||e.unknown){if(c->accepted)return sp_fail(p);c->invalid_hint=true;return true;}
++        c->header=true;c->body=e.body;c->end=e.end;c->cursor=e.body;moved=true;
++    }
++    /* Speculative hints only parse their headers; no child/result authority. */
++    if(!c->accepted||!(p->metadata_seen&2))return moved;
++    // Establish the genuine source-order probe origin first. Later cursors may
++    // seed immutable headers, but must not count/consume Blocks before that
++    // frontier is known; this also keeps excluded-Cluster receipts exact.
++    if(!p->origin_verified&&c->start!=p->origin_frontier)return moved;
++    if(c->timestamp&&p->origin_verified&&
++       mkv_sparse_time_excludes_window(&p->origin,c->ticks)){
++        c->done=c->excluded=true;p->progress.excluded_clusters++;return true;
++    }
++    while(!c->done&&sp_live(p)){
++        if(c->group&&c->cursor==c->group_end){
++            int r=sp_record(p,c);if(!r)return moved;if(r<0)return sp_fail(p);
++            c->group=false;c->block=false;c->selected=false;c->duration_seen=false;c->forbidden=false;
++            moved=true;continue;
++        }
++        uint64_t end=c->group?c->group_end:c->end;
++        if(c->cursor==end){
++            if(c->group||!c->timestamp)return sp_fail(p);
++            c->done=true;return true;
++        }
++        struct sp_element e;int r=sp_element(p,c->cursor,end,&e);
++        if(!r)return moved;if(r<0||e.unknown)return sp_fail(p);
++        if(!c->group&&e.id==0xe7){
++            uint64_t ticks=0;if(c->timestamp)return sp_fail(p);
++            r=sp_scalar(p,e,&ticks);if(!r)return moved;
++            if(r<0||ticks>MKV_SPARSE_MAX_EXACT_NS/(uint64_t)p->spec.timecode_scale)return sp_fail(p);
++            c->ticks=ticks;c->timestamp=true;c->cursor=e.end;moved=true;
++            if(p->origin_verified&&mkv_sparse_time_excludes_window(&p->origin,ticks)){
++                c->done=c->excluded=true;p->progress.excluded_clusters++;return true;
++            }
++            continue;
++        }
++        if(!c->timestamp&&(e.id==0xa0||e.id==0xa3))return sp_fail(p);
++        if(!c->group&&e.id==0xa0){
++            c->group=true;c->group_end=e.end;c->cursor=e.body;c->block=false;c->selected=false;
++            c->duration_seen=false;c->duration=0;c->forbidden=false;moved=true;continue;
++        }
++        if((c->group&&e.id==0xa1)||(!c->group&&e.id==0xa3)){
++            r=sp_block_header(p,c,e);if(!r)return moved;if(r<0)return sp_fail(p);
++            if(!c->group){if(c->selected)return sp_fail(p);c->block=false;}
++        }else if(c->group&&e.id==0x9b){
++            uint64_t ticks;r=sp_scalar(p,e,&ticks);if(!r)return moved;
++            if(r<0||c->duration_seen||ticks>INT64_MAX/(uint64_t)p->spec.timecode_scale)return sp_fail(p);
++            c->duration_seen=true;c->duration=ticks*p->spec.timecode_scale;
++        }else if(c->group&&e.id==0xfb){
++            r=sp_reference_block(p,e);if(!r)return moved;if(r<0)return sp_fail(p);
++        }else if(c->group&&e.id==0x75a2){
++            uint64_t padding;r=sp_scalar(p,e,&padding);if(!r)return moved;
++            if(r<0)return sp_fail(p);c->forbidden=true;
++        }else if(c->group&&(e.id==0x75a1||e.id==SP_CLUSTER)){
++            return sp_fail(p); // unsupported BlockAdditions, or native group error
++        }else if(c->group&&e.id!=0xfb&&e.id!=0xbf&&e.id!=0xec){
++            c->forbidden=true; // may precede a selected Block; never forget it
++        }else if(!c->group&&e.id==SP_CLUSTER)return sp_fail(p);
++        c->cursor=e.end;moved=true;
++    }
++    return moved;
++}
++/* The original probe uses the Cluster clock of the first known-track Block,
++ * not necessarily the first Timestamp of an empty Cluster. Verify that same
++ * source-order fact before allowing any whole-Cluster exclusion. */
++static bool sp_origin_update(struct mkv_sparse_planner *p)
++{
++    while(!p->origin_verified&&p->origin_frontier&&sp_live(p)){
++        struct sp_cluster *c=NULL;
++        for(size_t i=0;i<p->cluster_count;i++)
++            if(p->clusters[i].accepted&&p->clusters[i].start==p->origin_frontier)c=&p->clusters[i];
++        if(!c)return false;
++        if(c->first_known_block){
++            if(!c->timestamp||c->ticks*(uint64_t)p->spec.timecode_scale!=(uint64_t)p->origin.first_cluster_ns)
++                return sp_fail(p);
++            p->origin_verified=true;return true;
++        }
++        if(!c->done)return false;
++        uint64_t next=UINT64_MAX;
++        for(size_t i=0;i<p->cluster_count;i++)
++            if(p->clusters[i].accepted&&p->clusters[i].start>c->start&&p->clusters[i].start<next)
++                next=p->clusters[i].start;
++        if(next==UINT64_MAX)return false;
++        p->origin_frontier=next;
++    }
++    return false;
++}
++static int sp_span_compare(const void *a,const void *b)
++{
++    const struct mkv_sparse_span *x=a,*y=b;return x->start<y->start?-1:x->start>y->start;
++}
++static int sp_text_compare(const void *a,const void *b)
++{
++    const struct mkv_sparse_text *x=a,*y=b;return x->source_position<y->source_position?-1:x->source_position>y->source_position;
++}
++struct mkv_sparse_planner *mkv_sparse_planner_create(
++    const struct demux_mkv_reference_spec *s,size_t z,int64_t origin,uint64_t total,
++    const uint64_t *hints,size_t count,bool(*abort_requested)(void*),void *opaque)
++{
++    if(!s||z!=sizeof(*s)||s->version!=1||!total||total>INT64_MAX||origin<0||
++       (uint64_t)origin>MKV_SPARSE_MAX_EXACT_NS||s->segment_start<=0||
++       (uint64_t)s->segment_start>=total||s->timecode_scale<1||s->timecode_scale>1000000000LL||
++       !s->track_number||s->track_number>INT_MAX||!s->track_uid||s->codec_delay_ns>60000000000ULL||
++       !s->num_tracks||s->num_tracks>1024||s->codec_delay_present>1||s->default_duration_present>1||
++       s->default_duration_ns>3600000000000ULL||s->demux_start_time!=origin/1e9||
++       s->consumer_ts_offset!=0||!isfinite(s->demux_start_time)||count>SP_MAX_CLUSTERS||
++       (count&&!hints)||!abort_requested)return NULL;
++    struct mkv_sparse_planner *p=calloc(1,sizeof(*p));if(!p)return NULL;
++    p->clusters=calloc(SP_MAX_CLUSTERS,sizeof(*p->clusters));p->text=calloc(SP_MAX_TEXT,sizeof(*p->text));
++    if(!p->clusters||!p->text){mkv_sparse_planner_destroy(&p);return NULL;}
++    p->spec=*s;p->abort_requested=abort_requested;p->abort_opaque=opaque;
++    p->origin=(struct mkv_sparse_origin){.first_cluster_ns=origin,.timecode_scale=s->timecode_scale,
++        .codec_delay_ns=s->codec_delay_ns,.entity_total=total,.segment_start=s->segment_start,
++        .segment_end=total,.track_number=s->track_number,.track_uid=s->track_uid,.window_end_ms=1080000};
++    p->segment_end=total;
++    for(size_t i=0;i<count;i++)if(!sp_cluster(p,hints[i])){mkv_sparse_planner_destroy(&p);return NULL;}
++    return p;
++}
++enum mkv_sparse_step mkv_sparse_planner_next(struct mkv_sparse_planner *p,
++    struct mkv_sparse_span *out,size_t capacity,size_t *count,uint64_t *id)
++{
++    if(!p||!out||capacity<MKV_SPARSE_MAX_SPANS||!count||!id||p->pending_active||!sp_live(p))return MKV_SPARSE_ERROR;
++    *count=0;*id=0;if(p->progress.complete)return MKV_SPARSE_FINISHED;
++    p->need_count=0;
++    if(sp_boot(p)){
++        bool moved;
++        do{
++            moved=sp_chain(p);
++            if(p->cues_pos&&!p->cues_done){
++                struct sp_element e;int r=sp_element(p,p->cues_pos,p->segment_end,&e);
++                if(r<0||(r>0&&(e.id!=SP_CUES||sp_metadata(p,e,true)<0)))sp_fail(p);
++            }
++            for(size_t i=0;i<p->cluster_count&&!p->progress.failed;i++)moved|=sp_walk(p,&p->clusters[i]);
++            moved|=sp_origin_update(p);
++        }while(moved&&!p->progress.failed&&sp_live(p));
++    }
++    if(p->progress.failed)return MKV_SPARSE_ERROR;
++    bool done=p->progress.chain_complete&&p->metadata_seen==3&&p->origin_verified;
++    unsigned accepted=0;
++    for(size_t i=0;i<p->cluster_count;i++)if(p->clusters[i].accepted){accepted++;done&=p->clusters[i].done;}
++    if(done&&accepted){
++        qsort(p->text,p->text_count,sizeof(*p->text),sp_text_compare);
++        for(size_t i=1;i<p->text_count;i++)if(p->text[i].source_position==p->text[i-1].source_position||
++            p->text[i].pts_ns<p->text[i-1].pts_ns){sp_fail(p);return MKV_SPARSE_ERROR;}
++        p->progress.metadata_matched=true;p->progress.clusters=accepted;p->progress.complete=true;
++        return MKV_SPARSE_FINISHED;
++    }
++    if(!p->need_count||p->progress.batches>=MKV_SPARSE_MAX_REQUESTS){sp_fail(p);return MKV_SPARSE_ERROR;}
++    qsort(p->need,p->need_count,sizeof(*p->need),sp_span_compare);
++    size_t n=0;uint64_t sum=0;
++    for(size_t i=0;i<p->need_count;i++){
++        struct mkv_sparse_span s=p->need[i];
++        if(n&&s.start<=out[n-1].start+out[n-1].bytes){
++            uint64_t end=s.start+s.bytes,old=out[n-1].start+out[n-1].bytes;
++            if(end<=old)continue;
++            if(end-out[n-1].start>MKV_SPARSE_MAX_SPAN_BYTES)continue;
++            if(sum+end-old>MKV_SPARSE_MAX_BATCH_PAYLOAD)continue;
++            out[n-1].bytes+=end-old;sum+=end-old;continue;
++        }
++        if(sum+s.bytes>MKV_SPARSE_MAX_BATCH_PAYLOAD)continue;
++        out[n++]=s;sum+=s.bytes;
++    }
++    if(!mkv_sparse_spans_valid(out,n,p->origin.entity_total)||
++       sum>MKV_SPARSE_MAX_HTTP_BYTES-p->progress.requested_payload_bytes){sp_fail(p);return MKV_SPARSE_ERROR;}
++    memcpy(p->pending,out,n*sizeof(*out));p->pending_count=n;p->pending_active=true;
++    p->progress.batches++;p->progress.requested_payload_bytes+=sum;
++    *id=++p->batch_id;*count=n;sp_clear_cache(p);return MKV_SPARSE_FETCH;
++}
++bool mkv_sparse_planner_accept(struct mkv_sparse_planner *p,uint64_t id,
++    const struct mkv_sparse_bytes *parts,size_t count,bool framed)
++{
++    if(!p||!sp_live(p)||!p->pending_active||id!=p->batch_id||!framed||!parts||
++       count!=p->pending_count)return p?sp_fail(p):false;
++    for(size_t i=0;i<count;i++){
++        if(parts[i].start!=p->pending[i].start||parts[i].bytes!=p->pending[i].bytes||!parts[i].data){sp_clear_cache(p);return sp_fail(p);}
++        unsigned char *copy=malloc(parts[i].bytes);if(!copy){sp_clear_cache(p);return sp_fail(p);}
++        memcpy(copy,parts[i].data,parts[i].bytes);
++        p->cache[p->cache_count++]=(struct sp_cache){{parts[i].start,parts[i].bytes,copy},copy};
++    }
++    p->pending_active=false;p->pending_count=0;return true;
++}
++bool mkv_sparse_planner_progress(const struct mkv_sparse_planner *p,
++    struct mkv_sparse_progress *out,size_t z)
++{if(!p||!out||z!=sizeof(*out))return false;*out=p->progress;return true;}
++const struct mkv_sparse_text *mkv_sparse_planner_text(const struct mkv_sparse_planner *p,size_t *count)
++{if(!p||!count||!p->progress.complete||p->progress.failed)return NULL;*count=p->text_count;return p->text;}
++void mkv_sparse_planner_destroy(struct mkv_sparse_planner **pp)
++{
++    if(!pp||!*pp)return;struct mkv_sparse_planner *p=*pp;*pp=NULL;sp_clear_cache(p);
++    for(size_t i=0;i<p->text_count;i++)free((void*)p->text[i].data);
++    free(p->text);free(p->clusters);free(p);
++}
+diff --git a/demux/reference_mkv_sparse_planner.h b/demux/reference_mkv_sparse_planner.h
+new file mode 100644
+--- /dev/null
++++ b/demux/reference_mkv_sparse_planner.h
+@@ -0,0 +1,86 @@
++/* Private source proposal. No network authority or public ABI. */
++#pragma once
++#include "reference_mkv.h"
++#include "reference_mkv_sparse.h"
++
++struct mkv_sparse_planner;
++#define MKV_SPARSE_MAX_CAPTURE_HINTS 8192u
++struct mkv_sparse_snapshot {
++    struct demux_mkv_reference_spec spec;
++    int64_t original_origin_ns;
++    size_t hint_count;
++    uint64_t hints[MKV_SPARSE_MAX_CAPTURE_HINTS];
++};
++/* Actual original native owner only, excluded from read/seek/close. Allocates
++ * an owned source-private scalar snapshot, never reads deferred Cues or I/O.
++ * Header/index positions are hints only. Failure leaves *out NULL. */
++bool demux_mkv_reference_sparse_capture(struct demuxer *d, struct sh_stream *selected,
++    double consumer_ts_offset, struct mkv_sparse_snapshot **out);
++bool demux_mkv_reference_sparse_revalidate(struct demuxer *d, struct sh_stream *selected,
++    double consumer_ts_offset, const struct mkv_sparse_snapshot *expected);
++void demux_mkv_reference_sparse_snapshot_free(struct mkv_sparse_snapshot **snapshot);
++struct mkv_sparse_bytes {
++    uint64_t start;
++    uint32_t bytes;
++    const unsigned char *data;
++};
++struct mkv_sparse_text {
++    uint64_t source_position;
++    int64_t pts_ns;
++    uint64_t duration_ns;
++    uint32_t bytes;
++    const unsigned char *data;
++};
++struct mkv_sparse_progress {
++    uint32_t batches, clusters, excluded_clusters;
++    uint64_t requested_payload_bytes, block_headers, selected_occurrences;
++    bool chain_complete, metadata_matched, complete, failed;
++};
++enum mkv_sparse_step { MKV_SPARSE_ERROR = -1, MKV_SPARSE_FINISHED = 0,
++                       MKV_SPARSE_FETCH = 1 };
++
++/* Owned scalar descriptor and hints only. Hints are untrusted acceleration
++ * offsets; a hint never creates a Cluster or absence witness. All allocations
++ * are fallible. Abort callback/storage outlive planner destruction. */
++struct mkv_sparse_planner *mkv_sparse_planner_create(
++    const struct demux_mkv_reference_spec *spec, size_t spec_size,
++    int64_t original_origin_ns, uint64_t known_entity_bytes,
++    const uint64_t *hints, size_t hint_count,
++    bool (*abort_requested)(void *), void *abort_opaque);
++
++/* One worker, one pending batch. The supplied spans are copied and immutable
++ * until accept. No I/O is hidden in next. No range end is media EOF. */
++enum mkv_sparse_step mkv_sparse_planner_next(struct mkv_sparse_planner *p,
++    struct mkv_sparse_span *out, size_t capacity, size_t *count,
++    uint64_t *batch_id);
++
++/* Caller supplies ONLY a fully framed/admitted FF sparse batch, in exactly the
++ * emitted span order. This parser primitive does not authenticate that caller.
++ * It copies bytes, so no response buffer or live transport is retained. False
++ * framing, a missing/extra/changed span or allocation failure is sticky failure. */
++bool mkv_sparse_planner_accept(struct mkv_sparse_planner *p, uint64_t batch_id,
++    const struct mkv_sparse_bytes *parts, size_t count, bool batch_validated);
++bool mkv_sparse_planner_progress(const struct mkv_sparse_planner *p,
++    struct mkv_sparse_progress *out, size_t out_size);
++/* Returned records are planner-owned, source-ordered, and available only after
++ * actual Segment-chain/metadata/every-relevant-child completion. */
++const struct mkv_sparse_text *mkv_sparse_planner_text(
++    const struct mkv_sparse_planner *p, size_t *count);
++void mkv_sparse_planner_destroy(struct mkv_sparse_planner **p);
++
++/* Decode completed owned records with the SAME genuine SUBRIP decoder and
++ * mkv_reference_decode helper as the sequential native worker. This fills only
++ * tentative pairs; it never marks complete or invents source/response witness. */
++bool demux_mkv_reference_sparse_decode(const struct mkv_sparse_planner *planner,
++    const struct demux_mkv_reference_spec *spec, size_t spec_size,
++    const AVIOInterruptCB *owned_interrupt,
++    struct demux_reference_result *out, size_t out_size);
++
++/* Actual synchronous utility worker, captured reader-grant only. It owns every
++ * copied batch/plan/decoder; grant and job callback survive join/last close.
++ * Final original-owner source/track/epoch/intent admission is still mandatory. */
++bool demux_mkv_reference_sparse_run(struct stream_reference_reader_grant *grant,
++    const struct demux_mkv_reference_spec *spec, size_t spec_size,
++    int64_t original_origin_ns, const uint64_t *owned_hints, size_t hint_count,
++    int64_t deadline_ns, const AVIOInterruptCB *owned_interrupt,
++    struct demux_reference_result *out, size_t out_size);
+diff --git a/demux/reference_mkv_sparse_worker.c b/demux/reference_mkv_sparse_worker.c
+new file mode 100644
+--- /dev/null
++++ b/demux/reference_mkv_sparse_worker.c
+@@ -0,0 +1,181 @@
++/* Private actual sparse utility worker. Source proposal, UNCOMPILED/UNRUN.
++ * Ordinary playback never uses this stream/parser or its optional restrictions. */
++#include <stdlib.h>
++#include <string.h>
++#include <libavcodec/codec_id.h>
++#include "common/common.h"
++#include "osdep/timer.h"
++#include "stream/reference_source.h"
++#include "stream/vortx_reference_sparse.h"
++#include "reference_mkv_sparse_planner.h"
++
++struct mkv_sparse_worker {
++    struct stream_reference_reader_grant *grant;
++    const AVIOInterruptCB *interrupt;
++    int64_t deadline;
++};
++static bool mkv_sparse_worker_abort(void *opaque)
++{
++    struct mkv_sparse_worker *w = opaque;
++    return mp_time_ns() >= w->deadline ||
++        stream_reference_reader_cancelled(w->grant) ||
++        !stream_reference_reader_current(w->grant) ||
++        w->interrupt->callback(w->interrupt->opaque);
++}
++static int mkv_sparse_worker_interrupt(void *opaque)
++{ return mkv_sparse_worker_abort(opaque); }
++static void mkv_sparse_free_parts(struct mkv_sparse_bytes *parts, size_t count)
++{
++    for (size_t i = 0; i < count; i++) {
++        free((void *)parts[i].data);
++        parts[i] = (struct mkv_sparse_bytes){0};
++    }
++}
++
++bool demux_mkv_reference_sparse_run(struct stream_reference_reader_grant *grant,
++    const struct demux_mkv_reference_spec *spec, size_t spec_size,
++    int64_t original_origin_ns, const uint64_t *hints, size_t hint_count,
++    int64_t deadline, const AVIOInterruptCB *interrupt,
++    struct demux_reference_result *out, size_t out_size)
++{
++    int64_t now = mp_time_ns();
++    if (!grant || !spec || spec_size != sizeof(*spec) || !interrupt ||
++        !interrupt->callback || !out || out_size != sizeof(*out) ||
++        out->complete || out->num_pairs || deadline <= now ||
++        deadline - now > 30000000000LL)
++        return false;
++    struct mkv_sparse_worker w = {grant, interrupt, deadline};
++    AVIOInterruptCB owned_cb = {mkv_sparse_worker_interrupt, &w};
++    struct avpriv_vortx_reference_sparse_budget *budget = NULL;
++    struct avpriv_vortx_reference_sparse_reader *reader = NULL;
++    struct mkv_sparse_planner *planner = NULL;
++    struct mkv_sparse_span *spans = calloc(MKV_SPARSE_MAX_SPANS, sizeof(*spans));
++    struct avpriv_vortx_reference_sparse_span *request = calloc(MKV_SPARSE_MAX_SPANS, sizeof(*request));
++    struct mkv_sparse_bytes *parts = calloc(MKV_SPARSE_MAX_SPANS, sizeof(*parts));
++    struct demux_reference_result value = {0};
++    struct avpriv_vortx_reference_sparse_info info = {0};
++    struct mkv_sparse_progress progress = {0};
++    size_t part_count = 0;
++    bool ok = false;
++    if (!spans || !request || !parts || mkv_sparse_worker_abort(&w) ||
++        !stream_reference_reader_witness(grant, &value.source_generation,
++            &value.source_epoch, &value.response_generation) ||
++        !stream_reference_reader_sparse_budget(grant, &owned_cb, &budget) ||
++        avpriv_vortx_reference_sparse_budget_info_v1(budget, &info, sizeof(info)) < 0 ||
++        info.terminal_error || info.active_handle || !info.entity_bytes)
++        goto done;
++    planner = mkv_sparse_planner_create(spec, spec_size, original_origin_ns,
++        info.entity_bytes, hints, hint_count, mkv_sparse_worker_abort, &w);
++    if (!planner)
++        goto done;
++    for (;;) {
++        size_t count = 0;
++        uint64_t id = 0;
++        enum mkv_sparse_step step = mkv_sparse_planner_next(planner, spans,
++            MKV_SPARSE_MAX_SPANS, &count, &id);
++        if (step == MKV_SPARSE_ERROR || mkv_sparse_worker_abort(&w))
++            goto done;
++        if (step == MKV_SPARSE_FINISHED)
++            break;
++        if (!count || count > MKV_SPARSE_MAX_SPANS)
++            goto done;
++        for (size_t i = 0; i < count; i++) {
++            if (spans[i].bytes > UINT32_MAX)
++                goto done;
++            request[i] = (struct avpriv_vortx_reference_sparse_span){spans[i].start, spans[i].bytes};
++        }
++        if (avpriv_vortx_reference_sparse_open_v1(budget, request,
++                count * sizeof(*request), count, &reader) < 0)
++            goto done;
++        part_count = 0;
++        for (;;) {
++            struct avpriv_vortx_reference_sparse_part part = {0};
++            int next = avpriv_vortx_reference_sparse_next_part_v1(reader, &part, sizeof(part));
++            if (next < 0 || mkv_sparse_worker_abort(&w))
++                goto done;
++            if (!next)
++                break; // only FF's COMPLETE BATCH, never entity EOF
++            if (part_count >= count || part.plan_index != part_count ||
++                part.start != spans[part_count].start ||
++                part.bytes != spans[part_count].bytes || part.entity_bytes != info.entity_bytes)
++                goto done;
++            unsigned char *buffer = malloc(part.bytes);
++            if (!buffer)
++                goto done;
++            parts[part_count] = (struct mkv_sparse_bytes){part.start, part.bytes, buffer};
++            part_count++;
++            uint32_t used = 0;
++            while (used < part.bytes) {
++                int n = avpriv_vortx_reference_sparse_read_part_v1(reader,
++                    buffer + used, part.bytes - used);
++                if (n <= 0 || (uint32_t)n > part.bytes - used || mkv_sparse_worker_abort(&w))
++                    goto done;
++                used += n;
++            }
++            unsigned char extra = 0;
++            if (avpriv_vortx_reference_sparse_read_part_v1(reader, &extra, 1) != 0)
++                goto done;
++        }
++        struct avpriv_vortx_reference_sparse_stats stats = {0};
++        if (part_count != count ||
++            avpriv_vortx_reference_sparse_stats_v1(reader, &stats, sizeof(stats)) < 0 ||
++            !stats.batch_validated || stats.terminal_error || stats.parts_complete != count)
++            goto done;
++        avpriv_vortx_reference_sparse_close_v1(&reader);
++        info = (struct avpriv_vortx_reference_sparse_info){0};
++        if (avpriv_vortx_reference_sparse_budget_info_v1(budget, &info, sizeof(info)) < 0 ||
++            info.terminal_error || info.active_handle || mkv_sparse_worker_abort(&w) ||
++            !mkv_sparse_planner_accept(planner, id, parts, part_count, true))
++            goto done;
++        mkv_sparse_free_parts(parts, part_count);
++        part_count = 0;
++    }
++    if (!mkv_sparse_planner_progress(planner, &progress, sizeof(progress)) ||
++        !progress.complete || !progress.chain_complete || !progress.metadata_matched ||
++        progress.failed || progress.selected_occurrences > UINT32_MAX ||
++        mkv_sparse_worker_abort(&w))
++        goto done;
++    struct demux_reference_result decoded = {0};
++    if (!demux_mkv_reference_sparse_decode(planner, spec, spec_size,
++            &owned_cb, &decoded, sizeof(decoded)) || mkv_sparse_worker_abort(&w))
++        goto done;
++    info = (struct avpriv_vortx_reference_sparse_info){0};
++    int64_t source_generation = 0, response_generation = 0;
++    uint64_t source_epoch = 0;
++    if (avpriv_vortx_reference_sparse_budget_info_v1(budget, &info, sizeof(info)) < 0 ||
++        info.terminal_error || info.active_handle ||
++        info.http_plaintext_bytes > VORTX_SPARSE_MAX_HTTP_BYTES ||
++        info.requests_started > VORTX_SPARSE_MAX_REQUESTS ||
++        !stream_reference_reader_witness(grant, &source_generation, &source_epoch, &response_generation) ||
++        source_generation != value.source_generation || source_epoch != value.source_epoch ||
++        response_generation != value.response_generation || mkv_sparse_worker_abort(&w))
++        goto done;
++    value.num_pairs = decoded.num_pairs;
++    memcpy(value.pairs, decoded.pairs, sizeof(value.pairs));
++    value.packets_seen = progress.selected_occurrences;
++    value.stream_index = spec->owner_stream_index;
++    value.demuxer_id = spec->owner_demuxer_id;
++    value.ff_index = value.av_stream_id = -1;
++    value.format_kind = 3;
++    value.codec_id = AV_CODEC_ID_SUBRIP;
++    value.time_base_num = 1;
++    value.time_base_den = 1000;
++    value.source_origin = spec->source_origin;
++    value.origin_seconds = spec->demux_start_time;
++    value.prefix_end_ms = 1080000;
++    value.input_bytes = info.http_plaintext_bytes;
++    value.complete = true;
++    // Final caller must still compare the ORIGINAL current demux/track/source
++    // epoch and intent, then use existing publication/reader-quiescence fences.
++    *out = value;
++    ok = true;
++done:
++    avpriv_vortx_reference_sparse_close_v1(&reader);
++    mkv_sparse_free_parts(parts, part_count);
++    mkv_sparse_planner_destroy(&planner);
++    avpriv_vortx_reference_sparse_budget_release_v1(&budget);
++    free(parts);
++    free(request);
++    free(spans);
++    return ok;
++}
+diff --git a/stream/vortx_reference_sparse.h b/stream/vortx_reference_sparse.h
+new file mode 100644
+--- /dev/null
++++ b/stream/vortx_reference_sparse.h
+@@ -0,0 +1,100 @@
++/* Source-private matched-component sparse HTTP API. SOURCE PROPOSAL ONLY;
++ * UNCOMPILED/UNRUN. This additive header preserves the adaeb9 prefix contract.
++ * Recipe remains opaque/native: no Swift/public option/serialized carrier. */
++#ifndef VORTX_PRIVATE_REFERENCE_SPARSE_H
++#define VORTX_PRIVATE_REFERENCE_SPARSE_H
++#include <stddef.h>
++#include <stdint.h>
++#include <libavformat/avio.h>
++
++#define VORTX_SPARSE_MAX_HTTP_BYTES (128u * 1024u * 1024u)
++#define VORTX_SPARSE_MAX_REQUESTS 256u
++#define VORTX_SPARSE_MAX_SPANS 1024u
++#define VORTX_SPARSE_MAX_SPAN_BYTES (1024u * 1024u)
++#define VORTX_SPARSE_MAX_BATCH_BYTES (4u * 1024u * 1024u)
++#define VORTX_SPARSE_MAX_RANGE_VALUE (32u * 1024u)
++
++struct avpriv_vortx_reference_recipe;
++struct avpriv_vortx_reference_sparse_budget;
++struct avpriv_vortx_reference_sparse_reader;
++struct avpriv_vortx_reference_sparse_span {
++    uint64_t start; /* absolute entity offset */
++    uint32_t bytes; /* 1..1MiB, end=start+bytes-1 checked before addition */
++};
++struct avpriv_vortx_reference_sparse_info {
++    uint64_t entity_bytes; /* known original total; never inferred from prefix */
++    uint64_t http_plaintext_bytes; /* outgoing request + ALL incoming HTTP */
++    uint32_t requests_started;
++    int active_handle;
++    int terminal_error;
++};
++struct avpriv_vortx_reference_sparse_part {
++    uint32_t plan_index;
++    uint64_t start;
++    uint32_t bytes;
++    uint64_t entity_bytes;
++};
++struct avpriv_vortx_reference_sparse_stats {
++    uint64_t payload_bytes;
++    uint32_t parts_complete;
++    int batch_validated; /* all parts, final delimiter, exact outer body length */
++    int terminal_error;
++};
++
++/* One worker owns budget and every handle, no concurrent budget operations.
++ * Create owns a complete immutable native recipe copy plus retained response
++ * lifetime token. Caller owns the input recipe throughout create; the budget
++ * retains no original owner/FD and thereafter owns its copy until release.
++ * Job owns callback storage until last close/budget release. Native publication
++ * ownership of the original recipe remains separate. Require known nonzero
++ * original total and current response lifetime. No network here. Inherit exact
++ * captured deadline, never renew30s or bytes/attempts on another open/close. */
++int avpriv_vortx_reference_sparse_budget_create_v1(
++    const struct avpriv_vortx_reference_recipe *recipe,
++    const AVIOInterruptCB *owned_interrupt,
++    struct avpriv_vortx_reference_sparse_budget **out);
++int avpriv_vortx_reference_sparse_budget_info_v1(
++    const struct avpriv_vortx_reference_sparse_budget *budget,
++    struct avpriv_vortx_reference_sparse_info *out, size_t out_size);
++
++/* Validate count<=1024 BEFORE multiplication/access; spans_size must exactly
++ * match. Copy ascending nonoverlapping spans, every end below original total.
++ * Each<=1MiB, sum<=4MiB; Range value<=32KiB and whole request still bounded.
++ * One active handle. Charge attempt before connection, request bytes before
++ * write and every received HTTP byte before read. 256attempts/128MiB shared.
++ * One span requires exact single206. Multiple require strict multipart206.
++ * Original URL/Host/SNI, credentials, strongETag, knownTOTAL, pinned endpoints
++ * and supported verified TLS remain exact. No redirect/retry/reconnect/seek. */
++int avpriv_vortx_reference_sparse_open_v1(
++    struct avpriv_vortx_reference_sparse_budget *budget,
++    const struct avpriv_vortx_reference_sparse_span *spans,
++    size_t spans_size, uint32_t span_count,
++    struct avpriv_vortx_reference_sparse_reader **out);
++
++/* All output structures must be cleared; exact out_size checked before access.
++ * 1=next strict admitted part header; 0=ENTIRE batch framing validated;
++ * negative=sticky operation failure. Prior part must be fully drained.
++ * A zero result is NEVER media EOF. No unrequested/coalesced/reordered parts. */
++int avpriv_vortx_reference_sparse_next_part_v1(
++    struct avpriv_vortx_reference_sparse_reader *reader,
++    struct avpriv_vortx_reference_sparse_part *out, size_t out_size);
++/* Positive current-part payload bytes; zero=current exact part drained;
++ * negative=sticky failure. Payload stays tentative until entire batch validates.
++ * Every operation checks current token, original deadline and owned callback.
++ * No binary boundary search, body-sized eager allocation, or synthetic holes. */
++int avpriv_vortx_reference_sparse_read_part_v1(
++    struct avpriv_vortx_reference_sparse_reader *reader,
++    unsigned char *buffer, int buffer_size);
++int avpriv_vortx_reference_sparse_stats_v1(
++    const struct avpriv_vortx_reference_sparse_reader *reader,
++    struct avpriv_vortx_reference_sparse_stats *out, size_t out_size);
++
++/* Close ALL duplicate contexts before recipe/callback release. An incomplete
++ * close invalidates the operation; bytes/attempts are never replenished.
++ * Budget release requires no active handle; misuse leaves budget owned and
++ * terminal rather than freeing storage underneath a live handle. */
++void avpriv_vortx_reference_sparse_close_v1(
++    struct avpriv_vortx_reference_sparse_reader **reader);
++void avpriv_vortx_reference_sparse_budget_release_v1(
++    struct avpriv_vortx_reference_sparse_budget **budget);
++#endif

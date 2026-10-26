@@ -1,9 +1,8 @@
 diff --git a/Package.swift b/Package.swift
-index 9d9b0af..b19bd8e 100644
+index 9d9b0af52ea6978126a5828a474f6eaa85c63225..47fbf53d1a3c0bd3f4c92bb1c695465a3c4010d9 100644
 --- a/Package.swift
 +++ b/Package.swift
-@@ -77,7 +77,8 @@ let package = Package(
-             linkerSettings: [
+@@ -78,6 +78,7 @@
                  .linkedFramework("AudioToolbox"),
                  .linkedFramework("CoreVideo"),
                  .linkedFramework("CoreFoundation"),
@@ -11,8 +10,19 @@ index 9d9b0af..b19bd8e 100644
                  .linkedFramework("CoreMedia"),
                  .linkedFramework("Metal"),
                  .linkedFramework("VideoToolbox"),
+@@ -229,8 +230,8 @@
+ 
+         .binaryTarget(
+             name: "Libshaderc_combined",
+-            url: "https://github.com/mpvkit/libshaderc-build/releases/download/2025.5.0/Libshaderc_combined.xcframework.zip",
+-            checksum: "758047b615708575b580eb960a2d083f760a29dc462d6eaa360416c946ce433b"
++            url: "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip",
++            checksum: "77a3d355993cf53843a394bf58262dab99cdd93f9e6fe31d5ca6e55b03866ce1"
+         ),
+ 
+         .binaryTarget(
 diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScripts/XCFrameworkBuild/main.swift
-index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d2514258e2c1dee 100644
+index e5f872cf14336741fcd52076bd6f6ef9dab766d9..a0cf015fbb52d3c406280b1a9b230cd319b2aec6 100644
 --- a/Sources/BuildScripts/XCFrameworkBuild/main.swift
 +++ b/Sources/BuildScripts/XCFrameworkBuild/main.swift
 @@ -1,4 +1,5 @@
@@ -21,7 +31,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
  
  do {
      let options = try ArgumentOptions.parse(CommandLine.arguments)
-@@ -45,12 +46,40 @@
+@@ -45,20 +46,58 @@
  
  enum Library: String, CaseIterable {
      case libmpv, FFmpeg, libshaderc, vulkan, lcms2, libdovi, openssl, libunibreak, libfreetype, libfribidi, libharfbuzz, libass, libsmbclient, libplacebo, libdav1d, gmp, nettle, gnutls, libuchardet, libbluray, libluajit, libuavs3d
@@ -31,9 +41,11 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +    //   mpv        8c67647b5005 (master, 2026-07-24) - carries 998c20af6 dovi_split,
 +    //              f53e8f3fe demux_mkv EL+BL grouping, 6c4480cbf mp_image.enhancement_layer,
 +    //              0480011ac vf=format=enhancement-layer, 81037dae3 no_enhancement_layer.
-+    //   libplacebo 4c426e466814 (master, 2026-07-24) - carries 801b6812 FEL merging,
-+    //              187b1bd1 pl_frame.enhancement_layer, dbf8dd89 nlq_active/nlq,
-+    //              6e66d6d5 libav NLQ mapping. PL_API_VER 371 (>= 367 required by mpv).
++    //   libplacebo v7.387.0 (stable), exact 275f7dea2792, PL_API_VER 387.
++    //              Descends from the prior 4c426e466814 FEL pin (141 ahead, 0 behind).
++    //              Keep the paired library headers/code for API 375/387 type/unit changes.
++    //   LittleCMS  lcms2.20rc1, exact 131543411356: PRERELEASE TEST CANDIDATE.
++    //              Built from official source; this is not a stable or shipped upgrade.
 +    //   FFmpeg     946fcce07b6d (n9.0.2 maintenance) - libavcodec 63.1.102 retains
 +    //              6026988b75 the `dovi_split` bitstream filter and 5f6dff5e7d hvcE ->
 +    //              AV_PKT_DATA_HEVC_CONF, which is what mpv's single-track interleaved
@@ -41,9 +53,16 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +    //              gate on demux_lavf's dual-track Dolby Vision grouping. release/9.0 is a
 +    //              descendant of original 6e851934; pin the released tag and exact commit.
 +    static let mpvPinnedSHA = "8c67647b50059406c5c0444903597281b81516cf"
-+    static let placeboPinnedSHA = "4c426e466814536def653cb23f1d1c287ea7a7f5"
++    static let placeboPinnedSHA = "275f7dea27924cdd34ab2e6c20e448b6bc4fab65"
++    static let placeboPinnedBranch = "v7.387.0"
++    static let lcmsPinnedSHA = "1315434113566bcf3eb46c2485fcc1c0a56ab806"
++    static let lcmsPinnedBranch = "lcms2.20rc1"
 +    static let ffmpegPinnedSHA = "946fcce07b6dcd0331c8cc609192aeff5e1924f8"
 +    static let ffmpegPinnedBranch = "n9.0.2"
++    static let opensslPinnedSHA = "2f4e3a5fec05394068cfa7379890ab552483a8a6"
++    static let opensslPinnedBranch = "openssl-4.1.0"
++    static let dav1dPinnedSHA = "54706fc6bc0cdecab7e9593974a4039cc038fca7"
++    static let dav1dPinnedBranch = "1.5.4"
 +
      var version: String {
          switch self {
@@ -62,36 +81,86 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +            // take a bare SHA, and this SHA is not reachable from master.
 +            return "9.0.2-\(Library.ffmpegPinnedSHA.prefix(8))"
          case .openssl:
-             return "3.3.5"
+-            return "3.3.5"
++            // Latest stable source candidate; compatibility and artifact gates remain open.
++            return "4.1.0-\(Library.opensslPinnedSHA.prefix(8))"
          case .gnutls:
-@@ -76,7 +105,10 @@
+-            return "3.8.11"
++            return "3.8.13-ffed8ec1"
+         case .nettle:
+-            return "3.8.11"
++            return "4.0-3addbc00"
+         case .gmp:
+-            return "3.8.11"
++            return "6.3.0-a3c2b802"
+         case .libass:
+             return "0.17.5"
+         case .libunibreak:
+@@ -71,18 +110,21 @@
+             return "0.17.5"
+         case .libsmbclient:
+             return "4.15.13-2512"
+-        case .libdav1d:    // AV1 decoding
+-            return "1.5.3"
++        case .libdav1d:    // AV1 decoding, exact official source candidate
++            return "1.5.4-\(Library.dav1dPinnedSHA.prefix(8))"
          case .lcms2:
-             return "2.17.0"
+-            return "2.17.0"
++            // Explicit prerelease candidate: never infer stable status from LCMS_VERSION 2200.
++            return "2.20rc1-\(Library.lcmsPinnedSHA.prefix(8))"
          case .libplacebo:
 -            return "7.360.1"
-+            // SPIKE: built FROM SOURCE off libplacebo master (PL_API_VER 371) instead of the
-+            // prebuilt 7.360.1 zip (PL_API_VER 360). mpv's FEL code is behind PL_API_VER >= 367,
-+            // so the released zip would silently compile the whole feature out.
-+            return "master-\(Library.placeboPinnedSHA.prefix(8))"
++            // Stable upstream release, built from exact source rather than an unverified wrapper.
++            // API 387 retains the prior custom pin's >= 367 FEL/EL mapping path.
++            return "7.387.0-\(Library.placeboPinnedSHA.prefix(8))"
          case .libdovi:
              return "3.3.2"
          case .vulkan:
-@@ -123,7 +155,8 @@
+             return "1.4.2"
+         case .libshaderc:  // compiling GLSL (OpenGL Shading Language) shaders into SPIR-V (Standard Portable Intermediate Representation - Vulkan) code
+-            return "2025.5.0"
++            return "2026.1.0"
+         case .libuchardet:
+             return "0.0.8"
+         case .libbluray:
+@@ -101,13 +143,13 @@
+         case .FFmpeg:
+             return "https://github.com/FFmpeg/FFmpeg"
+         case .openssl:
+-            return "https://github.com/mpvkit/openssl-build/releases/download/\(self.version)/openssl-all.zip"
++            return "https://github.com/openssl/openssl.git"
+         case .gnutls:
+-            return "https://github.com/mpvkit/gnutls-build/releases/download/\(self.version)/gnutls-all.zip"
++            return "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz"
+         case .nettle:
+-            return "https://github.com/mpvkit/gnutls-build/releases/download/\(self.version)/nettle-all.zip"
++            return "https://ftp.gnu.org/gnu/nettle/nettle-4.0.tar.gz"
+         case .gmp:
+-            return "https://github.com/mpvkit/gnutls-build/releases/download/\(self.version)/gmp-all.zip"
++            return "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
+         case .libass:
+             return "https://github.com/mpvkit/libass-build/releases/download/\(self.version)/libass-all.zip"
+         case .libunibreak:
+@@ -121,11 +163,12 @@
+         case .libsmbclient:
+             return "https://github.com/mpvkit/libsmbclient-build/releases/download/\(self.version)/libsmbclient-all.zip"
          case .lcms2:
-             return "https://github.com/mpvkit/lcms2-build/releases/download/\(self.version)/lcms2-all.zip"
+-            return "https://github.com/mpvkit/lcms2-build/releases/download/\(self.version)/lcms2-all.zip"
++            return "https://github.com/mm2/Little-CMS.git"
          case .libplacebo:
 -            return "https://github.com/mpvkit/libplacebo-build/releases/download/\(self.version)/libplacebo-all.zip"
 +            // SPIKE: source build off upstream git (was: prebuilt libplacebo-all.zip).
 +            return "https://code.videolan.org/videolan/libplacebo.git"
          case .libdav1d:
-             return "https://github.com/mpvkit/libdav1d-build/releases/download/\(self.version)/libdav1d-all.zip"
+-            return "https://github.com/mpvkit/libdav1d-build/releases/download/\(self.version)/libdav1d-all.zip"
++            return "https://code.videolan.org/videolan/dav1d.git"
          case .libdovi:
-@@ -370,6 +403,17 @@
- private class BuildMPV: BaseBuild {
-     init() {
+             return "https://github.com/mpvkit/libdovi-build/releases/download/\(self.version)/libdovi-all.zip"
+         case .vulkan:
+@@ -372,6 +415,17 @@
          super.init(library: .libmpv)
-+    }
-+
+     }
+ 
 +    // SPIKE: pinned master SHA rather than the v0.41.0 tag. All three MPVKit patches
 +    // (moltenvk context, swift-frontend revert, tvOS avfoundation AO) were verified to
 +    // apply cleanly at this commit.
@@ -101,10 +170,12 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +                                 library: .libmpv,
 +                                 into: directoryURL)
 +        try SpikeGit.applyPatches(for: library, in: directoryURL)
-     }
- 
++    }
++
      override func flagsDependencelibrarys() -> [Library] {
-@@ -396,6 +440,14 @@
+         if BaseBuild.options.enableGPL {
+             return [.gmp, .libsmbclient]
+@@ -396,6 +450,14 @@
              "-Djpeg=disabled",
              "-Dvapoursynth=disabled",
              "-Drubberband=disabled",
@@ -119,7 +190,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
          ]
          if BaseBuild.options.enableGPL {
              array.append("-Dgpl=true")
-@@ -450,7 +502,16 @@
+@@ -450,7 +512,16 @@
      }
  
      override func beforeBuild() throws {
@@ -137,7 +208,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
  
          if Utility.shell("which nasm") == nil {
              Utility.shell("brew install nasm")
-@@ -609,7 +670,18 @@
+@@ -609,7 +680,18 @@
          //        if platform == .isimulator || platform == .tvsimulator {
          //            arguments.append("--assert-level=1")
          //        }
@@ -152,12 +223,12 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +        // (see the loop below). Shaderc remains built and shipped for libplacebo.
 +        // Apple FFmpeg uses SecureTransport for TLS. GnuTLS remains built for libsmbclient,
 +        // but FFmpeg must not select its unavailable tvOS system-trust implementation.
-+        arguments += ["--disable-gnutls", "--enable-securetransport"]
++        arguments += ["--disable-gnutls", "--disable-openssl", "--enable-securetransport"]
 +        var dependencyLibrary = [Library.gmp, .libfreetype, .libharfbuzz, .libfribidi, .libass, .vulkan, .lcms2, .libplacebo, .libdav1d, .libuavs3d]
          if BaseBuild.options.enableGPL {
              dependencyLibrary += [.libsmbclient]
          }
-@@ -681,6 +753,22 @@
+@@ -681,6 +763,22 @@
          "--enable-encoder=aac", "--enable-encoder=alac", "--enable-encoder=flac", "--enable-encoder=pcm*",
          "--enable-encoder=movtext", "--enable-encoder=mpeg4", "--enable-encoder=h264_videotoolbox",
          "--enable-encoder=hevc_videotoolbox", "--enable-encoder=prores", "--enable-encoder=prores_videotoolbox",
@@ -180,23 +251,26 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
          // ./configure --list-protocols
          "--enable-protocols",
          // ./configure --list-demuxers
-@@ -778,12 +866,241 @@
+@@ -778,33 +876,500 @@
  }
  
  
 -private class BuildPlacebo: ZipBaseBuild {
-+// SPIKE: build libplacebo FROM SOURCE at a pinned master SHA so PL_API_VER >= 367 and
-+// mpv's Dolby Vision FEL merging path actually compiles in. Upstream MPVKit downloads a
-+// prebuilt 7.360.1 zip (PL_API_VER 360), which compiles the whole feature out silently.
-+// Meson flags mirror mpvkit/libplacebo-build so the resulting library is a drop-in.
++// Build stable libplacebo 7.387.0 from its exact official source commit. The old custom
++// source pin already carried FEL; this move retains it and adopts subsequent upstream fixes.
++// Header/library consistency, full native compile and physical DV proof remain required.
 +private class BuildPlacebo: BaseBuild {
      init() {
          super.init(library: .libplacebo)
      }
+-}
+-
+-private class BuildOpenSSL: ZipBaseBuild {
 +
 +    override func beforeBuild() throws {
 +        try SpikeGit.clonePinned(url: library.url,
 +                                 sha: Library.placeboPinnedSHA,
++                                 branch: Library.placeboPinnedBranch,
 +                                 library: .libplacebo,
 +                                 into: directoryURL)
 +        try SpikeGit.applyPatches(for: library, in: directoryURL)
@@ -232,7 +306,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +        }
 +        return args
 +    }
- }
++}
 +
 +// SPIKE: shared helpers for cloning a dependency at an exact commit. BaseBuild.beforeBuild
 +// can only clone a tag/branch via `--branch`, which cannot express a SHA.
@@ -241,7 +315,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +        NSError(domain: "VortX.MPVKit.Pin", code: 1,
 +                userInfo: [NSLocalizedDescriptionKey: message])
 +    }
- 
++
 +    private static func output(_ command: String, in directoryURL: URL) throws -> String {
 +        // Utility.shell returns an empty string on success unless isOutput is true. Every
 +        // validation command below consumes stdout, so keep that flag explicit rather than
@@ -370,7 +444,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +        }
 +    }
 +
-+    static func clonePinned(url: String, sha: String, branch: String? = nil, library: Library, into directoryURL: URL) throws {
++    static func clonePinned(url: String, sha: String, branch: String? = nil, initializeSubmodules: Bool = true, library: Library, into directoryURL: URL) throws {
 +        if FileManager.default.fileExists(atPath: directoryURL.path) {
 +            guard FileManager.default.fileExists(atPath: directoryURL.appendingPathComponent(".git").path) else {
 +                throw failure("pinned source path exists but is not a Git checkout: \(directoryURL.path)")
@@ -393,9 +467,11 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +        try Utility.launch(path: "/usr/bin/git",
 +                           arguments: ["-c", "advice.detachedHead=false", "checkout", "--detach", sha],
 +                           currentDirectoryURL: directoryURL)
-+        try Utility.launch(path: "/usr/bin/git",
-+                           arguments: ["submodule", "update", "--init", "--recursive", "--depth", "1"],
-+                           currentDirectoryURL: directoryURL)
++        if initializeSubmodules {
++            try Utility.launch(path: "/usr/bin/git",
++                               arguments: ["submodule", "update", "--init", "--recursive", "--depth", "1"],
++                               currentDirectoryURL: directoryURL)
++        }
 +        let head = try output("git rev-parse HEAD", in: directoryURL)
 +        guard head == sha else {
 +            throw failure("fresh clone at \(directoryURL.path) resolved to \(head), expected exact pin \(sha)")
@@ -420,14 +496,287 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +    }
 +}
 +
- private class BuildOpenSSL: ZipBaseBuild {
++// Build latest-stable OpenSSL 4.1.0 from an exact official source commit.
++// Existing public trust/hostname/proxy policy and FFmpeg SecureTransport stay intact.
++private class BuildOpenSSL: BaseBuild {
      init() {
          super.init(library: .openssl)
-@@ -838,12 +1155,266 @@
+     }
+-}
+-
+-private class BuildGmp: ZipBaseBuild {
+-    init() {
+-        super.init(library: .gmp)
+-    }
+-}
+-
+-private class BuildNettle: ZipBaseBuild {
+-    init() {
+-        super.init(library: .nettle)
+-    }
+-}
+-
+-private class BuildGnutls: ZipBaseBuild {
+-    init() {
+-        super.init(library: .gnutls)
++
++    override func beforeBuild() throws {
++        try SpikeGit.clonePinned(url: library.url, sha: Library.opensslPinnedSHA,
++                                 branch: Library.opensslPinnedBranch, initializeSubmodules: false,
++                                 library: .openssl, into: directoryURL)
++        try SpikeGit.applyPatches(for: library, in: directoryURL)
++    }
++
++    override func frameworks() throws -> [String] { ["libssl", "libcrypto"] }
++    override func generatesPackageManagerFile() -> Bool { false }
++
++    private func target(platform: PlatformType, arch: ArchType) -> String {
++        "vortx-apple-\(platform.rawValue)-\(arch.rawValue)"
++    }
++
++    private func targetConfiguration(platform: PlatformType, arch: ArchType) -> String {
++        let isa = arch == .x86_64 ? "x86_64" : "aarch64"
++        let perlasm = arch == .x86_64 ? "macosx" : "ios64"
++        let system = platform == .macos ? "MACOSX" : "iOS"
++        // Inherit the upstream Darwin ABI/toolchain template without a conflicting
++        // hard-coded -arch or SDK. Existing platform CFLAGS bind the one target.
++        return """
++        my %targets = (
++            "\(target(platform: platform, arch: arch))" => {
++                inherit_from => [ "darwin-common" ],
++                CC => "/usr/bin/clang",
++                cflags => "-fno-common",
++                lib_cppflags => "-DL_ENDIAN",
++                bn_ops => "SIXTY_FOUR_BIT_LONG",
++                asm_arch => "\(isa)",
++                perlasm_scheme => "\(perlasm)",
++                sys_id => "\(system)",
++            },
++        );
++
++        """ + "\n"
++    }
++
++    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
++        ["--config=\(scratch(platform: platform, arch: arch).appendingPathComponent("vortx-openssl-target.conf").path)",
++         "--prefix=\(thinDir(platform: platform, arch: arch).path)",
++         "no-async", "no-shared", "no-dso", "no-tests", "no-apps", "no-docs",
++         target(platform: platform, arch: arch)]
++    }
++
++    override func build(platform: PlatformType, arch: ArchType) throws {
++        let buildURL = scratch(platform: platform, arch: arch)
++        try FileManager.default.createDirectory(at: buildURL, withIntermediateDirectories: true)
++        let recordURL = buildURL.appendingPathComponent("vortx-openssl-build.json")
++        guard !FileManager.default.fileExists(atPath: recordURL.path) else {
++            throw NSError(domain: "VortXOpenSSL", code: 1,
++                          userInfo: [NSLocalizedDescriptionKey: "Fresh OpenSSL build evidence directory required"])
++        }
++        var environ = environment(platform: platform, arch: arch)
++        environ["AR"] = platform.xcrunFind(tool: "ar").trimmingCharacters(in: .whitespacesAndNewlines)
++        environ["RANLIB"] = platform.xcrunFind(tool: "ranlib").trimmingCharacters(in: .whitespacesAndNewlines)
++        environ["ARFLAGS"] = "qc"
++        try SDKSystemMetadata.append(to: &environ, sdkRoot: URL(fileURLWithPath: platform.isysroot), buildRoot: buildURL)
++        let config = targetConfiguration(platform: platform, arch: arch)
++        let configURL = buildURL.appendingPathComponent("vortx-openssl-target.conf")
++        guard !FileManager.default.fileExists(atPath: configURL.path) else {
++            throw NSError(domain: "VortXOpenSSL", code: 2,
++                          userInfo: [NSLocalizedDescriptionKey: "Refusing existing OpenSSL target configuration"])
++        }
++        try Data(config.utf8).write(to: configURL, options: .withoutOverwriting)
++        let configureArguments = arguments(platform: platform, arch: arch)
++        // OpenSSL uses capital Configure; the generic lowercase autoconf path is unsuitable.
++        try Utility.launch(path: "/usr/bin/perl", arguments: [directoryURL.appendingPathComponent("Configure").path] + configureArguments,
++                           currentDirectoryURL: buildURL, environment: environ)
++        try Utility.launch(path: "/usr/bin/make", arguments: ["-j1", "build_sw"], currentDirectoryURL: buildURL, environment: environ)
++        try Utility.launch(path: "/usr/bin/make", arguments: ["-j1", "install_sw"], currentDirectoryURL: buildURL, environment: environ)
++        // Capture only fixed generated configuration keys; never dump the process environment.
++        let dump = #"my %v; for my $k (qw(target CC CFLAGS CPPFLAGS CXX CXXFLAGS LDFLAGS AR ARFLAGS RANLIB CROSS_COMPILE)) { $v{$k} = $configdata::config{$k}; } for my $k (qw(cflags cppflags lflags lib_cppflags)) { $v{$k} = $configdata::target{$k}; } print JSON::PP->new->canonical->encode(\%v);"#
++        let effectiveOutput = try Utility.launch(path: "/usr/bin/perl",
++            arguments: ["-I", buildURL.path, "-Mconfigdata", "-MJSON::PP", "-e", dump],
++            isOutput: true, isPrint: false, currentDirectoryURL: buildURL, environment: environ)
++        let effective = try JSONSerialization.jsonObject(with: Data(effectiveOutput.utf8))
++        let configHash = SHA256.hash(data: Data(config.utf8)).map { String(format: "%02x", $0) }.joined()
++        let record: [String: Any] = [
++            "schema": 1, "version": "4.1.0", "sourceSHA": Library.opensslPinnedSHA,
++            "sourceTag": Library.opensslPinnedBranch, "platform": platform.rawValue,
++            "arch": arch.rawValue, "configureTarget": target(platform: platform, arch: arch),
++            "configureArguments": configureArguments, "sdkRoot": platform.isysroot,
++            "sourceDirectory": directoryURL.path, "buildDirectory": buildURL.path,
++            "prefix": thinDir(platform: platform, arch: arch).path, "environment": environ,
++            "targetConfig": config, "targetConfigSHA256": configHash,
++            "effectiveConfiguration": effective,
++            "compiled": true, "installed": true,
++        ]
++        let bytes = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .prettyPrinted])
++        try bytes.write(to: recordURL, options: .withoutOverwriting)
++    }
++}
++
++// Release archives are authenticated and prepared by crypto-release-sources.py.
++// Never route these sources through BaseBuild's autogen/bootstrap heuristics.
++private class PinnedCryptoReleaseBuild: BaseBuild {
++    private var workRoot: URL { URL.currentDirectory.deletingLastPathComponent() }
++
++    private func verifySources() throws {
++        let helper = workRoot.appendingPathComponent("Sources/BuildScripts/crypto-release-sources.py")
++        try Utility.launch(path: "python3", arguments: [helper.path, "verify", workRoot.path],
++                           currentDirectoryURL: URL.currentDirectory)
++    }
++
++    override func beforeBuild() throws {
++        try verifySources()
++        let expected: String
++        switch library {
++        case .gmp: expected = "gmp-6.3.0-a3c2b802"
++        case .nettle: expected = "nettle-4.0-3addbc00"
++        case .gnutls: expected = "gnutls-3.8.13-ffed8ec1"
++        default: throw NSError(domain: "VortXCryptoSource", code: 1,
++                               userInfo: [NSLocalizedDescriptionKey: "Unsupported release-source library"])
++        }
++        guard directoryURL.lastPathComponent == expected else {
++            throw NSError(domain: "VortXCryptoSource", code: 2,
++                          userInfo: [NSLocalizedDescriptionKey: "Release source selector differs from the fixed archive policy"])
++        }
++    }
++
++    override func generatesPackageManagerFile() -> Bool { false }
++
++    override func environment(platform: PlatformType, arch: ArchType) -> [String: String] {
++        var env = super.environment(platform: platform, arch: arch)
++        env["AR"] = platform.xcrunFind(tool: "ar").trimmingCharacters(in: .whitespacesAndNewlines)
++        env["RANLIB"] = platform.xcrunFind(tool: "ranlib").trimmingCharacters(in: .whitespacesAndNewlines)
++        // Build-time generators must run on the build machine, without target SDK flags.
++        env["CC_FOR_BUILD"] = "/usr/bin/clang"
++        return env
++    }
++
++    override func build(platform: PlatformType, arch: ArchType) throws {
++        try verifySources()
++        let buildURL = scratch(platform: platform, arch: arch)
++        try FileManager.default.createDirectory(at: buildURL, withIntermediateDirectories: true)
++        let recordURL = buildURL.appendingPathComponent("vortx-crypto-build.json")
++        guard !FileManager.default.fileExists(atPath: recordURL.path) else {
++            throw NSError(domain: "VortXCryptoSource", code: 3,
++                          userInfo: [NSLocalizedDescriptionKey: "Fresh crypto build evidence required"])
++        }
++        var env = environment(platform: platform, arch: arch)
++        try SDKSystemMetadata.append(to: &env, sdkRoot: URL(fileURLWithPath: platform.isysroot), buildRoot: buildURL)
++        // These are authenticated release scripts. No network bootstrap or autogen runs.
++        let configure = directoryURL.appendingPathComponent("configure")
++        let args = ["--prefix=\(thinDir(platform: platform, arch: arch).path)"] + arguments(platform: platform, arch: arch)
++        try Utility.launch(path: "/bin/sh", arguments: [configure.path] + args,
++                           currentDirectoryURL: buildURL, environment: env)
++        // Authenticated archive mtimes are preserved by the preparer. A make
++        // rule attempting autotools regeneration still fails closed.
++        let makeArgs = ["-j1", "AUTOCONF=/usr/bin/false", "AUTOHEADER=/usr/bin/false",
++                        "AUTOMAKE=/usr/bin/false", "ACLOCAL=/usr/bin/false"]
++        try Utility.launch(path: "/usr/bin/make", arguments: makeArgs, currentDirectoryURL: buildURL, environment: env)
++        try Utility.launch(path: "/usr/bin/make", arguments: makeArgs + ["install"], currentDirectoryURL: buildURL, environment: env)
++        // Any tracked/release-tree change, including generated source files, fails closed.
++        try verifySources()
++        var generated: [String: [String: Any]] = [:]
++        var configurationNames = ["Makefile", "config.status", "config.log", "config.h"]
++        switch library {
++        case .gmp: configurationNames += ["gmp.h"]
++        case .nettle: configurationNames += ["config.make", "config.m4", "version.h", "nettle.pc", "hogweed.pc"]
++        case .gnutls: configurationNames += ["lib/gnutls.pc", "lib/includes/gnutls/gnutls.h"]
++        default: break
++        }
++        for name in configurationNames {
++            let path = buildURL.appendingPathComponent(name)
++            let info = try FileManager.default.attributesOfItem(atPath: path.path)
++            guard info[.type] as? FileAttributeType == .typeRegular,
++                  let size = info[.size] as? NSNumber, size.intValue > 0, size.intValue <= 16 * 1024 * 1024 else {
++                throw NSError(domain: "VortXCryptoSource", code: 4,
++                              userInfo: [NSLocalizedDescriptionKey: "Missing or unsafe generated crypto configuration: \(name)"])
++            }
++            let bytes = try Data(contentsOf: path)
++            generated[name] = ["bytes": bytes.count,
++                               "sha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()]
++        }
++        let record: [String: Any] = ["schema": 1, "library": library.rawValue,
++            "sourceDirectory": directoryURL.path, "selector": library.version,
++            "platform": platform.rawValue, "arch": arch.rawValue,
++            "configureArguments": args, "makeArguments": makeArgs, "environment": env,
++            "buildDirectory": buildURL.path, "prefix": thinDir(platform: platform, arch: arch).path,
++            "generatedConfiguration": generated, "compiled": true, "installed": true]
++        try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .prettyPrinted])
++            .write(to: recordURL, options: .withoutOverwriting)
++    }
++}
++
++private class BuildGmp: PinnedCryptoReleaseBuild {
++    init() { super.init(library: .gmp) }
++
++    override func environment(platform: PlatformType, arch: ArchType) -> [String: String] {
++        var env = super.environment(platform: platform, arch: arch)
++        env["ABI"] = "64"
++        return env
++    }
++
++    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
++        ["--disable-assembly", "--disable-cxx", "--with-pic", "--enable-static",
++         "--disable-shared", "--disable-fast-install", "--disable-maintainer-mode",
++         "--host=\(platform.host(arch: arch))"]
++    }
++}
++
++private class BuildNettle: PinnedCryptoReleaseBuild {
++    init() { super.init(library: .nettle) }
++    override func flagsDependencelibrarys() -> [Library] { [.gmp] }
++    override func frameworks() throws -> [String] { ["nettle", "hogweed"] }
++
++    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
++        ["--disable-assembler", "--disable-openssl", "--disable-gcov", "--disable-documentation",
++         "--disable-mini-gmp", "--enable-public-key", "--disable-fat", "--enable-pic",
++         "--enable-static", "--disable-shared", "--disable-dependency-tracking",
++         "--host=\(platform.host(arch: arch))"]
++    }
++}
++
++private class BuildGnutls: PinnedCryptoReleaseBuild {
++    init() { super.init(library: .gnutls) }
++    override func flagsDependencelibrarys() -> [Library] { [.gmp, .nettle] }
++
++    override func ldFlags(platform: PlatformType, arch: ArchType) -> [String] {
++        // Library ordering belongs to the explicit dependency variables/pkg-config.
++        platform.ldFlags(arch: arch) + [Library.gmp, .nettle].map {
++            "-L\(thinDir(library: $0, platform: platform, arch: arch).path)/lib"
++        }
++    }
++
++    override func environment(platform: PlatformType, arch: ArchType) -> [String: String] {
++        var env = super.environment(platform: platform, arch: arch)
++        let gmp = thinDir(library: .gmp, platform: platform, arch: arch).path
++        let nettle = thinDir(library: .nettle, platform: platform, arch: arch).path
++        env["GMP_CFLAGS"] = "-I\(gmp)/include"
++        env["GMP_LIBS"] = "-L\(gmp)/lib -lgmp"
++        env["NETTLE_CFLAGS"] = "-I\(nettle)/include"
++        env["NETTLE_LIBS"] = "-L\(nettle)/lib -lnettle"
++        env["HOGWEED_CFLAGS"] = "-I\(nettle)/include"
++        // The configure RSA probe uses HOGWEED_LIBS alone. Keep the complete
++        // static dependency order here instead of relying on ambient LDFLAGS.
++        env["HOGWEED_LIBS"] = "-L\(nettle)/lib -lhogweed -lnettle -L\(gmp)/lib -lgmp"
++        return env
++    }
++
++    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
++        ["--with-included-libtasn1", "--with-included-unistring", "--without-brotli",
++         "--without-idn", "--without-p11-kit", "--without-zlib", "--without-zstd",
++         "--without-tpm", "--without-tpm2", "--without-leancrypto", "--disable-cxx", "--disable-libdane",
++         "--enable-hardware-acceleration", "--disable-openssl-compatibility", "--disable-code-coverage",
++         "--disable-doc", "--disable-maintainer-mode", "--disable-manpages", "--disable-nls", "--disable-rpath",
++         "--disable-tests", "--disable-tools", "--disable-full-test-suite", "--with-pic", "--enable-static",
++         "--disable-shared", "--disable-fast-install", "--disable-dependency-tracking",
++         "--host=\(platform.host(arch: arch))"]
      }
  }
  
-+
+@@ -839,16 +1404,300 @@
+ }
+ 
+ 
 +// Metadata correction for one retained binary wrapper, not a Samba upgrade.
 +// The hardcoded proof is inseparable from this policy; callers supply observations only.
 +enum SmbMetadataNormalizer {
@@ -644,12 +993,19 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +        }
 +    }
 +}
- 
++
  private class BuildSmbclient: ZipBaseBuild {
      init() {
          super.init(library: .libsmbclient)
      }
  
+-}
+-
+-private class BuildDav1d: ZipBaseBuild {
++    // The candidate packages the exact retained wrapper locally alongside
++    // the rebuilt crypto closure; its remote selector remains unchanged.
++    override func generatesPackageManagerFile() -> Bool { false }
++
 +    override func validateDownloadedArchive(_ archive: URL) throws {
 +        try SmbMetadataNormalizer.validateArchive(archive, version: library.version)
 +    }
@@ -686,10 +1042,130 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..f4db2db395eae3ea4e13db0b5d251425
 +        try SmbMetadataNormalizer.normalize(wrapper: directoryURL, outputRoot: URL.currentDirectory,
 +                                            version: library.version, requested: requested)
 +        try super.afterBuild()
++        // ZipBaseBuild only restores thin inputs. Preserve normalization and
++        // minimum-OS validation before emitting the candidate's local ZIP.
++        try createXCFramework()
++        try packageRelease()
 +    }
++}
++
++private class BuildDav1d: BaseBuild {
+     init() {
+         super.init(library: .libdav1d)
++    }
++
++    override func beforeBuild() throws {
++        try SpikeGit.clonePinned(url: library.url,
++                                 sha: Library.dav1dPinnedSHA,
++                                 branch: Library.dav1dPinnedBranch,
++                                 library: .libdav1d,
++                                 into: directoryURL)
++        try SpikeGit.applyPatches(for: library, in: directoryURL)
++    }
++
++    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
++        // Preserve the selected Apple wrapper policy: assembly objects lack platform load commands.
++        ["-Denable_asm=false", "-Denable_tools=false", "-Denable_examples=false", "-Denable_tests=false",
++         "-Denable_docs=false", "-Denable_seek_stress=false", "-Dtestdata_tests=false",
++         "-Dfuzzing_engine=none", "-Dxxhash_muxer=disabled"]
++    }
++
++    override func generatesPackageManagerFile() -> Bool {
++        // No published MPVKit 1.5.4 wrapper was observed. Local assembly and the
++        // fixed candidate profile bind the actual source-built framework.
++        false
+     }
+ 
+     override func buildALL() throws {
+@@ -861,9 +1710,32 @@
+     }
  }
  
- private class BuildDav1d: ZipBaseBuild {
+-private class BuildLittleCms: ZipBaseBuild {
++// lcms2.20rc1 is an explicit prerelease test candidate, built from official source.
++// The source version/header says 2.20/2200, so retain the rc1 label in our exact pin.
++private class BuildLittleCms: BaseBuild {
+     init() {
+         super.init(library: .lcms2)
++    }
++
++    override func beforeBuild() throws {
++        try SpikeGit.clonePinned(url: library.url,
++                                 sha: Library.lcmsPinnedSHA,
++                                 branch: Library.lcmsPinnedBranch,
++                                 library: .lcms2,
++                                 into: directoryURL)
++        try SpikeGit.applyPatches(for: library, in: directoryURL)
++    }
++
++    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
++        // No codec dependencies, tools, or optional GPL plugins enter the source closure.
++        ["-Djpeg=disabled", "-Dtiff=disabled", "-Dutils=false",
++         "-Dfastfloat=false", "-Dthreaded=false"]
++    }
++
++    override func generatesPackageManagerFile() -> Bool {
++        // Assembly binds the actual local XCFramework. Never synthesize a remote
++        // mpvkit/lcms2-build release/checksum for this official-source RC candidate.
++        false
+     }
+ }
+ 
+@@ -879,9 +1751,54 @@
+     }
+ }
+ 
++// The published all-ZIP feeds libplacebo; the matching XCFramework stays a remote
++// Swift target. Pin both bodies, then retain their per-architecture correspondence.
+ private class BuildShaderc: ZipBaseBuild {
+     init() throws {
+         super.init(library: .libshaderc)
++    }
++
++    private func validate(_ archive: URL, bytes: UInt64, sha256: String) throws {
++        let attributes = try FileManager.default.attributesOfItem(atPath: archive.path)
++        guard attributes[.type] as? FileAttributeType == .typeRegular,
++              (attributes[.size] as? NSNumber)?.uint64Value == bytes else {
++            throw NSError(domain: "VortXShaderc", code: 1,
++                          userInfo: [NSLocalizedDescriptionKey: "Shaderc input type/size differs: \(archive.path)"])
++        }
++        let file = try FileHandle(forReadingFrom: archive)
++        defer { file.closeFile() }
++        var hasher = SHA256()
++        while let data = try file.read(upToCount: 1024 * 1024), !data.isEmpty {
++            hasher.update(data: data)
++        }
++        let actual = hasher.finalize().map { String(format: "%02x", $0) }.joined()
++        guard actual == sha256 else {
++            throw NSError(domain: "VortXShaderc", code: 2,
++                          userInfo: [NSLocalizedDescriptionKey: "Shaderc input hash differs: \(archive.path)"])
++        }
++    }
++
++    override func validateDownloadedArchive(_ archive: URL) throws {
++        try validate(archive, bytes: 124322785,
++                     sha256: "d213fa58de7886846fb8cb713ea5213b77654a3ad2ba3d89b1f2fe367d945ba5")
++    }
++
++    override func beforeBuild() throws {
++        // Never reuse an extracted prebuilt cache that may disagree with its ZIP.
++        guard !FileManager.default.fileExists(atPath: directoryURL.path) else {
++            throw NSError(domain: "VortXShaderc", code: 3,
++                          userInfo: [NSLocalizedDescriptionKey: "Fresh Shaderc candidate directory required: \(directoryURL.path)"])
++        }
++        try super.beforeBuild()
++        let xcArchive = directoryURL.appendingPathComponent("Libshaderc_combined.xcframework.zip")
++        guard !FileManager.default.fileExists(atPath: xcArchive.path) else {
++            throw NSError(domain: "VortXShaderc", code: 4,
++                          userInfo: [NSLocalizedDescriptionKey: "Unexpected Shaderc XCFramework input already exists"])
++        }
++        try Utility.launch(path: "/usr/bin/curl", arguments: ["--fail", "--location", "--output", xcArchive.path,
++            "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip"])
++        try validate(xcArchive, bytes: 61246203,
++                     sha256: "77a3d355993cf53843a394bf58262dab99cdd93f9e6fe31d5ca6e55b03866ce1")
+     }
+ }
+ 
 diff --git a/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch b/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch
 index 8b268af..7a075b0 100644
 --- a/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch
@@ -712,16 +1188,13 @@ index 8b268af..7a075b0 100644
  -endif
  +#endif
 diff --git a/Sources/BuildScripts/XCFrameworkBuild/base.swift b/Sources/BuildScripts/XCFrameworkBuild/base.swift
-index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..a5b87d6b0d9dd5062afb536a2004f10bfd70ac6d 100644
+index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883c423d9de 100644
 --- a/Sources/BuildScripts/XCFrameworkBuild/base.swift
 +++ b/Sources/BuildScripts/XCFrameworkBuild/base.swift
-@@ -87,6 +87,124 @@
-         }
+@@ -90,6 +90,124 @@
+     }
+ }
  
-         return options
-+    }
-+}
-+
 +enum SDKSystemMetadata {
 +    static func fail(_ message: String) -> NSError {
 +        NSError(domain: "VortX.SDKSystemMetadata", code: 1,
@@ -837,10 +1310,28 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..a5b87d6b0d9dd5062afb536a2004f10b
 +        }
 +        let metadata = try prepare(sdkRoot: sdkRoot, buildRoot: buildRoot)
 +        environment["PKG_CONFIG_LIBDIR"] = target + ":" + metadata.path
-     }
- }
++    }
++}
++
+ class BaseBuild {
+     static let defaultPath = "/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+     static var platforms = PlatformType.allCases
+@@ -152,7 +270,13 @@
  
-@@ -228,7 +346,8 @@
+     func afterBuild() throws {
+         try verifyMinVersions()
+-        try generatePackageManagerFile()
++        if generatesPackageManagerFile() {
++            try generatePackageManagerFile()
++        }
++    }
++
++    func generatesPackageManagerFile() -> Bool {
++        true
+     }
+ 
+     private func verifyMinVersions() throws {
+@@ -228,7 +352,8 @@
      func build(platform: PlatformType, arch: ArchType) throws {
          let buildURL = scratch(platform: platform, arch: arch)
          try? FileManager.default.createDirectory(at: buildURL, withIntermediateDirectories: true, attributes: nil)
@@ -850,15 +1341,48 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..a5b87d6b0d9dd5062afb536a2004f10b
          if FileManager.default.fileExists(atPath: (directoryURL + "meson.build").path) {
              if Utility.shell("which meson") == nil {
                  Utility.shell("brew install meson")
-@@ -319,7 +438,6 @@
+@@ -241,18 +366,18 @@
+             let crossFile = createMesonCrossFile(platform: platform, arch: arch)
+             let meson = Utility.shell("which meson", isOutput: true)!
+             try Utility.launch(path: meson, arguments: ["setup", buildURL.path, "--cross-file=\(crossFile.path)"] + arguments(platform: platform, arch: arch), currentDirectoryURL: directoryURL, environment: environ)
+-            try Utility.launch(path: meson, arguments: ["compile", "--clean"], currentDirectoryURL: buildURL, environment: environ)
+-            try Utility.launch(path: meson, arguments: ["compile", "--verbose"], currentDirectoryURL: buildURL, environment: environ)
+-            try Utility.launch(path: meson, arguments: ["install"], currentDirectoryURL: buildURL, environment: environ)
++            try Utility.launch(path: meson, arguments: ["compile", "--clean", "-j", "1"], currentDirectoryURL: buildURL, environment: environ)
++            try Utility.launch(path: meson, arguments: ["compile", "--verbose", "-j", "1"], currentDirectoryURL: buildURL, environment: environ)
++            try Utility.launch(path: meson, arguments: ["install", "--no-rebuild"], currentDirectoryURL: buildURL, environment: environ)
+         } else if FileManager.default.fileExists(atPath: (directoryURL + wafPath()).path) {
+             let waf = (directoryURL + wafPath()).path
+-            try Utility.launch(path: waf, arguments: ["configure"] + arguments(platform: platform, arch: arch), currentDirectoryURL: directoryURL, environment: environ)
+-            try Utility.launch(path: waf, arguments: wafBuildArg(), currentDirectoryURL: directoryURL, environment: environ)
+-            try Utility.launch(path: waf, arguments: ["install"] + wafInstallArg(), currentDirectoryURL: directoryURL, environment: environ)
++            try Utility.launch(path: waf, arguments: ["configure", "-j1"] + arguments(platform: platform, arch: arch), currentDirectoryURL: directoryURL, environment: environ)
++            try Utility.launch(path: waf, arguments: ["-j1"] + wafBuildArg(), currentDirectoryURL: directoryURL, environment: environ)
++            try Utility.launch(path: waf, arguments: ["install", "-j1"] + wafInstallArg(), currentDirectoryURL: directoryURL, environment: environ)
+         } else {
+             try configure(buildURL: buildURL, environ: environ, platform: platform, arch: arch)
+-            try Utility.launch(path: "/usr/bin/make", arguments: ["-j8"], currentDirectoryURL: buildURL, environment: environ)
+-            try Utility.launch(path: "/usr/bin/make", arguments: ["-j8", "install"], currentDirectoryURL: buildURL, environment: environ)
++            try Utility.launch(path: "/usr/bin/make", arguments: ["-j1"], currentDirectoryURL: buildURL, environment: environ)
++            try Utility.launch(path: "/usr/bin/make", arguments: ["-j1", "install"], currentDirectoryURL: buildURL, environment: environ)
+         }
+     }
+ 
+@@ -319,9 +444,12 @@
          let cFlags = cFlags(platform: platform, arch: arch).joined(separator: " ")
          let ldFlags = ldFlags(platform: platform, arch: arch).joined(separator: " ")
          let pkgConfigPath = platform.pkgConfigPath(arch: arch)
 -        let pkgConfigPathDefault = Utility.shell("pkg-config --variable pc_path pkg-config", isOutput: true)!
          return [
              "LC_CTYPE": "C",
++            // Keep nested native build tools within the one-worker candidate budget.
++            "MAKEFLAGS": "-j1",
++            "CMAKE_BUILD_PARALLEL_LEVEL": "1",
++            "CARGO_BUILD_JOBS": "1",
              "CC": "/usr/bin/clang",
-@@ -333,7 +451,9 @@
+             "CXX": "/usr/bin/clang++",
+             // "SDKROOT": platform.sdk.lowercased(),
+@@ -333,7 +461,9 @@
              "CXXFLAGS": cFlags,
              "ASMFLAGS": cFlags,
              "LDFLAGS": ldFlags,
@@ -869,7 +1393,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..a5b87d6b0d9dd5062afb536a2004f10b
              "PATH": BaseBuild.defaultPath,
          ]
      }
-@@ -959,6 +1079,9 @@
+@@ -959,6 +1089,9 @@
  
  class ZipBaseBuild : BaseBuild {
  
@@ -879,7 +1403,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..a5b87d6b0d9dd5062afb536a2004f10b
      override func beforeBuild() throws {
          // unzip builded static library
          let outputFileName = "\(library.rawValue).zip"
-@@ -972,7 +1095,10 @@
+@@ -972,7 +1105,10 @@
  
          if !FileManager.default.fileExists(atPath: outputFile.path) {
              try! Utility.launch(path: "wget", arguments: ["-O", outputFileName, library.url], currentDirectoryURL: directoryURL)
@@ -890,7 +1414,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..a5b87d6b0d9dd5062afb536a2004f10b
          }
      }
  
-@@ -1245,14 +1371,13 @@
+@@ -1245,14 +1381,13 @@
      }
  
      func pkgConfigPath(arch: ArchType) -> String {
@@ -910,3 +1434,1566 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..a5b87d6b0d9dd5062afb536a2004f10b
      }
  }
  
+diff --git a/Sources/BuildScripts/crypto-release-sources.py b/Sources/BuildScripts/crypto-release-sources.py
+new file mode 100644
+index 0000000..9191d290ed83a103cd7c95293f5a45a9f828147a
+--- /dev/null
++++ b/Sources/BuildScripts/crypto-release-sources.py
+@@ -0,0 +1,626 @@
++#!/usr/bin/env python3
++"""Fixed release-source input boundary for the proposed Apple crypto chain.
++
++This file is a recovery proposal. It performs no download and never bootstraps
++Git sources. The SHA-256 values are corroborated by retained Homebrew formula
++metadata; this is not a claim of upstream signature verification.
++"""
++
++import argparse
++import gzip
++import hashlib
++import io
++import json
++import lzma
++import os
++from pathlib import Path
++import stat
++import tarfile
++import uuid
++
++
++MAX_ARCHIVE = 8 * 1024 * 1024
++MAX_UNCOMPRESSED = 512 * 1024 * 1024
++MAX_MEMBERS = 100000
++MAX_FILE = 64 * 1024 * 1024
++MAX_RECEIPT = 64 * 1024 * 1024
++MAX_PATH = 4096
++MAX_MTIME = 4102444800
++PROFILE = "gmp630-nettle400-gnutls3813-release-sources-v1"
++PINS = (
++    {
++        "id": "gmp", "version": "6.3.0", "archiveRoot": "gmp-6.3.0",
++        "filename": "gmp-6.3.0.tar.xz", "compression": "xz", "bytes": 2094196,
++        "sha256": "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898",
++        "sourceRoot": "gmp-6.3.0-a3c2b802",
++        "url": "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz",
++    },
++    {
++        "id": "nettle", "version": "4.0", "archiveRoot": "nettle-4.0",
++        "filename": "nettle-4.0.tar.gz", "compression": "gz", "bytes": None,
++        "sha256": "3addbc00da01846b232fb3bc453538ea5468da43033f21bb345cb1e9073f5094",
++        "sourceRoot": "nettle-4.0-3addbc00",
++        "url": "https://ftp.gnu.org/gnu/nettle/nettle-4.0.tar.gz",
++    },
++    {
++        "id": "gnutls", "version": "3.8.13", "archiveRoot": "gnutls-3.8.13",
++        "filename": "gnutls-3.8.13.tar.xz", "compression": "xz", "bytes": 7275324,
++        "sha256": "ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e",
++        "sourceRoot": "gnutls-3.8.13-ffed8ec1",
++        "url": "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz",
++    },
++)
++
++
++def digest(data):
++    return hashlib.sha256(data).hexdigest()
++
++
++def canonical(value):
++    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
++
++
++def identity(st):
++    return (st.st_dev, st.st_ino, st.st_size, st.st_mode, st.st_mtime_ns, st.st_ctime_ns)
++
++
++def archive_mtime(value):
++    if type(value) is not int or not 0 <= value <= MAX_MTIME:
++        raise ValueError("source mtime must be bounded integral seconds")
++    return value
++
++
++def filesystem_mtime(info):
++    if info.st_mtime_ns % 1000000000:
++        raise ValueError("source mtime no longer matches integral release metadata")
++    return archive_mtime(info.st_mtime_ns // 1000000000)
++
++
++def checked_path(value):
++    path = Path(value)
++    if not path.is_absolute() or ".." in path.parts:
++        raise ValueError("an absolute path without parent traversal is required")
++    current = Path(path.anchor)
++    for part in path.parts[1:]:
++        current /= part
++        try:
++            info = current.lstat()
++        except FileNotFoundError:
++            break
++        if stat.S_ISLNK(info.st_mode):
++            raise ValueError("linked path ancestor is not admitted")
++    return path
++
++
++def directory(path):
++    checked_path(path)
++    info = path.lstat()
++    if not stat.S_ISDIR(info.st_mode):
++        raise ValueError("a real directory is required")
++    return path
++
++
++def read_regular(path, maximum):
++    checked_path(path)
++    before = path.lstat()
++    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > maximum:
++        raise ValueError("input must be a bounded, unlinked regular file")
++    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++    with os.fdopen(fd, "rb") as stream:
++        opened = os.fstat(stream.fileno())
++        if identity(opened) != identity(before):
++            raise ValueError("input changed before reading")
++        data = stream.read(maximum + 1)
++        if len(data) > maximum or identity(os.fstat(stream.fileno())) != identity(opened):
++            raise ValueError("input changed or exceeded its bound")
++    if identity(path.lstat()) != identity(before) or len(data) != before.st_size:
++        raise ValueError("input changed while reading")
++    return data
++
++
++def write_new(path, data, mode=0o644):
++    directory(path.parent)
++    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
++    with os.fdopen(fd, "wb") as stream:
++        stream.write(data)
++        stream.flush()
++        os.fsync(stream.fileno())
++    os.chmod(path, mode, follow_symlinks=False)
++
++
++def member_path(value):
++    if (not isinstance(value, str) or not value or len(value.encode()) > MAX_PATH
++            or not value.isprintable() or value.startswith("/") or "\\" in value
++            or ":" in value or "\x00" in value):
++        raise ValueError("unsafe archive path")
++    parts = value.rstrip("/").split("/")
++    if any(part in ("", ".", "..") or part.casefold() == ".git" for part in parts):
++        raise ValueError("unsafe archive path component")
++    return "/".join(parts)
++
++
++def link_path(parent, target):
++    if (not isinstance(target, str) or not target or len(target.encode()) > MAX_PATH
++            or not target.isprintable() or target.startswith("/") or "\\" in target
++            or ":" in target or "\x00" in target):
++        raise ValueError("unsafe source symlink target")
++    parts = list(parent)
++    for part in target.split("/"):
++        if part in ("", "."):
++            continue
++        if part == "..":
++            if not parts:
++                raise ValueError("source symlink escapes its release root")
++            parts.pop()
++        elif part.casefold() == ".git":
++            raise ValueError("source symlink points through Git metadata")
++        else:
++            parts.append(part)
++    return "/".join(parts)
++
++
++class LimitedReader:
++    def __init__(self, stream, maximum):
++        self.stream, self.maximum, self.count = stream, maximum, 0
++
++    def read(self, size=-1):
++        allowance = self.maximum - self.count
++        if size < 0 or size > allowance + 1:
++            size = allowance + 1
++        block = self.stream.read(size)
++        self.count += len(block)
++        if self.count > self.maximum:
++            raise ValueError("decompressed source archive exceeds its bound")
++        return block
++
++
++class LimitedWriter:
++    def __init__(self, stream, maximum):
++        self.stream, self.maximum, self.count = stream, maximum, 0
++
++    def write(self, block):
++        if self.count + len(block) > self.maximum:
++            raise ValueError("captured source tar exceeds its aggregate bound")
++        written = self.stream.write(block)
++        self.count += written
++        return written
++
++
++def tar_stream(blob, compression):
++    raw = io.BytesIO(blob)
++    if compression == "xz":
++        decoded = lzma.LZMAFile(raw, "rb")
++    elif compression == "gz":
++        decoded = gzip.GzipFile(fileobj=raw, mode="rb")
++    elif compression == "none":
++        decoded = raw
++    else:
++        raise ValueError("unknown fixed source compression")
++    return tarfile.open(fileobj=LimitedReader(decoded, MAX_UNCOMPRESSED), mode="r|")
++
++
++def file_row(member, stream):
++    if member.size < 0 or member.size > MAX_FILE:
++        raise ValueError("source member exceeds its bound")
++    hasher, count = hashlib.sha256(), 0
++    while True:
++        block = stream.read(min(1024 * 1024, member.size - count + 1))
++        if not block:
++            break
++        count += len(block)
++        if count > member.size:
++            raise ValueError("source member exceeds its declared length")
++        hasher.update(block)
++    if count != member.size:
++        raise ValueError("truncated source member")
++    return {"kind": "file", "mode": 0o755 if member.mode & 0o111 else 0o644,
++            "mtime": archive_mtime(member.mtime),
++            "bytes": count, "sha256": hasher.hexdigest()}
++
++
++def finish_index(entries):
++    # Add implicit parent directories, then reject a file/link used as an ancestor.
++    for name in list(entries):
++        parts = name.split("/")
++        for end in range(1, len(parts)):
++            parent = "/".join(parts[:end])
++            row = entries.setdefault(parent, {"kind": "directory", "mode": 0o755, "mtime": 0})
++            if row["kind"] != "directory":
++                raise ValueError("non-directory source member has children")
++            if len(entries) > MAX_MEMBERS:
++                raise ValueError("source archive has too many explicit and implicit paths")
++    folded = {}
++    for name in entries:
++        if name.casefold() in folded and folded[name.casefold()] != name:
++            raise ValueError("source archive has case-colliding members")
++        folded[name.casefold()] = name
++
++    def resolve(name, visited=()):
++        if len(visited) >= 32:
++            raise ValueError("source symlink chain exceeds its bound")
++        parts = name.split("/") if name else []
++        for end in range(1, len(parts) + 1):
++            prefix = "/".join(parts[:end])
++            row = entries.get(prefix)
++            if row is None:
++                raise ValueError("dangling source symlink")
++            if row["kind"] == "symlink":
++                if prefix in visited:
++                    raise ValueError("cyclic source symlink")
++                destination = link_path(parts[:end - 1], row["target"])
++                tail = parts[end:]
++                following = "/".join(([destination] if destination else []) + tail)
++                return resolve(following, visited + (prefix,))
++            if end < len(parts) and row["kind"] != "directory":
++                raise ValueError("source symlink resolves through a non-directory")
++        return name
++
++    for name, row in entries.items():
++        if row["kind"] == "symlink":
++            resolve(name)
++    return [{"path": name, **entries[name]} for name in sorted(entries)]
++
++
++def index_archive(pin, blob):
++    if (len(blob) > MAX_ARCHIVE or (pin["bytes"] is not None and len(blob) != pin["bytes"])
++            or digest(blob) != pin["sha256"]):
++        raise ValueError("release source body differs from its fixed pin")
++    entries = {"": {"kind": "directory", "mode": 0o755, "mtime": 0}}
++    seen, total = set(), 0
++    with tar_stream(blob, pin["compression"]) as archive:
++        for member in archive:
++            if len(seen) >= MAX_MEMBERS:
++                raise ValueError("source archive has too many members")
++            full = member_path(member.name)
++            root, separator, name = full.partition("/")
++            if root != pin["archiveRoot"]:
++                raise ValueError("source archive has a foreign top-level root")
++            if full.casefold() in seen:
++                raise ValueError("duplicate or case-colliding source member")
++            seen.add(full.casefold())
++            if getattr(member, "sparse", None) or any("sparse" in key.casefold() for key in member.pax_headers):
++                raise ValueError("sparse source archive members are not admitted")
++            if not separator:
++                if not member.isdir():
++                    raise ValueError("source archive root is not a directory")
++                entries[""]["mtime"] = archive_mtime(member.mtime)
++                continue
++            if member.isdir():
++                row = {"kind": "directory", "mode": 0o755,
++                       "mtime": archive_mtime(member.mtime)}
++            elif member.isreg():
++                total += member.size
++                if total > MAX_UNCOMPRESSED:
++                    raise ValueError("source member total exceeds its bound")
++                stream = archive.extractfile(member)
++                if stream is None:
++                    raise ValueError("missing source member body")
++                with stream:
++                    row = file_row(member, stream)
++            elif member.issym():
++                link_path(name.split("/")[:-1], member.linkname)
++                data = member.linkname.encode()
++                row = {"kind": "symlink", "mode": 0o777, "bytes": len(data),
++                       "mtime": archive_mtime(member.mtime),
++                       "sha256": digest(data), "target": member.linkname}
++            else:
++                # In particular, do not turn hardlinks into silently independent files.
++                raise ValueError("hardlinks and special source members require a reviewed successor")
++            entries[name] = row
++    rows = finish_index(entries)
++    configure = next((row for row in rows if row["path"] == "configure"), None)
++    if configure is None or configure["kind"] != "file" or configure["mode"] != 0o755:
++        raise ValueError("release archive lacks a regular executable configure; bootstrap is forbidden")
++    return rows
++
++
++def actual_index(root):
++    directory(root)
++    info = root.lstat()
++    entries = {"": {"kind": "directory", "mode": stat.S_IMODE(info.st_mode),
++                    "mtime": filesystem_mtime(info)}}
++    for parent, dirs, files in os.walk(root, followlinks=False):
++        parent = Path(parent)
++        for name in sorted(dirs + files):
++            path = parent / name
++            relative = member_path(path.relative_to(root).as_posix())
++            info = path.lstat()
++            if stat.S_ISDIR(info.st_mode):
++                row = {"kind": "directory", "mode": stat.S_IMODE(info.st_mode),
++                       "mtime": filesystem_mtime(info)}
++            elif stat.S_ISREG(info.st_mode):
++                data = read_regular(path, MAX_FILE)
++                row = {"kind": "file", "mode": stat.S_IMODE(info.st_mode),
++                       "mtime": filesystem_mtime(info),
++                       "bytes": len(data), "sha256": digest(data)}
++            elif stat.S_ISLNK(info.st_mode):
++                target = os.readlink(path)
++                after = path.lstat()
++                if identity(after) != identity(info):
++                    raise ValueError("source symlink changed during readback")
++                link_path(relative.split("/")[:-1], target)
++                data = target.encode()
++                row = {"kind": "symlink", "mode": 0o777, "bytes": len(data),
++                       "mtime": filesystem_mtime(info),
++                       "sha256": digest(data), "target": target}
++            else:
++                raise ValueError("source tree contains a special file")
++            entries[relative] = row
++            if len(entries) > MAX_MEMBERS:
++                raise ValueError("source tree has too many paths")
++    return finish_index(entries)
++
++
++def extract_source(pin, blob, destination, rows):
++    # The complete virtual tree and every link were checked before any extraction.
++    destination.mkdir(mode=0o755)
++    os.chmod(destination, 0o755, follow_symlinks=False)
++    for row in rows:
++        if row["kind"] == "directory":
++            path = destination / row["path"]
++            path.mkdir(mode=0o755, parents=True, exist_ok=True)
++            os.chmod(path, 0o755, follow_symlinks=False)
++    expected = {row["path"]: row for row in rows}
++    with tar_stream(blob, pin["compression"]) as archive:
++        for member in archive:
++            full = member_path(member.name)
++            _, separator, name = full.partition("/")
++            if not separator or not member.isreg():
++                continue
++            target = destination / name
++            stream = archive.extractfile(member)
++            if stream is None:
++                raise ValueError("missing source member during extraction")
++            with stream:
++                data = stream.read(MAX_FILE + 1)
++            row = expected[name]
++            if len(data) != row["bytes"] or digest(data) != row["sha256"]:
++                raise ValueError("source member differs between validation and extraction")
++            write_new(target, data, row["mode"])
++    for row in rows:
++        if row["kind"] == "symlink":
++            os.symlink(row["target"], destination / row["path"])
++    # Preserve authenticated release ordering for make's regeneration rules.
++    # Metadata writes happen after all child creation; directories are last.
++    for row in rows:
++        if row["kind"] != "directory":
++            nanoseconds = row["mtime"] * 1000000000
++            os.utime(destination / row["path"], ns=(nanoseconds, nanoseconds),
++                     follow_symlinks=False)
++    directories = sorted((row for row in rows if row["kind"] == "directory"),
++                         key=lambda row: len(row["path"].split("/")) if row["path"] else 0,
++                         reverse=True)
++    for row in directories:
++        nanoseconds = row["mtime"] * 1000000000
++        os.utime(destination / row["path"], ns=(nanoseconds, nanoseconds),
++                 follow_symlinks=False)
++    if actual_index(destination) != rows:
++        raise ValueError("extracted source tree differs from the release archive")
++
++
++def receipt_for(verified):
++    roots = []
++    for pin, blob, rows in verified:
++        roots.append({"id": pin["id"], "version": pin["version"],
++                      "url": pin["url"], "archive": "archives/" + pin["filename"],
++                      "archiveRoot": pin["archiveRoot"], "archiveBytes": len(blob),
++                      "archiveSHA256": pin["sha256"], "sourceRoot": "dist/" + pin["sourceRoot"],
++                      "membersSHA256": digest(canonical(rows)), "members": rows})
++    return {"schema": 1, "profile": PROFILE,
++            "identityBasis": "fixed-sha256-corroborated-by-package-maintainer-metadata",
++            "upstreamSignatureVerified": False, "roots": roots}
++
++
++def read_inputs(archive_directory):
++    directory(archive_directory)
++    result = []
++    for pin in PINS:
++        blob = read_regular(archive_directory / pin["filename"], MAX_ARCHIVE)
++        result.append((pin, blob, index_archive(pin, blob)))
++    return result
++
++
++def prepare(work, inputs):
++    directory(work)
++    dist = work / "dist"
++    if not dist.exists():
++        dist.mkdir(mode=0o755)
++    directory(dist)
++    destinations = [dist / pin["sourceRoot"] for pin in PINS] + [dist / "crypto-sources"]
++    if any(path.exists() or path.is_symlink() for path in destinations):
++        raise ValueError("crypto source preparation requires fresh exact destinations")
++    verified = read_inputs(inputs)
++    stage = dist / (".crypto-sources-stage-" + uuid.uuid4().hex)
++    stage.mkdir(mode=0o755)
++    state = stage / "crypto-sources"
++    state.mkdir(mode=0o755)
++    (state / "archives").mkdir(mode=0o755)
++    for pin, blob, rows in verified:
++        write_new(state / "archives" / pin["filename"], blob)
++        extract_source(pin, blob, stage / pin["sourceRoot"], rows)
++    write_new(state / "receipt.json", canonical(receipt_for(verified)))
++    # No replacement or automatic recovery: an interrupted publication is retained.
++    for pin in PINS:
++        os.rename(stage / pin["sourceRoot"], dist / pin["sourceRoot"])
++    os.rename(state, dist / "crypto-sources")
++    stage.rmdir()
++    verify(work)
++
++
++def strict_json(data):
++    def pairs(items):
++        result = {}
++        for key, value in items:
++            if key in result:
++                raise ValueError("duplicate receipt key")
++            result[key] = value
++        return result
++    return json.loads(data.decode("utf-8"), object_pairs_hook=pairs)
++
++
++def verify(work):
++    directory(work)
++    state = directory(work / "dist" / "crypto-sources")
++    if {path.name for path in state.iterdir()} != {"archives", "receipt.json"}:
++        raise ValueError("unexpected crypto source state input")
++    archive_dir = directory(state / "archives")
++    if {path.name for path in archive_dir.iterdir()} != {pin["filename"] for pin in PINS}:
++        raise ValueError("crypto source archive set is not exact")
++    verified = read_inputs(archive_dir)
++    observed = strict_json(read_regular(state / "receipt.json", MAX_RECEIPT))
++    if canonical(observed) != canonical(receipt_for(verified)):
++        raise ValueError("crypto source receipt differs from actual pinned archive members")
++    for pin, _, rows in verified:
++        if actual_index(work / "dist" / pin["sourceRoot"]) != rows:
++            raise ValueError("crypto release source tree changed or contains extra paths")
++    return verified
++
++
++def tar_add(archive, path, full, row):
++    entry = tarfile.TarInfo(full)
++    entry.uid = entry.gid = 0
++    entry.mtime = row["mtime"]
++    entry.uname = entry.gname = ""
++    entry.mode = row["mode"]
++    if row["kind"] == "directory":
++        entry.type = tarfile.DIRTYPE
++        archive.addfile(entry)
++    elif row["kind"] == "symlink":
++        entry.type, entry.linkname = tarfile.SYMTYPE, row["target"]
++        archive.addfile(entry)
++    else:
++        data = read_regular(path, MAX_FILE)
++        if len(data) != row["bytes"] or digest(data) != row["sha256"]:
++            raise ValueError("source changed during source capture")
++        entry.size = len(data)
++        archive.addfile(entry, io.BytesIO(data))
++
++
++def capture(work, output):
++    verified = verify(work)
++    for protected in [work / "dist" / pin["sourceRoot"] for pin in PINS] + [
++            work / "dist" / "crypto-sources"]:
++        try:
++            output.relative_to(protected)
++        except ValueError:
++            continue
++        raise ValueError("source capture output cannot be inside a protected source/input root")
++    directory(output.parent)
++    if output.exists() or output.is_symlink():
++        raise ValueError("source capture output must be fresh")
++    output.mkdir(mode=0o755)
++    (output / "archives").mkdir(mode=0o755)
++    for pin, blob, _ in verified:
++        write_new(output / "archives" / pin["filename"], blob)
++    snapshot = output / "crypto-release-sources.tar"
++    fd = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
++    with os.fdopen(fd, "wb") as stream:
++        bounded = LimitedWriter(stream, MAX_UNCOMPRESSED)
++        with tarfile.open(fileobj=bounded, mode="w|", format=tarfile.PAX_FORMAT) as archive:
++            for pin, _, rows in verified:
++                for row in rows:
++                    full = pin["archiveRoot"] + ("/" + row["path"] if row["path"] else "")
++                    tar_add(archive, work / "dist" / pin["sourceRoot"] / row["path"],
++                            full, row)
++        stream.flush()
++        os.fsync(stream.fileno())
++    # A changed source tree or raw body cannot be blessed by capture's own receipt.
++    if verify(work) != verified:
++        raise ValueError("crypto input tuple changed during source capture")
++    write_new(output / "crypto-release-sources.json", canonical(receipt_for(verified)))
++    verify_capture(output)
++
++
++def verify_capture(output):
++    directory(output)
++    if {path.name for path in output.iterdir()} != {
++            "archives", "crypto-release-sources.tar", "crypto-release-sources.json"}:
++        raise ValueError("captured crypto source artifact set is not exact")
++    archive_dir = directory(output / "archives")
++    if {path.name for path in archive_dir.iterdir()} != {pin["filename"] for pin in PINS}:
++        raise ValueError("captured crypto source body set is not exact")
++    verified = read_inputs(archive_dir)
++    receipt = strict_json(read_regular(output / "crypto-release-sources.json", MAX_RECEIPT))
++    if canonical(receipt) != canonical(receipt_for(verified)):
++        raise ValueError("captured receipt differs from the pinned release source bodies")
++    expected = {}
++    for pin, _, rows in verified:
++        expected.update({pin["archiveRoot"] + ("/" + row["path"] if row["path"] else ""): row
++                         for row in rows})
++    snapshot = output / "crypto-release-sources.tar"
++    checked_path(snapshot)
++    before = snapshot.lstat()
++    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > MAX_UNCOMPRESSED:
++        raise ValueError("captured source tar must be a bounded regular file")
++    fd = os.open(snapshot, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++    observed, count = set(), 0
++    with os.fdopen(fd, "rb") as stream:
++        if identity(os.fstat(stream.fileno())) != identity(before):
++            raise ValueError("captured source tar changed before readback")
++        with tarfile.open(fileobj=LimitedReader(stream, MAX_UNCOMPRESSED), mode="r|") as archive:
++            for member in archive:
++                name = member_path(member.name)
++                count += 1
++                if count > MAX_MEMBERS * len(PINS) or name in observed or name not in expected:
++                    raise ValueError("captured source tar has an extra or duplicate member")
++                observed.add(name)
++                wanted = expected[name]
++                if member.isdir():
++                    actual = {"kind": "directory", "mode": member.mode,
++                              "mtime": archive_mtime(member.mtime)}
++                elif (member.isreg() and member.mode in (0o644, 0o755)
++                      and not getattr(member, "sparse", None)
++                      and not any("sparse" in key.casefold() for key in member.pax_headers)):
++                    body = archive.extractfile(member)
++                    if body is None:
++                        raise ValueError("captured source member has no body")
++                    with body:
++                        actual = file_row(member, body)
++                elif member.issym():
++                    data = member.linkname.encode()
++                    actual = {"kind": "symlink", "mode": 0o777, "bytes": len(data),
++                              "mtime": archive_mtime(member.mtime),
++                              "sha256": digest(data), "target": member.linkname}
++                else:
++                    raise ValueError("captured source tar has an unsupported member")
++                if actual != {key: value for key, value in wanted.items() if key != "path"}:
++                    raise ValueError("captured source member differs from the retained raw archive")
++        if identity(os.fstat(stream.fileno())) != identity(before):
++            raise ValueError("captured source tar changed during readback")
++    if identity(snapshot.lstat()) != identity(before) or observed != set(expected):
++        raise ValueError("captured source tar changed or omitted release source members")
++    if read_inputs(archive_dir) != verified:
++        raise ValueError("retained release archive tuple changed during captured source readback")
++    reread = strict_json(read_regular(output / "crypto-release-sources.json", MAX_RECEIPT))
++    if canonical(reread) != canonical(receipt):
++        raise ValueError("captured source receipt changed during readback")
++    return receipt
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    commands = parser.add_subparsers(dest="command", required=True)
++    item = commands.add_parser("prepare")
++    item.add_argument("work")
++    item.add_argument("local_archives")
++    item = commands.add_parser("verify")
++    item.add_argument("work")
++    item = commands.add_parser("capture")
++    item.add_argument("work")
++    item.add_argument("output")
++    item = commands.add_parser("verify-capture")
++    item.add_argument("output")
++    args = parser.parse_args()
++    if args.command == "prepare":
++        prepare(checked_path(args.work), checked_path(args.local_archives))
++    elif args.command == "verify":
++        verify(checked_path(args.work))
++    elif args.command == "capture":
++        capture(checked_path(args.work), checked_path(args.output))
++    else:
++        verify_capture(checked_path(args.output))
++    print("PASS " + PROFILE + " " + args.command)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/Sources/BuildScripts/crypto-chain-gate.py b/Sources/BuildScripts/crypto-chain-gate.py
+new file mode 100644
+index 0000000..75a553bff5e32004554eee85fc08981bcb72d121
+--- /dev/null
++++ b/Sources/BuildScripts/crypto-chain-gate.py
+@@ -0,0 +1,925 @@
++#!/usr/bin/env python3
++"""Opt-in source-candidate archive/symbol correspondence; no SMB runtime verdict.
++
++This recovery fragment is deliberately independent of the shipping verifier. Its
++caller must already have selected the fixed crypto-chain candidate profile.
++Both capture and verify inspect current bytes with the selected Apple readers;
++a JSON assertion about a digest is never a replacement for that inspection.
++"""
++import argparse
++import base64
++import binascii
++import hashlib
++import json
++import os
++from pathlib import Path
++import plistlib
++import re
++import stat
++import subprocess
++import tempfile
++
++
++PROFILE = 'native-upgrades-crypto-chain-v1'
++SCHEMA = 2
++PACKAGE_POLICY = 'assembled-mpvkit-relative-artifact-closure-v1'
++MAX_ARCHIVE = 512 * 1024**2
++MAX_HEADER = 4 * 1024**2
++MAX_READER = 16 * 1024**2
++MAX_RECEIPT = 64 * 1024**2
++MAX_CONFIGURATION = 16 * 1024**2
++MAX_INLINE_RAW = 16 * 1024**2
++MAX_READER_JSON = 32 * 1024**2
++MAX_METADATA_JSON = 8 * 1024**2
++INLINE_BODY_POLICY = {'encoding': 'canonical-rfc4648-base64', 'recordMaxRawBytes': MAX_HEADER,
++                      'configurationMaxRawBytes': MAX_CONFIGURATION, 'sdkMaxRawBytes': MAX_HEADER,
++                      'aggregateMaxRawBytes': MAX_INLINE_RAW, 'readerMaxJSONBytes': MAX_READER_JSON,
++                      'metadataMaxJSONBytes': MAX_METADATA_JSON, 'receiptMaxBytes': MAX_RECEIPT}
++RECEIPT_RELATIVE = 'dist/crypto-chain/vortx-crypto-chain.json'
++MATRIX = (
++    ('ios', 'arm64', 'ios-arm64'),
++    ('isimulator', 'arm64', 'ios-arm64_x86_64-simulator'),
++    ('isimulator', 'x86_64', 'ios-arm64_x86_64-simulator'),
++    ('tvos', 'arm64', 'tvos-arm64_arm64e'),
++    ('tvos', 'arm64e', 'tvos-arm64_arm64e'),
++    ('tvsimulator', 'arm64', 'tvos-arm64_x86_64-simulator'),
++    ('tvsimulator', 'x86_64', 'tvos-arm64_x86_64-simulator'),
++    ('macos', 'arm64', 'macos-arm64_x86_64'),
++    ('macos', 'x86_64', 'macos-arm64_x86_64'),
++)
++# target, WORK output directory, thin static archive, framework binary name
++LIBRARIES = (
++    ('gmp', 'gmp', 'libgmp.a', 'gmp'),
++    ('nettle', 'nettle', 'libnettle.a', 'nettle'),
++    ('hogweed', 'nettle', 'libhogweed.a', 'hogweed'),
++    ('gnutls', 'gnutls', 'libgnutls.a', 'gnutls'),
++    ('Libsmbclient', 'libsmbclient', 'libsmbclient.a', 'Libsmbclient'),
++)
++VERSIONS = {'gmp': '6.3.0', 'nettle': '4.0', 'hogweed': '4.0',
++            'gnutls': '3.8.13', 'Libsmbclient': '4.15.13-2512'}
++SOURCES = {
++    'gmp': {'archive': 'gmp-6.3.0.tar.xz',
++            'sha256': 'a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898'},
++    'gnutls': {'tag': '3.8.13',
++               'commit': 'b390d80208ed60f1b33ad899475951a8efb40ccd',
++               'archive': 'gnutls-3.8.13.tar.xz',
++               'sha256': 'ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e'},
++    'nettle': {'tag': 'nettle_4.0_release_20260205',
++               'commit': 'bf13ee9e5024014cfa6d2fc097923afe087e63ba',
++               'archive': 'nettle-4.0.tar.gz',
++               'sha256': '3addbc00da01846b232fb3bc453538ea5468da43033f21bb345cb1e9073f5094'},
++}
++SELECTORS = {'gmp': '6.3.0-a3c2b802', 'nettle': '4.0-3addbc00', 'gnutls': '3.8.13-ffed8ec1'}
++PKG_LIBRARIES = ('libmpv', 'FFmpeg', 'libshaderc', 'vulkan', 'lcms2', 'libdovi',
++                 'openssl', 'libunibreak', 'libfreetype', 'libfribidi', 'libharfbuzz',
++                 'libass', 'libsmbclient', 'libplacebo', 'libdav1d', 'gmp', 'nettle',
++                 'gnutls', 'libuchardet', 'libbluray', 'libluajit', 'libuavs3d')
++DEFAULT_PATH = '/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
++PLATFORMS = {
++    'ios': ('iphoneos', 'ios15.0', '-mios-version-min=15.0', 'ios'),
++    'isimulator': ('iphonesimulator', 'ios15.0-simulator', '-mios-simulator-version-min=15.0', 'ios'),
++    'tvos': ('appletvos', 'tvos15.0', '-mtvos-version-min=15.0', 'tvos'),
++    'tvsimulator': ('appletvsimulator', 'tvos15.0-simulator', '-mtvos-simulator-version-min=15.0', 'tvos'),
++    'macos': ('macosx', 'macos12.0', '-mmacosx-version-min=12.0', 'apple'),
++}
++CONFIGURE_FLAGS = {
++    'gmp': ('--disable-assembly', '--disable-cxx', '--with-pic', '--enable-static',
++            '--disable-shared', '--disable-fast-install', '--disable-maintainer-mode'),
++    'nettle': ('--disable-assembler', '--disable-openssl', '--disable-gcov', '--disable-documentation',
++               '--disable-mini-gmp', '--enable-public-key', '--disable-fat', '--enable-pic',
++               '--enable-static', '--disable-shared', '--disable-dependency-tracking'),
++    'gnutls': ('--with-included-libtasn1', '--with-included-unistring', '--without-brotli',
++               '--without-idn', '--without-p11-kit', '--without-zlib', '--without-zstd',
++               '--without-tpm', '--without-tpm2', '--without-leancrypto', '--disable-cxx', '--disable-libdane',
++               '--enable-hardware-acceleration', '--disable-openssl-compatibility', '--disable-code-coverage',
++               '--disable-doc', '--disable-maintainer-mode', '--disable-manpages', '--disable-nls', '--disable-rpath',
++               '--disable-tests', '--disable-tools', '--disable-full-test-suite', '--with-pic', '--enable-static',
++               '--disable-shared', '--disable-fast-install', '--disable-dependency-tracking'),
++}
++GENERATED = ('Makefile', 'config.status', 'config.log', 'config.h')
++EXTRA_GENERATED = {'gmp': ('gmp.h',),
++                   'nettle': ('config.make', 'config.m4', 'version.h', 'nettle.pc', 'hogweed.pc'),
++                   'gnutls': ('lib/gnutls.pc', 'lib/includes/gnutls/gnutls.h')}
++INSTALLED_CONFIGURATION = {'gmp': {'gmp.h': 'include/gmp.h'},
++                           'nettle': {'version.h': 'include/nettle/version.h',
++                                      'nettle.pc': 'lib/pkgconfig/nettle.pc',
++                                      'hogweed.pc': 'lib/pkgconfig/hogweed.pc'},
++                           'gnutls': {'lib/gnutls.pc': 'lib/pkgconfig/gnutls.pc',
++                                      'lib/includes/gnutls/gnutls.h': 'include/gnutls/gnutls.h'}}
++MAKE_ARGUMENTS = ('-j1', 'AUTOCONF=/usr/bin/false', 'AUTOHEADER=/usr/bin/false',
++                  'AUTOMAKE=/usr/bin/false', 'ACLOCAL=/usr/bin/false')
++REQUIRED = {
++    'gmp': {'__gmpz_cmp', '__gmpz_init'},
++    'nettle': {'nettle_sha256_init', 'nettle_version_major'},
++    'hogweed': {'nettle_rsa_private_key_init'},
++    'gnutls': {'gnutls_check_version', 'gnutls_global_init'},
++    'Libsmbclient': {'smbc_new_context', 'smbc_init_context'},
++}
++# Exact retained wrapper identity; these are not claims of a new Samba build.
++SMB_PINS = {
++    'ios/arm64': (31955240, '1c378176da85ff2386f5c81c903860f8ab258a4e846ddba5bb0febc284f01cd0'),
++    'isimulator/arm64': (31948848, 'bcb902da9a24ebbd3571bd1d04eeea88b3782e10ad98eee9a2be90e15ddeb795'),
++    'isimulator/x86_64': (26473896, '0602a2a2eb8c987677b38a150cdf8b03d0f88f13eb7dd7877cacb4a41d7a5254'),
++    'tvos/arm64': (31955264, '4921e4c649589e920e139078219b1a3f01a1fea6cd5bc8b71875d15c09aad252'),
++    'tvos/arm64e': (32054336, '0267dfcd4ca93acf1e62bb75bc7509f6640c2367c63da99a3c983ec9ad9d8206'),
++    'tvsimulator/arm64': (31948880, '6960f069a31801eb0f0f70eb0efd67239502d5c7081163a9ca38faca226a29fd'),
++    'tvsimulator/x86_64': (26474992, '4295cab93d2e40c1234f81a8032d28a0da970643d07cb3c01aaf9b63cd103ef1'),
++    'macos/arm64': (31933296, '4f6a36df06ad0e5f36c3106c7c61a1978dbc642a7d27c4f9aceb19540998424f'),
++    'macos/x86_64': (27602360, '0c9c03db4279b730b86b505b09c2fedc11b879ee7914ef818c940a38e867ae81'),
++}
++SMB_HEADERS = {
++    'libsmbclient.h': (125287, '9e0fd2184591f449c79b6bc5b5468443920523ea943440534df04294b940ce1c'),
++    'samba/version.h': (421, 'd601401634a789612aab95d50295c69713af8fb4ac5addf39dffcc402e978554'),
++}
++OPEN_GATES = (
++    'mandatory companion release-source authentication/capture must be integrated by the profile caller',
++    'actual execution receipts for the captured configured build commands',
++    'consumer header/ABI compile and final application link',
++    'explicit static gnutls_global_init consumer behavior',
++    'physical SMB authentication, signing, encryption and IO behavior',
++    'signing, package publication and release acceptance',
++)
++
++
++def fail(message):
++    raise ValueError('crypto-chain: ' + message)
++
++
++def digest_bytes(data):
++    return hashlib.sha256(data).hexdigest()
++
++
++class InlineBudget:
++    def __init__(self):
++        self.raw_bytes = 0
++
++    def add(self, count):
++        self.raw_bytes += count
++        if self.raw_bytes > MAX_INLINE_RAW:
++            fail('aggregate inline body bytes exceed cap')
++
++
++def decode_body_row(row, maximum, budget):
++    if type(row) is not dict or set(row) != {'path', 'bytes', 'sha256', 'bodyBase64'}:
++        fail('inline body row field set differs')
++    name, count, sha, encoded = (row[key] for key in ('path', 'bytes', 'sha256', 'bodyBase64'))
++    if (type(name) is not str or not name or len(name) > 4096 or name.startswith('/')
++            or '\\' in name or ':' in name or not name.isprintable()
++            or any(part in ('', '.', '..') for part in name.split('/'))):
++        fail('inline body row path is not relative')
++    if type(count) is not int or not 0 < count <= maximum:
++        fail('inline body raw size differs from cap')
++    if type(sha) is not str or re.fullmatch(r'[0-9a-f]{64}', sha) is None:
++        fail('inline body hash is malformed')
++    if (type(encoded) is not str or not encoded.isascii()
++            or len(encoded) > 4 * ((maximum + 2) // 3)
++            or re.fullmatch(r'(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?', encoded) is None):
++        fail('inline body is not canonical base64')
++    try:
++        body = base64.b64decode(encoded, validate=True)
++    except (ValueError, binascii.Error):
++        fail('inline body is not canonical base64')
++    if base64.b64encode(body).decode('ascii') != encoded:
++        fail('inline body is not canonical base64')
++    if len(body) != count or digest_bytes(body) != sha:
++        fail('inline body bytes/hash differ')
++    budget.add(len(body))
++    return body
++
++
++def inline_row(row, body, maximum, budget):
++    result = {**row, 'bodyBase64': base64.b64encode(body).decode('ascii')}
++    decode_body_row(result, maximum, budget)
++    return result
++
++
++def inline_file(path, root, maximum, budget):
++    row, body = read_verified(path, root, maximum)
++    return inline_row(row, body, maximum, budget)
++
++
++def validate_inline_bodies(receipt):
++    budget = InlineBudget()
++    for row in receipt['rows']:
++        builds = row.get('builds')
++        if type(builds) is not dict or set(builds) != {'gmp', 'nettle', 'gnutls'}:
++            fail('inline build family set differs')
++        for library, build in builds.items():
++            if type(build) is not dict or set(build) != {'record', 'generatedConfiguration', 'installedConfiguration', 'sdkMetadata'}:
++                fail('inline evidence family set differs')
++            decode_body_row(build['record'], MAX_HEADER, budget)
++            families = ((build['generatedConfiguration'], set(GENERATED + EXTRA_GENERATED[library]), MAX_CONFIGURATION),
++                        (build['installedConfiguration'], set(INSTALLED_CONFIGURATION[library].values()), MAX_CONFIGURATION),
++                        (build['sdkMetadata'], {'zlib.pc', 'libxml-2.0.pc'}, MAX_HEADER))
++            for family, names, maximum in families:
++                if type(family) is not dict or set(family) != names:
++                    fail('inline evidence member set differs')
++                for evidence in family.values():
++                    decode_body_row(evidence, maximum, budget)
++    return budget.raw_bytes
++
++
++def contained_root(value, label):
++    path = Path(value)
++    if not path.is_absolute() or path.resolve() != path:
++        fail(label + ' must be an absolute, unlinked path')
++    for ancestor in (path, *path.parents):
++        if ancestor.is_symlink():
++            fail(label + ' has a linked ancestor')
++    if not path.is_dir():
++        fail(label + ' is not a directory')
++    return path
++
++
++def stable_identity(row):
++    return (row.st_dev, row.st_ino, row.st_mode, row.st_nlink, row.st_size,
++            row.st_mtime_ns, row.st_ctime_ns)
++
++
++def bounded_digest(stream, maximum):
++    count, h = 0, hashlib.sha256()
++    while True:
++        block = stream.read(min(1024 * 1024, maximum - count + 1))
++        if not block:
++            return count, h.hexdigest()
++        count += len(block)
++        if count > maximum:
++            fail('input grew beyond its continuous hash bound')
++        h.update(block)
++
++
++def archive_kind(header, total_bytes, architecture_count):
++    """Dispatch on the container, never infer thin AR from one architecture."""
++    if len(header) != 8 or total_bytes < 8:
++        fail('unknown or truncated archive container magic')
++    if header == b'!<arch>\n':
++        if architecture_count != 1:
++            fail('an AR container requires exactly one declared architecture')
++        return 'ar'
++    fat = {b'\xca\xfe\xba\xbe': ('big', 20), b'\xbe\xba\xfe\xca': ('little', 20),
++           b'\xca\xfe\xba\xbf': ('big', 32), b'\xbf\xba\xfe\xca': ('little', 32)}
++    if len(header) != 8 or header[:4] not in fat:
++        fail('unknown or truncated archive container magic')
++    byteorder, entry_size = fat[header[:4]]
++    count = int.from_bytes(header[4:8], byteorder)
++    if count != architecture_count or not 1 <= count <= len(MATRIX):
++        fail('FAT architecture count differs from the required slice')
++    if total_bytes < 8 + entry_size * count:
++        fail('truncated FAT architecture table')
++    return 'fat'
++
++
++def regular(path, root, maximum):
++    """No arbitrary filesystem aliases, links, devices, or mutable open handles."""
++    if not path.is_absolute() or root not in path.parents:
++        fail('file is outside its declared root')
++    relative = path.relative_to(root)
++    current = root
++    for part in relative.parts:
++        current = current / part
++        if current.is_symlink():
++            fail('unexpected symlink: ' + str(relative))
++    before = path.lstat()
++    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
++            or not 0 < before.st_size <= maximum):
++        fail('not one bounded regular file: ' + str(relative))
++    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++    try:
++        opened = os.fstat(descriptor)
++        if stable_identity(opened) != stable_identity(before):
++            fail('file changed before reading: ' + str(relative))
++        with os.fdopen(descriptor, 'rb', closefd=False) as stream:
++            count, sha = bounded_digest(stream, maximum)
++        after = os.fstat(descriptor)
++        final = path.lstat()
++        if (count != opened.st_size or stable_identity(opened) != stable_identity(after)
++                or stable_identity(after) != stable_identity(final)):
++            fail('file changed while reading: ' + str(relative))
++        return {'path': relative.as_posix(), 'bytes': after.st_size, 'sha256': sha}
++    finally:
++        os.close(descriptor)
++
++
++def text_file(path, root):
++    row, body = read_verified(path, root, MAX_HEADER)
++    return row, body.decode('utf-8', errors='strict')
++
++
++def read_verified(path, root, maximum):
++    row = regular(path, root, maximum)
++    before = path.lstat()
++    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
++            or before.st_size != row['bytes']):
++        fail('input changed before bounded body read')
++    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++    with os.fdopen(descriptor, 'rb') as stream:
++        opened = os.fstat(stream.fileno())
++        if stable_identity(opened) != stable_identity(before):
++            fail('input changed to a non-regular file')
++        body = stream.read(maximum + 1)
++        after = os.fstat(stream.fileno())
++    if (len(body) > maximum or len(body) != row['bytes'] or digest_bytes(body) != row['sha256']
++            or stable_identity(opened) != stable_identity(after)
++            or stable_identity(after) != stable_identity(path.lstat())):
++        fail('input changed while reading bounded body')
++    return row, body
++
++
++def macro(text, name):
++    matches = re.findall(r'^\s*#\s*define\s+' + re.escape(name) + r'\s+([0-9]+)\s*(?:/\*.*\*/)?\s*$', text, re.M)
++    if len(matches) != 1:
++        fail('expected one numeric macro ' + name)
++    return int(matches[0])
++
++
++def check_headers(target, headers, root, platform=None, arch=None):
++    """Check selected public versions; returned hashes bind every checked header."""
++    if target == 'gmp':
++        row, content = text_file(headers / 'gmp.h', root)
++        values = tuple(macro(content, key) for key in ('__GNU_MP_VERSION', '__GNU_MP_VERSION_MINOR', '__GNU_MP_VERSION_PATCHLEVEL'))
++        if values != (6, 3, 0) or (macro(content, 'GMP_LIMB_BITS'), macro(content, 'GMP_NAIL_BITS')) != (64, 0):
++            fail('mixed GMP public header version')
++        return [row]
++    if target in ('nettle', 'hogweed'):
++        # BaseBuild copies include/nettle directly for nettle; hogweed falls back
++        # to all of include because there is no include/hogweed directory.
++        candidate = headers / 'version.h' if target == 'nettle' else headers / 'nettle/version.h'
++        row, content = text_file(candidate, root)
++        if tuple(macro(content, key) for key in ('NETTLE_VERSION_MAJOR', 'NETTLE_VERSION_MINOR', 'NETTLE_USE_MINI_GMP')) != (4, 0, 0):
++            fail('mixed Nettle version or mini-GMP backend')
++        return [row]
++    if target == 'gnutls':
++        row, content = text_file(headers / 'gnutls.h', root)
++        if tuple(macro(content, key) for key in ('GNUTLS_VERSION_MAJOR', 'GNUTLS_VERSION_MINOR', 'GNUTLS_VERSION_PATCH')) != (3, 8, 13):
++            fail('mixed GnuTLS public header version')
++        if not re.search(r'^\s*#\s*define\s+GNUTLS_VERSION\s+"3\.8\.13"\s*$', content, re.M):
++            fail('GnuTLS release string differs')
++        return [row]
++    if target == 'Libsmbclient':
++        rows = []
++        # The retained wrapper's framework includes include/samba-4.0/.
++        for name, (size, expected) in SMB_HEADERS.items():
++            row = regular(headers / 'samba-4.0' / name, root, MAX_HEADER)
++            if (row['bytes'], row['sha256']) != (size, expected):
++                fail('retained Samba public header identity differs')
++            rows.append(row)
++        return rows
++    fail('unrecognized library')
++
++
++def check_thin_headers(target, prefix, root):
++    headers = prefix / 'include'
++    if target == 'nettle':
++        headers = headers / 'nettle'
++    elif target == 'gnutls':
++        headers = headers / 'gnutls'
++    return check_headers(target, headers, root)
++
++
++def normalize_symbols(raw):
++    symbols = set()
++    for line in raw.splitlines():
++        value = line.strip()
++        if not value or value.endswith(':'):
++            continue
++        if not re.fullmatch(r'[A-Za-z_.$][A-Za-z0-9_.$]*', value):
++            fail('unrecognized nm -j row')
++        # One Mach-O ABI underscore, not every leading underscore (GMP uses two).
++        symbols.add(value[1:] if value.startswith('_') else value)
++    return symbols
++
++
++def validate_symbols(observations):
++    if set(observations) != {item[0] for item in LIBRARIES}:
++        fail('symbol library set differs')
++    for target, required in REQUIRED.items():
++        if not required <= observations[target]['defined']:
++            fail('required defined public symbol missing from ' + target)
++    consumer = observations['Libsmbclient']
++    def crypto_helper(name):
++        return name.startswith(('nettle_', '_nettle_', 'hogweed_', '__gmp',
++                                'gmp_', 'mpz_', 'mpn_', 'mpq_', 'mpf_'))
++    # Nettle 4 retains some symbol names while changing their C signatures.
++    # The approved retention boundary is the public GnuTLS ABI only; a direct
++    # helper import or a statically embedded old provider requires a rebuild.
++    if any(crypto_helper(name) for name in consumer['undefined']):
++        fail('retained Samba directly imports a crypto-helper ABI; rebuild required')
++    if any(name.startswith('_gnutls_') for name in consumer['undefined']):
++        fail('retained Samba imports a private GnuTLS ABI; rebuild required')
++    if any(name.startswith(('gnutls_', '_gnutls_')) or crypto_helper(name)
++           for name in consumer['defined']):
++        fail('retained Samba embeds crypto provider symbols; rebuild required')
++    imports = {name for name in consumer['undefined'] if name.startswith('gnutls_')} - consumer['defined']
++    if not imports:
++        fail('retained Samba has no observed public GnuTLS imports')
++    unresolved = imports - observations['gnutls']['defined']
++    if unresolved:
++        fail('new GnuTLS does not define retained Samba imports: ' + ', '.join(sorted(unresolved)))
++    helper_edges = {}
++    for target in ('nettle', 'hogweed', 'gnutls'):
++        required = {name for name in observations[target]['undefined'] if crypto_helper(name)} - observations[target]['defined']
++        providers = set().union(*(observations[name]['defined'] for name in ('gmp', 'nettle', 'hogweed') if name != target))
++        if required - providers:
++            fail(target + ' crypto-helper imports are unresolved by the selected closure')
++        helper_edges[target] = sorted(required)
++    if not helper_edges['gnutls']:
++        fail('new GnuTLS has no observed crypto-helper linkage')
++    return {'sambaGnuTLSImports': sorted(imports), 'helperImports': helper_edges}
++
++
++def run_reader(arguments, scratch):
++    """Run only the selected native reader later; this module never runs on import."""
++    with tempfile.TemporaryFile(dir=scratch) as output, tempfile.TemporaryFile(dir=scratch) as error:
++        process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=output, stderr=error,
++                                   cwd=scratch, env={'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL': 'C'})
++        try:
++            code = process.wait(timeout=60)
++        except BaseException:
++            process.kill()
++            process.wait()
++            raise
++        if output.tell() > MAX_READER or error.tell() > MAX_READER:
++            fail('reader output exceeds bound')
++        output.seek(0)
++        error.seek(0)
++        data, diagnostic = output.read(), error.read()
++    if code != 0:
++        fail('reader failed: ' + str(arguments[0]) + ': ' + diagnostic.decode('utf-8', errors='replace')[:1024])
++    return data.decode('utf-8', errors='strict')
++
++
++def reader_record(text):
++    data = text.encode('utf-8')
++    return {'bytes': len(data), 'sha256': digest_bytes(data), 'text': text}
++
++
++def tool_identity(path):
++    resolved = Path(path).resolve()
++    # Xcode command-line tool entry points may be links. Resolve once and pin
++    # the actual regular reader body; never accept a supplied shell command.
++    if not resolved.is_absolute() or not resolved.is_file():
++        fail('native reader is unavailable')
++    # Apple installs some selected tool bodies with multiple hardlinks. This
++    # exception applies only here, never to archive/configuration input files.
++    before = resolved.lstat()
++    if not stat.S_ISREG(before.st_mode) or before.st_nlink < 1 or not 0 < before.st_size <= MAX_ARCHIVE:
++        fail('native tool body is not a bounded regular file')
++    descriptor = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++    try:
++        opened = os.fstat(descriptor)
++        if stable_identity(before) != stable_identity(opened):
++            fail('native tool changed before reading')
++        with os.fdopen(descriptor, 'rb', closefd=False) as stream:
++            count, sha = bounded_digest(stream, MAX_ARCHIVE)
++        after = os.fstat(descriptor)
++        if (count != opened.st_size or stable_identity(opened) != stable_identity(after)
++                or stable_identity(after) != stable_identity(resolved.lstat())):
++            fail('native tool changed while reading')
++        return {'resolvedPath': str(resolved), 'path': resolved.name,
++                'bytes': after.st_size, 'sha256': sha}
++    finally:
++        os.close(descriptor)
++
++
++def resolved_tools(scratch):
++    xcrun = '/usr/bin/xcrun'
++    tools = {'xcrun': tool_identity(xcrun), 'xcodebuild': tool_identity('/usr/bin/xcodebuild')}
++    for name in ('lipo', 'nm'):
++        value = run_reader([xcrun, '--find', name], scratch).strip()
++        if not value.startswith('/') or '\n' in value:
++            fail('xcrun did not return one absolute reader')
++        tools[name] = tool_identity(value)
++    tools['toolchainVersion'] = reader_record(run_reader(['/usr/bin/xcodebuild', '-version'], scratch))
++    tools['platforms'] = {}
++    for platform, (sdk, _, _, _) in PLATFORMS.items():
++        sdk_root = run_reader([xcrun, '--sdk', sdk, '--show-sdk-path'], scratch).strip()
++        if not sdk_root.startswith('/') or '\n' in sdk_root or not sdk_root.endswith('.sdk'):
++            fail('xcrun did not return one selected SDK root')
++        row = {'sdkRoot': sdk_root, 'resolvedSDKRoot': str(Path(sdk_root).resolve())}
++        for name in ('ar', 'ranlib'):
++            path = run_reader([xcrun, '--sdk', sdk, '--find', name], scratch).strip()
++            if not path.startswith('/') or '\n' in path:
++                fail('xcrun did not return one target archive tool')
++            row[name] = {'selectedPath': path, **tool_identity(path)}
++        tools['platforms'][platform] = row
++    return tools
++
++
++def recipe_contract(work, library, platform, arch, sdk_tools):
++    """Exact source recipe fields, independent of the untrusted build record."""
++    dist = work / 'dist'
++    prefix = dist / library / platform / 'thin' / arch
++    scratch = dist / library / platform / 'scratch' / arch
++    _, target_os, minimum, host_os = PLATFORMS[platform]
++    target_cpu = 'x86_64' if arch == 'x86_64' else 'arm64'
++    host = target_cpu + '-' + host_os + '-darwin'
++    cflags = ['-arch', arch, '-isysroot', sdk_tools['sdkRoot'], '-target', target_cpu + '-apple-' + target_os, minimum]
++    if platform in ('tvos', 'tvsimulator'):
++        cflags.append('-DHAVE_FORK=0')
++    dependencies = () if library == 'gmp' else ('gmp',) if library == 'nettle' else ('gmp', 'nettle')
++    for dependency in dependencies:
++        cflags.append('-I' + str(dist / dependency / platform / 'thin' / arch / 'include'))
++    ldflags = ['-lc++', '-arch', arch, '-isysroot', sdk_tools['sdkRoot'], '-target', target_cpu + '-apple-' + target_os, minimum]
++    for dependency in dependencies:
++        ldflags.append('-L' + str(dist / dependency / platform / 'thin' / arch / 'lib'))
++        if library != 'gnutls':
++            ldflags.append('-l' + dependency)
++    flags = ' '.join(cflags)
++    environment = {'LC_CTYPE': 'C', 'CC': '/usr/bin/clang', 'CXX': '/usr/bin/clang++',
++                   'CURRENT_ARCH': arch, 'CFLAGS': flags, 'CPPFLAGS': flags,
++                   'CXXFLAGS': flags, 'ASMFLAGS': flags, 'LDFLAGS': ' '.join(ldflags),
++                   'PKG_CONFIG_LIBDIR': ':'.join(str(dist / name / platform / 'thin' / arch / 'lib/pkgconfig') for name in PKG_LIBRARIES) + ':' + str(scratch / 'vortx-sdk-pkgconfig'),
++                   'PKG_CONFIG_PATH': '', 'PATH': DEFAULT_PATH,
++                   'MAKEFLAGS': '-j1', 'CMAKE_BUILD_PARALLEL_LEVEL': '1', 'CARGO_BUILD_JOBS': '1',
++                   'AR': sdk_tools['ar']['selectedPath'], 'RANLIB': sdk_tools['ranlib']['selectedPath'],
++                   'CC_FOR_BUILD': '/usr/bin/clang'}
++    if library == 'gmp':
++        environment['ABI'] = '64'
++    if library == 'gnutls':
++        gmp = str(dist / 'gmp' / platform / 'thin' / arch)
++        nettle = str(dist / 'nettle' / platform / 'thin' / arch)
++        environment.update(GMP_CFLAGS='-I' + gmp + '/include', GMP_LIBS='-L' + gmp + '/lib -lgmp',
++                           NETTLE_CFLAGS='-I' + nettle + '/include', NETTLE_LIBS='-L' + nettle + '/lib -lnettle',
++                           HOGWEED_CFLAGS='-I' + nettle + '/include',
++                           HOGWEED_LIBS='-L' + nettle + '/lib -lhogweed -lnettle -L' + gmp + '/lib -lgmp')
++    return {'schema': 1, 'library': library, 'selector': SELECTORS[library],
++            'sourceDirectory': str(dist / (library + '-' + SELECTORS[library])),
++            'platform': platform, 'arch': arch,
++            'configureArguments': ['--prefix=' + str(prefix), *CONFIGURE_FLAGS[library], '--host=' + host],
++            'makeArguments': list(MAKE_ARGUMENTS),
++            'environment': environment, 'buildDirectory': str(scratch), 'prefix': str(prefix),
++            'compiled': True, 'installed': True}
++
++
++def build_record(work, library, platform, arch, sdk_tools, budget=None):
++    if budget is None:
++        budget = InlineBudget()
++    expected = recipe_contract(work, library, platform, arch, sdk_tools)
++    scratch = Path(expected['buildDirectory'])
++    record_path = scratch / 'vortx-crypto-build.json'
++    row, body = read_verified(record_path, work, MAX_HEADER)
++    record = strict_json(body)
++    if not isinstance(record, dict) or set(record) != set(expected) | {'generatedConfiguration'}:
++        fail('build record field set differs')
++    if not exact_equal({key: record[key] for key in expected}, expected):
++        fail('configured build recipe differs from the fixed source policy')
++    generated = record['generatedConfiguration']
++    names = GENERATED + EXTRA_GENERATED[library]
++    if not isinstance(generated, dict) or set(generated) != set(names):
++        fail('generated configuration set differs')
++    configurations = {}
++    for name in names:
++        observed = inline_file(scratch / name, work, MAX_CONFIGURATION, budget)
++        if not exact_equal(generated[name], {key: observed[key] for key in ('bytes', 'sha256')}):
++            fail('generated configuration differs from the actual build file')
++        configurations[name] = observed
++    installed = {}
++    for name, relative in INSTALLED_CONFIGURATION[library].items():
++        observed = inline_file(Path(expected['prefix']) / relative, work, MAX_CONFIGURATION, budget)
++        if any(observed[key] != configurations[name][key] for key in ('bytes', 'sha256')):
++            fail('installed generated header/pkg-config file differs from its build output')
++        installed[relative] = observed
++    # These two files are inputs from the existing bounded SDK metadata helper.
++    sdk_metadata = {name: inline_file(scratch / 'vortx-sdk-pkgconfig' / name, work, MAX_HEADER, budget)
++                    for name in ('zlib.pc', 'libxml-2.0.pc')}
++    return {'record': inline_row(row, body, MAX_HEADER, budget), 'generatedConfiguration': configurations,
++            'installedConfiguration': installed, 'sdkMetadata': sdk_metadata}
++
++
++def local_manifest(package):
++    row, text = text_file(package / 'Package.swift', package)
++    for target, *_ in LIBRARIES:
++        pattern = (r'\.binaryTarget\s*\(\s*name:\s*"' + re.escape(target)
++                   + r'"\s*,\s*path:\s*"artifacts/' + re.escape(target) + r'\.xcframework"\s*\)')
++        if len(re.findall(pattern, text, re.S)) != 1:
++            fail('candidate must bind one local target ' + target)
++        remote = r'name:\s*"' + re.escape(target) + r'"\s*,\s*url:'
++        if re.search(remote, text):
++            fail('candidate retains a remote target ' + target)
++    return row
++
++
++def xcframework_identity(package, target, binary_name):
++    root = package / 'artifacts' / (target + '.xcframework')
++    expected_slices = {slice_name for _, _, slice_name in MATRIX}
++    if root.resolve() != root or not root.is_dir() or {path.name for path in root.iterdir()} != expected_slices | {'Info.plist'}:
++        fail('XCFramework directory has missing or extra slices')
++    row, data = read_verified(root / 'Info.plist', package, MAX_HEADER)
++    metadata = plistlib.loads(data)
++    if (not isinstance(metadata, dict) or metadata.get('CFBundlePackageType') != 'XFWK'
++            or metadata.get('XCFrameworkFormatVersion') != '1.0'):
++        fail('invalid XCFramework container metadata')
++    available = metadata.get('AvailableLibraries')
++    if not isinstance(available, list) or len(available) != len(expected_slices):
++        fail('XCFramework slice declaration set differs')
++    declarations = {}
++    for library in available:
++        if not isinstance(library, dict):
++            fail('invalid XCFramework slice declaration')
++        identifier = library.get('LibraryIdentifier')
++        if type(identifier) is not str or identifier not in expected_slices or identifier in declarations:
++            fail('unknown or duplicate XCFramework slice declaration')
++        archs = sorted({arch for _, arch, slice_name in MATRIX if slice_name == identifier})
++        platform = 'macos' if identifier.startswith('macos-') else 'tvos' if identifier.startswith('tvos-') else 'ios'
++        expected = {'LibraryIdentifier': identifier, 'LibraryPath': binary_name + '.framework',
++                    'SupportedArchitectures': archs, 'SupportedPlatform': platform}
++        if identifier.endswith('-simulator'):
++            expected['SupportedPlatformVariant'] = 'simulator'
++        actual = dict(library)
++        actual_archs = actual.get('SupportedArchitectures')
++        if not isinstance(actual_archs, list) or any(type(value) is not str for value in actual_archs):
++            fail('invalid XCFramework architecture declaration')
++        actual['SupportedArchitectures'] = sorted(actual_archs)
++        if actual != expected:
++            fail('XCFramework platform/architecture/library metadata differs')
++        declarations[identifier] = expected
++    return row
++
++
++def snapshot_regular(path, root, scratch, name):
++    """Inspect a private byte copy, then reread its original identity."""
++    row = regular(path, root, MAX_ARCHIVE)
++    copy = Path(scratch) / name
++    source = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++    destination = None
++    try:
++        destination = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
++        if not stat.S_ISREG(os.fstat(source).st_mode):
++            fail('archive changed to a non-regular input')
++        h, count = hashlib.sha256(), 0
++        with os.fdopen(source, 'rb', closefd=False) as incoming, os.fdopen(destination, 'wb', closefd=False) as outgoing:
++            for block in iter(lambda: incoming.read(1024 * 1024), b''):
++                count += len(block)
++                if count > MAX_ARCHIVE:
++                    fail('archive grew beyond bound')
++                h.update(block)
++                outgoing.write(block)
++            outgoing.flush()
++        if (count, h.hexdigest()) != (row['bytes'], row['sha256']) or regular(path, root, MAX_ARCHIVE) != row:
++            fail('archive changed during private snapshot')
++    finally:
++        os.close(source)
++        if destination is not None:
++            os.close(destination)
++    return row, copy
++
++
++def normalized_gmp_header(body):
++    """Only the two generated diagnostic compiler strings may vary by arch."""
++    text = body.decode('utf-8', errors='strict')
++    for name in ('__GMP_CC', '__GMP_CFLAGS'):
++        definitions = re.findall(r'(?m)^[ \t]*#[ \t]*define[ \t]+' + name + r'\b[^\r\n]*$', text)
++        pattern = (r'(?m)^[ \t]*#[ \t]*define[ \t]+' + name
++                   + r'[ \t]+"(?:[^"\\\r\n]|\\[^\r\n])*"[ \t]*$')
++        if len(definitions) != 1 or len(re.findall(pattern, text)) != 1:
++            fail('GMP diagnostic macro has an unapproved shape: ' + name)
++        text = re.sub(pattern, '#define ' + name + ' "<generated-diagnostic>"', text)
++    return text.encode('utf-8')
++
++
++def header_correspondence(target, work, package, prefix, framework, slice_name,
++                          thin_headers, packaged_headers):
++    if target != 'gmp':
++        if [(row['bytes'], row['sha256']) for row in thin_headers] != [(row['bytes'], row['sha256']) for row in packaged_headers]:
++            fail('packaged checked headers differ from the current thin build')
++        return {'kind': 'exact-checked-header-bytes'}
++    _, current = read_verified(prefix / 'include/gmp.h', work, MAX_HEADER)
++    _, packaged = read_verified(framework / 'Headers/gmp.h', package, MAX_HEADER)
++    normalized = normalized_gmp_header(current)
++    if normalized_gmp_header(packaged) != normalized:
++        fail('packaged GMP header differs beyond generated compiler diagnostics')
++    matches = []
++    for platform, arch, candidate_slice in MATRIX:
++        if candidate_slice != slice_name:
++            continue
++        headers = work / 'dist/gmp' / platform / 'thin' / arch / 'include'
++        check_headers('gmp', headers, work)
++        row, body = read_verified(headers / 'gmp.h', work, MAX_HEADER)
++        if normalized_gmp_header(body) != normalized:
++            fail('GMP thin headers differ beyond generated compiler diagnostics')
++        if body == packaged:
++            matches.append({'platform': platform, 'arch': arch, 'header': row})
++    if not matches:
++        fail('packaged GMP header is not the exact body of any selected thin header')
++    return {'kind': 'gmp-two-generated-diagnostic-strings-only',
++            'normalizedSHA256': digest_bytes(normalized), 'packagedHeaderFrom': matches}
++
++
++def framework_layout(framework, binary_name, slice_name, package):
++    if not slice_name.startswith('macos-'):
++        return framework / binary_name, {'kind': 'shallow'}
++    # BaseBuild.fixShallowBundles creates precisely this macOS layout. This is
++    # not a general symlink resolver and grants no archive-source exception.
++    links = {'Versions/Current': 'A', binary_name: 'Versions/Current/' + binary_name,
++             'Resources': 'Versions/Current/Resources'}
++    observations = []
++    for name, target in links.items():
++        path = framework / name
++        if not path.is_symlink() or os.readlink(path) != target:
++            fail('macOS framework link differs from the fixed BaseBuild layout')
++        encoded = target.encode('utf-8')
++        observations.append({'path': path.relative_to(package).as_posix(),
++                             'target': target, 'bytes': len(encoded), 'sha256': digest_bytes(encoded)})
++    versions, version_a = framework / 'Versions', framework / 'Versions/A'
++    if (versions.is_symlink() or version_a.is_symlink() or not versions.is_dir() or not version_a.is_dir()
++            or {path.name for path in versions.iterdir()} != {'A', 'Current'}
++            or {path.name for path in version_a.iterdir()} != {binary_name, 'Resources'}):
++        fail('macOS framework version directory differs')
++    resources = version_a / 'Resources'
++    if resources.is_symlink() or not resources.is_dir() or {path.name for path in resources.iterdir()} != {'Info.plist'}:
++        fail('macOS framework resource directory differs')
++    info = regular(resources / 'Info.plist', package, MAX_HEADER)
++    return version_a / binary_name, {'kind': 'fixed-macos-versions-A', 'links': observations, 'info': info}
++
++
++def capture_evidence(work, package, scratch):
++    tools = resolved_tools(scratch)
++    lipo, nm = tools['lipo']['resolvedPath'], tools['nm']['resolvedPath']
++    manifest = local_manifest(package)
++    containers = {target: xcframework_identity(package, target, binary_name)
++                  for target, _, _, binary_name in LIBRARIES}
++    source_boundary = regular(work / 'dist/crypto-sources/receipt.json', work, MAX_RECEIPT)
++    rows = []
++    reader_budget = len(json.dumps(tools['toolchainVersion'], ensure_ascii=True).encode('ascii'))
++    inline_budget = InlineBudget()
++    slices = {slice_name: sorted({arch for _, arch, value in MATRIX if value == slice_name}) for _, _, slice_name in MATRIX}
++    for platform, arch, slice_name in MATRIX:
++        library_rows, observations = {}, {}
++        builds = {library: build_record(work, library, platform, arch, tools['platforms'][platform], inline_budget)
++                  for library in ('gmp', 'nettle', 'gnutls')}
++        for target, directory, archive, binary_name in LIBRARIES:
++            prefix = work / 'dist' / directory / platform / 'thin' / arch
++            thin = prefix / 'lib' / archive
++            thin_row, thin_copy = snapshot_regular(thin, work, scratch, platform + '-' + arch + '-' + target + '-source.a')
++            if target == 'Libsmbclient' and (thin_row['bytes'], thin_row['sha256']) != SMB_PINS[platform + '/' + arch]:
++                fail('retained Samba archive differs from the approved wrapper')
++            thin_headers = check_thin_headers(target, prefix, work)
++            framework = package / 'artifacts' / (target + '.xcframework') / slice_name / (binary_name + '.framework')
++            binary, layout = framework_layout(framework, binary_name, slice_name, package)
++            fat_row, fat_copy = snapshot_regular(binary, package, scratch, platform + '-' + arch + '-' + target + '-package.a')
++            fat_headers = check_headers(target, framework / 'Headers', package)
++            headers_match = header_correspondence(target, work, package, prefix, framework, slice_name,
++                                                  thin_headers, fat_headers)
++            # Stable basenames keep archive-member headings deterministic on
++            # reader reread; random private staging paths never enter stdout.
++            arches_raw = run_reader([lipo, '-archs', fat_copy.name], scratch)
++            if sorted(arches_raw.split()) != slices[slice_name]:
++                fail('packaged architecture set differs')
++            # BaseBuild uses lipo -create even for one architecture. FAT wrappers
++            # always need thinning; only an actual one-arch AR can copy directly.
++            with fat_copy.open('rb') as container:
++                kind = archive_kind(container.read(8), fat_row['bytes'], len(slices[slice_name]))
++            extracted = None
++            if kind == 'ar':
++                correspondence = {'bytes': fat_row['bytes'], 'sha256': fat_row['sha256']}
++            else:
++                extracted = Path(scratch) / (platform + '-' + arch + '-' + target + '.a')
++                run_reader([lipo, fat_copy.name, '-thin', arch, '-output', extracted.name], scratch)
++                extracted_row = regular(extracted, Path(scratch), MAX_ARCHIVE)
++                correspondence = {'bytes': extracted_row['bytes'], 'sha256': extracted_row['sha256']}
++            if correspondence != {'bytes': thin_row['bytes'], 'sha256': thin_row['sha256']}:
++                fail('packaged archive does not correspond to the current thin build')
++            defined_raw = run_reader([nm, '-arch', arch, '-g', '-U', '-j', thin_copy.name], scratch)
++            undefined_raw = run_reader([nm, '-arch', arch, '-u', '-j', thin_copy.name], scratch)
++            reader_budget += sum(len(json.dumps(reader_record(value), ensure_ascii=True).encode('ascii'))
++                                 for value in (arches_raw, defined_raw, undefined_raw))
++            if reader_budget > MAX_READER_JSON:
++                fail('aggregate native reader evidence exceeds bound')
++            observations[target] = {'defined': normalize_symbols(defined_raw), 'undefined': normalize_symbols(undefined_raw)}
++            library_rows[target] = {
++                'version': VERSIONS[target], 'thin': thin_row, 'thinHeaders': thin_headers,
++                'packaged': fat_row, 'packagedHeaders': fat_headers, 'correspondence': correspondence,
++                'frameworkLayout': layout,
++                'headerCorrespondence': headers_match,
++                'architectures': reader_record(arches_raw),
++                'defined': reader_record(defined_raw), 'undefined': reader_record(undefined_raw),
++            }
++            thin_copy.unlink()
++            fat_copy.unlink()
++            if extracted is not None:
++                extracted.unlink()
++        rows.append({'platform': platform, 'arch': arch, 'slice': slice_name,
++                     'libraries': library_rows, 'builds': builds, **validate_symbols(observations)})
++    result = {'schemaVersion': SCHEMA, 'profile': PROFILE, 'work': str(work), 'packagePolicy': PACKAGE_POLICY,
++            'inlineBodyPolicy': INLINE_BODY_POLICY,
++            'versions': VERSIONS, 'sourcePins': SOURCES, 'tools': tools, 'packageManifest': manifest,
++            'xcframeworkInfo': containers, 'releaseSourceBoundary': source_boundary,
++            'rows': rows, 'acceptance': 'ARCHIVE_AND_PUBLIC_SYMBOL_CORRESPONDENCE_ONLY',
++            'openGates': list(OPEN_GATES)}
++    validate_receipt_caps(result)
++    return result
++
++
++def validate_receipt_caps(value):
++    def reader_bytes(item):
++        if isinstance(item, dict):
++            if 'text' in item:
++                if (set(item) != {'bytes', 'sha256', 'text'} or type(item['text']) is not str
++                        or type(item['bytes']) is not int or not 0 <= item['bytes'] <= MAX_READER):
++                    fail('reader evidence row shape differs')
++                raw = item['text'].encode('utf-8')
++                if len(raw) != item['bytes'] or digest_bytes(raw) != item['sha256']:
++                    fail('reader evidence bytes/hash differ')
++                return len(json.dumps(item, sort_keys=True).encode('utf-8'))
++            return sum(reader_bytes(child) for child in item.values())
++        if isinstance(item, list):
++            return sum(reader_bytes(child) for child in item)
++        return 0
++    def metadata(item):
++        if isinstance(item, dict):
++            return {key: metadata(child) for key, child in item.items() if key not in ('bodyBase64', 'text')}
++        if isinstance(item, list):
++            return [metadata(child) for child in item]
++        return item
++    if reader_bytes(value) > MAX_READER_JSON:
++        fail('aggregate native reader evidence exceeds cap')
++    if len(json.dumps(metadata(value), indent=2, sort_keys=True).encode('utf-8')) > MAX_METADATA_JSON:
++        fail('receipt metadata exceeds cap')
++    if len((json.dumps(value, indent=2, sort_keys=True) + '\n').encode('utf-8')) > MAX_RECEIPT:
++        fail('receipt exceeds cap')
++
++
++def strict_json(data):
++    if isinstance(data, bytes):
++        data = data.decode('utf-8', errors='strict')
++    def unique(pairs):
++        result = {}
++        for key, value in pairs:
++            if key in result:
++                fail('duplicate receipt field')
++            result[key] = value
++        return result
++    return json.loads(data, object_pairs_hook=unique,
++                      parse_constant=lambda value: fail('non-finite receipt number'))
++
++
++def exact_equal(left, right):
++    if type(left) is not type(right):
++        return False
++    if isinstance(left, dict):
++        return set(left) == set(right) and all(exact_equal(left[key], right[key]) for key in left)
++    if isinstance(left, list):
++        return len(left) == len(right) and all(exact_equal(a, b) for a, b in zip(left, right))
++    return left == right
++
++
++def validate_receipt(receipt, observed):
++    """Fresh IO is supplied by capture_evidence, never derived from the receipt."""
++    if not isinstance(receipt, dict) or set(receipt) != set(observed):
++        fail('receipt field set differs')
++    if (receipt.get('schemaVersion') != SCHEMA or receipt.get('profile') != PROFILE
++            or receipt.get('versions') != VERSIONS or receipt.get('sourcePins') != SOURCES
++            or receipt.get('packagePolicy') != PACKAGE_POLICY or receipt.get('inlineBodyPolicy') != INLINE_BODY_POLICY):
++        fail('receipt identity differs')
++    expected_matrix = [(platform, arch, slice_name) for platform, arch, slice_name in MATRIX]
++    rows = receipt.get('rows')
++    if (not isinstance(rows, list) or len(rows) != len(MATRIX)
++            or [(row.get('platform'), row.get('arch'), row.get('slice')) for row in rows if isinstance(row, dict)] != expected_matrix):
++        fail('receipt slice matrix differs')
++    if not exact_equal(receipt, observed):
++        fail('receipt does not match current input bytes and native reader observations')
++    validate_inline_bodies(receipt)
++    validate_receipt_caps(receipt)
++
++
++def write_receipt(path, value, work):
++    if path.exists() or path.is_symlink():
++        fail('refusing to overwrite an existing receipt')
++    if path.parent.resolve() != path.parent or work not in path.parent.parents:
++        fail('linked or escaping receipt directory')
++    data = (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
++    if len(data) > MAX_RECEIPT:
++        fail('receipt exceeds bound')
++    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
++    with os.fdopen(descriptor, 'wb') as output:
++        output.write(data)
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('mode', choices=('capture', 'verify'))
++    parser.add_argument('work')
++    parser.add_argument('package')
++    parser.add_argument('--dependency-profile', required=True, choices=(PROFILE,))
++    args = parser.parse_args()
++    work, package = contained_root(args.work, 'WORK'), contained_root(args.package, 'PACKAGE')
++    receipt = work / RECEIPT_RELATIVE
++    receipt.parent.mkdir(parents=True, exist_ok=True)
++    if receipt.parent.resolve() != receipt.parent:
++        fail('linked receipt parent')
++    # Staging stays within WORK; no VortX data or native reader output in /tmp.
++    with tempfile.TemporaryDirectory(prefix='.reader-', dir=receipt.parent) as scratch:
++        observed = capture_evidence(work, package, scratch)
++    if args.mode == 'capture':
++        write_receipt(receipt, observed, work)
++    else:
++        _, body = read_verified(receipt, work, MAX_RECEIPT)
++        validate_receipt(strict_json(body), observed)
++    print('PASS crypto-chain archive/public-symbol correspondence; native SMB/runtime gates OPEN')
++
++
++if __name__ == '__main__':
++    try:
++        main()
++    except (ValueError, OSError, subprocess.SubprocessError) as error:
++        raise SystemExit(str(error))

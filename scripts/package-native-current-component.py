@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Offline exact-profile candidate packaging; no build, extraction, inspection or promotion."""
 import argparse
+import base64
+import binascii
 from collections import deque
 import gzip
 import hashlib
 import io
 import json
+import lzma
 import os
 from pathlib import Path
+import plistlib
 import re
 import stat
 import subprocess
@@ -17,8 +21,74 @@ import zipfile
 
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
-PROFILE = "original-http-finite-reference-reader-v1"
-PROFILE_MANIFEST_SHA256 = "83fd8922b81eb06b400e15be489d7d7dfe04508c20f5ff2024225f2776bb938d"
+PROFILE = "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-candidate"
+PROFILE_MANIFEST_SHA256 = "36394b6782d0ae0b14275b51dd15e03c22745a0d1cfad51ed7cab06fb37b93d1"
+NATIVE_UPGRADES_PROFILE = "native-upgrades-openssl410-crypto-v4"
+SHADERC_WRAPPER_VERSION = "2026.1.0"
+SHADERC_REMOTE_URL = "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip"
+SHADERC_SOURCE_SPECS = (
+    ("libshaderc.zip", 124322785,
+     "d213fa58de7886846fb8cb713ea5213b77654a3ad2ba3d89b1f2fe367d945ba5"),
+    ("Libshaderc_combined.xcframework.zip", 61246203,
+     "77a3d355993cf53843a394bf58262dab99cdd93f9e6fe31d5ca6e55b03866ce1"),
+)
+SHADERC_MATRIX = (
+    ("ios-arm64", "arm64", "ios"),
+    ("ios-arm64_x86_64-simulator", "arm64", "isimulator"),
+    ("ios-arm64_x86_64-simulator", "x86_64", "isimulator"),
+    ("tvos-arm64_arm64e", "arm64", "tvos"),
+    ("tvos-arm64_arm64e", "arm64e", "tvos"),
+    ("tvos-arm64_x86_64-simulator", "arm64", "tvsimulator"),
+    ("tvos-arm64_x86_64-simulator", "x86_64", "tvsimulator"),
+    ("macos-arm64_x86_64", "arm64", "macos"),
+    ("macos-arm64_x86_64", "x86_64", "macos"),
+)
+OPENSSL_BOM_PROFILE = "openssl-4.1.0-source-v1"
+OPENSSL_SOURCE_VERSION = "4.1.0"
+OPENSSL_SOURCE_SHA = "2f4e3a5fec05394068cfa7379890ab552483a8a6"
+OPENSSL_SOURCE_TAG = "openssl-4.1.0"
+OPENSSL_ROOT = "openssl-4.1.0-2f4e3a5f"
+OPENSSL_OUTPUT_ROOT = "openssl"
+OPENSSL_GITLINKS = {
+    "cloudflare-quiche": "7ab6a55cfe471267d61e4d28ba43d41defcd87e0",
+    "gost-engine": "74b1f4fddbc2d6de969815b1992ddc1ae7c643fe",
+    "krb5": "784c38f50e70a739400cdd3f2620bac2e2788e6c",
+    "oqs-provider": "c5fb439e4ffd947f24c139232fb04fd71fe3c29e",
+    "pkcs11-provider": "eb157e48066fdb2b5735f6f327ed7ae65c51eb6f",
+    "pyca-cryptography": "e83bbe58e373536636baaa7c33a64a6e8f04c953",
+    "python-ecdsa": "4096fa01715929e08b97e73f3173aee9d57f2a3f",
+    "fuzz/corpora": "7e3fb43a75c55275759e8bdb5c32de4b50978eab",
+    "tlsfuzzer": "61f45d9701294fd87ef92d2a7e3dfb076653a562",
+    "tlslite-ng": "77ef321dde1a9e6bcf94d73c80f8789a770d8031",
+    "wycheproof": "3fa63dd0344abb611f1fb1d77e119938603ea230",
+}
+OPENSSL_CONFIGURE_FLAGS = ("no-async", "no-shared", "no-dso", "no-tests", "no-apps", "no-docs")
+OPENSSL_PKG_LIBRARIES = ("libmpv", "FFmpeg", "libshaderc", "vulkan", "lcms2", "libdovi",
+                         "openssl", "libunibreak", "libfreetype", "libfribidi", "libharfbuzz",
+                         "libass", "libsmbclient", "libplacebo", "libdav1d", "gmp", "nettle",
+                         "gnutls", "libuchardet", "libbluray", "libluajit", "libuavs3d")
+OPENSSL_MATRIX = (
+    ("ios", "arm64", "vortx-apple-ios-arm64", "ios-arm64"),
+    ("isimulator", "arm64", "vortx-apple-isimulator-arm64", "ios-arm64_x86_64-simulator"),
+    ("isimulator", "x86_64", "vortx-apple-isimulator-x86_64", "ios-arm64_x86_64-simulator"),
+    ("tvos", "arm64", "vortx-apple-tvos-arm64", "tvos-arm64_arm64e"),
+    ("tvos", "arm64e", "vortx-apple-tvos-arm64e", "tvos-arm64_arm64e"),
+    ("tvsimulator", "arm64", "vortx-apple-tvsimulator-arm64", "tvos-arm64_x86_64-simulator"),
+    ("tvsimulator", "x86_64", "vortx-apple-tvsimulator-x86_64", "tvos-arm64_x86_64-simulator"),
+    ("macos", "arm64", "vortx-apple-macos-arm64", "macos-arm64_x86_64"),
+    ("macos", "x86_64", "vortx-apple-macos-x86_64", "macos-arm64_x86_64"),
+)
+OPENSSL_ENV_KEYS = ("CC", "CXX", "CFLAGS", "CPPFLAGS", "CXXFLAGS", "ASMFLAGS",
+                    "LDFLAGS", "PKG_CONFIG_LIBDIR", "PKG_CONFIG_PATH", "PATH",
+                    "CURRENT_ARCH", "LC_CTYPE", "AR", "ARFLAGS", "RANLIB",
+                    "MAKEFLAGS", "CMAKE_BUILD_PARALLEL_LEVEL", "CARGO_BUILD_JOBS")
+OPENSSL_EFFECTIVE_KEYS = ("target", "CC", "CFLAGS", "CPPFLAGS", "CXX", "CXXFLAGS",
+                           "LDFLAGS", "AR", "ARFLAGS", "RANLIB", "CROSS_COMPILE",
+                           "cflags", "cppflags", "lflags", "lib_cppflags")
+OPENSSL_DEFAULT_PATH = "/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+OPENSSL_OUTPUTS = (("libssl.a", "lib/libssl.a", 512 * MIB),
+                   ("libcrypto.a", "lib/libcrypto.a", 512 * MIB),
+                   ("opensslv.h", "include/openssl/opensslv.h", MIB))
 RECIPE_PATHS = frozenset("""
 scripts/assemble-mpvkit-dvfel.sh scripts/build-mpvkit-dvfel.sh
 scripts/ffmpeg-response-witness.patch scripts/ffmpeg-response-generation.patch
@@ -46,17 +116,22 @@ scripts/native-media-hosted/android/buildscripts/scripts/ffmpeg.sh
 """.split())
 INPUT_MANIFEST = "scripts/native-media-hosted/inputs.sha256"
 WORKFLOW = ".github/workflows/native-media-candidates.yml"
-OUTPUTS = {"apple": {"apple-candidate.tar.gz", "apple-original-library-zips.tar", "apple-artifact-gate.txt"},
+OUTPUTS = {"apple": {"apple-candidate.tar.gz", "apple-original-library-zips.tar", "apple-artifact-gate.txt",
+                      "apple-shaderc-original-all.zip", "apple-shaderc-original-xcframework.zip",
+                      "apple-shaderc-inputs.json", "apple-openssl-builds.json",
+                      "apple-crypto-source-gmp.tar.xz", "apple-crypto-source-nettle.tar.gz",
+                      "apple-crypto-source-gnutls.tar.xz", "apple-crypto-release-sources.tar",
+                      "apple-crypto-release-sources.json", "apple-crypto-chain.json"},
            "android": {"libmpv-release-candidate.aar", "android-artifact-evidence.json",
                        "android-corresponding-sources.tar.gz", "android-build-configs.tar.gz"}}
 PINS = {"mpv": "8c67647b50059406c5c0444903597281b81516cf",
         "ffmpeg": "946fcce07b6dcd0331c8cc609192aeff5e1924f8",
-        "libplacebo": "4c426e466814536def653cb23f1d1c287ea7a7f5"}
+        "libplacebo": "275f7dea27924cdd34ab2e6c20e448b6bc4fab65"}
 ANDROID_PINS = dict(PINS, mbedtls="068ff080b369adfac81509f9b57b2afabaf82dc5",
                     dav1d="54706fc6bc0cdecab7e9593974a4039cc038fca7",
                     freetype="0a0221a1347e2f1e07c395263540026e9a0aa7c7",
                     fribidi="b93119f5fdc7ea47672cc304c1455ffa6dfe7536",
-                    harfbuzz="c7a7457b7385f33178e8cf87615ca077a810bbe7",
+                    harfbuzz="35f656a1a2bab548ea7f54a6dd3fba2b09680d14",
                     libxml2="96498992efa48d52b0e8b83058bd88dbdaf153c1",
                     fontconfig="0f236723a3c26bd9745e32ba2b3ee21e5f809295",
                     libass="4a05d8127f525943ebf45fdc6497c9e665947f0d")
@@ -65,11 +140,11 @@ WRAPPER = {"apple": "2103893078c5e339073b11737b86f7f22b9c4491",
 # Full-file postcomposition hashes retain cancellation plus owned observation.
 CANCEL = {"misc/thread_tools.c": "151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9",
           "misc/thread_tools.h": "62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f",
-          "stream/stream_lavf.c": "b8c78d8239af8c968c53ca83f601f91e521090d6d2d7522101fb68b332074940",
-          "stream/reference_source.h": "dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b",
+          "stream/stream_lavf.c": "650bf7b94771e70a6b934b21e362bc77f66ceb1d23ee684d2b169c6e694544a5",
+          "stream/reference_source.h": "1f606a977b55f18fdb9f9fc7f5e4549b5774bef10a06c33b06ab945531909b29",
           "stream/vortx_http_request.h": "d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9"}
 RESPONSE = {
-    "libavformat/http.c": "d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802",
+    "libavformat/http.c": "d1301474b4389256f9862565a399a8888366a68d2e3630338848289fe8a9c831",
     "libavformat/url.h": "14e3acc5a6715d48edb3dadb2f5248deaa38c36b30ff763e9be4b89edf2b1a0c",
     "libavformat/avio.c": "16bf38abc7a5b5586268c71723041df2b90b7b99a8fbaeb06c8b20926534fe7a",
     "libavformat/tcp.c": "cc9c11534ff5017d5931bb06788f95f10e9809953e5ec1cc03114a3a877cdcce",
@@ -79,31 +154,41 @@ RESPONSE = {
 }
 READER_FFMPEG_CREATED = {
     "libavformat/vortx_reference_reader.inc": "a8c74f929942423550dba65f738fd4d2ad2d63d975665f64e6da1b00f5001645",
-    "libavformat/vortx_reference_pin.h": "1000225eb4660e936bdf5984b62c6cbd7ae2c747472e55aabb6dc620d4f386dc",
+    "libavformat/vortx_reference_pin.h": "e0ccea8466e28169d0882fd664081baa09d3a39626d5351a31804b6dc4bb4e94",
     "libavformat/vortx_reference_reader_stream.h": "adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87",
+    "libavformat/vortx_reference_sparse.h": "fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c",
+    "libavformat/vortx_reference_sparse.inc": "0e3201c26657765a1e6e7a15fe9db1bcac5cf96a8cb7e9d691533e0f4bf3f15f",
 }
 READER_MPV = {
-    "demux/demux.c": "e5f08305137ed3f7b28fa24ee431e19222153a6cfed10f12d109b92da55567a4",
+    "demux/demux.c": "f5a4cd7bf4e29902ef965e43027755c19ded1423129a3fbe9808ad89e64c0e1c",
     "demux/demux.h": "bee52b38477ce7c8efd9a50e778f720ea8c9eec577afab29998682c26ffe75e2",
     "demux/demux_lavf.c": "d945ae1699d383c3d645d2ab963abb166fd0c19f10a4ab144505e7fbfb0408fb",
-    "demux/reference_reader.c": "322fa3a90ad9a461c549b2aaebf50adba07b9862d11b8690355a6d789571c752",
-    "demux/reference_reader.h": "4894866fc49f8ab7af9f4d5b3a29bfc7d1ac4153483fd04354db3e89e55cad03",
-    "demux/reference_reader_internal.h": "6b21e2b72c87c49d609fdfca0252c32635d50054abe4eaae33340fc5b7da1a9c",
+    "demux/reference_reader.c": "222ec8920d38971d386470d8172e45a89a52350eb352124ddf954be9409b792b",
+    "demux/reference_reader.h": "59d669fb370bc12f01856031b8f9d908eb1d50a927d955ecb1fe0b4484c2407d",
+    "demux/reference_reader_internal.h": "ded5dc02785e98934a966de87df4337e4c6aed0275bce26da2017883917f4c8d",
+    "demux/demux_mkv.c": "1b7cc4d40efa0620bd10669dc44a7d6b32d0236e2ae2be3510a3bac0829e39c2",
+    "demux/reference_mkv.h": "38df7814efc3aa7434e5afe269406a989ab6a5fa22a200aa28149a3ab68e46d9",
+    "demux/reference_mkv_reader.c": "3ac442e8ff489d11f4a5df6b86f8d964457753f66ce5f3eb530d7db3746b6f7c",
+    "demux/reference_mkv_sparse.h": "4b013b6e794257a576bc01f6becb9d120cb878e0851b2e0bdd2225dcf7b18df2",
+    "demux/reference_mkv_sparse_planner.c": "e36c6a879138b26e125f647c9254b41674b22b338ab12838376fe8d38bdae056",
+    "demux/reference_mkv_sparse_planner.h": "c88597a42186ceb81f45f1f44b3734469cf06889ea3bf91e4853b861943e84fe",
+    "demux/reference_mkv_sparse_worker.c": "5deae68bf3c680aa4898ca6c8e0c0e76aa4628bffa693d0ae2d6dd287d9a5e64",
+    "stream/vortx_reference_sparse.h": "fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c",
     "stream/stream_lavf.c": CANCEL["stream/stream_lavf.c"],
     "stream/reference_source.h": CANCEL["stream/reference_source.h"],
     "stream/vortx_reference_reader_stream.h": "adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87",
-    "player/owned_subtitle.c": "242697e6be2bd2e10272679a3d618f07a07138b7a15b3b94cdbfdf521599bb25",
+    "player/owned_subtitle.c": "014b93845488ef873a4d29c4c8dd4ada69d244626e7a7b38bac82809989c6b29",
     "player/owned_subtitle.h": "8d2f0ee5c972d1da69213cd80fbe249bcf3f19d9de8a2ef87e241d2f08f06284",
-    "player/command.c": "661388627775cf58dec688388d36aba9e457b0f3e97d349a91033f3f5f1f6e3b",
-    "player/reference_owned.inc": "4402bcd094a80a769479320ac852c329acb39781fa8fc478d0ed79af10ae19e2",
+    "player/command.c": "e7a19f392bb69e9d208382f157234ac3c908d22a0d4afee5f372ee8f9d33dade",
+    "player/reference_owned.inc": "23ac96bfedefcab2234afa2a6f329a36fac6735effca6798b4043d777b060217",
     "sub/owned_text_slot.h": "63c498dd4bdc9fa9c6d128f1be8f37d7cdf377c853888342897f6639601662f6",
     "sub/osd.c": "9b57ccd08e5777e2bc644cbf8001df0301552edf5cf24e36185a54f4cd667195",
     "sub/dec_sub.c": "6e2137b90fe7f2915a528bdd83426448afbd099229f65342dbfd85d1ba1d347b",
     "sub/dec_sub.h": "cb9b5af7c3f87a8dda584617c1f20a90a9331182d54a50c7e5fb8e64e74b384f",
 }
 READER_MPV_MESON = {
-    "apple": "4c748249732131a2942b66087fa7142a2f9c239274cc272a35ec36221c010205",
-    "android": "316e9aca3c4960701eab42e62ca1005379e082e1a21b4788b7581811ca360147",
+    "apple": "c2abd8f89a772717fdd4bcdbb4a2236d9fb28eca029acfe84bf12f7333df5a55",
+    "android": "32c9a1321883f6a980652173061c9c01727ef83b7a0dfe6e8e3a22364b753d47",
 }
 MBEDTLS = {"apple": "77d72cb88fc662b984f051335b356abc3e76e97ce39302dde6961ecdbba7a332",
            "android": "7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac"}
@@ -113,7 +198,158 @@ GITLINKS = {"3rdparty/Vulkan-Headers": "74d8a6cb930c68ef617b202c3ff3c59d919e086b
             "3rdparty/jinja": "15206881c006c79667fe5154fe80c01c65410679",
             "3rdparty/markupsafe": "297fc8e356e6836a62087949245d09a28e9f1b13",
             "demos/3rdparty/nuklear": "242f35efa067a46c595645eeda7b1771ea1f83b1"}
-LIBRARIES = "Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo".split()
+LIBRARIES = "Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient".split()
+UNSUFFIXED_LIBRARIES = frozenset(("Libplacebo", "lcms2", "Libdav1d", "Libssl", "Libcrypto",
+                                  "gmp", "nettle", "hogweed", "gnutls", "Libsmbclient"))
+
+CRYPTO_SOURCE_PROFILE = "gmp630-nettle400-gnutls3813-release-sources-v1"
+CRYPTO_CHAIN_PROFILE = "native-upgrades-crypto-chain-v1"
+CRYPTO_PACKAGE_POLICY = "assembled-mpvkit-relative-artifact-closure-v1"
+CRYPTO_SOURCE_OUTPUTS = (
+    {"id": "gmp", "version": "6.3.0", "archiveRoot": "gmp-6.3.0",
+     "filename": "gmp-6.3.0.tar.xz", "compression": "xz", "bytes": 2094196,
+     "sha256": "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898",
+     "sourceRoot": "gmp-6.3.0-a3c2b802", "url": "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz",
+     "output": "apple-crypto-source-gmp.tar.xz"},
+    {"id": "nettle", "version": "4.0", "archiveRoot": "nettle-4.0",
+     "filename": "nettle-4.0.tar.gz", "compression": "gz", "bytes": None,
+     "sha256": "3addbc00da01846b232fb3bc453538ea5468da43033f21bb345cb1e9073f5094",
+     "sourceRoot": "nettle-4.0-3addbc00", "url": "https://ftp.gnu.org/gnu/nettle/nettle-4.0.tar.gz",
+     "output": "apple-crypto-source-nettle.tar.gz"},
+    {"id": "gnutls", "version": "3.8.13", "archiveRoot": "gnutls-3.8.13",
+     "filename": "gnutls-3.8.13.tar.xz", "compression": "xz", "bytes": 7275324,
+     "sha256": "ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e",
+     "sourceRoot": "gnutls-3.8.13-ffed8ec1",
+     "url": "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz",
+     "output": "apple-crypto-source-gnutls.tar.xz"},
+)
+CRYPTO_CAPTURE_TAR_OUTPUT = "apple-crypto-release-sources.tar"
+CRYPTO_CAPTURE_RECEIPT_OUTPUT = "apple-crypto-release-sources.json"
+CRYPTO_CHAIN_OUTPUT = "apple-crypto-chain.json"
+CRYPTO_MAX_ARCHIVE = 8 * MIB
+CRYPTO_MAX_UNCOMPRESSED = 512 * MIB
+CRYPTO_MAX_MEMBERS = 100000
+CRYPTO_MAX_MEMBER = 64 * MIB
+CRYPTO_MAX_RECEIPT = 64 * MIB
+CRYPTO_MAX_PATH = 4096
+CRYPTO_MAX_MTIME = 4102444800
+CRYPTO_MAX_INLINE_RAW = 16 * MIB
+CRYPTO_MAX_READER_JSON = 32 * MIB
+CRYPTO_MAX_METADATA_JSON = 8 * MIB
+CRYPTO_INLINE_BODY_POLICY = {
+    "encoding": "canonical-rfc4648-base64", "recordMaxRawBytes": 4 * MIB,
+    "configurationMaxRawBytes": 16 * MIB, "sdkMaxRawBytes": 4 * MIB,
+    "aggregateMaxRawBytes": 16 * MIB, "readerMaxJSONBytes": 32 * MIB,
+    "metadataMaxJSONBytes": 8 * MIB, "receiptMaxBytes": 64 * MIB,
+}
+CRYPTO_ACCEPTANCE = "ARCHIVE_AND_PUBLIC_SYMBOL_CORRESPONDENCE_ONLY"
+CRYPTO_OPEN_GATES = (
+    "mandatory companion release-source authentication/capture must be integrated by the profile caller",
+    "actual execution receipts for the captured configured build commands",
+    "consumer header/ABI compile and final application link",
+    "explicit static gnutls_global_init consumer behavior",
+    "physical SMB authentication, signing, encryption and IO behavior",
+    "signing, package publication and release acceptance",
+)
+CRYPTO_INSTALLED_HELPERS = {
+    "Sources/BuildScripts/crypto-release-sources.py":
+        "3c310499d446eed72eb16521b27c16f718f23e7ab1472dec1fad79cc40ed1537",
+    "Sources/BuildScripts/crypto-chain-gate.py":
+        "041dd13e48e1821f5d7bf049bb8eb097d3772d6ea867c15a3b7646779a3c015d",
+}
+CRYPTO_MATRIX = (
+    ("ios", "arm64", "ios-arm64"),
+    ("isimulator", "arm64", "ios-arm64_x86_64-simulator"),
+    ("isimulator", "x86_64", "ios-arm64_x86_64-simulator"),
+    ("tvos", "arm64", "tvos-arm64_arm64e"),
+    ("tvos", "arm64e", "tvos-arm64_arm64e"),
+    ("tvsimulator", "arm64", "tvos-arm64_x86_64-simulator"),
+    ("tvsimulator", "x86_64", "tvos-arm64_x86_64-simulator"),
+    ("macos", "arm64", "macos-arm64_x86_64"),
+    ("macos", "x86_64", "macos-arm64_x86_64"),
+)
+CRYPTO_LIBRARIES = (
+    ("gmp", "gmp", "libgmp.a", "gmp"),
+    ("nettle", "nettle", "libnettle.a", "nettle"),
+    ("hogweed", "nettle", "libhogweed.a", "hogweed"),
+    ("gnutls", "gnutls", "libgnutls.a", "gnutls"),
+    ("Libsmbclient", "libsmbclient", "libsmbclient.a", "Libsmbclient"),
+)
+CRYPTO_VERSIONS = {"gmp": "6.3.0", "nettle": "4.0", "hogweed": "4.0",
+                   "gnutls": "3.8.13", "Libsmbclient": "4.15.13-2512"}
+CRYPTO_SOURCE_PINS = {
+    "gmp": {"archive": "gmp-6.3.0.tar.xz",
+            "sha256": "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"},
+    "gnutls": {"tag": "3.8.13", "commit": "b390d80208ed60f1b33ad899475951a8efb40ccd",
+               "archive": "gnutls-3.8.13.tar.xz",
+               "sha256": "ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e"},
+    "nettle": {"tag": "nettle_4.0_release_20260205",
+               "commit": "bf13ee9e5024014cfa6d2fc097923afe087e63ba",
+               "archive": "nettle-4.0.tar.gz",
+               "sha256": "3addbc00da01846b232fb3bc453538ea5468da43033f21bb345cb1e9073f5094"},
+}
+CRYPTO_SELECTORS = {"gmp": "6.3.0-a3c2b802", "nettle": "4.0-3addbc00",
+                    "gnutls": "3.8.13-ffed8ec1"}
+CRYPTO_PKG_LIBRARIES = OPENSSL_PKG_LIBRARIES
+CRYPTO_DEFAULT_PATH = OPENSSL_DEFAULT_PATH
+CRYPTO_PLATFORMS = {
+    "ios": ("iphoneos", "ios15.0", "-mios-version-min=15.0", "ios"),
+    "isimulator": ("iphonesimulator", "ios15.0-simulator", "-mios-simulator-version-min=15.0", "ios"),
+    "tvos": ("appletvos", "tvos15.0", "-mtvos-version-min=15.0", "tvos"),
+    "tvsimulator": ("appletvsimulator", "tvos15.0-simulator", "-mtvos-simulator-version-min=15.0", "tvos"),
+    "macos": ("macosx", "macos12.0", "-mmacosx-version-min=12.0", "apple"),
+}
+CRYPTO_CONFIGURE_FLAGS = {
+    "gmp": ("--disable-assembly", "--disable-cxx", "--with-pic", "--enable-static",
+            "--disable-shared", "--disable-fast-install", "--disable-maintainer-mode"),
+    "nettle": ("--disable-assembler", "--disable-openssl", "--disable-gcov", "--disable-documentation",
+               "--disable-mini-gmp", "--enable-public-key", "--disable-fat", "--enable-pic",
+               "--enable-static", "--disable-shared", "--disable-dependency-tracking"),
+    "gnutls": ("--with-included-libtasn1", "--with-included-unistring", "--without-brotli",
+               "--without-idn", "--without-p11-kit", "--without-zlib", "--without-zstd",
+               "--without-tpm", "--without-tpm2", "--without-leancrypto", "--disable-cxx", "--disable-libdane",
+               "--enable-hardware-acceleration", "--disable-openssl-compatibility", "--disable-code-coverage",
+               "--disable-doc", "--disable-maintainer-mode", "--disable-manpages", "--disable-nls", "--disable-rpath",
+               "--disable-tests", "--disable-tools", "--disable-full-test-suite", "--with-pic", "--enable-static",
+               "--disable-shared", "--disable-fast-install", "--disable-dependency-tracking"),
+}
+CRYPTO_GENERATED = ("Makefile", "config.status", "config.log", "config.h")
+CRYPTO_EXTRA_GENERATED = {
+    "gmp": ("gmp.h",),
+    "nettle": ("config.make", "config.m4", "version.h", "nettle.pc", "hogweed.pc"),
+    "gnutls": ("lib/gnutls.pc", "lib/includes/gnutls/gnutls.h"),
+}
+CRYPTO_INSTALLED_CONFIGURATION = {
+    "gmp": {"gmp.h": "include/gmp.h"},
+    "nettle": {"version.h": "include/nettle/version.h",
+               "nettle.pc": "lib/pkgconfig/nettle.pc", "hogweed.pc": "lib/pkgconfig/hogweed.pc"},
+    "gnutls": {"lib/gnutls.pc": "lib/pkgconfig/gnutls.pc",
+               "lib/includes/gnutls/gnutls.h": "include/gnutls/gnutls.h"},
+}
+CRYPTO_MAKE_ARGUMENTS = ("-j1", "AUTOCONF=/usr/bin/false", "AUTOHEADER=/usr/bin/false",
+                         "AUTOMAKE=/usr/bin/false", "ACLOCAL=/usr/bin/false")
+CRYPTO_REQUIRED_SYMBOLS = {
+    "gmp": {"__gmpz_cmp", "__gmpz_init"},
+    "nettle": {"nettle_sha256_init", "nettle_version_major"},
+    "hogweed": {"nettle_rsa_private_key_init"},
+    "gnutls": {"gnutls_check_version", "gnutls_global_init"},
+    "Libsmbclient": {"smbc_new_context", "smbc_init_context"},
+}
+CRYPTO_SMB_PINS = {
+    "ios/arm64": (31955240, "1c378176da85ff2386f5c81c903860f8ab258a4e846ddba5bb0febc284f01cd0"),
+    "isimulator/arm64": (31948848, "bcb902da9a24ebbd3571bd1d04eeea88b3782e10ad98eee9a2be90e15ddeb795"),
+    "isimulator/x86_64": (26473896, "0602a2a2eb8c987677b38a150cdf8b03d0f88f13eb7dd7877cacb4a41d7a5254"),
+    "tvos/arm64": (31955264, "4921e4c649589e920e139078219b1a3f01a1fea6cd5bc8b71875d15c09aad252"),
+    "tvos/arm64e": (32054336, "0267dfcd4ca93acf1e62bb75bc7509f6640c2367c63da99a3c983ec9ad9d8206"),
+    "tvsimulator/arm64": (31948880, "6960f069a31801eb0f0f70eb0efd67239502d5c7081163a9ca38faca226a29fd"),
+    "tvsimulator/x86_64": (26474992, "4295cab93d2e40c1234f81a8032d28a0da970643d07cb3c01aaf9b63cd103ef1"),
+    "macos/arm64": (31933296, "4f6a36df06ad0e5f36c3106c7c61a1978dbc642a7d27c4f9aceb19540998424f"),
+    "macos/x86_64": (27602360, "0c9c03db4279b730b86b505b09c2fedc11b879ee7914ef818c940a38e867ae81"),
+}
+CRYPTO_SMB_HEADERS = {
+    "libsmbclient.h": (125287, "9e0fd2184591f449c79b6bc5b5468443920523ea943440534df04294b940ce1c"),
+    "samba/version.h": (421, "d601401634a789612aab95d50295c69713af8fb4ac5addf39dffcc402e978554"),
+}
 CREATED_MPV = {"player/owned_subtitle.c": READER_MPV["player/owned_subtitle.c"],
                "player/owned_subtitle.h": READER_MPV["player/owned_subtitle.h"],
                "player/reference_owned.inc": READER_MPV["player/reference_owned.inc"],
@@ -121,6 +357,13 @@ CREATED_MPV = {"player/owned_subtitle.c": READER_MPV["player/owned_subtitle.c"],
                "demux/reference_reader.h": READER_MPV["demux/reference_reader.h"],
                "demux/reference_reader_internal.h": READER_MPV["demux/reference_reader_internal.h"],
                "stream/vortx_reference_reader_stream.h": READER_MPV["stream/vortx_reference_reader_stream.h"],
+               "demux/reference_mkv.h": READER_MPV["demux/reference_mkv.h"],
+               "demux/reference_mkv_reader.c": READER_MPV["demux/reference_mkv_reader.c"],
+               "demux/reference_mkv_sparse.h": READER_MPV["demux/reference_mkv_sparse.h"],
+               "demux/reference_mkv_sparse_planner.c": READER_MPV["demux/reference_mkv_sparse_planner.c"],
+               "demux/reference_mkv_sparse_planner.h": READER_MPV["demux/reference_mkv_sparse_planner.h"],
+               "demux/reference_mkv_sparse_worker.c": READER_MPV["demux/reference_mkv_sparse_worker.c"],
+               "stream/vortx_reference_sparse.h": READER_MPV["stream/vortx_reference_sparse.h"],
                "sub/owned_text_slot.h": READER_MPV["sub/owned_text_slot.h"],
                "stream/reference_source.h": CANCEL["stream/reference_source.h"],
                "stream/vortx_http_request.h": "d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9"}
@@ -163,6 +406,8 @@ def untracked(lane, row, recipe):
         reader_path = ("Sources/BuildScripts/patch/FFmpeg/0005-finite-reference-reader.patch" if lane == "apple"
                        else "buildscripts/patches/ffmpeg/0006-finite-reference-reader.patch")
         result[reader_path] = recipe["scripts/ffmpeg-finite-reference-reader.patch"]
+        if lane == "apple":
+            result.update(CRYPTO_INSTALLED_HELPERS)
         if lane == "android":
             result["buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"] = recipe["scripts/native-media-hosted/android/buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"]
             for helper in ("download-lua.sh", "download-libunibreak.sh"):
@@ -218,6 +463,19 @@ def integer(value, limit):
 
 def keys(value, expected):
     need(type(value) is dict and set(value) == set(expected.split()), "Unexpected object keys")
+
+
+def exact_equal(left, right):
+    """JSON equality that never aliases booleans with integers."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return (set(left) == set(right) and
+                all(exact_equal(left[key], right[key]) for key in left))
+    if isinstance(left, list):
+        return (len(left) == len(right) and
+                all(exact_equal(a, b) for a, b in zip(left, right)))
+    return left == right
 
 
 def name_key(value):
@@ -430,6 +688,259 @@ def tar_index(archive, name, *, compressed=True, file_limit=64 * MIB, total=2 * 
     return rows, captured
 
 
+def crypto_canonical(value):
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def crypto_member_path(value):
+    need(isinstance(value, str) and value and len(value.encode("utf-8")) <= CRYPTO_MAX_PATH and
+         value.isprintable() and not value.startswith("/") and "\\" not in value and
+         ":" not in value and "\x00" not in value,
+         "Unsafe crypto source archive path")
+    parts = value.rstrip("/").split("/")
+    need(all(part not in ("", ".", "..") and part.casefold() != ".git" for part in parts),
+         "Unsafe crypto source archive path component")
+    return "/".join(parts)
+
+
+def crypto_link_path(parent, target):
+    need(isinstance(target, str) and target and len(target.encode("utf-8")) <= CRYPTO_MAX_PATH and
+         target.isprintable() and not target.startswith("/") and "\\" not in target and
+         ":" not in target and "\x00" not in target,
+         "Unsafe crypto source symlink target")
+    parts = list(parent)
+    for part in target.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            need(parts, "Crypto source symlink escapes its release root")
+            parts.pop()
+        elif part.casefold() == ".git":
+            need(False, "Crypto source symlink points through Git metadata")
+        else:
+            parts.append(part)
+    return "/".join(parts)
+
+
+def crypto_mtime(value):
+    need(type(value) is int and 0 <= value <= CRYPTO_MAX_MTIME,
+         "Crypto source mtime must be bounded integral seconds")
+    return value
+
+
+def crypto_tar_stream(blob, compression):
+    raw = io.BytesIO(blob)
+    if compression == "xz":
+        decoded = lzma.LZMAFile(raw, "rb")
+    elif compression == "gz":
+        decoded = gzip.GzipFile(fileobj=raw, mode="rb")
+    elif compression == "none":
+        decoded = raw
+    else:
+        need(False, "Unknown fixed crypto source compression")
+    return tarfile.open(fileobj=BoundedReader(decoded, CRYPTO_MAX_UNCOMPRESSED), mode="r|")
+
+
+def crypto_file_row(member, stream):
+    need(0 <= member.size <= CRYPTO_MAX_MEMBER, "Crypto source member exceeds its bound")
+    hasher, count = hashlib.sha256(), 0
+    while True:
+        block = stream.read(min(CHUNK, member.size - count + 1))
+        if not block:
+            break
+        count += len(block)
+        need(count <= member.size, "Crypto source member exceeds its declared length")
+        hasher.update(block)
+    need(count == member.size, "Truncated crypto source member")
+    return {"kind": "file", "mode": 0o755 if member.mode & 0o111 else 0o644,
+            "mtime": crypto_mtime(member.mtime), "bytes": count,
+            "sha256": hasher.hexdigest()}
+
+
+def crypto_finish_index(entries):
+    for name in list(entries):
+        parts = name.split("/") if name else []
+        for end in range(1, len(parts)):
+            parent = "/".join(parts[:end])
+            row = entries.setdefault(parent, {"kind": "directory", "mode": 0o755, "mtime": 0})
+            need(row["kind"] == "directory", "Crypto source non-directory member has children")
+            need(len(entries) <= CRYPTO_MAX_MEMBERS, "Crypto source archive has too many paths")
+    folded = {}
+    for name in entries:
+        key = name.casefold()
+        need(key not in folded or folded[key] == name,
+             "Crypto source archive has case-colliding members")
+        folded[key] = name
+
+    def resolve(name, visited=()):
+        need(len(visited) < 32, "Crypto source symlink chain exceeds its bound")
+        parts = name.split("/") if name else []
+        for end in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:end])
+            row = entries.get(prefix)
+            need(row is not None, "Dangling crypto source symlink")
+            if row["kind"] == "symlink":
+                need(prefix not in visited, "Cyclic crypto source symlink")
+                destination = crypto_link_path(parts[:end - 1], row["target"])
+                following = "/".join(([destination] if destination else []) + parts[end:])
+                return resolve(following, visited + (prefix,))
+            need(end == len(parts) or row["kind"] == "directory",
+                 "Crypto source symlink resolves through a non-directory")
+        return name
+
+    for name, row in entries.items():
+        if row["kind"] == "symlink":
+            resolve(name)
+    return [{"path": name, **entries[name]} for name in sorted(entries)]
+
+
+def crypto_index_archive(pin, blob):
+    need(len(blob) <= CRYPTO_MAX_ARCHIVE and
+         (pin["bytes"] is None or len(blob) == pin["bytes"]) and
+         sha(blob) == pin["sha256"],
+         "Crypto release source body differs from its fixed pin")
+    entries = {"": {"kind": "directory", "mode": 0o755, "mtime": 0}}
+    seen, total = set(), 0
+    with crypto_tar_stream(blob, pin["compression"]) as archive:
+        for member in archive:
+            need(len(seen) < CRYPTO_MAX_MEMBERS, "Crypto source archive has too many members")
+            full = crypto_member_path(member.name)
+            root, separator, name = full.partition("/")
+            need(root == pin["archiveRoot"], "Crypto source archive has a foreign top-level root")
+            need(full.casefold() not in seen, "Duplicate or case-colliding crypto source member")
+            seen.add(full.casefold())
+            need(not getattr(member, "sparse", None) and
+                 not any("sparse" in key.casefold() for key in member.pax_headers),
+                 "Sparse crypto source members are not admitted")
+            if not separator:
+                need(member.isdir(), "Crypto source archive root is not a directory")
+                entries[""]["mtime"] = crypto_mtime(member.mtime)
+                continue
+            if member.isdir():
+                row = {"kind": "directory", "mode": 0o755, "mtime": crypto_mtime(member.mtime)}
+            elif member.isreg():
+                total += member.size
+                need(total <= CRYPTO_MAX_UNCOMPRESSED, "Crypto source member total exceeds its bound")
+                body = archive.extractfile(member)
+                need(body is not None, "Missing crypto source member body")
+                with body:
+                    row = crypto_file_row(member, body)
+            elif member.issym():
+                crypto_link_path(name.split("/")[:-1], member.linkname)
+                body = member.linkname.encode("utf-8")
+                row = {"kind": "symlink", "mode": 0o777, "bytes": len(body),
+                       "mtime": crypto_mtime(member.mtime), "sha256": sha(body),
+                       "target": member.linkname}
+            else:
+                need(False, "Crypto source hardlinks and special members are not admitted")
+            need(name not in entries, "Duplicate crypto source member")
+            entries[name] = row
+    rows = crypto_finish_index(entries)
+    configure = next((row for row in rows if row["path"] == "configure"), None)
+    need(configure is not None and configure["kind"] == "file" and configure["mode"] == 0o755,
+         "Crypto release archive lacks an executable configure")
+    return rows
+
+
+def crypto_expected_receipt(verified):
+    roots = []
+    for pin, blob, rows in verified:
+        roots.append({"id": pin["id"], "version": pin["version"], "url": pin["url"],
+                      "archive": "archives/" + pin["filename"],
+                      "archiveRoot": pin["archiveRoot"], "archiveBytes": len(blob),
+                      "archiveSHA256": pin["sha256"],
+                      "sourceRoot": "dist/" + pin["sourceRoot"],
+                      "membersSHA256": sha(crypto_canonical(rows)), "members": rows})
+    return {"schema": 1, "profile": CRYPTO_SOURCE_PROFILE,
+            "identityBasis": "fixed-sha256-corroborated-by-package-maintainer-metadata",
+            "upstreamSignatureVerified": False, "roots": roots}
+
+
+def crypto_load(data):
+    need(len(data) <= CRYPTO_MAX_RECEIPT, "Crypto JSON byte bound")
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            need(key not in result, "Duplicate crypto JSON key")
+            result[key] = value
+        return result
+    return json.loads(data.decode("utf-8", errors="strict"), object_pairs_hook=unique,
+                      parse_constant=lambda _: need(False, "Nonfinite crypto JSON"))
+
+
+def crypto_capture_correspondence(blob, expected):
+    need(0 < len(blob) <= CRYPTO_MAX_UNCOMPRESSED,
+         "Captured crypto source tar exceeds its bound")
+    observed, folded, count = set(), set(), 0
+    with tarfile.open(fileobj=BoundedReader(io.BytesIO(blob), CRYPTO_MAX_UNCOMPRESSED), mode="r|") as archive:
+        for member in archive:
+            name = crypto_member_path(member.name)
+            count += 1
+            need(count <= CRYPTO_MAX_MEMBERS * len(CRYPTO_SOURCE_OUTPUTS) and
+                 name not in observed and name.casefold() not in folded and name in expected,
+                 "Captured crypto source tar has an extra or duplicate member")
+            observed.add(name)
+            folded.add(name.casefold())
+            wanted = expected[name]
+            if member.isdir():
+                actual = {"kind": "directory", "mode": member.mode,
+                          "mtime": crypto_mtime(member.mtime)}
+            elif (member.isreg() and member.mode in (0o644, 0o755)
+                  and not getattr(member, "sparse", None)
+                  and not any("sparse" in key.casefold() for key in member.pax_headers)):
+                body = archive.extractfile(member)
+                need(body is not None, "Captured crypto source member has no body")
+                with body:
+                    actual = crypto_file_row(member, body)
+            elif member.issym():
+                crypto_link_path(name.split("/")[:-1], member.linkname)
+                body = member.linkname.encode("utf-8")
+                actual = {"kind": "symlink", "mode": 0o777, "bytes": len(body),
+                          "mtime": crypto_mtime(member.mtime), "sha256": sha(body),
+                          "target": member.linkname}
+            else:
+                need(False, "Captured crypto source tar has an unsupported member")
+            need(exact_equal(actual, wanted),
+                 "Captured crypto source member differs from its raw archive")
+    need(observed == set(expected), "Captured crypto source tar omitted release members")
+
+
+def crypto_source_outputs(archive):
+    verified, output_rows = [], []
+    for pin in CRYPTO_SOURCE_OUTPUTS:
+        body = read(archive, pin["output"], CRYPTO_MAX_ARCHIVE)
+        rows = crypto_index_archive(pin, body)
+        verified.append((pin, body, rows))
+        output_rows.append({"logicalPath": "archives/" + pin["filename"],
+                            "name": pin["output"], "bytes": len(body), "sha256": sha(body)})
+    expected_receipt = crypto_expected_receipt(verified)
+    receipt_body = read(archive, CRYPTO_CAPTURE_RECEIPT_OUTPUT, CRYPTO_MAX_RECEIPT)
+    need(exact_equal(crypto_load(receipt_body), expected_receipt) and
+         receipt_body == crypto_canonical(expected_receipt),
+         "Captured crypto source receipt differs from raw source bodies")
+    expected_members = {}
+    for pin, _, rows in verified:
+        for row in rows:
+            name = pin["archiveRoot"] + (("/" + row["path"]) if row["path"] else "")
+            need(name not in expected_members, "Overlapping captured crypto source roots")
+            expected_members[name] = {key: value for key, value in row.items() if key != "path"}
+    capture_body = read(archive, CRYPTO_CAPTURE_TAR_OUTPUT, CRYPTO_MAX_UNCOMPRESSED)
+    crypto_capture_correspondence(capture_body, expected_members)
+    roots = []
+    for root, output_row in zip(expected_receipt["roots"], output_rows, strict=True):
+        roots.append({"id": root["id"], "version": root["version"],
+                      "archiveRoot": root["archiveRoot"], "sourceRoot": root["sourceRoot"],
+                      "archive": output_row, "membersSHA256": root["membersSHA256"]})
+    return {"profile": CRYPTO_SOURCE_PROFILE, "roots": roots,
+            "capture": {
+                "tar": {"logicalPath": "crypto-release-sources.tar",
+                        "name": CRYPTO_CAPTURE_TAR_OUTPUT, "bytes": len(capture_body),
+                        "sha256": sha(capture_body)},
+                "receipt": {"logicalPath": "crypto-release-sources.json",
+                            "name": CRYPTO_CAPTURE_RECEIPT_OUTPUT, "bytes": len(receipt_body),
+                            "sha256": sha(receipt_body)}}}
+
+
 def declared(rows, root, native=False):
     need(type(rows) is list and len(rows) <= 100000, "File inventory bound")
     result = {}
@@ -470,7 +981,15 @@ REFERENCE_FFMPEG_FUNCTIONS = frozenset((
     "avpriv_vortx_reference_capture_v1", "avpriv_vortx_reference_revalidate_v1",
     "avpriv_vortx_reference_recipe_current", "avpriv_vortx_reference_open_prefix_v1",
     "avpriv_vortx_reference_read_v1", "avpriv_vortx_reference_stats_v1",
-    "avpriv_vortx_reference_reader_close_v1", "avpriv_vortx_reference_recipe_release_v1"))
+    "avpriv_vortx_reference_reader_close_v1", "avpriv_vortx_reference_recipe_release_v1",
+    "avpriv_vortx_reference_sparse_budget_create_v1",
+    "avpriv_vortx_reference_sparse_budget_info_v1",
+    "avpriv_vortx_reference_sparse_open_v1",
+    "avpriv_vortx_reference_sparse_next_part_v1",
+    "avpriv_vortx_reference_sparse_read_part_v1",
+    "avpriv_vortx_reference_sparse_stats_v1",
+    "avpriv_vortx_reference_sparse_close_v1",
+    "avpriv_vortx_reference_sparse_budget_release_v1"))
 PRIVATE_MPV_FUNCTIONS = frozenset(("stream_reference_sent_request_copy_transport",))
 
 
@@ -604,16 +1123,1145 @@ def android(archive, inputs, recipe):
         need(evidence["sentRequestABI"]["reader"]["mode"] == "hosted-ndk-reader", "Default hosted reader identity")
 
 
-def apple(archive, native, captured):
+def shaderc_remote_target(package):
+    """Authenticate Shaderc's published remote target before local rewrites."""
+    need(isinstance(package, str), "Apple package source text")
+    need(len(re.findall(r'\bname:\s*"Libshaderc_combined"', package)) == 1,
+         "Unique Shaderc Package.swift target")
+    pattern = re.compile(
+        r'\.binaryTarget\(\s*name:\s*"Libshaderc_combined",\s*'
+        r'url:\s*"([^"]+)",\s*checksum:\s*"([0-9a-f]{64})"\s*\)',
+        re.DOTALL)
+    matches = pattern.findall(package)
+    need(len(matches) == 1 and matches[0] == (SHADERC_REMOTE_URL, SHADERC_SOURCE_SPECS[1][2]),
+         "Exact published Shaderc remote target")
+
+
+def shaderc_receipt(value, source_rows, validator_sha256, retained_all_rows):
+    """Validate the producer receipt without importing or executing evidence.py."""
+    need(type(retained_all_rows) is dict, "Authenticated retained Shaderc all-ZIP index")
+    keys(value, "schema profile wrapperVersion validatorSHA256 reader sources matrix runtimeSecurityTested promotionEligible")
+    need(type(value["schema"]) is int and value["schema"] == 1 and
+         value["profile"] == NATIVE_UPGRADES_PROFILE and
+         value["wrapperVersion"] == SHADERC_WRAPPER_VERSION and
+         value["runtimeSecurityTested"] is False and value["promotionEligible"] is False,
+         "Shaderc receipt schema/profile boundary")
+    digest(validator_sha256)
+    need(value["validatorSHA256"] == validator_sha256, "Shaderc receipt validator identity")
+    reader = value["reader"]
+    keys(reader, "mode requestedReader resolvedReader readerSHA256 toolchainReader toolchainSHA256 toolchainVersion")
+    need(reader["mode"] == "xcrun-resolved-lipo" and reader["requestedReader"] == "/usr/bin/xcrun" and
+         reader["toolchainReader"] == "/usr/bin/xcodebuild" and
+         isinstance(reader["resolvedReader"], str) and reader["resolvedReader"].startswith("/") and
+         "\x00" not in reader["resolvedReader"] and isinstance(reader["toolchainVersion"], str) and
+         len(reader["resolvedReader"]) <= 4096 and
+         reader["toolchainVersion"].strip() and "\x00" not in reader["toolchainVersion"] and
+         len(reader["toolchainVersion"]) <= 4096,
+         "Shaderc reader identity")
+    digest(reader["readerSHA256"])
+    digest(reader["toolchainSHA256"])
+    expected_sources = [dict(name=name, bytes=bytes_, sha256=checksum)
+                        for name, bytes_, checksum in SHADERC_SOURCE_SPECS]
+    need(type(source_rows) is list and source_rows == expected_sources,
+         "Pinned Shaderc source bodies")
+    sources = value["sources"]
+    need(type(sources) is list and len(sources) == len(expected_sources), "Shaderc receipt source rows")
+    for row in sources:
+        keys(row, "name bytes sha256")
+        integer(row["bytes"], 8 * 1024**3)
+        digest(row["sha256"])
+    need(sources == expected_sources, "Shaderc receipt source identity")
+    expected = {(slice_name, arch):
+                "lib/" + platform_name + "/thin/" + arch + "/lib/libshaderc_combined.a"
+                for slice_name, arch, platform_name in SHADERC_MATRIX}
+    matrix = value["matrix"]
+    need(type(matrix) is list and len(matrix) == len(expected), "Shaderc exact matrix row count")
+    observed = set()
+    for row in matrix:
+        keys(row, "slice arch allZipEntry allArchiveSHA256 xcArchiveSHA256 equal")
+        need(isinstance(row["slice"], str) and isinstance(row["arch"], str),
+             "Shaderc matrix identity types")
+        identity = (row["slice"], row["arch"])
+        need(identity in expected and identity not in observed and
+             row["allZipEntry"] == expected[identity], "Shaderc matrix entry path")
+        digest(row["allArchiveSHA256"])
+        digest(row["xcArchiveSHA256"])
+        need(row["equal"] is True and row["allArchiveSHA256"] == row["xcArchiveSHA256"],
+             "Shaderc per-architecture digest equality")
+        retained = retained_all_rows.get(row["allZipEntry"])
+        need(isinstance(retained, dict) and retained.get("kind") == "file" and
+             retained.get("sha256") == row["allArchiveSHA256"],
+             "Shaderc matrix digest differs from retained all-ZIP member")
+        observed.add(identity)
+    need(observed == set(expected), "Shaderc exact nine-architecture matrix")
+
+
+def openssl_effective_configuration(value, environment, target):
+    """Validate the exact configdata.pm whitelist without executing its producer."""
+    need(type(value) is dict and set(value) == set(OPENSSL_EFFECTIVE_KEYS),
+         "OpenSSL effective configuration keys differ from the fixed whitelist")
+    for key in OPENSSL_EFFECTIVE_KEYS:
+        item = value[key]
+        if key == "CROSS_COMPILE":
+            need(item is None, "OpenSSL CROSS_COMPILE must be JSON null for this profile")
+            continue
+        if isinstance(item, str):
+            need(bool(item) and len(item) <= 65536 and "\x00" not in item,
+                 "OpenSSL effective configuration string bound")
+        else:
+            need(type(item) is list and len(item) <= 4096 and
+                 all(isinstance(part, str) and part and len(part) <= 65536 and
+                     "\x00" not in part for part in item),
+                 "OpenSSL effective configuration list bound")
+    need(value["target"] == target and value["CC"] == environment["CC"] and
+         value["CXX"] == environment["CXX"] and value["AR"] == environment["AR"] and
+         value["RANLIB"] == environment["RANLIB"] and value["ARFLAGS"] == ["qc"],
+         "OpenSSL effective compiler/tool configuration differs from the environment")
+    need(value["CFLAGS"] == [environment["CFLAGS"]] and
+         value["CPPFLAGS"] == [environment["CPPFLAGS"]] and
+         value["CXXFLAGS"] == [environment["CXXFLAGS"]] and
+         value["LDFLAGS"] == [environment["LDFLAGS"]],
+         "OpenSSL effective make flags differ from the fixed environment")
+    need(value["lib_cppflags"] == "-DL_ENDIAN", "OpenSSL effective library CPP flags differ")
+    cflags = value["cflags"] if type(value["cflags"]) is list else [value["cflags"]]
+    need("-fno-common" in cflags, "OpenSSL effective C flags omit the fixed target flag")
+
+
+def openssl_environment(value, platform, arch, sdk_root, source_directory, build_directory):
+    need(type(value) is dict and set(value) == set(OPENSSL_ENV_KEYS),
+         "OpenSSL environment keys differ from the fixed build map")
+    need(all(isinstance(value[key], str) and len(value[key]) <= 65536 and "\x00" not in value[key]
+             for key in OPENSSL_ENV_KEYS),
+         "OpenSSL environment value bound")
+    need(value["CC"] == "/usr/bin/clang" and value["CXX"] == "/usr/bin/clang++" and
+         value["CURRENT_ARCH"] == arch and value["LC_CTYPE"] == "C" and
+         value["PKG_CONFIG_PATH"] == "" and value["PATH"] == OPENSSL_DEFAULT_PATH and
+         value["ARFLAGS"] == "qc" and value["MAKEFLAGS"] == "-j1" and
+         value["CMAKE_BUILD_PARALLEL_LEVEL"] == "1" and value["CARGO_BUILD_JOBS"] == "1",
+         "OpenSSL fixed environment identity")
+    for key, suffix in (("AR", "ar"), ("RANLIB", "ranlib")):
+        path = value[key]
+        need(path.startswith("/") and ".." not in Path(path).parts and len(path) <= 4096 and
+             Path(path).name == suffix and
+             re.fullmatch(r"/.+/Toolchains/[^/]+\.xctoolchain/usr/bin/" + suffix, path),
+             "OpenSSL selected absolute SDK tool: " + key)
+    sdk = Path(sdk_root)
+    need(sdk_root.startswith("/") and "\x00" not in sdk_root and ".." not in sdk.parts,
+         "OpenSSL SDK root is not a safe absolute path")
+    sdk_suffix = {"ios": ("iPhoneOS", "iPhoneOS.sdk"),
+                  "isimulator": ("iPhoneSimulator", "iPhoneSimulator.sdk"),
+                  "tvos": ("AppleTVOS", "AppleTVOS.sdk"),
+                  "tvsimulator": ("AppleTVSimulator", "AppleTVSimulator.sdk"),
+                  "macos": ("MacOSX", "MacOSX.sdk")}[platform]
+    sdk_pattern = (r".*/" + re.escape(sdk_suffix[0]) +
+                   r"\.platform/Developer/SDKs/" + re.escape(sdk_suffix[0]) +
+                   r"(?:[0-9]{1,3}(?:\.[0-9]{1,3}){0,3})?\.sdk")
+    need(re.fullmatch(sdk_pattern, str(sdk)),
+         "OpenSSL SDK root does not match the fixed platform")
+    cpu = "arm64" if arch in ("arm64", "arm64e") else "x86_64"
+    minimum = {"ios": "15.0", "isimulator": "15.0", "tvos": "15.0",
+               "tvsimulator": "15.0", "macos": "12.0"}[platform]
+    target = {"ios": cpu + "-apple-ios" + minimum,
+              "isimulator": cpu + "-apple-ios" + minimum + "-simulator",
+              "tvos": cpu + "-apple-tvos" + minimum,
+              "tvsimulator": cpu + "-apple-tvos" + minimum + "-simulator",
+              "macos": cpu + "-apple-macos" + minimum}[platform]
+    minimum_flag = {"ios": "-mios-version-min=" + minimum,
+                    "isimulator": "-mios-simulator-version-min=" + minimum,
+                    "tvos": "-mtvos-version-min=" + minimum,
+                    "tvsimulator": "-mtvos-simulator-version-min=" + minimum,
+                    "macos": "-mmacosx-version-min=" + minimum}[platform]
+    common = "-arch " + arch + " -isysroot " + sdk_root + " -target " + target + " " + minimum_flag
+    cflags = common + (" -DHAVE_FORK=0" if platform in ("tvos", "tvsimulator") else "")
+    need(value["CFLAGS"] == value["CPPFLAGS"] == value["CXXFLAGS"] == value["ASMFLAGS"] == cflags and
+         value["LDFLAGS"] == "-lc++ " + common,
+         "OpenSSL compiler/linker flags differ from the fixed platform policy")
+    source = Path(source_directory)
+    build = Path(build_directory)
+    need(source_directory.startswith("/") and build_directory.startswith("/") and
+         "\x00" not in source_directory and "\x00" not in build_directory and
+         source.name == OPENSSL_ROOT and source.parent.name == "dist" and
+         build == source.parent / OPENSSL_OUTPUT_ROOT / platform / "scratch" / arch,
+         "OpenSSL source/build directory identity differs from the fixed layout")
+    expected_pkg = [str(source.parent / library / platform / "thin" / arch / "lib" / "pkgconfig")
+                    for library in OPENSSL_PKG_LIBRARIES]
+    expected_pkg.append(str(build / "vortx-sdk-pkgconfig"))
+    need(value["PKG_CONFIG_LIBDIR"] == ":".join(expected_pkg),
+         "OpenSSL pkg-config target roots differ from the fixed ordered map")
+
+
+def openssl_target_config(value, platform, arch, target):
+    need(isinstance(value, str) and value and len(value.encode("utf-8")) <= MIB and
+         "\x00" not in value and value.endswith("\n"),
+         "OpenSSL generated target config is bounded text")
+    expected = ("my %targets = (\n"
+                "    \"" + target + "\" => {\n"
+                "        inherit_from => [ \"darwin-common\" ],\n"
+                "        CC => \"/usr/bin/clang\",\n"
+                "        cflags => \"-fno-common\",\n"
+                "        lib_cppflags => \"-DL_ENDIAN\",\n"
+                "        bn_ops => \"SIXTY_FOUR_BIT_LONG\",\n"
+                "        asm_arch => \"" + ("aarch64" if arch in ("arm64", "arm64e") else "x86_64") + "\",\n"
+                "        perlasm_scheme => \"" + ("ios64" if arch in ("arm64", "arm64e") else "macosx") + "\",\n"
+                "        sys_id => \"" + ("MACOSX" if platform == "macos" else "iOS") + "\",\n"
+                "    },\n"
+                ");\n\n")
+    need(value == expected, "OpenSSL generated target config differs from the fixed template")
+
+
+def validate_native_gitlinks(row, files):
+    """Authenticate normal recursive links and OpenSSL's bounded no-fetch map."""
+    need(type(row) is dict and isinstance(row.get("root"), str) and
+         isinstance(row.get("commit"), str) and type(row.get("gitlinks")) is list,
+         "Native Gitlink row shape")
+    links = {}
+    for item in row["gitlinks"]:
+        keys(item, "path commit")
+        name = path(item["path"])
+        need(name not in links and re.fullmatch(r"[0-9a-f]{40}", item["commit"]),
+             "Gitlink source preservation")
+        if row["commit"] != OPENSSL_SOURCE_SHA:
+            need(any(name0.startswith(row["root"] + "/" + name + "/") for name0 in files),
+                 "Gitlink source preservation")
+        links[name] = item["commit"]
+    if row["commit"] == OPENSSL_SOURCE_SHA:
+        need(links == OPENSSL_GITLINKS and
+             not any(any(name0 == row["root"] + "/" + name or
+                         name0.startswith(row["root"] + "/" + name + "/")
+                        for name in OPENSSL_GITLINKS) for name0 in files),
+             "Pinned OpenSSL no-fetch Gitlinks")
+    return links
+
+
+def openssl_receipt(value, validator_sha256):
+    """Validate the source-build BOM without importing or executing build code."""
+    keys(value, "schema profile sourceProfile version sourceSHA sourceTag validatorSHA256 matrix runtimeSecurityTested promotionEligible")
+    need(type(value["schema"]) is int and value["schema"] == 1 and
+         value["profile"] == NATIVE_UPGRADES_PROFILE and
+         value["sourceProfile"] == OPENSSL_BOM_PROFILE and
+         value["version"] == OPENSSL_SOURCE_VERSION and
+         value["sourceSHA"] == OPENSSL_SOURCE_SHA and
+         value["sourceTag"] == OPENSSL_SOURCE_TAG and
+         value["runtimeSecurityTested"] is False and value["promotionEligible"] is False,
+         "OpenSSL receipt source/profile boundary")
+    digest(validator_sha256)
+    need(value["validatorSHA256"] == validator_sha256, "OpenSSL receipt validator identity")
+    need(type(value["matrix"]) is list and len(value["matrix"]) == len(OPENSSL_MATRIX),
+         "OpenSSL exact nine-row matrix")
+    expected = {(platform, arch): (target, slice_name)
+                for platform, arch, target, slice_name in OPENSSL_MATRIX}
+    observed = set()
+    header_hashes = set()
+    for row in value["matrix"]:
+        keys(row, "platform arch slice configureTarget configureArguments sdkRoot sourceDirectory buildDirectory prefix environment targetConfig targetConfigSHA256 effectiveConfiguration compiled installed outputs")
+        identity = (row["platform"], row["arch"])
+        need(identity in expected and identity not in observed and
+             row["slice"] == expected[identity][1] and
+             row["configureTarget"] == expected[identity][0] and
+             row["compiled"] is True and row["installed"] is True,
+             "OpenSSL row platform/architecture/completion")
+        for field in ("sdkRoot", "sourceDirectory", "buildDirectory", "prefix"):
+            need(isinstance(row[field], str) and row[field].startswith("/") and
+                 "\x00" not in row[field] and len(row[field]) <= 4096,
+                 "OpenSSL row bounded absolute path: " + field)
+        source_root = Path(row["sourceDirectory"])
+        need(source_root.name == OPENSSL_ROOT and source_root.parent.name == "dist",
+             "OpenSSL row source root")
+        need(Path(row["buildDirectory"]) == source_root.parent / OPENSSL_OUTPUT_ROOT / row["platform"] /
+             "scratch" / row["arch"], "OpenSSL row scratch directory")
+        need(Path(row["prefix"]) == source_root.parent / OPENSSL_OUTPUT_ROOT / row["platform"] /
+             "thin" / row["arch"], "OpenSSL row installed thin directory")
+        need(row["prefix"].endswith("/dist/" + OPENSSL_OUTPUT_ROOT + "/" + row["platform"] + "/thin/" + row["arch"]),
+             "OpenSSL row thin prefix")
+        expected_args = ["--config=" + row["buildDirectory"] + "/vortx-openssl-target.conf",
+                         "--prefix=" + row["prefix"], *OPENSSL_CONFIGURE_FLAGS, expected[identity][0]]
+        need(row["configureArguments"] == expected_args, "OpenSSL Configure argument identity")
+        openssl_environment(row["environment"], row["platform"], row["arch"], row["sdkRoot"],
+                            row["sourceDirectory"], row["buildDirectory"])
+        openssl_target_config(row["targetConfig"], row["platform"], row["arch"],
+                              expected[identity][0])
+        need(row["targetConfigSHA256"] == sha(row["targetConfig"].encode("utf-8")),
+             "OpenSSL target config digest")
+        openssl_effective_configuration(row["effectiveConfiguration"], row["environment"],
+                                        expected[identity][0])
+        outputs = row["outputs"]
+        need(type(outputs) is list and len(outputs) == len(OPENSSL_OUTPUTS), "OpenSSL output count")
+        seen = set()
+        for output in outputs:
+            keys(output, "name path bytes sha256")
+            fixed = next((candidate for candidate in OPENSSL_OUTPUTS if candidate[0] == output["name"]), None)
+            need(fixed is not None and output["name"] not in seen and output["path"] == fixed[1],
+                 "OpenSSL output path/name")
+            integer(output["bytes"], fixed[2])
+            need(output["bytes"] > 0, "OpenSSL output must not be empty")
+            digest(output["sha256"])
+            if output["name"] == "opensslv.h":
+                header_hashes.add(output["sha256"])
+            seen.add(output["name"])
+        need(seen == {name for name, _, _ in OPENSSL_OUTPUTS}, "OpenSSL output set")
+        observed.add(identity)
+    need(observed == set(expected) and len(header_hashes) == 1, "OpenSSL complete matrix/header identity")
+    return value
+
+
+def _zip_resolve(rows, name):
+    seen = set()
+    for _ in range(16):
+        need(name not in seen, "ZIP link cycle")
+        seen.add(name)
+        row = rows.get(name)
+        need(isinstance(row, dict), "ZIP member missing: " + name)
+        if row.get("kind") == "file":
+            return name
+        need(row.get("kind") == "symlink" and isinstance(row.get("target"), str),
+             "ZIP member is not a regular file: " + name)
+        target = row["target"]
+        need(target and len(target.encode("utf-8")) <= 4096 and
+             not target.startswith("/") and "\\" not in target and "\x00" not in target and
+             target.isprintable(), "unsafe ZIP link target")
+        base = name.split("/")[:-1]
+        for piece in target.split("/"):
+            if piece in ("", "."):
+                continue
+            if piece == "..":
+                need(base, "ZIP link escapes archive root")
+                base.pop()
+            else:
+                base.append(piece)
+        name = "/".join(base)
+    raise ValueError("ZIP link hop bound")
+
+
+def _macho_arch_hashes(data):
+    """Return bounded universal-binary member hashes; thin archives are one-arch."""
+    need(isinstance(data, bytes) and data, "OpenSSL framework binary is empty")
+    big_magic = int.from_bytes(data[:4], "big") if len(data) >= 4 else 0
+    little_magic = int.from_bytes(data[:4], "little") if len(data) >= 4 else 0
+    fat_magic = big_magic if big_magic in (0xCAFEBABE, 0xCAFEBABF) else None
+    if fat_magic is None and little_magic in (0xCAFEBABE, 0xCAFEBABF):
+        fat_magic = little_magic
+    if fat_magic is None:
+        return None
+    endian = "big" if big_magic in (0xCAFEBABE, 0xCAFEBABF) else "little"
+    width = 8 if (big_magic == 0xCAFEBABF or little_magic == 0xCAFEBABF) else 4
+    count = int.from_bytes(data[4:8], endian)
+    need(0 < count <= 16, "OpenSSL universal-binary slice count")
+    entry_size = 32 if width == 8 else 20
+    need(8 + count * entry_size <= len(data), "OpenSSL universal-binary header bound")
+    result = {}
+    ranges = []
+    for index in range(count):
+        offset = 8 + index * entry_size
+        cputype = int.from_bytes(data[offset:offset + 4], endian)
+        subtype = int.from_bytes(data[offset + 4:offset + 8], endian)
+        if width == 8:
+            start = int.from_bytes(data[offset + 8:offset + 16], endian)
+            size = int.from_bytes(data[offset + 16:offset + 24], endian)
+        else:
+            start = int.from_bytes(data[offset + 8:offset + 12], endian)
+            size = int.from_bytes(data[offset + 12:offset + 16], endian)
+        need(size > 0 and start >= 8 + count * entry_size and start + size <= len(data),
+             "OpenSSL universal-binary slice bounds")
+        arch = "arm64" if cputype == 0x0100000C and subtype & 0xff != 2 else (
+            "arm64e" if cputype == 0x0100000C else "x86_64" if cputype == 0x01000007 else None)
+        need(arch is not None and arch not in result, "OpenSSL universal-binary architecture identity")
+        result[arch] = (size, sha(data[start:start + size]))
+        ranges.append((start, start + size))
+    ranges.sort()
+    need(all(previous_end <= start for (_, previous_end), (start, _) in zip(ranges, ranges[1:])),
+         "OpenSSL universal-binary slices overlap")
+    return result
+
+
+def _openssl_archive_member(archive, rows, name, limit=512 * MIB):
+    resolved = _zip_resolve(rows, name)
+    data = read(archive, resolved, limit)
+    return resolved, data
+
+
+def openssl_archive_binding(value, zip_bodies):
+    """Bind nine BOM rows to the retained Libssl/Libcrypto ZIP members."""
+    need(set(zip_bodies) == {"Libssl", "Libcrypto"}, "Retained OpenSSL ZIP bodies")
+    archives = {}
+    for base, body in zip_bodies.items():
+        with io.BytesIO(body) as stream, zip_open(stream, 256) as archive:
+            archives[base] = (body, archive.infolist(), zip_index(archive, count=256, total=8 * 1024**3))
+    expected_arches = {}
+    for platform, arch, _, slice_name in OPENSSL_MATRIX:
+        expected_arches.setdefault(slice_name, set()).add(arch)
+    rows = {(row["platform"], row["arch"]): row for row in value["matrix"]}
+    header_hashes = set()
+    for platform, arch, _, slice_name in OPENSSL_MATRIX:
+        row = rows[(platform, arch)]
+        outputs = {output["name"]: output for output in row["outputs"]}
+        for base in ("Libssl", "Libcrypto"):
+            body, _, indexed = archives[base]
+            with io.BytesIO(body) as stream, zip_open(stream, 256) as archive:
+                binary_name = base + ".xcframework/" + slice_name + "/" + base + ".framework/" + base
+                _, binary = _openssl_archive_member(archive, indexed, binary_name)
+                segments = _macho_arch_hashes(binary)
+                if segments is None:
+                    need(len(expected_arches[slice_name]) == 1,
+                         "OpenSSL thin framework binary used for a multi-arch slice")
+                    segments = {next(iter(expected_arches[slice_name])): (len(binary), sha(binary))}
+                need(set(segments) == expected_arches[slice_name], "OpenSSL exact framework architecture set")
+                expected_output = outputs["libssl.a" if base == "Libssl" else "libcrypto.a"]
+                need(segments[arch] == (expected_output["bytes"], expected_output["sha256"]),
+                     "OpenSSL framework/static-library byte correspondence")
+                header_name = base + ".xcframework/" + slice_name + "/" + base + ".framework/Headers/openssl/opensslv.h"
+                need(header_name in indexed, "Missing OpenSSL version header")
+                _, header = _openssl_archive_member(archive, indexed, header_name, MIB)
+                header_sha = sha(header)
+                need(len(header) == outputs["opensslv.h"]["bytes"] and
+                     header_sha == outputs["opensslv.h"]["sha256"],
+                     "OpenSSL version-header byte correspondence")
+                header_hashes.add(header_sha)
+    need(len(header_hashes) == 1, "OpenSSL retained version-header correspondence")
+
+
+def crypto_inline_file(row, maximum, expected_path=None, budget=None):
+    keys(row, "path bytes sha256 bodyBase64")
+    name = path(row["path"])
+    need(expected_path is None or name == expected_path, "Crypto inline file path")
+    integer(row["bytes"], maximum)
+    need(row["bytes"] > 0 and isinstance(row["bodyBase64"], str) and
+         len(row["bodyBase64"]) <= ((maximum + 2) // 3) * 4,
+         "Crypto inline file body bound")
+    try:
+        body = base64.b64decode(row["bodyBase64"].encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error) as error:
+        raise ValueError("Crypto inline file is not canonical base64") from error
+    need(base64.b64encode(body).decode("ascii") == row["bodyBase64"] and
+         len(body) == row["bytes"] and sha(body) == row["sha256"],
+         "Crypto inline file raw-body identity")
+    if budget is not None:
+        budget[0] += len(body)
+        need(budget[0] <= CRYPTO_MAX_INLINE_RAW, "Crypto aggregate inline raw-body cap")
+    return body
+
+
+def crypto_recorded_text(row, label):
+    keys(row, "bytes sha256 text")
+    need(isinstance(row["text"], str), "Crypto " + label + " text type")
+    body = row["text"].encode("utf-8")
+    integer(row["bytes"], 16 * MIB)
+    need(len(body) == row["bytes"] and sha(body) == row["sha256"],
+         "Crypto " + label + " text identity")
+    return row["text"]
+
+
+def crypto_tool_record(row, label):
+    keys(row, "resolvedPath path bytes sha256")
+    resolved = row["resolvedPath"]
+    need(isinstance(resolved, str) and resolved.startswith("/") and "\x00" not in resolved and
+         ".." not in Path(resolved).parts and len(resolved) <= 4096 and
+         row["path"] == Path(resolved).name,
+         "Crypto " + label + " resolved tool path")
+    integer(row["bytes"], 512 * MIB)
+    need(row["bytes"] > 0, "Crypto " + label + " empty tool")
+    digest(row["sha256"])
+    return row
+
+
+def crypto_tools(value):
+    keys(value, "xcrun xcodebuild lipo nm toolchainVersion platforms")
+    resolved_aliases = {
+        "xcrun": {"xcrun"}, "xcodebuild": {"xcodebuild"},
+        "lipo": {"lipo"}, "nm": {"nm", "llvm-nm"},
+        "ar": {"ar"}, "ranlib": {"ranlib", "libtool"},
+    }
+    for name in ("xcrun", "xcodebuild", "lipo", "nm"):
+        crypto_tool_record(value[name], name)
+        need(value[name]["path"] in resolved_aliases[name],
+             "Crypto selected tool resolved basename: " + name)
+    need(value["xcrun"]["resolvedPath"] == "/usr/bin/xcrun" and
+         value["xcodebuild"]["resolvedPath"] == "/usr/bin/xcodebuild",
+         "Crypto fixed Apple tool entry points")
+    crypto_recorded_text(value["toolchainVersion"], "toolchain version")
+    need(type(value["platforms"]) is dict and set(value["platforms"]) == set(CRYPTO_PLATFORMS),
+         "Crypto selected SDK platform set")
+    sdk_stems = {"ios": "iPhoneOS", "isimulator": "iPhoneSimulator",
+                 "tvos": "AppleTVOS", "tvsimulator": "AppleTVSimulator",
+                 "macos": "MacOSX"}
+    for platform, row in value["platforms"].items():
+        keys(row, "sdkRoot resolvedSDKRoot ar ranlib")
+        stem = sdk_stems[platform]
+        sdk_pattern = (r".*/" + re.escape(stem) +
+                       r"\.platform/Developer/SDKs/" + re.escape(stem) +
+                       r"(?:[0-9]{1,3}(?:\.[0-9]{1,3}){0,3})?\.sdk")
+        for field in ("sdkRoot", "resolvedSDKRoot"):
+            sdk = row[field]
+            need(isinstance(sdk, str) and sdk.startswith("/") and "\x00" not in sdk and
+                 ".." not in Path(sdk).parts and len(sdk) <= 4096 and
+                 re.fullmatch(sdk_pattern, sdk) is not None,
+                 "Crypto selected SDK root for " + platform)
+        for name in ("ar", "ranlib"):
+            tool = row[name]
+            keys(tool, "selectedPath resolvedPath path bytes sha256")
+            selected = tool["selectedPath"]
+            need(isinstance(selected, str) and selected.startswith("/") and
+                 Path(selected).name == name and len(selected) <= 4096 and
+                 "\x00" not in selected and ".." not in Path(selected).parts,
+                 "Crypto selected target archive tool")
+            crypto_tool_record({key: tool[key] for key in
+                                ("resolvedPath", "path", "bytes", "sha256")}, name)
+            need(tool["path"] in resolved_aliases[name],
+                 "Crypto selected SDK tool resolved basename: " + name)
+    return value
+
+
+def crypto_recipe_contract(work, library, platform, arch, sdk_tools):
+    dist = work / "dist"
+    prefix = dist / library / platform / "thin" / arch
+    scratch = dist / library / platform / "scratch" / arch
+    _, target_os, minimum, host_os = CRYPTO_PLATFORMS[platform]
+    target_cpu = "x86_64" if arch == "x86_64" else "arm64"
+    host = target_cpu + "-" + host_os + "-darwin"
+    cflags = ["-arch", arch, "-isysroot", sdk_tools["sdkRoot"],
+              "-target", target_cpu + "-apple-" + target_os, minimum]
+    if platform in ("tvos", "tvsimulator"):
+        cflags.append("-DHAVE_FORK=0")
+    dependencies = () if library == "gmp" else ("gmp",) if library == "nettle" else ("gmp", "nettle")
+    for dependency in dependencies:
+        cflags.append("-I" + str(dist / dependency / platform / "thin" / arch / "include"))
+    ldflags = ["-lc++", "-arch", arch, "-isysroot", sdk_tools["sdkRoot"],
+               "-target", target_cpu + "-apple-" + target_os, minimum]
+    for dependency in dependencies:
+        ldflags.append("-L" + str(dist / dependency / platform / "thin" / arch / "lib"))
+        if library != "gnutls":
+            ldflags.append("-l" + dependency)
+    flags = " ".join(cflags)
+    environment = {
+        "LC_CTYPE": "C", "CC": "/usr/bin/clang", "CXX": "/usr/bin/clang++",
+        "CURRENT_ARCH": arch, "CFLAGS": flags, "CPPFLAGS": flags,
+        "CXXFLAGS": flags, "ASMFLAGS": flags, "LDFLAGS": " ".join(ldflags),
+        "PKG_CONFIG_LIBDIR": ":".join(str(dist / name / platform / "thin" / arch /
+                                              "lib/pkgconfig") for name in CRYPTO_PKG_LIBRARIES) +
+                                ":" + str(scratch / "vortx-sdk-pkgconfig"),
+        "PKG_CONFIG_PATH": "", "PATH": CRYPTO_DEFAULT_PATH,
+        "AR": sdk_tools["ar"]["selectedPath"],
+        "RANLIB": sdk_tools["ranlib"]["selectedPath"],
+        "CC_FOR_BUILD": "/usr/bin/clang", "MAKEFLAGS": "-j1",
+        "CMAKE_BUILD_PARALLEL_LEVEL": "1", "CARGO_BUILD_JOBS": "1",
+    }
+    if library == "gmp":
+        environment["ABI"] = "64"
+    if library == "gnutls":
+        gmp = str(dist / "gmp" / platform / "thin" / arch)
+        nettle = str(dist / "nettle" / platform / "thin" / arch)
+        environment.update(
+            GMP_CFLAGS="-I" + gmp + "/include", GMP_LIBS="-L" + gmp + "/lib -lgmp",
+            NETTLE_CFLAGS="-I" + nettle + "/include",
+            NETTLE_LIBS="-L" + nettle + "/lib -lnettle",
+            HOGWEED_CFLAGS="-I" + nettle + "/include",
+            HOGWEED_LIBS="-L" + nettle + "/lib -lhogweed -lnettle -L" + gmp + "/lib -lgmp")
+    return {
+        "schema": 1, "library": library, "selector": CRYPTO_SELECTORS[library],
+        "sourceDirectory": str(dist / (library + "-" + CRYPTO_SELECTORS[library])),
+        "platform": platform, "arch": arch,
+        "configureArguments": ["--prefix=" + str(prefix), *CRYPTO_CONFIGURE_FLAGS[library],
+                               "--host=" + host],
+        "makeArguments": list(CRYPTO_MAKE_ARGUMENTS), "environment": environment,
+        "buildDirectory": str(scratch), "prefix": str(prefix),
+        "compiled": True, "installed": True,
+    }
+
+
+def crypto_macro(text, name):
+    values = re.findall(r"^\s*#\s*define\s+" + re.escape(name) +
+                        r"\s+([0-9]+)\s*(?:/\*.*\*/)?\s*$", text, re.M)
+    need(len(values) == 1, "Crypto expected one numeric macro " + name)
+    return int(values[0])
+
+
+def crypto_public_header(target, body):
+    text = body.decode("utf-8", errors="strict")
+    if target == "gmp":
+        need(tuple(crypto_macro(text, key) for key in
+                   ("__GNU_MP_VERSION", "__GNU_MP_VERSION_MINOR", "__GNU_MP_VERSION_PATCHLEVEL")) ==
+             (6, 3, 0) and (crypto_macro(text, "GMP_LIMB_BITS"),
+                            crypto_macro(text, "GMP_NAIL_BITS")) == (64, 0),
+             "Mixed GMP public header version/ABI")
+    elif target in ("nettle", "hogweed"):
+        need(tuple(crypto_macro(text, key) for key in
+                   ("NETTLE_VERSION_MAJOR", "NETTLE_VERSION_MINOR", "NETTLE_USE_MINI_GMP")) ==
+             (4, 0, 0), "Mixed Nettle version or mini-GMP backend")
+    elif target == "gnutls":
+        need(tuple(crypto_macro(text, key) for key in
+                   ("GNUTLS_VERSION_MAJOR", "GNUTLS_VERSION_MINOR", "GNUTLS_VERSION_PATCH")) ==
+             (3, 8, 13) and
+             len(re.findall(r'^\s*#\s*define\s+GNUTLS_VERSION\s+"3\.8\.13"\s*$', text, re.M)) == 1,
+             "Mixed GnuTLS public header version")
+    return body
+
+
+def crypto_build_evidence(value, work, library, platform, arch, sdk_tools, budget):
+    keys(value, "record generatedConfiguration installedConfiguration sdkMetadata")
+    expected = crypto_recipe_contract(work, library, platform, arch, sdk_tools)
+    scratch = Path(expected["buildDirectory"])
+    record_path = (scratch / "vortx-crypto-build.json").relative_to(work).as_posix()
+    record_body = crypto_inline_file(value["record"], 4 * MIB, record_path, budget)
+    record = crypto_load(record_body)
+    need(type(record) is dict and set(record) == set(expected) | {"generatedConfiguration"} and
+         exact_equal({key: record[key] for key in expected}, expected),
+         "Crypto configured build recipe differs from fixed policy")
+    names = CRYPTO_GENERATED + CRYPTO_EXTRA_GENERATED[library]
+    need(type(record["generatedConfiguration"]) is dict and
+         set(record["generatedConfiguration"]) == set(names) and
+         type(value["generatedConfiguration"]) is dict and
+         set(value["generatedConfiguration"]) == set(names),
+         "Crypto generated configuration set")
+    generated = {}
+    for name in names:
+        expected_path = (scratch / name).relative_to(work).as_posix()
+        body = crypto_inline_file(value["generatedConfiguration"][name], 16 * MIB,
+                                  expected_path, budget)
+        claimed = record["generatedConfiguration"][name]
+        keys(claimed, "bytes sha256")
+        need(exact_equal(claimed, {"bytes": len(body), "sha256": sha(body)}),
+             "Crypto build record/generated raw bytes")
+        generated[name] = body
+    installed_spec = CRYPTO_INSTALLED_CONFIGURATION[library]
+    need(type(value["installedConfiguration"]) is dict and
+         set(value["installedConfiguration"]) == set(installed_spec.values()),
+         "Crypto installed configuration set")
+    installed = {}
+    for generated_name, relative in installed_spec.items():
+        expected_path = (Path(expected["prefix"]) / relative).relative_to(work).as_posix()
+        body = crypto_inline_file(value["installedConfiguration"][relative], 16 * MIB,
+                                  expected_path, budget)
+        need(body == generated[generated_name],
+             "Crypto installed configuration differs from generated raw bytes")
+        installed[relative] = body
+    need(type(value["sdkMetadata"]) is dict and
+         set(value["sdkMetadata"]) == {"zlib.pc", "libxml-2.0.pc"},
+         "Crypto SDK metadata set")
+    for name in ("zlib.pc", "libxml-2.0.pc"):
+        crypto_inline_file(value["sdkMetadata"][name], 4 * MIB,
+                           (scratch / "vortx-sdk-pkgconfig" / name).relative_to(work).as_posix(),
+                           budget)
+    if library == "gmp":
+        crypto_public_header("gmp", installed["include/gmp.h"])
+    elif library == "nettle":
+        crypto_public_header("nettle", installed["include/nettle/version.h"])
+    else:
+        crypto_public_header("gnutls", installed["include/gnutls/gnutls.h"])
+    return installed, value["installedConfiguration"]
+
+
+def crypto_normalize_symbols(text):
+    symbols = set()
+    for line in text.splitlines():
+        value = line.strip()
+        if not value or value.endswith(":"):
+            continue
+        need(re.fullmatch(r"[A-Za-z_.$][A-Za-z0-9_.$]*", value) is not None,
+             "Unrecognized crypto nm row")
+        symbols.add(value[1:] if value.startswith("_") else value)
+    return symbols
+
+
+def crypto_validate_symbols(observations):
+    need(set(observations) == {item[0] for item in CRYPTO_LIBRARIES},
+         "Crypto symbol library set")
+    for target, required in CRYPTO_REQUIRED_SYMBOLS.items():
+        need(required <= observations[target]["defined"],
+             "Required defined crypto symbol missing from " + target)
+    consumer = observations["Libsmbclient"]
+    def helper(name):
+        return name.startswith(("nettle_", "_nettle_", "hogweed_", "__gmp",
+                                "gmp_", "mpz_", "mpn_", "mpq_", "mpf_"))
+    need(not any(helper(name) for name in consumer["undefined"]),
+         "Retained Samba directly imports a crypto-helper ABI")
+    need(not any(name.startswith("_gnutls_") for name in consumer["undefined"]),
+         "Retained Samba imports a private GnuTLS ABI")
+    need(not any(name.startswith(("gnutls_", "_gnutls_")) or helper(name)
+                 for name in consumer["defined"]),
+         "Retained Samba embeds crypto provider symbols")
+    imports = {name for name in consumer["undefined"] if name.startswith("gnutls_")} - consumer["defined"]
+    need(imports, "Retained Samba has no observed public GnuTLS imports")
+    need(not imports - observations["gnutls"]["defined"],
+         "Selected GnuTLS does not define retained Samba imports")
+    edges = {}
+    for target in ("nettle", "hogweed", "gnutls"):
+        required = {name for name in observations[target]["undefined"] if helper(name)} - observations[target]["defined"]
+        providers = set().union(*(observations[name]["defined"]
+                                  for name in ("gmp", "nettle", "hogweed") if name != target))
+        need(not required - providers, target + " crypto-helper imports are unresolved")
+        edges[target] = sorted(required)
+    need(edges["gnutls"], "Selected GnuTLS has no observed crypto-helper linkage")
+    return {"sambaGnuTLSImports": sorted(imports), "helperImports": edges}
+
+
+def crypto_normalized_gmp_header(body):
+    text = body.decode("utf-8", errors="strict")
+    for name in ("__GMP_CC", "__GMP_CFLAGS"):
+        definitions = re.findall(r"(?m)^[ \t]*#[ \t]*define[ \t]+" + name + r"\b[^\r\n]*$", text)
+        pattern = (r"(?m)^[ \t]*#[ \t]*define[ \t]+" + name +
+                   r'[ \t]+"(?:[^"\\\r\n]|\\[^\r\n])*"[ \t]*$')
+        need(len(definitions) == 1 and len(re.findall(pattern, text)) == 1,
+             "GMP diagnostic macro has an unapproved shape: " + name)
+        text = re.sub(pattern, "#define " + name + ' "<generated-diagnostic>"', text)
+    return text.encode("utf-8")
+
+
+def crypto_header_correspondence(target, packaged, thin_evidence):
+    if target != "gmp":
+        need(all(packaged == body for _, body, _ in thin_evidence),
+             "Packaged crypto header differs from selected thin build bytes")
+        return {"kind": "exact-checked-header-bytes"}
+    normalized = crypto_normalized_gmp_header(packaged)
+    matches = []
+    for identity, body, row in thin_evidence:
+        if crypto_normalized_gmp_header(body) == normalized:
+            if body == packaged:
+                matches.append({"platform": identity[0], "arch": identity[1], "header": row})
+        else:
+            need(False, "GMP thin headers differ beyond generated compiler diagnostics")
+    need(matches, "Packaged GMP header is not one exact selected thin header")
+    return {"kind": "gmp-two-generated-diagnostic-strings-only",
+            "normalizedSHA256": sha(normalized), "packagedHeaderFrom": matches}
+
+
+def crypto_zip_file(catalog, target, name, limit=512 * MIB):
+    body, rows = catalog[target]
+    with io.BytesIO(body) as stream, zip_open(stream, 100000) as archive:
+        _, data = _openssl_archive_member(archive, rows, name, limit)
+    return data
+
+
+def crypto_zip_catalog(zip_bodies):
+    expected_targets = {row[0] for row in CRYPTO_LIBRARIES}
+    need(set(zip_bodies) == expected_targets, "Retained crypto ZIP body set")
+    expected_slices = {slice_name for _, _, slice_name in CRYPTO_MATRIX}
+    expected_arches = {slice_name: sorted({arch for _, arch, candidate in CRYPTO_MATRIX
+                                          if candidate == slice_name})
+                       for slice_name in expected_slices}
+    catalog = {}
+    for target, _, _, binary_name in CRYPTO_LIBRARIES:
+        body = zip_bodies[target]
+        with io.BytesIO(body) as stream, zip_open(stream, 100000) as archive:
+            rows = zip_index(archive, count=100000, total=4 * 1024**3)
+            root = target + ".xcframework"
+            need(rows and all(name.startswith(root + "/") for name in rows),
+                 "Crypto ZIP root")
+            need(all((name.removeprefix(root + "/") == "Info.plist" or
+                      name.removeprefix(root + "/").split("/", 1)[0] in expected_slices)
+                     for name in rows),
+                 "Crypto ZIP has an undeclared top-level slice")
+            info_name = root + "/Info.plist"
+            _, info_body = _openssl_archive_member(archive, rows, info_name, 4 * MIB)
+            metadata = plistlib.loads(info_body)
+        need(isinstance(metadata, dict) and metadata.get("CFBundlePackageType") == "XFWK" and
+             metadata.get("XCFrameworkFormatVersion") == "1.0",
+             "Crypto XCFramework metadata identity")
+        available = metadata.get("AvailableLibraries")
+        need(isinstance(available, list) and len(available) == len(expected_slices),
+             "Crypto XCFramework slice declarations")
+        declarations = set()
+        for item in available:
+            need(isinstance(item, dict), "Crypto XCFramework declaration shape")
+            identifier = item.get("LibraryIdentifier")
+            need(isinstance(identifier, str) and identifier in expected_slices and
+                 identifier not in declarations, "Crypto XCFramework declaration identity")
+            platform = "macos" if identifier.startswith("macos-") else (
+                "tvos" if identifier.startswith("tvos-") else "ios")
+            expected = {"LibraryIdentifier": identifier,
+                        "LibraryPath": binary_name + ".framework",
+                        "SupportedArchitectures": expected_arches[identifier],
+                        "SupportedPlatform": platform}
+            if identifier.endswith("-simulator"):
+                expected["SupportedPlatformVariant"] = "simulator"
+            actual = dict(item)
+            need(isinstance(actual.get("SupportedArchitectures"), list) and
+                 all(isinstance(value, str) for value in actual["SupportedArchitectures"]),
+                 "Crypto XCFramework architecture list")
+            actual["SupportedArchitectures"] = sorted(actual["SupportedArchitectures"])
+            need(exact_equal(actual, expected), "Crypto XCFramework declaration differs")
+            declarations.add(identifier)
+        need(declarations == expected_slices, "Crypto XCFramework declaration coverage")
+        expected_links = {}
+        framework = root + "/macos-arm64_x86_64/" + binary_name + ".framework"
+        for name, destination in (("Versions/Current", "A"),
+                                  (binary_name, "Versions/Current/" + binary_name),
+                                  ("Resources", "Versions/Current/Resources")):
+            expected_links[framework + "/" + name] = destination
+        actual_links = {name: row["target"] for name, row in rows.items()
+                        if row["kind"] == "symlink"}
+        need(actual_links == expected_links, "Crypto exact macOS framework link set")
+        catalog[target] = (body, rows)
+    return catalog
+
+
+def crypto_plain_row(row, expected_path=None, maximum=512 * MIB):
+    keys(row, "path bytes sha256")
+    name = path(row["path"])
+    need(expected_path is None or name == expected_path, "Crypto recorded file path")
+    integer(row["bytes"], maximum)
+    need(row["bytes"] > 0, "Crypto recorded file is empty")
+    digest(row["sha256"])
+    return row
+
+
+def crypto_zip_row(catalog, target, package_path):
+    prefix = "artifacts/" + target + ".xcframework/"
+    need(package_path.startswith(prefix), "Crypto packaged path root")
+    archive_name = target + ".xcframework/" + package_path.removeprefix(prefix)
+    row = catalog[target][1].get(archive_name)
+    need(isinstance(row, dict) and row.get("kind") == "file",
+         "Crypto packaged regular file missing from original ZIP")
+    return {"path": package_path, "bytes": row["bytes"], "sha256": row["sha256"]}, archive_name
+
+
+def crypto_framework_layout(target, binary_name, slice_name, catalog):
+    if not slice_name.startswith("macos-"):
+        return {"kind": "shallow"}
+    package_framework = ("artifacts/" + target + ".xcframework/" + slice_name + "/" +
+                         binary_name + ".framework")
+    archive_framework = (target + ".xcframework/" + slice_name + "/" +
+                         binary_name + ".framework")
+    links = []
+    for name, destination in (("Versions/Current", "A"),
+                              (binary_name, "Versions/Current/" + binary_name),
+                              ("Resources", "Versions/Current/Resources")):
+        row = catalog[target][1].get(archive_framework + "/" + name)
+        body = destination.encode("utf-8")
+        need(isinstance(row, dict) and row.get("kind") == "symlink" and
+             row.get("target") == destination and row.get("bytes") == len(body) and
+             row.get("sha256") == sha(body), "Crypto macOS framework link bytes")
+        links.append({"path": package_framework + "/" + name, "target": destination,
+                      "bytes": len(body), "sha256": sha(body)})
+    info_path = package_framework + "/Versions/A/Resources/Info.plist"
+    info, _ = crypto_zip_row(catalog, target, info_path)
+    return {"kind": "fixed-macos-versions-A", "links": links, "info": info}
+
+
+def crypto_reader_caps(value):
+    def reader_bytes(item):
+        if isinstance(item, dict):
+            if "text" in item:
+                crypto_recorded_text(item, "native reader")
+                return len(json.dumps(item, sort_keys=True).encode("utf-8"))
+            return sum(reader_bytes(child) for child in item.values())
+        if isinstance(item, list):
+            return sum(reader_bytes(child) for child in item)
+        return 0
+    def metadata(item):
+        if isinstance(item, dict):
+            return {key: metadata(child) for key, child in item.items()
+                    if key not in ("bodyBase64", "text")}
+        if isinstance(item, list):
+            return [metadata(child) for child in item]
+        return item
+    need(reader_bytes(value) <= CRYPTO_MAX_READER_JSON, "Crypto aggregate reader JSON cap")
+    need(len(json.dumps(metadata(value), indent=2, sort_keys=True).encode("utf-8")) <=
+         CRYPTO_MAX_METADATA_JSON, "Crypto receipt metadata JSON cap")
+
+
+def crypto_chain_receipt(body, zip_bodies, archive_sources,
+                         candidate_package_row, candidate_package_body):
+    """Validate the frozen gate receipt against retained raw artifact bytes."""
+    need(isinstance(body, bytes) and 0 < len(body) <= CRYPTO_MAX_RECEIPT,
+         "Crypto receipt raw byte bound")
+    value = crypto_load(body)
+    need(type(value) is dict, "Crypto receipt object")
+    keys(value, "schemaVersion profile work packagePolicy inlineBodyPolicy versions sourcePins "
+                "tools packageManifest xcframeworkInfo releaseSourceBoundary rows acceptance openGates")
+    expected_identity = {
+        "schemaVersion": 2, "profile": CRYPTO_CHAIN_PROFILE,
+        "packagePolicy": CRYPTO_PACKAGE_POLICY,
+        "inlineBodyPolicy": CRYPTO_INLINE_BODY_POLICY,
+        "versions": CRYPTO_VERSIONS, "sourcePins": CRYPTO_SOURCE_PINS,
+        "acceptance": CRYPTO_ACCEPTANCE, "openGates": list(CRYPTO_OPEN_GATES),
+    }
+    need(all(exact_equal(value[key], expected) for key, expected in expected_identity.items()),
+         "Crypto receipt fixed identity")
+    work_text = value["work"]
+    need(type(work_text) is str and 0 < len(work_text) <= 4096 and
+         work_text.startswith("/") and "\x00" not in work_text,
+         "Crypto receipt WORK path")
+    work = Path(work_text)
+    need(work.is_absolute() and str(work) == work_text and ".." not in work.parts,
+         "Crypto receipt normalized WORK path")
+
+    tools = crypto_tools(value["tools"])
+    catalog = crypto_zip_catalog(zip_bodies)
+
+    need(type(candidate_package_row) is dict and
+         candidate_package_row.get("kind") == "file" and
+         candidate_package_row.get("bytes") == len(candidate_package_body) and
+         candidate_package_row.get("sha256") == sha(candidate_package_body),
+         "Crypto candidate Package.swift raw bytes")
+    package_manifest = {"path": "Package.swift", "bytes": len(candidate_package_body),
+                        "sha256": sha(candidate_package_body)}
+    crypto_plain_row(value["packageManifest"], "Package.swift", 4 * MIB)
+    need(exact_equal(value["packageManifest"], package_manifest),
+         "Crypto package manifest/raw candidate correspondence")
+
+    need(type(value["xcframeworkInfo"]) is dict and
+         set(value["xcframeworkInfo"]) == {item[0] for item in CRYPTO_LIBRARIES},
+         "Crypto XCFramework metadata target set")
+    for target, _, _, _ in CRYPTO_LIBRARIES:
+        expected, _ = crypto_zip_row(
+            catalog, target, "artifacts/" + target + ".xcframework/Info.plist")
+        crypto_plain_row(value["xcframeworkInfo"][target], expected["path"], 4 * MIB)
+        need(exact_equal(value["xcframeworkInfo"][target], expected),
+             "Crypto XCFramework metadata/raw ZIP correspondence")
+
+    need(type(archive_sources) is dict and
+         type(archive_sources.get("capture")) is dict and
+         type(archive_sources["capture"].get("receipt")) is dict,
+         "Crypto release-source boundary metadata")
+    source_receipt = archive_sources["capture"]["receipt"]
+    release_boundary = {
+        "path": "dist/crypto-sources/receipt.json",
+        "bytes": source_receipt["bytes"], "sha256": source_receipt["sha256"],
+    }
+    crypto_plain_row(value["releaseSourceBoundary"], release_boundary["path"],
+                     CRYPTO_MAX_RECEIPT)
+    need(exact_equal(value["releaseSourceBoundary"], release_boundary),
+         "Crypto gate/source-helper receipt correspondence")
+
+    rows = value["rows"]
+    need(type(rows) is list and len(rows) == len(CRYPTO_MATRIX),
+         "Crypto exact nine-row matrix")
+    expected_matrix = list(CRYPTO_MATRIX)
+    observed_matrix = []
+    build_evidence = {}
+    inline_budget = [0]
+    for row in rows:
+        keys(row, "platform arch slice libraries builds sambaGnuTLSImports helperImports")
+        identity = (row["platform"], row["arch"], row["slice"])
+        observed_matrix.append(identity)
+        need(identity in CRYPTO_MATRIX and identity not in build_evidence,
+             "Crypto matrix row identity")
+        need(type(row["builds"]) is dict and
+             set(row["builds"]) == {"gmp", "nettle", "gnutls"},
+             "Crypto build family set")
+        platform, arch, _ = identity
+        sdk_tools = tools["platforms"][platform]
+        build_evidence[identity] = {}
+        for library in ("gmp", "nettle", "gnutls"):
+            bodies, recorded_rows = crypto_build_evidence(
+                row["builds"][library], work, library, platform, arch,
+                sdk_tools, inline_budget)
+            build_evidence[identity][library] = {
+                "bodies": bodies, "rows": recorded_rows,
+            }
+    need(observed_matrix == expected_matrix,
+         "Crypto matrix order/coverage differs from frozen gate")
+
+    expected_slice_arches = {
+        slice_name: sorted({arch for _, arch, candidate in CRYPTO_MATRIX
+                            if candidate == slice_name})
+        for _, _, slice_name in CRYPTO_MATRIX
+    }
+    library_map = {target: (directory, archive_name, binary_name)
+                   for target, directory, archive_name, binary_name in CRYPTO_LIBRARIES}
+
+    def plain_inline(row):
+        keys(row, "path bytes sha256 bodyBase64")
+        return {key: row[key] for key in ("path", "bytes", "sha256")}
+
+    def thin_header_material(identity, target):
+        platform, arch, _ = identity
+        if target == "Libsmbclient":
+            rows = [
+                {"path": ("dist/libsmbclient/" + platform + "/thin/" + arch +
+                          "/include/samba-4.0/" + name),
+                 "bytes": size, "sha256": checksum}
+                for name, (size, checksum) in CRYPTO_SMB_HEADERS.items()
+            ]
+            return rows, []
+        source = "nettle" if target == "hogweed" else target
+        relative = {"gmp": "include/gmp.h",
+                    "nettle": "include/nettle/version.h",
+                    "hogweed": "include/nettle/version.h",
+                    "gnutls": "include/gnutls/gnutls.h"}[target]
+        evidence = build_evidence[identity][source]
+        return ([plain_inline(evidence["rows"][relative])],
+                [evidence["bodies"][relative]])
+
+    for row in rows:
+        platform, arch, slice_name = row["platform"], row["arch"], row["slice"]
+        identity = (platform, arch, slice_name)
+        libraries = row["libraries"]
+        need(type(libraries) is dict and set(libraries) == set(library_map),
+             "Crypto row library set")
+        observations = {}
+        for target, library in libraries.items():
+            keys(library, "version thin thinHeaders packaged packagedHeaders correspondence "
+                          "frameworkLayout headerCorrespondence architectures defined undefined")
+            need(type(library["version"]) is str and
+                 library["version"] == CRYPTO_VERSIONS[target],
+                 "Crypto library version: " + target)
+            directory, archive_name, binary_name = library_map[target]
+            thin_path = ("dist/" + directory + "/" + platform + "/thin/" + arch +
+                         "/lib/" + archive_name)
+            thin = crypto_plain_row(library["thin"], thin_path)
+            if target == "Libsmbclient":
+                need((thin["bytes"], thin["sha256"]) ==
+                     CRYPTO_SMB_PINS[platform + "/" + arch],
+                     "Retained Samba thin archive identity")
+
+            framework = ("artifacts/" + target + ".xcframework/" + slice_name + "/" +
+                         binary_name + ".framework")
+            packaged_path = (framework + "/Versions/A/" + binary_name
+                             if slice_name.startswith("macos-") else
+                             framework + "/" + binary_name)
+            packaged_expected, packaged_archive_name = crypto_zip_row(
+                catalog, target, packaged_path)
+            packaged = crypto_plain_row(library["packaged"], packaged_path)
+            need(exact_equal(packaged, packaged_expected),
+                 "Crypto packaged binary/raw ZIP correspondence")
+            packaged_body = crypto_zip_file(catalog, target, packaged_archive_name)
+            need((len(packaged_body), sha(packaged_body)) ==
+                 (packaged["bytes"], packaged["sha256"]),
+                 "Crypto packaged binary body identity")
+            segments = _macho_arch_hashes(packaged_body)
+            slice_arches = expected_slice_arches[slice_name]
+            if segments is None:
+                need(packaged_body.startswith(b"!<arch>\n") and len(slice_arches) == 1,
+                     "Crypto one-arch package must be an ar body or a parsed FAT container")
+                segments = {slice_arches[0]: (len(packaged_body), sha(packaged_body))}
+            need(set(segments) == set(slice_arches),
+                 "Crypto exact packaged architecture set")
+            segment = {"bytes": segments[arch][0], "sha256": segments[arch][1]}
+            keys(library["correspondence"], "bytes sha256")
+            need(exact_equal(library["correspondence"], segment) and
+                 exact_equal(segment, {"bytes": thin["bytes"], "sha256": thin["sha256"]}),
+                 "Crypto packaged/thin archive segment correspondence")
+
+            architectures = crypto_recorded_text(library["architectures"], "architecture")
+            need(sorted(architectures.split()) == slice_arches,
+                 "Crypto recorded architecture set")
+            defined = crypto_normalize_symbols(
+                crypto_recorded_text(library["defined"], "defined symbols"))
+            undefined = crypto_normalize_symbols(
+                crypto_recorded_text(library["undefined"], "undefined symbols"))
+            observations[target] = {"defined": defined, "undefined": undefined}
+
+            expected_thin_headers, thin_bodies = thin_header_material(identity, target)
+            need(type(library["thinHeaders"]) is list and
+                 len(library["thinHeaders"]) == len(expected_thin_headers),
+                 "Crypto thin header count")
+            for reported, expected in zip(library["thinHeaders"],
+                                          expected_thin_headers, strict=True):
+                crypto_plain_row(reported, expected["path"], 4 * MIB)
+                need(exact_equal(reported, expected),
+                     "Crypto thin header/build evidence correspondence")
+
+            header_names = ({"gmp": ("gmp.h",),
+                             "nettle": ("version.h",),
+                             "hogweed": ("nettle/version.h",),
+                             "gnutls": ("gnutls.h",),
+                             "Libsmbclient": tuple(CRYPTO_SMB_HEADERS)}[target])
+            expected_packaged_headers, packaged_header_bodies = [], []
+            for header_name in header_names:
+                header_path = framework + "/Headers/" + (
+                    "samba-4.0/" + header_name if target == "Libsmbclient" else header_name)
+                expected_header, zip_name = crypto_zip_row(catalog, target, header_path)
+                header_body = crypto_zip_file(catalog, target, zip_name, 4 * MIB)
+                expected_packaged_headers.append(expected_header)
+                packaged_header_bodies.append(header_body)
+                if target == "Libsmbclient":
+                    size, checksum = CRYPTO_SMB_HEADERS[header_name]
+                    need((len(header_body), sha(header_body)) == (size, checksum),
+                         "Retained Samba packaged public header identity")
+                else:
+                    crypto_public_header(target, header_body)
+            need(type(library["packagedHeaders"]) is list and
+                 len(library["packagedHeaders"]) == len(expected_packaged_headers),
+                 "Crypto packaged header count")
+            for reported, expected in zip(library["packagedHeaders"],
+                                          expected_packaged_headers, strict=True):
+                crypto_plain_row(reported, expected["path"], 4 * MIB)
+                need(exact_equal(reported, expected),
+                     "Crypto packaged header/raw ZIP correspondence")
+
+            if target == "gmp":
+                thin_evidence = []
+                for candidate in CRYPTO_MATRIX:
+                    if candidate[2] != slice_name:
+                        continue
+                    candidate_rows, candidate_bodies = thin_header_material(candidate, target)
+                    thin_evidence.append(((candidate[0], candidate[1]),
+                                          candidate_bodies[0], candidate_rows[0]))
+                expected_headers = crypto_header_correspondence(
+                    target, packaged_header_bodies[0], thin_evidence)
+            elif target == "Libsmbclient":
+                expected_headers = {"kind": "exact-checked-header-bytes"}
+            else:
+                expected_headers = crypto_header_correspondence(
+                    target, packaged_header_bodies[0],
+                    [(identity[:2], thin_bodies[0], expected_thin_headers[0])])
+            need(exact_equal(library["headerCorrespondence"], expected_headers),
+                 "Crypto public-header correspondence policy")
+            expected_layout = crypto_framework_layout(
+                target, binary_name, slice_name, catalog)
+            need(exact_equal(library["frameworkLayout"], expected_layout),
+                 "Crypto framework layout/raw ZIP correspondence")
+
+        symbol_policy = crypto_validate_symbols(observations)
+        need(exact_equal(row["sambaGnuTLSImports"],
+                         symbol_policy["sambaGnuTLSImports"]) and
+             exact_equal(row["helperImports"], symbol_policy["helperImports"]),
+             "Crypto symbol-boundary receipt")
+
+    need(inline_budget[0] <= CRYPTO_MAX_INLINE_RAW,
+         "Crypto aggregate inline raw-body cap")
+    crypto_reader_caps(value)
+    canonical = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    need(body == canonical and len(canonical) <= CRYPTO_MAX_RECEIPT,
+         "Crypto canonical final receipt bytes")
+    return value
+
+
+def apple(archive, native, captured, recipe, archive_sources):
     gate = read(archive, "apple-artifact-gate.txt", MIB).decode("utf-8")
     need("TLS VERIFY PASSED: 5 Apple slices and 9 architectures use SecureTransport" in gate.splitlines() and
          "MPVKit-DVFEL ARTIFACT VERIFY PASSED: FFmpeg 9.0.2 (libavcodec/libavformat 63.1.102), dovi_split, and Apple TLS gates" in gate.splitlines() and
+         "PASS dependency-profile " + NATIVE_UPGRADES_PROFILE in gate.splitlines() and
+         "PASS openssl-profile " + OPENSSL_BOM_PROFILE in gate.splitlines() and
+         "PASS apple-openssl-receipt" in gate.splitlines() and
+         "PASS apple-shaderc-receipt" in gate.splitlines() and
+         "PASS " + CRYPTO_SOURCE_PROFILE + " verify" in gate.splitlines() and
+         "PASS crypto-chain archive/public-symbol correspondence; native SMB/runtime gates OPEN" in gate.splitlines() and
          "PASS apple-sent-abi" in gate.splitlines() and "PASS apple-reference-abi" in gate.splitlines() and
          "FAILED" not in gate, "Apple original, sent-request and finite-reader artifact gates")
+    need("apple-shaderc-original-all.zip" in archive.namelist() and
+         "apple-shaderc-original-xcframework.zip" in archive.namelist(),
+         "Missing Shaderc original output")
+    need("apple-shaderc-inputs.json" in archive.namelist(), "Missing Shaderc receipt output")
+    need("apple-openssl-builds.json" in archive.namelist(), "Missing OpenSSL BOM output")
+    need(all(name in archive.namelist() for name in
+             {pin["output"] for pin in CRYPTO_SOURCE_OUTPUTS} |
+             {CRYPTO_CAPTURE_TAR_OUTPUT, CRYPTO_CAPTURE_RECEIPT_OUTPUT, CRYPTO_CHAIN_OUTPUT}),
+         "Missing crypto source/artifact receipt output")
+    shaderc_sources = []
+    retained_all_body = None
+    for output_name, (source_name, expected_bytes, expected_sha256) in zip(
+            ("apple-shaderc-original-all.zip", "apple-shaderc-original-xcframework.zip"),
+            SHADERC_SOURCE_SPECS, strict=True):
+        data = read(archive, output_name, expected_bytes + 1)
+        need(len(data) == expected_bytes and sha(data) == expected_sha256,
+             "Exact published Shaderc body: " + output_name)
+        shaderc_sources.append(dict(name=source_name, bytes=len(data), sha256=sha(data)))
+        if source_name == SHADERC_SOURCE_SPECS[0][0]:
+            retained_all_body = data
+    need(retained_all_body is not None, "Missing retained Shaderc all-ZIP body")
+    with io.BytesIO(retained_all_body) as retained_stream, zip_open(retained_stream) as retained_archive:
+        retained_all_rows = zip_index(retained_archive)
+    shaderc_receipt(load(read(archive, "apple-shaderc-inputs.json")), shaderc_sources,
+                     recipe["scripts/native-media-hosted/evidence.py"], retained_all_rows)
+    openssl_bom = load(read(archive, "apple-openssl-builds.json"))
+    openssl_receipt(openssl_bom, recipe["scripts/native-media-hosted/evidence.py"])
     candidate, actual = tar_index(archive, "apple-candidate.tar.gz", file_limit=512 * MIB, total=4 * 1024**3, capture=("MPVKit-DVFEL/Package.swift",), allow_dirs=True)
     zips, _ = tar_index(archive, "apple-original-library-zips.tar", compressed=False, file_limit=512 * MIB, total=4 * 1024**3, allow_dirs=True)
     need(set(zips) == {name + ".xcframework.zip" for name in LIBRARIES} and all(row["kind"] == "file" for row in zips.values()), "Apple original ZIP set")
     expected = {}
+    openssl_zip_bodies = {}
+    crypto_zip_bodies = {}
     # Read each original ZIP through its authenticated tar member, without filesystem extraction.
     with archive.open("apple-original-library-zips.tar") as stream, tarfile.open(fileobj=stream, mode="r|") as libraries:
         for member in libraries:
@@ -621,17 +2269,29 @@ def apple(archive, native, captured):
                 continue
             base = member.name.removesuffix(".xcframework.zip")
             with libraries.extractfile(member) as incoming, io.BytesIO(incoming.read(512 * MIB + 1)) as saved, zip_open(saved) as library:
+                body = saved.getvalue()
                 rows = zip_index(library)
-            target = base if base == "Libplacebo" else base + "-GPL"
+            if base in ("Libssl", "Libcrypto"):
+                openssl_zip_bodies[base] = body
+            if base in ("gmp", "nettle", "hogweed", "gnutls", "Libsmbclient"):
+                crypto_zip_bodies[base] = body
+            target = base if base in UNSUFFIXED_LIBRARIES else base + "-GPL"
             for name, row in rows.items():
                 need(name.startswith(base + ".xcframework/"), "Apple library root")
                 expected["MPVKit-DVFEL/artifacts/" + target + ".xcframework/" + name.split("/", 1)[1]] = row
+    openssl_archive_binding(openssl_bom, openssl_zip_bodies)
+    crypto_chain_receipt(
+        read(archive, CRYPTO_CHAIN_OUTPUT, CRYPTO_MAX_RECEIPT),
+        crypto_zip_bodies, archive_sources,
+        candidate["MPVKit-DVFEL/Package.swift"],
+        actual["MPVKit-DVFEL/Package.swift"])
     for name, row in native.items():
         if any(name.startswith("source-0/Sources/" + value + "/") for value in ("_MPVKit", "_MPVKit-GPL", "_FFmpeg", "_FFmpeg-GPL")):
             expected["MPVKit-DVFEL/" + name.removeprefix("source-0/")] = row
     package = captured["source-0/Package.swift"].decode("utf-8")
+    shaderc_remote_target(package)
     for base in LIBRARIES:
-        target = base if base == "Libplacebo" else base + "-GPL"
+        target = base if base in UNSUFFIXED_LIBRARIES else base + "-GPL"
         pattern = r'\.binaryTarget\(\s*name:\s*"%s",\s*url:\s*"[^"]*",\s*checksum:\s*"[^"]*"\s*\)' % re.escape(target)
         replacement = '.binaryTarget(\n            name: "%s",\n            path: "artifacts/%s.xcframework"\n        )' % (target, target)
         package, count = re.subn(pattern, lambda _: replacement, package)
@@ -672,7 +2332,7 @@ def package(args):
             need(set(inputs) == expected and type(manifest) is dict and set(manifest) == expected - {"artifact-sha256.json", "build.log"}, "Exact original artifact membership/coverage")
             need(all(digest(value) == inputs[name]["sha256"] for name, value in manifest.items()), "Original manifest content")
             meta = load(read(archive, "source-format-v2.json"))
-            keys(meta, "schema sourceProfile lane appSourceCommit runId attempt workflowRef recipeManifestSHA256 legacyReceiptSHA256 producerArchive nativeArchive producerFiles sources outputs")
+            keys(meta, "schema sourceProfile lane appSourceCommit runId attempt workflowRef recipeManifestSHA256 legacyReceiptSHA256 producerArchive nativeArchive producerFiles sources archiveSources outputs")
             need(type(meta["schema"]) is int and meta["schema"] == 2 and meta["sourceProfile"] == PROFILE and
                  all(meta[key] == receipt[key] for key in ("lane", "appSourceCommit", "runId", "attempt", "workflowRef")) and
                  meta["legacyReceiptSHA256"] == manifest["result.json"], "Exact v2 metadata identity")
@@ -706,17 +2366,15 @@ def package(args):
                 need(created == untracked(args.lane, row, recipe) and all(item["kind"] == "file" for item in row["files"] if item["tracked"] is False), "Exact recipe-created untracked file set/content")
                 need(files and not set(native) & set(files), "Missing/overlapping native source group")
                 native.update(files)
-                links = {}
-                need(type(row["gitlinks"]) is list and len(row["gitlinks"]) <= 1000, "Gitlink count")
-                for item in row["gitlinks"]:
-                    keys(item, "path commit")
-                    name = path(item["path"])
-                    need(name not in links and re.fullmatch(r"[0-9a-f]{40}", item["commit"]) and any(name0.startswith(row["root"] + "/" + name + "/") for name0 in files), "Gitlink source preservation")
-                    links[name] = item["commit"]
+                need(len(row["gitlinks"]) <= 1000, "Gitlink count")
+                links = validate_native_gitlinks(row, files)
                 if row["commit"] == PINS["libplacebo"]:
                     need(all(links.get(name) == commit for name, commit in GITLINKS.items()), "Pinned libplacebo Gitlinks")
             known = {"libmpv-master-8c67647b": PINS["mpv"], "FFmpeg-9.0.2-946fcce0": PINS["ffmpeg"],
-                     "libplacebo-master-4c426e46": PINS["libplacebo"]} if args.lane == "apple" else dict(ANDROID_PINS)
+                     "libplacebo-7.387.0-275f7dea": PINS["libplacebo"],
+                     "lcms2-2.20rc1-13154341": "1315434113566bcf3eb46c2485fcc1c0a56ab806",
+                     "libdav1d-1.5.4-54706fc6": "54706fc6bc0cdecab7e9593974a4039cc038fca7",
+                     OPENSSL_ROOT: OPENSSL_SOURCE_SHA} if args.lane == "apple" else dict(ANDROID_PINS)
             known["_native-mpvkit" if args.lane == "apple" else "_native-publisher"] = WRAPPER[args.lane]
             need(set(groups) == set(known) and sources[0]["commit"] == WRAPPER[args.lane] and
                  all(groups[name]["commit"] == commit for name, commit in known.items()), "Exact admitted public native roots/revisions")
@@ -727,6 +2385,9 @@ def package(args):
                 need(row and row["kind"] == "file" and row["sha256"] == checksum, "Cancellation/finite-reader afterimage: " + name)
             ffmpeg = next(row for row in meta["sources"] if row["commit"] == PINS["ffmpeg"])
             require_response_source({row["path"]: row for row in ffmpeg["files"]}, args.lane)
+            expected_archive_sources = crypto_source_outputs(archive) if args.lane == "apple" else None
+            need(exact_equal(meta["archiveSources"], expected_archive_sources),
+                 "Archive-backed source metadata/raw-body/capture correspondence")
             for key, name, expected_rows in (("producerArchive", "producer-inputs-v2.tar.gz", producer), ("nativeArchive", "native-sources-v2.tar.gz", native)):
                 keys(meta[key], "name sha256 bytes")
                 need(meta[key] == dict(name=name, sha256=inputs[name]["sha256"], bytes=inputs[name]["bytes"]), "V2 archive identity")
@@ -738,7 +2399,8 @@ def package(args):
                 keys(row, "name sha256 bytes")
                 need(row["name"] in OUTPUTS[args.lane] and row["name"] not in bound and row == dict(name=row["name"], sha256=inputs[row["name"]]["sha256"], bytes=inputs[row["name"]]["bytes"]), "Same-byte lane output binding")
                 bound[row["name"]] = row
-            android(archive, inputs, recipe) if args.lane == "android" else apple(archive, native, captured)
+            android(archive, inputs, recipe) if args.lane == "android" else apple(
+                archive, native, captured, recipe, expected_archive_sources)
             out = args.out.absolute()
             need(out.parent.is_dir() and out.parent.resolve() == out.parent and not out.exists() and not out.is_symlink(), "Fresh real output parent")
             out.mkdir(mode=0o700, exist_ok=False)
@@ -781,7 +2443,10 @@ def package(args):
                           "originalZIP": outputs["original-ci.zip"], "toolSHA256": sha(tool), "gitEntrypoint": git_tool, "sourceKitContent": content,
                           "sourceKitExcludedBinaryCarriers": {name: {key: inputs[name][key] for key in ("bytes", "sha256")} for name in sorted(excluded)},
                           "outputs": outputs, "nativeRebuilt": False, "independentBinaryInspection": False,
-                          "sourceCaptureScope": "cached/nonignored native files and recursive Gitlinks; Android original full deps/config archives also retained",
+                          "sourceCaptureScope": ("seven strict Git roots plus three independently reindexed archive-backed crypto release roots"
+                                                 if args.lane == "apple" else
+                                                 "cached/nonignored native files and recursive Gitlinks; Android original full deps/config archives also retained"),
+                          "archiveSourceRootCount": 3 if args.lane == "apple" else 0,
                           "unresolvedExternalSourceObligations": True,
                           "externalCIauthenticationRequired": True,
                           "originalCIReclassified": False,

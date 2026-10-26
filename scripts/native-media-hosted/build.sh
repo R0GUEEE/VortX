@@ -62,14 +62,36 @@ if [[ $lane == apple ]]; then
     MPVKIT_DVFEL_WORK="$upstream" MPVKIT_DVFEL_DEST="$out/MPVKit-DVFEL" \
         bash scripts/build-mpvkit-dvfel.sh
     # Existing builder already runs these; explicit retained log identifies candidate acceptance only.
-    bash scripts/verify-mpvkit-dvfel-artifacts.sh "$out/MPVKit-DVFEL" > "$out/apple-artifact-gate.txt" 2>&1
+    bash scripts/verify-mpvkit-dvfel-artifacts.sh "$out/MPVKit-DVFEL" \
+        --dependency-profile native-upgrades-openssl410-crypto-v4 \
+        --shaderc-inputs "$upstream/dist/libshaderc-2026.1.0" \
+        --openssl-builds "$upstream/dist/openssl/vortx-openssl-builds.json" \
+        --crypto-work "$upstream" > "$out/apple-artifact-gate.txt" 2>&1
     python3 scripts/native-media-hosted/evidence.py apple-sent-abi "$out/MPVKit-DVFEL" >> "$out/apple-artifact-gate.txt" 2>&1
     tar -czf "$out/apple-candidate.tar.gz" -C "$out" MPVKit-DVFEL
     # Keep the original per-library ZIP bytes used by assembly, separately from the assembled package.
     tar -cf "$out/apple-original-library-zips.tar" -C "$upstream/dist/release" \
         Libmpv.xcframework.zip Libavcodec.xcframework.zip Libavdevice.xcframework.zip \
         Libavfilter.xcframework.zip Libavformat.xcframework.zip Libavutil.xcframework.zip \
-        Libswresample.xcframework.zip Libswscale.xcframework.zip Libplacebo.xcframework.zip
+        Libswresample.xcframework.zip Libswscale.xcframework.zip Libplacebo.xcframework.zip lcms2.xcframework.zip Libdav1d.xcframework.zip Libssl.xcframework.zip Libcrypto.xcframework.zip \
+        gmp.xcframework.zip nettle.xcframework.zip hogweed.xcframework.zip gnutls.xcframework.zip Libsmbclient.xcframework.zip
+    # Retain exact original published Shaderc inputs and the tool-bound comparison receipt.
+    shaderc_inputs="$upstream/dist/libshaderc-2026.1.0"
+    cp "$shaderc_inputs/libshaderc.zip" "$out/apple-shaderc-original-all.zip"
+    cp "$shaderc_inputs/Libshaderc_combined.xcframework.zip" "$out/apple-shaderc-original-xcframework.zip"
+    cp "$shaderc_inputs/vortx-shaderc-inputs.json" "$out/apple-shaderc-inputs.json"
+    cp "$upstream/dist/openssl/vortx-openssl-builds.json" "$out/apple-openssl-builds.json"
+    crypto_capture="$upstream/dist/crypto-capture"
+    crypto_chain="$upstream/dist/crypto-chain/vortx-crypto-chain.json"
+    [ -d "$crypto_capture/archives" ] && [ -f "$crypto_capture/crypto-release-sources.tar" ] &&
+        [ -f "$crypto_capture/crypto-release-sources.json" ] || exit 1
+    [ -f "$crypto_chain" ] || exit 1
+    cp "$crypto_capture/archives/gmp-6.3.0.tar.xz" "$out/apple-crypto-source-gmp.tar.xz"
+    cp "$crypto_capture/archives/nettle-4.0.tar.gz" "$out/apple-crypto-source-nettle.tar.gz"
+    cp "$crypto_capture/archives/gnutls-3.8.13.tar.xz" "$out/apple-crypto-source-gnutls.tar.xz"
+    cp "$crypto_capture/crypto-release-sources.tar" "$out/apple-crypto-release-sources.tar"
+    cp "$crypto_capture/crypto-release-sources.json" "$out/apple-crypto-release-sources.json"
+    cp "$crypto_chain" "$out/apple-crypto-chain.json"
 else
     # Downstream make/meson generators invoke python3 from PATH. Verify that SAME isolated
     # interpreter and its complete pinned third-party closure before downloading/building.
@@ -193,7 +215,7 @@ PYTHON_TOOLCHAIN
     bash patch.sh
     # Require the exact reviewed HTTP afterimage before any native compilation.
     [[ $(git -C deps/ffmpeg rev-parse HEAD) == 946fcce07b6dcd0331c8cc609192aeff5e1924f8 ]] || exit 1
-    printf '%s  %s\n' d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802 \
+    printf '%s  %s\n' d1301474b4389256f9862565a399a8888366a68d2e3630338848289fe8a9c831 \
         deps/ffmpeg/libavformat/http.c | shasum -a 256 -c -
     # Layout and actual TLS producer changes must come from the same full source build.
     printf '%s  %s\n' \
@@ -205,34 +227,49 @@ PYTHON_TOOLCHAIN
         b04fb28df85f1ef3883b4927d0bfab4477f400128c122f794ff13b4b9c85bebc deps/ffmpeg/libavformat/tls_securetransport.c \
         7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac deps/ffmpeg/libavformat/tls_mbedtls.c \
         a8c74f929942423550dba65f738fd4d2ad2d63d975665f64e6da1b00f5001645 deps/ffmpeg/libavformat/vortx_reference_reader.inc \
-        1000225eb4660e936bdf5984b62c6cbd7ae2c747472e55aabb6dc620d4f386dc deps/ffmpeg/libavformat/vortx_reference_pin.h \
-        adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87 deps/ffmpeg/libavformat/vortx_reference_reader_stream.h | shasum -a 256 -c -
+        e0ccea8466e28169d0882fd664081baa09d3a39626d5351a31804b6dc4bb4e94 deps/ffmpeg/libavformat/vortx_reference_pin.h \
+        adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87 deps/ffmpeg/libavformat/vortx_reference_reader_stream.h \
+        fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c deps/ffmpeg/libavformat/vortx_reference_sparse.h \
+        0e3201c26657765a1e6e7a15fe9db1bcac5cf96a8cb7e9d691533e0f4bf3f15f deps/ffmpeg/libavformat/vortx_reference_sparse.inc | shasum -a 256 -c -
     [[ $(git -C deps/mpv rev-parse HEAD) == 8c67647b50059406c5c0444903597281b81516cf ]] || exit 1
     printf '%s  %s\n' \
-        e5f08305137ed3f7b28fa24ee431e19222153a6cfed10f12d109b92da55567a4 deps/mpv/demux/demux.c \
+        f5a4cd7bf4e29902ef965e43027755c19ded1423129a3fbe9808ad89e64c0e1c deps/mpv/demux/demux.c \
         bee52b38477ce7c8efd9a50e778f720ea8c9eec577afab29998682c26ffe75e2 deps/mpv/demux/demux.h \
         d945ae1699d383c3d645d2ab963abb166fd0c19f10a4ab144505e7fbfb0408fb deps/mpv/demux/demux_lavf.c \
-        322fa3a90ad9a461c549b2aaebf50adba07b9862d11b8690355a6d789571c752 deps/mpv/demux/reference_reader.c \
-        4894866fc49f8ab7af9f4d5b3a29bfc7d1ac4153483fd04354db3e89e55cad03 deps/mpv/demux/reference_reader.h \
-        6b21e2b72c87c49d609fdfca0252c32635d50054abe4eaae33340fc5b7da1a9c deps/mpv/demux/reference_reader_internal.h \
-        b8c78d8239af8c968c53ca83f601f91e521090d6d2d7522101fb68b332074940 deps/mpv/stream/stream_lavf.c \
-        dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b deps/mpv/stream/reference_source.h \
+        222ec8920d38971d386470d8172e45a89a52350eb352124ddf954be9409b792b deps/mpv/demux/reference_reader.c \
+        59d669fb370bc12f01856031b8f9d908eb1d50a927d955ecb1fe0b4484c2407d deps/mpv/demux/reference_reader.h \
+        ded5dc02785e98934a966de87df4337e4c6aed0275bce26da2017883917f4c8d deps/mpv/demux/reference_reader_internal.h \
+        650bf7b94771e70a6b934b21e362bc77f66ceb1d23ee684d2b169c6e694544a5 deps/mpv/stream/stream_lavf.c \
+        1f606a977b55f18fdb9f9fc7f5e4549b5774bef10a06c33b06ab945531909b29 deps/mpv/stream/reference_source.h \
         adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87 deps/mpv/stream/vortx_reference_reader_stream.h \
-        316e9aca3c4960701eab42e62ca1005379e082e1a21b4788b7581811ca360147 deps/mpv/meson.build \
-        242697e6be2bd2e10272679a3d618f07a07138b7a15b3b94cdbfdf521599bb25 deps/mpv/player/owned_subtitle.c \
+        32c9a1321883f6a980652173061c9c01727ef83b7a0dfe6e8e3a22364b753d47 deps/mpv/meson.build \
+        014b93845488ef873a4d29c4c8dd4ada69d244626e7a7b38bac82809989c6b29 deps/mpv/player/owned_subtitle.c \
         8d2f0ee5c972d1da69213cd80fbe249bcf3f19d9de8a2ef87e241d2f08f06284 deps/mpv/player/owned_subtitle.h \
-        661388627775cf58dec688388d36aba9e457b0f3e97d349a91033f3f5f1f6e3b deps/mpv/player/command.c \
-        4402bcd094a80a769479320ac852c329acb39781fa8fc478d0ed79af10ae19e2 deps/mpv/player/reference_owned.inc \
+        e7a19f392bb69e9d208382f157234ac3c908d22a0d4afee5f372ee8f9d33dade deps/mpv/player/command.c \
+        23ac96bfedefcab2234afa2a6f329a36fac6735effca6798b4043d777b060217 deps/mpv/player/reference_owned.inc \
         63c498dd4bdc9fa9c6d128f1be8f37d7cdf377c853888342897f6639601662f6 deps/mpv/sub/owned_text_slot.h \
         9b57ccd08e5777e2bc644cbf8001df0301552edf5cf24e36185a54f4cd667195 deps/mpv/sub/osd.c \
         6e2137b90fe7f2915a528bdd83426448afbd099229f65342dbfd85d1ba1d347b deps/mpv/sub/dec_sub.c \
-        cb9b5af7c3f87a8dda584617c1f20a90a9331182d54a50c7e5fb8e64e74b384f deps/mpv/sub/dec_sub.h | shasum -a 256 -c -
+        cb9b5af7c3f87a8dda584617c1f20a90a9331182d54a50c7e5fb8e64e74b384f deps/mpv/sub/dec_sub.h \
+        1b7cc4d40efa0620bd10669dc44a7d6b32d0236e2ae2be3510a3bac0829e39c2 deps/mpv/demux/demux_mkv.c \
+        38df7814efc3aa7434e5afe269406a989ab6a5fa22a200aa28149a3ab68e46d9 deps/mpv/demux/reference_mkv.h \
+        3ac442e8ff489d11f4a5df6b86f8d964457753f66ce5f3eb530d7db3746b6f7c deps/mpv/demux/reference_mkv_reader.c \
+        4b013b6e794257a576bc01f6becb9d120cb878e0851b2e0bdd2225dcf7b18df2 deps/mpv/demux/reference_mkv_sparse.h \
+        e36c6a879138b26e125f647c9254b41674b22b338ab12838376fe8d38bdae056 deps/mpv/demux/reference_mkv_sparse_planner.c \
+        c88597a42186ceb81f45f1f44b3734469cf06889ea3bf91e4853b861943e84fe deps/mpv/demux/reference_mkv_sparse_planner.h \
+        5deae68bf3c680aa4898ca6c8e0c0e76aa4628bffa693d0ae2d6dd287d9a5e64 deps/mpv/demux/reference_mkv_sparse_worker.c \
+        fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c deps/mpv/stream/vortx_reference_sparse.h | shasum -a 256 -c -
     for private_header in deps/ffmpeg/libavformat/vortx_http_request.h deps/mpv/stream/vortx_http_request.h; do
         [[ -f "$private_header" && ! -L "$private_header" ]] || exit 1
         printf '%s  %s\n' d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9 "$private_header" | shasum -a 256 -c -
     done
     cmp -s deps/ffmpeg/libavformat/vortx_http_request.h deps/mpv/stream/vortx_http_request.h
     cmp -s deps/ffmpeg/libavformat/vortx_reference_reader_stream.h deps/mpv/stream/vortx_reference_reader_stream.h
+    for sparse_header in deps/ffmpeg/libavformat/vortx_reference_sparse.h deps/mpv/stream/vortx_reference_sparse.h; do
+        [[ -f "$sparse_header" && ! -L "$sparse_header" ]] || exit 1
+        printf '%s  %s\n' fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c "$sparse_header" | shasum -a 256 -c -
+    done
+    cmp -s deps/ffmpeg/libavformat/vortx_reference_sparse.h deps/mpv/stream/vortx_reference_sparse.h
     # Retain exactly the reviewed native source/patch state before any compiler runs.
     git -C deps/ffmpeg diff --binary > "$out/ffmpeg-applied.patch"
     cp deps/ffmpeg/libavformat/tls_mbedtls_vortx_distrust.h "$out/tls_mbedtls_vortx_distrust.h"

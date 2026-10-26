@@ -40,7 +40,7 @@ jobs:
       - name: Verify reviewed recipes
         run: |
           set -euo pipefail
-          printf '%s  %s\n' 83fd8922b81eb06b400e15be489d7d7dfe04508c20f5ff2024225f2776bb938d scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
+          printf '%s  %s\n' 36394b6782d0ae0b14275b51dd15e03c22745a0d1cfad51ed7cab06fb37b93d1 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
           shasum -a 256 -c scripts/native-media-hosted/inputs.sha256
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -64,6 +64,7 @@ jobs:
           name: native-media-apple-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             _build/native-media/apple/*.tar*
+            _build/native-media/apple/*.zip
             _build/native-media/apple/*.json
             _build/native-media/apple/*.txt
             _build/native-media/apple/*.log
@@ -85,7 +86,7 @@ jobs:
       - name: Verify reviewed recipes
         run: |
           set -euo pipefail
-          printf '%s  %s\n' 83fd8922b81eb06b400e15be489d7d7dfe04508c20f5ff2024225f2776bb938d scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
+          printf '%s  %s\n' 36394b6782d0ae0b14275b51dd15e03c22745a0d1cfad51ed7cab06fb37b93d1 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
           shasum -a 256 -c scripts/native-media-hosted/inputs.sha256
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

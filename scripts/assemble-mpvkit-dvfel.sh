@@ -2,11 +2,15 @@
 # Assemble app/Vendor/MPVKit-DVFEL from a completed MPVKit build tree.
 #
 # Only the libraries we actually rebuilt become LOCAL binaryTargets:
-#   Libmpv-GPL, Libav{codec,device,filter,format,util}-GPL, Libsw{resample,scale}-GPL, Libplacebo
-# Everything else (openssl, gnutls, libass, libdovi, MoltenVK, shaderc, lcms2, dav1d, uavs3d,
-# smbclient, bluray, luajit, unibreak, freetype, fribidi, harfbuzz, gmp, nettle) is UNCHANGED from
+#   Libmpv-GPL, Libav{codec,device,filter,format,util}-GPL, Libsw{resample,scale}-GPL, Libplacebo,
+#   lcms2, Libdav1d, Libssl, Libcrypto, gmp, nettle, hogweed, gnutls, Libsmbclient
+# LittleCMS lcms2.20rc1 is a source-built prerelease candidate, not a stable shipping claim.
+# dav1d 1.5.4 is also source-built; Shaderc alone moves to its paired 2026.1.0 wrapper.
+# OpenSSL 4.1.0 is source-built; its two targets are actual local artifacts.
+# Everything else (libass, libdovi, MoltenVK, uavs3d, bluray, luajit, unibreak, freetype, fribidi,
+# harfbuzz) is UNCHANGED from
 # the 0.41.0-n8.1.2 pin and stays an upstream remote binaryTarget with its existing checksum. That
-# keeps the delta to exactly the Dolby-Vision-relevant libraries.
+# keeps the remaining wrappers unchanged while the selected source candidate is evaluated.
 #
 # Usage: assemble-mpvkit-dvfel.sh <mpvkit-build-dir> <dest-package-dir>
 set -euo pipefail
@@ -16,7 +20,7 @@ PKG="${2:?usage: assemble-mpvkit-dvfel.sh <mpvkit-build-dir> <dest-package-dir>}
 # Read from the per-library ZIPS, not dist/release/xcframework: each library's createXCFramework()
 # wipes that directory before it writes, so only the LAST library built (libmpv) still has an
 # unpacked .xcframework there. The zips are produced per library before the next wipe, so they are
-# the only place all nine survive together.
+# the only place all eighteen survive together.
 REL="$SRC/dist/release"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -46,15 +50,25 @@ Libavutil:Libavutil-GPL
 Libswresample:Libswresample-GPL
 Libswscale:Libswscale-GPL
 Libplacebo:Libplacebo
+lcms2:lcms2
+Libdav1d:Libdav1d
+Libssl:Libssl
+Libcrypto:Libcrypto
+gmp:gmp
+nettle:nettle
+hogweed:hogweed
+gnutls:gnutls
+Libsmbclient:Libsmbclient
 MAP
 
-# Rewrite the nine rebuilt binaryTargets from url+checksum to a local path.
+# Rewrite the eighteen rebuilt binaryTargets from url+checksum to a local path.
 python3 - "$SRC/Package.swift" "$PKG/Package.swift" <<'PY'
 import re, sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
 local = ["Libmpv-GPL","Libavcodec-GPL","Libavdevice-GPL","Libavfilter-GPL","Libavformat-GPL",
-         "Libavutil-GPL","Libswresample-GPL","Libswscale-GPL","Libplacebo"]
+         "Libavutil-GPL","Libswresample-GPL","Libswscale-GPL","Libplacebo","lcms2","Libdav1d","Libssl","Libcrypto",
+         "gmp","nettle","hogweed","gnutls","Libsmbclient"]
 for name in local:
     pat = re.compile(r'\.binaryTarget\(\s*name:\s*"%s",\s*url:\s*"[^"]*",\s*checksum:\s*"[^"]*"\s*\)'
                      % re.escape(name))

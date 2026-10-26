@@ -1,11 +1,15 @@
 """Secretless producer contracts. Synthetic ELF text is not actual native acceptance."""
+import base64
 import hashlib
 import importlib.util
 import io
 import json
+import plistlib
+import stat
 from contextlib import redirect_stdout
 from copy import deepcopy
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -188,7 +192,7 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertIn('copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"', apple)
         self.assertIn('/patch/FFmpeg/0001-response-witness.patch"', apple)
         self.assertLess(apple.index('copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"'),
-                        apple.index('swift run --build-path'))
+                        apple.index('swift run --jobs 1 --build-path'))
         self.assertLess(apple.index('build enable-gpl platform=ios,tvos,macos'),
                         apple.index('FFMPEG_RESPONSE_SOURCE='))
         copy = 'cp "$root/scripts/ffmpeg-response-witness.patch" "$upstream/buildscripts/patches/ffmpeg/0002-response-witness.patch"'
@@ -199,9 +203,11 @@ class NativeMediaProducer(unittest.TestCase):
         source_check = android.index("deps/ffmpeg/libavformat/http.c | shasum")
         self.assertLess(android.index("bash patch.sh"), source_check)
         self.assertLess(source_check, android.index('for arch in armv7l arm64 x86_64;'))
+        # The original witness delta is pinned above; final source includes the
+        # complete later finite/sparse sequence rather than its historical HTTP.
         for recipe in (apple, android):
             self.assertIn("946fcce07b6dcd0331c8cc609192aeff5e1924f8", recipe)
-            self.assertIn("d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802", recipe)
+            self.assertIn("d1301474b4389256f9862565a399a8888366a68d2e3630338848289fe8a9c831", recipe)
         # The preexisting lexical patcher remains the dependency sequence authority.
         patcher = (ROOT / "scripts/native-media-hosted/android/buildscripts/patch.sh").read_text()
         self.assertIn('PATCHES=(patches/*)', patcher)
@@ -241,15 +247,15 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertLess(apple.index('copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"'),
                         apple.index('copy_exact "$RESPONSE_GENERATION_PATCH" "$GENERATED_RESPONSE_GENERATION_PATCH"'))
         self.assertLess(apple.index('copy_exact "$RESPONSE_GENERATION_PATCH" "$GENERATED_RESPONSE_GENERATION_PATCH"'),
-                        apple.index('swift run --build-path'))
+                        apple.index('swift run --jobs 1 --build-path'))
         copy = 'cp "$root/scripts/ffmpeg-response-generation.patch" "$upstream/buildscripts/patches/ffmpeg/0003-response-generation.patch"'
         self.assertIn(copy, android)
         self.assertLess(android.index('cp "$root/scripts/ffmpeg-response-witness.patch"'), android.index(copy))
         self.assertLess(android.index(copy), android.index("bash patch.sh"))
         for recipe in (apple, android):
-            for afterimage in ("d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802",
-                               "b8c78d8239af8c968c53ca83f601f91e521090d6d2d7522101fb68b332074940",
-                               "dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b"):
+            for afterimage in ("d1301474b4389256f9862565a399a8888366a68d2e3630338848289fe8a9c831",
+                               "650bf7b94771e70a6b934b21e362bc77f66ceb1d23ee684d2b169c6e694544a5",
+                               "1f606a977b55f18fdb9f9fc7f5e4549b5774bef10a06c33b06ab945531909b29"):
                 self.assertIn(afterimage, recipe)
         # Source contracts only. This does not exercise an HTTP owner or reader.
 
@@ -322,7 +328,7 @@ class NativeMediaProducer(unittest.TestCase):
         for lane, groups in MODULE.CURRENT_SOURCE_ROOTS.items():
             native = next(name for name, pin in groups.items() if pin == MODULE.CURRENT_NATIVE_PINS["mpv"])
             self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES[lane][native]["stream/reference_source.h"],
-                             "dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b")
+                             "1f606a977b55f18fdb9f9fc7f5e4549b5774bef10a06c33b06ab945531909b29")
 
     def test_transport_carriers_are_exact_ordered_v2_and_keep_private_retention(self):
         ffmpeg = (ROOT / "scripts/ffmpeg-original-transport-evidence.patch").read_bytes()
@@ -357,7 +363,7 @@ class NativeMediaProducer(unittest.TestCase):
             copy = 'copy_exact "$TRANSPORT_' + kind + '_PATCH" "$GENERATED_TRANSPORT_' + kind + '_PATCH"'
             self.assertIn(copy, apple)
             self.assertIn(apple_number, apple)
-            self.assertLess(apple.index(copy), apple.index('swift run --build-path'))
+            self.assertLess(apple.index(copy), apple.index('swift run --jobs 1 --build-path'))
             android_copy = ('cp "$root/scripts/' + source + '" "$upstream/buildscripts/patches/' +
                             folder + '/' + android_number + '"')
             self.assertIn(android_copy, android)
@@ -381,14 +387,15 @@ class NativeMediaProducer(unittest.TestCase):
         ffmpeg = (ROOT / 'scripts/ffmpeg-finite-reference-reader.patch').read_bytes()
         mpv = (ROOT / 'scripts/mpv-finite-reference-reader.patch').read_bytes()
         self.assertEqual(hashlib.sha256(ffmpeg).hexdigest(),
-                         '6927705a432e987d2e13e2d5922756cb6c395d5c060268191cf6c1d94063b2df')
+                         'a06f4b8b9eadc12eace93b1b340e0555116061188d0674f063698ea75d953abd')
         self.assertEqual(hashlib.sha256(mpv).hexdigest(),
-                         'c8752eb80824a5487f5d80addc473da09778d6dd8cb1adac899079aa2bc211f2')
+                         '42c020f9f6550af5072a8eff1b5860249bb9df5f9418855cb4636cd15854f7f2')
         self.assertEqual([line for line in ffmpeg.decode().splitlines() if line.startswith('+++ ')],
                          ['+++ b/libavformat/' + name for name in
                           ('http.c', 'url.h', 'avio.c', 'tcp.c', 'tls.c',
                            'vortx_reference_reader.inc', 'vortx_reference_pin.h',
-                           'vortx_reference_reader_stream.h')])
+                           'vortx_reference_reader_stream.h', 'vortx_reference_sparse.h',
+                           'vortx_reference_sparse.inc')])
         self.assertEqual([line for line in mpv.decode().splitlines() if line.startswith('+++ ')],
                          ['+++ b/' + name for name in
                           ('demux/demux.c', 'demux/demux.h', 'demux/demux_lavf.c',
@@ -397,7 +404,15 @@ class NativeMediaProducer(unittest.TestCase):
                            'stream/reference_source.h', 'stream/vortx_reference_reader_stream.h',
                            'meson.build', 'player/owned_subtitle.c', 'player/owned_subtitle.h',
                            'player/command.c', 'player/reference_owned.inc', 'sub/owned_text_slot.h',
-                           'sub/osd.c', 'sub/dec_sub.c', 'sub/dec_sub.h')])
+                           'sub/osd.c', 'sub/dec_sub.c', 'sub/dec_sub.h',
+                           'demux/demux_mkv.c', 'demux/reference_mkv.h',
+                           'demux/reference_mkv_reader.c', 'demux/reference_mkv_sparse.h',
+                           'demux/reference_mkv_sparse_planner.c',
+                           'demux/reference_mkv_sparse_planner.h',
+                           'demux/reference_mkv_sparse_worker.c',
+                           'stream/vortx_reference_sparse.h')])
+        self.assertEqual(ffmpeg.decode().count('new file mode 100644\n'), 5)
+        self.assertEqual(mpv.decode().count('new file mode 100644\n'), 12)
         for text in (ffmpeg.decode(), mpv.decode()):
             self.assertNotIn('--export-dynamic', text)
             self.assertNotIn('--dynamic-list', text)
@@ -411,7 +426,7 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertIn('READER_' + kind + '_PATCH="$REPO/scripts/' + source + '"', apple)
             self.assertIn(apple_number + '-finite-reference-reader.patch', apple)
             self.assertLess(apple.index(previous), apple.index(copy))
-            self.assertLess(apple.index(copy), apple.index('swift run --build-path'))
+            self.assertLess(apple.index(copy), apple.index('swift run --jobs 1 --build-path'))
             android_copy = ('cp "$root/scripts/' + source + '" "$upstream/buildscripts/patches/' +
                             folder + '/' + android_number + '-finite-reference-reader.patch"')
             self.assertLess(android.index('cp "$root/scripts/' + folder + '-original-transport-evidence.patch"'),
@@ -432,7 +447,7 @@ class NativeMediaProducer(unittest.TestCase):
         consumer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(consumer)
         self.assertEqual(MODULE.CURRENT_SOURCE_PROFILE, consumer.PROFILE)
-        self.assertEqual(consumer.PROFILE, "original-http-finite-reference-reader-v1")
+        self.assertEqual(consumer.PROFILE, "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-candidate")
         self.assertEqual(MODULE.CURRENT_RECIPE_PATHS, consumer.RECIPE_PATHS)
         self.assertEqual(len(consumer.RECIPE_PATHS), 36)
         manifest = ROOT / "scripts/native-media-hosted/inputs.sha256"
@@ -442,12 +457,53 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertEqual(MODULE.CURRENT_RESPONSE_FILES, consumer.RESPONSE)
         self.assertEqual(MODULE.CURRENT_READER_FFMPEG_CREATED, consumer.READER_FFMPEG_CREATED)
         self.assertEqual(MODULE.CURRENT_READER_MPV_FILES, consumer.READER_MPV)
-        self.assertEqual(len(consumer.READER_FFMPEG_CREATED), 3)
-        self.assertEqual(len(consumer.READER_MPV), 17)
+        self.assertEqual(consumer.READER_FFMPEG_CREATED, {
+            "libavformat/vortx_reference_reader.inc": "a8c74f929942423550dba65f738fd4d2ad2d63d975665f64e6da1b00f5001645",
+            "libavformat/vortx_reference_pin.h": "e0ccea8466e28169d0882fd664081baa09d3a39626d5351a31804b6dc4bb4e94",
+            "libavformat/vortx_reference_reader_stream.h": "adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87",
+            "libavformat/vortx_reference_sparse.h": "fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c",
+            "libavformat/vortx_reference_sparse.inc": "0e3201c26657765a1e6e7a15fe9db1bcac5cf96a8cb7e9d691533e0f4bf3f15f",
+        })
+        self.assertEqual(consumer.RESPONSE["libavformat/http.c"],
+                         "d1301474b4389256f9862565a399a8888366a68d2e3630338848289fe8a9c831")
+        self.assertEqual(len(consumer.READER_MPV), 25)
         self.assertNotIn("meson.build", consumer.READER_MPV)
+        native_created = {
+            "demux/reference_mkv.h": "38df7814efc3aa7434e5afe269406a989ab6a5fa22a200aa28149a3ab68e46d9",
+            "demux/reference_mkv_reader.c": "3ac442e8ff489d11f4a5df6b86f8d964457753f66ce5f3eb530d7db3746b6f7c",
+            "demux/reference_mkv_sparse.h": "4b013b6e794257a576bc01f6becb9d120cb878e0851b2e0bdd2225dcf7b18df2",
+            "demux/reference_mkv_sparse_planner.c": "e36c6a879138b26e125f647c9254b41674b22b338ab12838376fe8d38bdae056",
+            "demux/reference_mkv_sparse_planner.h": "c88597a42186ceb81f45f1f44b3734469cf06889ea3bf91e4853b861943e84fe",
+            "demux/reference_mkv_sparse_worker.c": "5deae68bf3c680aa4898ca6c8e0c0e76aa4628bffa693d0ae2d6dd287d9a5e64",
+            "stream/vortx_reference_sparse.h": "fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c",
+        }
+        self.assertEqual({name: consumer.READER_MPV[name] for name in native_created},
+                         native_created)
+        self.assertEqual(consumer.READER_MPV["demux/demux_mkv.c"],
+                         "1b7cc4d40efa0620bd10669dc44a7d6b32d0236e2ae2be3510a3bac0829e39c2")
+        self.assertEqual(consumer.READER_MPV["demux/reference_reader.c"],
+                         "222ec8920d38971d386470d8172e45a89a52350eb352124ddf954be9409b792b")
+        self.assertEqual(consumer.READER_MPV["demux/demux.c"],
+                         "f5a4cd7bf4e29902ef965e43027755c19ded1423129a3fbe9808ad89e64c0e1c")
+        self.assertEqual(consumer.READER_MPV["demux/reference_reader.h"],
+                         "59d669fb370bc12f01856031b8f9d908eb1d50a927d955ecb1fe0b4484c2407d")
+        self.assertEqual(consumer.READER_MPV["player/command.c"],
+                         "e7a19f392bb69e9d208382f157234ac3c908d22a0d4afee5f372ee8f9d33dade")
+        self.assertEqual(consumer.READER_MPV["player/owned_subtitle.c"],
+                         "014b93845488ef873a4d29c4c8dd4ada69d244626e7a7b38bac82809989c6b29")
+        self.assertEqual(consumer.READER_MPV["player/reference_owned.inc"],
+                         "23ac96bfedefcab2234afa2a6f329a36fac6735effca6798b4043d777b060217")
+        self.assertEqual(set(consumer.CREATED_MPV), set(native_created) | {
+            "player/owned_subtitle.c", "player/owned_subtitle.h", "player/reference_owned.inc",
+            "demux/reference_reader.c", "demux/reference_reader.h",
+            "demux/reference_reader_internal.h", "stream/vortx_reference_reader_stream.h",
+            "sub/owned_text_slot.h", "stream/reference_source.h", "stream/vortx_http_request.h",
+        })
+        self.assertEqual({name: consumer.CREATED_MPV[name] for name in native_created},
+                         native_created)
         meson = {
-            "apple": "4c748249732131a2942b66087fa7142a2f9c239274cc272a35ec36221c010205",
-            "android": "316e9aca3c4960701eab42e62ca1005379e082e1a21b4788b7581811ca360147"}
+            "apple": "c2abd8f89a772717fdd4bcdbb4a2236d9fb28eca029acfe84bf12f7333df5a55",
+            "android": "32c9a1321883f6a980652173061c9c01727ef83b7a0dfe6e8e3a22364b753d47"}
         self.assertEqual(MODULE.CURRENT_READER_MPV_MESON, meson)
         self.assertEqual(consumer.READER_MPV_MESON, meson)
         self.assertEqual(MODULE.CURRENT_MBEDTLS_FILES, consumer.MBEDTLS)
@@ -455,7 +511,7 @@ class NativeMediaProducer(unittest.TestCase):
             "apple": "77d72cb88fc662b984f051335b356abc3e76e97ce39302dde6961ecdbba7a332",
             "android": "7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac"})
         for lane, groups in MODULE.CURRENT_SOURCE_ROOTS.items():
-            self.assertEqual(len(consumer.READER_MPV | {"meson.build": consumer.READER_MPV_MESON[lane]}), 18)
+            self.assertEqual(len(consumer.READER_MPV | {"meson.build": consumer.READER_MPV_MESON[lane]}), 26)
             for directory, commit in groups.items():
                 self.assertEqual(consumer.untracked(lane, {"commit": commit}, recipe),
                                  MODULE.CURRENT_UNTRACKED_FILES[lane][directory])
@@ -468,7 +524,8 @@ class NativeMediaProducer(unittest.TestCase):
                        "db1b96a39966a51edbb10975b1cc67a69a6c744fa4101931470717cd63d44da0",
                        "b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f",
                        "205a083b57dd105078e3f71a1d0fad1fb6342d023d9fae32a60cbf6227218e74",
-                       "faebc27e86d3bf4375ef9c4461526f58caeaf3a6974d776f1a52159e29cdedd2")
+                       "faebc27e86d3bf4375ef9c4461526f58caeaf3a6974d776f1a52159e29cdedd2",
+                       "d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802")
         for lane in ("apple", "android"):
             expected = dict(consumer.RESPONSE, **{"libavformat/tls_mbedtls.c": consumer.MBEDTLS[lane]})
             valid = {name: {"kind": "file", "tracked": True, "sha256": checksum}
@@ -476,7 +533,7 @@ class NativeMediaProducer(unittest.TestCase):
             valid.update({name: {"kind": "file", "tracked": False, "sha256": checksum}
                           for name, checksum in consumer.READER_FFMPEG_CREATED.items()})
             self.assertEqual(len(expected), 8)
-            self.assertEqual(len(valid), 11)
+            self.assertEqual(len(valid), 13)
             for guard in (MODULE.require_current_response_source, consumer.require_response_source):
                 guard(valid, lane)
                 for path in expected:
@@ -509,6 +566,1189 @@ class NativeMediaProducer(unittest.TestCase):
                 other = "android" if lane == "apple" else "apple"
                 with self.assertRaises(ValueError):
                     guard(valid, other)
+
+        # The dependency candidate retains seven strict Apple Git roots, adds
+        # three independently authenticated archive-backed source roots, and
+        # carries the fixed Shaderc/OpenSSL/crypto receipt families. Synthetic
+        # bytes below test policy only; fixed production pins are asserted before
+        # substitutions.
+        expected_apple_roots = {
+            '_native-mpvkit': '2103893078c5e339073b11737b86f7f22b9c4491',
+            'libmpv-master-8c67647b': '8c67647b50059406c5c0444903597281b81516cf',
+            'FFmpeg-9.0.2-946fcce0': '946fcce07b6dcd0331c8cc609192aeff5e1924f8',
+            'libplacebo-7.387.0-275f7dea': '275f7dea27924cdd34ab2e6c20e448b6bc4fab65',
+            'lcms2-2.20rc1-13154341': '1315434113566bcf3eb46c2485fcc1c0a56ab806',
+            'libdav1d-1.5.4-54706fc6': '54706fc6bc0cdecab7e9593974a4039cc038fca7',
+            'openssl-4.1.0-2f4e3a5f': '2f4e3a5fec05394068cfa7379890ab552483a8a6'}
+        self.assertEqual(MODULE.CURRENT_SOURCE_ROOTS['apple'], expected_apple_roots)
+        self.assertEqual(len(MODULE.CURRENT_SOURCE_ROOTS['apple']), 7)
+        self.assertEqual(len(consumer.OUTPUTS['apple']), 13)
+        self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES['apple']['libdav1d-1.5.4-54706fc6'], {})
+        self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES['apple']['openssl-4.1.0-2f4e3a5f'], {})
+        self.assertEqual(MODULE.CURRENT_SOURCE_ROOTS['android']['harfbuzz'],
+                         '35f656a1a2bab548ea7f54a6dd3fba2b09680d14')
+        self.assertEqual(consumer.ANDROID_PINS['harfbuzz'],
+                         '35f656a1a2bab548ea7f54a6dd3fba2b09680d14')
+        self.assertNotIn(expected_apple_roots['lcms2-2.20rc1-13154341'],
+                         MODULE.CURRENT_SOURCE_ROOTS['android'].values())
+        libraries = ('Libmpv', 'Libavcodec', 'Libavdevice', 'Libavfilter', 'Libavformat',
+                     'Libavutil', 'Libswresample', 'Libswscale', 'Libplacebo', 'lcms2', 'Libdav1d',
+                     'Libssl', 'Libcrypto', 'gmp', 'nettle', 'hogweed', 'gnutls', 'Libsmbclient')
+        self.assertEqual(tuple(consumer.LIBRARIES), libraries)
+        self.assertEqual(consumer.NATIVE_UPGRADES_PROFILE, 'native-upgrades-openssl410-crypto-v4')
+        self.assertEqual(consumer.CRYPTO_CHAIN_PROFILE, 'native-upgrades-crypto-chain-v1')
+        self.assertEqual(consumer.CRYPTO_SOURCE_PROFILE,
+                         'gmp630-nettle400-gnutls3813-release-sources-v1')
+        self.assertEqual(tuple(row['id'] for row in consumer.CRYPTO_SOURCE_OUTPUTS),
+                         ('gmp', 'nettle', 'gnutls'))
+        self.assertEqual(len(consumer.CRYPTO_MATRIX), 9)
+        self.assertEqual(tuple(row[0] for row in consumer.CRYPTO_LIBRARIES),
+                         ('gmp', 'nettle', 'hogweed', 'gnutls', 'Libsmbclient'))
+        self.assertEqual(set(consumer.OUTPUTS['apple']), {
+            'apple-candidate.tar.gz', 'apple-original-library-zips.tar',
+            'apple-artifact-gate.txt', 'apple-shaderc-original-all.zip',
+            'apple-shaderc-original-xcframework.zip', 'apple-shaderc-inputs.json',
+            'apple-openssl-builds.json', 'apple-crypto-source-gmp.tar.xz',
+            'apple-crypto-source-nettle.tar.gz', 'apple-crypto-source-gnutls.tar.xz',
+            'apple-crypto-release-sources.tar', 'apple-crypto-release-sources.json',
+            'apple-crypto-chain.json'})
+        self.assertEqual(tuple(consumer.OPENSSL_ENV_KEYS[-3:]),
+                         ('MAKEFLAGS', 'CMAKE_BUILD_PARALLEL_LEVEL', 'CARGO_BUILD_JOBS'))
+        self.assertEqual(consumer.OPENSSL_SOURCE_SHA,
+                         '2f4e3a5fec05394068cfa7379890ab552483a8a6')
+        self.assertEqual(consumer.OPENSSL_SOURCE_TAG, 'openssl-4.1.0')
+        self.assertEqual(consumer.OPENSSL_SOURCE_VERSION, '4.1.0')
+        self.assertEqual(consumer.OPENSSL_BOM_PROFILE, 'openssl-4.1.0-source-v1')
+        self.assertEqual(consumer.OPENSSL_OUTPUT_ROOT, 'openssl')
+        self.assertEqual(len(consumer.OPENSSL_GITLINKS), 11)
+        self.assertEqual(consumer.OPENSSL_GITLINKS['cloudflare-quiche'],
+                         '7ab6a55cfe471267d61e4d28ba43d41defcd87e0')
+        self.assertEqual(consumer.OPENSSL_GITLINKS['fuzz/corpora'],
+                         '7e3fb43a75c55275759e8bdb5c32de4b50978eab')
+        self.assertEqual(consumer.OPENSSL_GITLINKS['wycheproof'],
+                         '3fa63dd0344abb611f1fb1d77e119938603ea230')
+        gitlink_row = {'root': 'source-openssl', 'commit': consumer.OPENSSL_SOURCE_SHA,
+                       'gitlinks': [{'path': name, 'commit': commit}
+                                    for name, commit in consumer.OPENSSL_GITLINKS.items()]}
+        consumer.validate_native_gitlinks(gitlink_row, {'source-openssl/.gitmodules': {}})
+        for mutate, files in (
+                (lambda row: row['gitlinks'].pop(), {'source-openssl/.gitmodules': {}}),
+                (lambda row: row['gitlinks'][0].update(commit='0' * 40), {'source-openssl/.gitmodules': {}}),
+                (lambda row: row['gitlinks'].append({'path': 'extra/corpora', 'commit': '1' * 40}),
+                 {'source-openssl/.gitmodules': {}}),
+                (lambda row: None, {'source-openssl/.gitmodules': {},
+                                    'source-openssl/cloudflare-quiche/file': {}}),
+                (lambda row: None, {'source-openssl/.gitmodules': {},
+                                    'source-openssl/cloudflare-quiche': {}})):
+            observed = deepcopy(gitlink_row)
+            mutate(observed)
+            with self.assertRaises(ValueError):
+                consumer.validate_native_gitlinks(observed, files)
+        self.assertEqual(consumer.OPENSSL_CONFIGURE_FLAGS,
+                         ('no-async', 'no-shared', 'no-dso', 'no-tests', 'no-apps', 'no-docs'))
+        targets = {base: base if base in consumer.UNSUFFIXED_LIBRARIES else base + '-GPL'
+                   for base in libraries}
+        source_package = ''.join('.binaryTarget(name: "%s", url: "https://fixture.invalid/%s.zip", '
+                                 'checksum: "%s")\n' % (targets[base], base, 'a' * 64)
+                                 for base in libraries)
+        fixture_all_members = {}
+        for slice_name, arch, platform_name in consumer.SHADERC_MATRIX:
+            name = 'lib/%s/thin/%s/lib/libshaderc_combined.a' % (platform_name, arch)
+            fixture_all_members[name] = ('fixture-' + slice_name + '-' + arch).encode()
+        fixture_all_archive = io.BytesIO()
+        with zipfile.ZipFile(fixture_all_archive, 'w') as archive:
+            for name, payload in fixture_all_members.items():
+                info = zipfile.ZipInfo(name)
+                info.create_system, info.external_attr = 3, 0o100644 << 16
+                archive.writestr(info, payload)
+        fixture_all_body = fixture_all_archive.getvalue()
+        fixture_all_rows = {name: {'kind': 'file', 'bytes': len(payload),
+                                   'sha256': hashlib.sha256(payload).hexdigest()}
+                            for name, payload in fixture_all_members.items()}
+        self.assertEqual(consumer.SHADERC_SOURCE_SPECS, (
+            ('libshaderc.zip', 124322785,
+             'd213fa58de7886846fb8cb713ea5213b77654a3ad2ba3d89b1f2fe367d945ba5'),
+            ('Libshaderc_combined.xcframework.zip', 61246203,
+             '77a3d355993cf53843a394bf58262dab99cdd93f9e6fe31d5ca6e55b03866ce1')))
+
+        def shaderc_xcframework_fixture(path, *, extra=(), link_body_overrides=None):
+            """Write a tiny metadata-only XCFramework ZIP with the three known links."""
+            framework = MODULE.SHADERC_XC_MAC_FRAMEWORK
+            link_body_overrides = {} if link_body_overrides is None else dict(link_body_overrides)
+            directories = (
+                'Libshaderc_combined.xcframework/',
+                'Libshaderc_combined.xcframework/macos-arm64_x86_64/',
+                framework + '/',
+                framework + '/Versions/',
+                framework + '/Versions/A/',
+                framework + '/Versions/A/Resources/',
+            )
+            files = {
+                framework + '/Versions/A/Resources/Info.plist': b'fixture plist',
+                framework + '/Versions/A/Libshaderc_combined': b'fixture binary',
+            }
+            links = {
+                name: link_body_overrides.get(name, target.encode('utf-8'))
+                for name, target in MODULE.SHADERC_XC_LINKS.items()
+            }
+
+            def add(archive, name, payload, mode):
+                info = zipfile.ZipInfo(name)
+                info.create_system = 3
+                info.external_attr = mode << 16
+                archive.writestr(info, payload)
+
+            with zipfile.ZipFile(path, 'w') as archive:
+                for name in directories:
+                    add(archive, name, b'', stat.S_IFDIR | 0o755)
+                for name, payload in files.items():
+                    add(archive, name, payload, stat.S_IFREG | 0o644)
+                for name, payload in links.items():
+                    add(archive, name, payload, stat.S_IFLNK | 0o755)
+                for name, payload, mode in extra:
+                    add(archive, name, payload, mode)
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / 'shaderc-xc-links.zip'
+            shaderc_xcframework_fixture(fixture)
+            rows = MODULE._shaderc_zip_index(fixture, role='xcframework')
+            framework = MODULE.SHADERC_XC_MAC_FRAMEWORK
+            binary_link = framework + '/Libshaderc_combined'
+            binary_name, binary_row = MODULE._shaderc_resolve_archive_path(
+                rows, binary_link, framework)
+            self.assertEqual(binary_name, framework + '/Versions/A/Libshaderc_combined')
+            self.assertEqual(binary_row['kind'], 'file')
+            resources_name, resources_row = MODULE._shaderc_resolve_archive_path(
+                rows, framework + '/Resources', framework)
+            self.assertEqual(resources_name, framework + '/Versions/A/Resources')
+            self.assertEqual(resources_row['kind'], 'directory')
+            self.assertEqual(rows[binary_link]['rawBytes'], len(b'Versions/Current/Libshaderc_combined'))
+            self.assertEqual(rows[binary_link]['rawSHA256'], hashlib.sha256(
+                b'Versions/Current/Libshaderc_combined').hexdigest())
+            with self.assertRaisesRegex(ValueError, 'symlink'):
+                MODULE._shaderc_zip_index(fixture, role='all')
+
+            def resolver_link(target):
+                raw = target.encode('utf-8')
+                return {'directory': False, 'kind': 'symlink', 'target': target,
+                        'bytes': len(raw), 'rawBytes': len(raw),
+                        'rawSHA256': hashlib.sha256(raw).hexdigest()}
+
+            with self.assertRaisesRegex(ValueError, 'cycle'):
+                MODULE._shaderc_resolve_archive_path(
+                    {framework + '/A': resolver_link('B'),
+                     framework + '/B': resolver_link('A')},
+                    framework + '/A', framework)
+            with self.assertRaisesRegex(ValueError, 'target'):
+                MODULE._shaderc_resolve_archive_path(
+                    {framework + '/A': resolver_link('../../outside')},
+                    framework + '/A', framework)
+            with self.assertRaisesRegex(ValueError, 'missing'):
+                MODULE._shaderc_resolve_archive_path(
+                    {framework + '/A': resolver_link('Missing')},
+                    framework + '/A', framework)
+
+            unlisted = Path(directory) / 'unlisted.zip'
+            shaderc_xcframework_fixture(
+                unlisted,
+                extra=((framework + '/Unlisted', b'Versions/A/Info.plist',
+                        stat.S_IFLNK | 0o755),))
+            with self.assertRaisesRegex(ValueError, 'unlisted'):
+                MODULE._shaderc_zip_index(unlisted, role='xcframework')
+
+            special = Path(directory) / 'special.zip'
+            shaderc_xcframework_fixture(
+                special,
+                extra=((framework + '/special', b'special', stat.S_IFCHR | 0o644),))
+            with self.assertRaisesRegex(ValueError, 'special'):
+                MODULE._shaderc_zip_index(special, role='xcframework')
+
+            case_collision = Path(directory) / 'case-collision.zip'
+            shaderc_xcframework_fixture(
+                case_collision,
+                extra=((framework + '/Versions/A/libshaderc_combined', b'case',
+                        stat.S_IFREG | 0o644),))
+            with self.assertRaisesRegex(ValueError, 'case-colliding'):
+                MODULE._shaderc_zip_index(case_collision, role='xcframework')
+
+            bad_body = Path(directory) / 'bad-body.zip'
+            shaderc_xcframework_fixture(
+                bad_body,
+                link_body_overrides={framework + '/Resources': b'Versions/Current/\xff'})
+            with self.assertRaisesRegex(ValueError, 'UTF-8'):
+                MODULE._shaderc_zip_index(bad_body, role='xcframework')
+
+        fixture_specs = (('libshaderc.zip', len(fixture_all_body), hashlib.sha256(fixture_all_body).hexdigest()),
+                         ('Libshaderc_combined.xcframework.zip', 7,
+                          hashlib.sha256(b'xc-body').hexdigest()))
+        consumer.SHADERC_SOURCE_SPECS = fixture_specs
+        shaderc_target = ('.binaryTarget(\n    name: "Libshaderc_combined",\n'
+                          '    url: "%s",\n    checksum: "%s"\n)\n' %
+                          (consumer.SHADERC_REMOTE_URL, fixture_specs[1][2]))
+        source_package += shaderc_target
+        ignore = (b'# Build OUTPUT (hundreds of MB), reproducible from the pinned refs via\n'
+                  b'# scripts/build-mpvkit-dvfel.sh. Must never enter git history.\nartifacts/\n')
+        profile_receipt = 'PASS dependency-profile ' + consumer.NATIVE_UPGRADES_PROFILE
+        gates = ['TLS VERIFY PASSED: 5 Apple slices and 9 architectures use SecureTransport',
+                 'MPVKit-DVFEL ARTIFACT VERIFY PASSED: FFmpeg 9.0.2 (libavcodec/libavformat 63.1.102), dovi_split, and Apple TLS gates',
+                 'PASS openssl-profile openssl-4.1.0-source-v1',
+                 'PASS apple-openssl-receipt',
+                 'PASS apple-shaderc-receipt',
+                 'PASS ' + consumer.CRYPTO_SOURCE_PROFILE + ' verify',
+                 'PASS crypto-chain archive/public-symbol correspondence; native SMB/runtime gates OPEN',
+                 'PASS apple-sent-abi', 'PASS apple-reference-abi']
+
+        def synthetic_tar(files, compressed, links=None):
+            links = {} if links is None else links
+            result = io.BytesIO()
+            with tarfile.open(fileobj=result, mode='w:gz' if compressed else 'w') as archive:
+                for name, data in files.items():
+                    info = tarfile.TarInfo(name)
+                    info.size, info.mode = len(data), 0o644
+                    archive.addfile(info, io.BytesIO(data))
+                for name, target in links.items():
+                    info = tarfile.TarInfo(name)
+                    info.type, info.mode, info.size = tarfile.SYMTYPE, 0o777, 0
+                    info.linkname = target
+                    archive.addfile(info)
+            return result.getvalue()
+
+        def crypto_source_fixture():
+            """Tiny source archives exercise raw-body/capture binding only."""
+            definitions = (
+                ('gmp', '6.3.0', 'gmp-6.3.0', 'gmp-6.3.0.tar.xz', 'xz',
+                 'gmp-6.3.0-a3c2b802', 'https://fixture.invalid/gmp-6.3.0.tar.xz'),
+                ('nettle', '4.0', 'nettle-4.0', 'nettle-4.0.tar.gz', 'gz',
+                 'nettle-4.0-3addbc00', 'https://fixture.invalid/nettle-4.0.tar.gz'),
+                ('gnutls', '3.8.13', 'gnutls-3.8.13', 'gnutls-3.8.13.tar.xz', 'xz',
+                 'gnutls-3.8.13-ffed8ec1', 'https://fixture.invalid/gnutls-3.8.13.tar.xz'))
+            pins, verified, bodies = [], [], {}
+            for identifier, version, archive_root, filename, compression, source_root, url in definitions:
+                configure = ('#!/bin/sh\n# inert source-policy fixture: ' + identifier + '\n').encode()
+                encoded = io.BytesIO()
+                with tarfile.open(fileobj=encoded, mode='w:' + compression,
+                                  format=tarfile.PAX_FORMAT) as source:
+                    root = tarfile.TarInfo(archive_root + '/')
+                    root.type, root.mode, root.mtime = tarfile.DIRTYPE, 0o755, 0
+                    source.addfile(root)
+                    entry = tarfile.TarInfo(archive_root + '/configure')
+                    entry.mode, entry.mtime, entry.size = 0o755, 0, len(configure)
+                    source.addfile(entry, io.BytesIO(configure))
+                body = encoded.getvalue()
+                pin = {'id': identifier, 'version': version, 'archiveRoot': archive_root,
+                       'filename': filename, 'compression': compression, 'bytes': len(body),
+                       'sha256': hashlib.sha256(body).hexdigest(), 'sourceRoot': source_root,
+                       'url': url, 'output': 'apple-crypto-source-' + identifier +
+                       ('.tar.gz' if compression == 'gz' else '.tar.xz')}
+                rows = consumer.crypto_index_archive(pin, body)
+                pins.append(pin)
+                verified.append((pin, body, rows))
+                bodies[pin['output']] = body
+            expected = consumer.crypto_expected_receipt(verified)
+            receipt = consumer.crypto_canonical(expected)
+            capture_stream = io.BytesIO()
+            with tarfile.open(fileobj=capture_stream, mode='w', format=tarfile.PAX_FORMAT) as capture:
+                for pin, _, rows in verified:
+                    root_name = pin['archiveRoot']
+                    root = tarfile.TarInfo(root_name)
+                    root.type, root.mode, root.mtime = tarfile.DIRTYPE, 0o755, 0
+                    capture.addfile(root)
+                    configure = ('#!/bin/sh\n# inert source-policy fixture: ' + pin['id'] + '\n').encode()
+                    entry = tarfile.TarInfo(root_name + '/configure')
+                    entry.mode, entry.mtime, entry.size = 0o755, 0, len(configure)
+                    capture.addfile(entry, io.BytesIO(configure))
+                    self.assertEqual({row['path'] for row in rows}, {'', 'configure'})
+            return {'pins': tuple(pins), 'bodies': bodies, 'receipt': receipt,
+                    'capture': capture_stream.getvalue()}
+
+        crypto_sources = crypto_source_fixture()
+
+        def shaderc_receipt_fixture():
+            rows = []
+            for slice_name, arch, platform_name in consumer.SHADERC_MATRIX:
+                all_entry = 'lib/%s/thin/%s/lib/libshaderc_combined.a' % (platform_name, arch)
+                rows.append({
+                    'slice': slice_name, 'arch': arch,
+                    'allZipEntry': all_entry,
+                    'allArchiveSHA256': fixture_all_rows[all_entry]['sha256'],
+                    'xcArchiveSHA256': fixture_all_rows[all_entry]['sha256'],
+                    'equal': True})
+            return {
+                'schema': 1, 'profile': consumer.NATIVE_UPGRADES_PROFILE,
+                'wrapperVersion': consumer.SHADERC_WRAPPER_VERSION,
+                'validatorSHA256': recipe['scripts/native-media-hosted/evidence.py'],
+                'reader': {'mode': 'xcrun-resolved-lipo', 'requestedReader': '/usr/bin/xcrun',
+                           'resolvedReader': '/fixture/lipo', 'readerSHA256': 'b' * 64,
+                           'toolchainReader': '/usr/bin/xcodebuild',
+                           'toolchainSHA256': 'c' * 64,
+                           'toolchainVersion': 'synthetic Xcode toolchain'},
+                'sources': [{'name': name, 'bytes': size, 'sha256': checksum}
+                            for name, size, checksum in consumer.SHADERC_SOURCE_SPECS],
+                'matrix': rows, 'runtimeSecurityTested': False, 'promotionEligible': False}
+
+        def synthetic_fat(parts):
+            # Tiny universal archive sentinel: the consumer checks bounded fat
+            # headers/segments only; this is not a native compatibility claim.
+            cpu = {'arm64': (0x0100000c, 0), 'arm64e': (0x0100000c, 2),
+                   'x86_64': (0x01000007, 3)}
+            header_size, offset = 8 + 20 * len(parts), 8 + 20 * len(parts)
+            records, payload = [], bytearray()
+            for arch, data in parts:
+                cputype, subtype = cpu[arch]
+                records.append((cputype, subtype, offset, len(data), 2))
+                payload.extend(data)
+                offset += len(data)
+            result = bytearray((0xcafebabe).to_bytes(4, 'big'))
+            result.extend(len(parts).to_bytes(4, 'big'))
+            for record in records:
+                for value in record:
+                    result.extend(value.to_bytes(4, 'big'))
+            result.extend(payload)
+            self.assertEqual(len(result), header_size + len(payload))
+            return bytes(result)
+
+        crypto_slice_arches = {}
+        for platform, arch, slice_name in consumer.CRYPTO_MATRIX:
+            crypto_slice_arches.setdefault(slice_name, set()).add(arch)
+
+        crypto_header_bodies = {
+            'gmp': (b'#define __GNU_MP_VERSION 6\n#define __GNU_MP_VERSION_MINOR 3\n'
+                    b'#define __GNU_MP_VERSION_PATCHLEVEL 0\n#define GMP_LIMB_BITS 64\n'
+                    b'#define GMP_NAIL_BITS 0\n#define __GMP_CC "fixture"\n'
+                    b'#define __GMP_CFLAGS "-arch arm64"\n'),
+            'nettle': (b'#define NETTLE_VERSION_MAJOR 4\n#define NETTLE_VERSION_MINOR 0\n'
+                       b'#define NETTLE_USE_MINI_GMP 0\n'),
+            'hogweed': (b'#define NETTLE_VERSION_MAJOR 4\n#define NETTLE_VERSION_MINOR 0\n'
+                        b'#define NETTLE_USE_MINI_GMP 0\n'),
+            'gnutls': (b'#define GNUTLS_VERSION_MAJOR 3\n#define GNUTLS_VERSION_MINOR 8\n'
+                       b'#define GNUTLS_VERSION_PATCH 13\n#define GNUTLS_VERSION "3.8.13"\n'),
+            'libsmbclient.h': b'fixture libsmbclient public header\n',
+            'samba/version.h': b'fixture samba version header\n'}
+        crypto_smb_headers = {
+            name: (len(body), hashlib.sha256(body).hexdigest())
+            for name, body in (('libsmbclient.h', crypto_header_bodies['libsmbclient.h']),
+                               ('samba/version.h', crypto_header_bodies['samba/version.h']))}
+
+        def crypto_zip_entry(archive, name, payload, mode=stat.S_IFREG | 0o644,
+                             target=None):
+            info = zipfile.ZipInfo(name)
+            info.create_system = 3
+            info.external_attr = mode << 16
+            archive.writestr(info, (target.encode() if target is not None else payload))
+
+        def crypto_library_fixture():
+            bodies, thin_bodies = {}, {}
+            for target, _, archive_name, binary_name in consumer.CRYPTO_LIBRARIES:
+                members = {}
+                metadata = {'CFBundlePackageType': 'XFWK',
+                            'XCFrameworkFormatVersion': '1.0', 'AvailableLibraries': []}
+                for slice_name in sorted(crypto_slice_arches):
+                    arches = sorted(crypto_slice_arches[slice_name])
+                    platform_name = ('macos' if slice_name.startswith('macos-') else
+                                     'tvos' if slice_name.startswith('tvos-') else 'ios')
+                    declaration = {'LibraryIdentifier': slice_name,
+                                   'LibraryPath': binary_name + '.framework',
+                                   'SupportedArchitectures': arches,
+                                   'SupportedPlatform': platform_name}
+                    if slice_name.endswith('-simulator'):
+                        declaration['SupportedPlatformVariant'] = 'simulator'
+                    metadata['AvailableLibraries'].append(declaration)
+                    framework = (target + '.xcframework/' + slice_name + '/' +
+                                 binary_name + '.framework')
+                    parts = []
+                    for arch in arches:
+                        thin = ('!<arch>\nfixture-' + target + '-' + slice_name + '-' + arch).encode()
+                        thin_bodies[(target, slice_name, arch)] = thin
+                        parts.append((arch, thin))
+                    packaged = parts[0][1] if len(parts) == 1 else synthetic_fat(parts)
+                    if slice_name.startswith('macos-'):
+                        members[framework + '/Versions/A/' + binary_name] = packaged
+                        members[framework + '/Versions/A/Resources/Info.plist'] = b'fixture framework info\n'
+                        members[framework + '/Versions/Current'] = ('symlink', 'A')
+                        members[framework + '/' + binary_name] = ('symlink', 'Versions/Current/' + binary_name)
+                        members[framework + '/Resources'] = ('symlink', 'Versions/Current/Resources')
+                    else:
+                        members[framework + '/' + binary_name] = packaged
+                    headers = framework + '/Headers/'
+                    if target == 'gmp':
+                        members[headers + 'gmp.h'] = crypto_header_bodies['gmp']
+                    elif target == 'nettle':
+                        members[headers + 'version.h'] = crypto_header_bodies['nettle']
+                    elif target == 'hogweed':
+                        members[headers + 'nettle/version.h'] = crypto_header_bodies['hogweed']
+                    elif target == 'gnutls':
+                        members[headers + 'gnutls.h'] = crypto_header_bodies['gnutls']
+                    else:
+                        members[headers + 'samba-4.0/libsmbclient.h'] = crypto_header_bodies['libsmbclient.h']
+                        members[headers + 'samba-4.0/samba/version.h'] = crypto_header_bodies['samba/version.h']
+                encoded = plistlib.dumps(metadata, fmt=plistlib.FMT_XML, sort_keys=True)
+                members[target + '.xcframework/Info.plist'] = encoded
+                output = io.BytesIO()
+                with zipfile.ZipFile(output, 'w') as archive:
+                    for name, value in members.items():
+                        if isinstance(value, tuple):
+                            crypto_zip_entry(archive, name, b'', stat.S_IFLNK | 0o777, value[1])
+                        else:
+                            crypto_zip_entry(archive, name, value)
+                bodies[target] = output.getvalue()
+            smb_pins = {}
+            for platform, arch, slice_name in consumer.CRYPTO_MATRIX:
+                thin = thin_bodies[('Libsmbclient', slice_name, arch)]
+                smb_pins[platform + '/' + arch] = (len(thin), hashlib.sha256(thin).hexdigest())
+            return bodies, thin_bodies, crypto_smb_headers, smb_pins
+
+        crypto_zip_bodies, crypto_thin_bodies, crypto_smb_headers, crypto_smb_pins = crypto_library_fixture()
+
+        def crypto_inline(path, body):
+            return {'path': path, 'bytes': len(body),
+                    'sha256': hashlib.sha256(body).hexdigest(),
+                    'bodyBase64': base64.b64encode(body).decode('ascii')}
+
+        def crypto_text(text):
+            body = text.encode('utf-8')
+            return {'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest(),
+                    'text': text}
+
+        def crypto_tool(name, resolved, body=None):
+            body = (name + ' synthetic selected tool\n').encode() if body is None else body
+            return {'resolvedPath': resolved, 'path': name, 'bytes': len(body),
+                    'sha256': hashlib.sha256(body).hexdigest()}
+
+        def crypto_tools_fixture():
+            toolchain = '/fixture/Xcode/Toolchains/XcodeDefault.xctoolchain/usr/bin/'
+            platforms = {}
+            sdk_names = {
+                'ios': 'iPhoneOS.sdk', 'isimulator': 'iPhoneSimulator.sdk',
+                'tvos': 'AppleTVOS.sdk', 'tvsimulator': 'AppleTVSimulator.sdk',
+                'macos': 'MacOSX.sdk'}
+            for platform, sdk_name in sdk_names.items():
+                sdk = '/fixture/Xcode/Platforms/' + sdk_name.removesuffix('.sdk') + (
+                    '.platform/Developer/SDKs/' + sdk_name)
+                platforms[platform] = {
+                    'sdkRoot': sdk, 'resolvedSDKRoot': sdk,
+                    'ar': dict(crypto_tool('ar', toolchain + 'ar'),
+                               selectedPath=toolchain + 'ar'),
+                    'ranlib': dict(crypto_tool('ranlib', toolchain + 'ranlib'),
+                                   selectedPath=toolchain + 'ranlib')}
+            return {
+                'xcrun': crypto_tool('xcrun', '/usr/bin/xcrun'),
+                'xcodebuild': crypto_tool('xcodebuild', '/usr/bin/xcodebuild'),
+                'lipo': crypto_tool('lipo', toolchain + 'lipo'),
+                'nm': crypto_tool('nm', toolchain + 'nm'),
+                'toolchainVersion': crypto_text('Xcode synthetic toolchain fixture\n'),
+                'platforms': platforms}
+
+        crypto_tool_rows = crypto_tools_fixture()
+
+        def crypto_archive_sources():
+            source = io.BytesIO()
+            with zipfile.ZipFile(source, 'w') as archive:
+                for output, body in crypto_sources['bodies'].items():
+                    archive.writestr(output, body)
+                archive.writestr('apple-crypto-release-sources.json', crypto_sources['receipt'])
+                archive.writestr('apple-crypto-release-sources.tar', crypto_sources['capture'])
+            source.seek(0)
+            with zipfile.ZipFile(source) as archive:
+                with patch.object(consumer, 'CRYPTO_SOURCE_OUTPUTS', crypto_sources['pins']):
+                    return consumer.crypto_source_outputs(archive)
+
+        crypto_archive_source_rows = crypto_archive_sources()
+
+        def crypto_chain_receipt_for(package_body):
+            """Construct a complete raw-byte-bound schema-2 fixture receipt."""
+            work = Path('/fixture/work')
+            catalog = consumer.crypto_zip_catalog(crypto_zip_bodies)
+            build_rows, build_bodies = {}, {}
+
+            def generated_body(library, name, platform, arch):
+                if library == 'gmp' and name == 'gmp.h':
+                    return crypto_header_bodies['gmp']
+                if library == 'nettle' and name == 'version.h':
+                    return crypto_header_bodies['nettle']
+                if library == 'gnutls' and name == 'lib/includes/gnutls/gnutls.h':
+                    return crypto_header_bodies['gnutls']
+                return ('generated ' + library + ' ' + platform + ' ' + arch +
+                        ' ' + name + '\n').encode()
+
+            def build_value(library, platform, arch):
+                sdk = crypto_tool_rows['platforms'][platform]
+                expected = consumer.crypto_recipe_contract(work, library, platform, arch, sdk)
+                scratch = Path(expected['buildDirectory'])
+                prefix = Path(expected['prefix'])
+                names = tuple(consumer.CRYPTO_GENERATED) + tuple(
+                    consumer.CRYPTO_EXTRA_GENERATED[library])
+                generated = {name: generated_body(library, name, platform, arch)
+                             for name in names}
+                record = dict(expected)
+                record['generatedConfiguration'] = {
+                    name: {'bytes': len(body),
+                           'sha256': hashlib.sha256(body).hexdigest()}
+                    for name, body in generated.items()}
+                record_body = json.dumps(record, sort_keys=True,
+                                         separators=(',', ':')).encode()
+                installed = {
+                    relative: generated[name]
+                    for name, relative in consumer.CRYPTO_INSTALLED_CONFIGURATION[library].items()}
+                value = {
+                    'record': crypto_inline(
+                        (scratch / 'vortx-crypto-build.json').relative_to(work).as_posix(),
+                        record_body),
+                    'generatedConfiguration': {
+                        name: crypto_inline((scratch / name).relative_to(work).as_posix(), body)
+                        for name, body in generated.items()},
+                    'installedConfiguration': {
+                        relative: crypto_inline((prefix / relative).relative_to(work).as_posix(), body)
+                        for relative, body in installed.items()},
+                    'sdkMetadata': {
+                        name: crypto_inline(
+                            (scratch / 'vortx-sdk-pkgconfig' / name).relative_to(work).as_posix(),
+                            ('synthetic ' + name + ' metadata\n').encode())
+                        for name in ('zlib.pc', 'libxml-2.0.pc')}}
+                installed_bodies, installed_rows = consumer.crypto_build_evidence(
+                    value, work, library, platform, arch, sdk, [0])
+                return value, installed_bodies, installed_rows
+
+            for identity in consumer.CRYPTO_MATRIX:
+                platform, arch, slice_name = identity
+                build_rows[identity], build_bodies[identity] = {}, {}
+                for library in ('gmp', 'nettle', 'gnutls'):
+                    value, installed, installed_rows = build_value(library, platform, arch)
+                    build_rows[identity][library] = value
+                    build_bodies[identity][library] = {
+                        'installed': installed, 'rows': installed_rows}
+
+            def plain(row):
+                return {key: row[key] for key in ('path', 'bytes', 'sha256')}
+
+            def static_row(target, platform, arch, slice_name):
+                _, directory, archive_name, _ = next(
+                    item for item in consumer.CRYPTO_LIBRARIES if item[0] == target)
+                body = crypto_thin_bodies[(target, slice_name, arch)]
+                return {'path': 'dist/' + directory +
+                        '/' + platform + '/thin/' + arch + '/lib/' +
+                        archive_name,
+                        'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
+
+            symbols = {
+                # Mach-O nm spellings retain one leading underscore; the
+                # consumer normalizes it before applying the public ABI policy.
+                'gmp': ('___gmpz_cmp\n___gmpz_init\n', ''),
+                'nettle': ('_nettle_sha256_init\n_nettle_version_major\n',
+                           '___gmpz_cmp\n'),
+                'hogweed': ('_nettle_rsa_private_key_init\n',
+                            '___gmpz_init\n_nettle_sha256_init\n'),
+                'gnutls': ('_gnutls_check_version\n_gnutls_global_init\n_gnutls_record_send\n',
+                           '_nettle_sha256_init\n_nettle_rsa_private_key_init\n'),
+                'Libsmbclient': ('_smbc_init_context\n_smbc_new_context\n',
+                                 '_gnutls_record_send\n')}
+
+            def library_rows(identity):
+                platform, arch, slice_name = identity
+                result, observations = {}, {}
+                slice_arches = sorted({candidate_arch for _, candidate_arch, candidate_slice
+                                       in consumer.CRYPTO_MATRIX if candidate_slice == slice_name})
+                for target, directory, archive_name, binary_name in consumer.CRYPTO_LIBRARIES:
+                    framework = ('artifacts/' + target + '.xcframework/' + slice_name + '/' +
+                                 binary_name + '.framework')
+                    packaged_path = (framework + '/Versions/A/' + binary_name
+                                     if slice_name.startswith('macos-')
+                                     else framework + '/' + binary_name)
+                    packaged, packaged_name = consumer.crypto_zip_row(
+                        catalog, target, packaged_path)
+                    packaged_body = consumer.crypto_zip_file(catalog, target, packaged_name)
+                    thin = static_row(target, platform, arch, slice_name)
+                    segments = consumer._macho_arch_hashes(packaged_body)
+                    if segments is None:
+                        segments = {slice_arches[0]: (len(packaged_body),
+                                                      hashlib.sha256(packaged_body).hexdigest())}
+                    correspondence = {'bytes': segments[arch][0], 'sha256': segments[arch][1]}
+                    architectures = crypto_text('\n'.join(slice_arches))
+                    defined, undefined = symbols[target]
+                    observations[target] = {
+                        'defined': consumer.crypto_normalize_symbols(defined),
+                        'undefined': consumer.crypto_normalize_symbols(undefined)}
+
+                    if target == 'Libsmbclient':
+                        thin_headers = [
+                            {'path': 'dist/libsmbclient/' + platform + '/thin/' + arch +
+                             '/include/samba-4.0/' + name,
+                             'bytes': size, 'sha256': checksum}
+                            for name, (size, checksum) in crypto_smb_headers.items()]
+                        header_names = tuple(crypto_smb_headers)
+                    else:
+                        source = 'nettle' if target == 'hogweed' else target
+                        relative = {'gmp': 'include/gmp.h',
+                                    'nettle': 'include/nettle/version.h',
+                                    'hogweed': 'include/nettle/version.h',
+                                    'gnutls': 'include/gnutls/gnutls.h'}[target]
+                        thin_headers = [plain(build_bodies[identity][source]['rows'][relative])]
+                        header_names = ({'gmp': ('gmp.h',), 'nettle': ('version.h',),
+                                         'hogweed': ('nettle/version.h',),
+                                         'gnutls': ('gnutls.h',)}[target])
+
+                    packaged_headers, packaged_header_bodies = [], []
+                    for header_name in header_names:
+                        header_path = framework + '/Headers/' + (
+                            'samba-4.0/' + header_name if target == 'Libsmbclient' else header_name)
+                        row, archive_name = consumer.crypto_zip_row(catalog, target, header_path)
+                        packaged_headers.append(row)
+                        body = consumer.crypto_zip_file(catalog, target, archive_name)
+                        packaged_header_bodies.append(body)
+
+                    if target == 'gmp':
+                        thin_evidence = []
+                        for candidate in consumer.CRYPTO_MATRIX:
+                            if candidate[2] != slice_name:
+                                continue
+                            candidate_source = build_bodies[candidate]['gmp']
+                            thin_evidence.append(
+                                ((candidate[0], candidate[1]),
+                                 candidate_source['installed']['include/gmp.h'],
+                                 plain(candidate_source['rows']['include/gmp.h'])))
+                        header_correspondence = consumer.crypto_header_correspondence(
+                            target, packaged_header_bodies[0], thin_evidence)
+                    elif target == 'Libsmbclient':
+                        header_correspondence = {'kind': 'exact-checked-header-bytes'}
+                    else:
+                        source = 'nettle' if target == 'hogweed' else target
+                        relative = {'nettle': 'include/nettle/version.h',
+                                    'gnutls': 'include/gnutls/gnutls.h'}[source]
+                        header_correspondence = consumer.crypto_header_correspondence(
+                            target, packaged_header_bodies[0],
+                            [((platform, arch), build_bodies[identity][source]['installed'][relative],
+                              plain(build_bodies[identity][source]['rows'][relative]))])
+                    result[target] = {
+                        'version': consumer.CRYPTO_VERSIONS[target], 'thin': thin,
+                        'thinHeaders': thin_headers, 'packaged': packaged,
+                        'packagedHeaders': packaged_headers, 'correspondence': correspondence,
+                        'frameworkLayout': consumer.crypto_framework_layout(
+                            target, binary_name, slice_name, catalog),
+                        'headerCorrespondence': header_correspondence,
+                        'architectures': architectures,
+                        'defined': crypto_text(defined), 'undefined': crypto_text(undefined)}
+                return result, observations
+
+            rows = []
+            for identity in consumer.CRYPTO_MATRIX:
+                platform, arch, slice_name = identity
+                libraries_for_row, observations = library_rows(identity)
+                symbol_policy = consumer.crypto_validate_symbols(observations)
+                rows.append({
+                    'platform': platform, 'arch': arch, 'slice': slice_name,
+                    'libraries': libraries_for_row,
+                    'builds': build_rows[identity],
+                    'sambaGnuTLSImports': symbol_policy['sambaGnuTLSImports'],
+                    'helperImports': symbol_policy['helperImports']})
+
+            xcframework_info = {}
+            for target, _, _, _ in consumer.CRYPTO_LIBRARIES:
+                row, _ = consumer.crypto_zip_row(
+                    catalog, target, 'artifacts/' + target + '.xcframework/Info.plist')
+                xcframework_info[target] = row
+            source_receipt = crypto_archive_source_rows['capture']['receipt']
+            value = {
+                'schemaVersion': 2, 'profile': consumer.CRYPTO_CHAIN_PROFILE,
+                'work': str(work), 'packagePolicy': consumer.CRYPTO_PACKAGE_POLICY,
+                'inlineBodyPolicy': consumer.CRYPTO_INLINE_BODY_POLICY,
+                'versions': dict(consumer.CRYPTO_VERSIONS),
+                'sourcePins': deepcopy(consumer.CRYPTO_SOURCE_PINS),
+                'tools': crypto_tool_rows,
+                'packageManifest': {'path': 'Package.swift', 'bytes': len(package_body),
+                                    'sha256': hashlib.sha256(package_body).hexdigest()},
+                'xcframeworkInfo': xcframework_info,
+                'releaseSourceBoundary': {
+                    'path': 'dist/crypto-sources/receipt.json',
+                    'bytes': source_receipt['bytes'], 'sha256': source_receipt['sha256']},
+                'rows': rows, 'acceptance': consumer.CRYPTO_ACCEPTANCE,
+                'openGates': list(consumer.CRYPTO_OPEN_GATES)}
+            return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
+
+        openssl_members, openssl_outputs = {}, {}
+        openssl_header = b'#define OPENSSL_VERSION_NUMBER 0x40100000L\n'
+        slice_arches = {}
+        for platform, arch, _, slice_name in consumer.OPENSSL_MATRIX:
+            slice_arches.setdefault(slice_name, set()).add(arch)
+        for base in ('Libssl', 'Libcrypto'):
+            for platform, arch, _, slice_name in consumer.OPENSSL_MATRIX:
+                payloads = [(candidate, ('fixture-' + base + '-' + slice_name + '-' + candidate).encode())
+                            for candidate in sorted(slice_arches[slice_name])]
+                binary = payloads[0][1] if len(payloads) == 1 else synthetic_fat(payloads)
+                binary_name = '%s.xcframework/%s/%s.framework/%s' % (base, slice_name, base, base)
+                header_name = '%s.xcframework/%s/%s.framework/Headers/openssl/opensslv.h' % (
+                    base, slice_name, base)
+                openssl_members[binary_name] = binary
+                openssl_members[header_name] = openssl_header
+                key = (base, platform, arch)
+                openssl_outputs.setdefault(key, {})
+                thin = dict(payloads)[arch]
+                openssl_outputs[key]['libssl.a' if base == 'Libssl' else 'libcrypto.a'] = {
+                    'name': 'libssl.a' if base == 'Libssl' else 'libcrypto.a',
+                    'path': 'lib/libssl.a' if base == 'Libssl' else 'lib/libcrypto.a',
+                    'bytes': len(thin), 'sha256': hashlib.sha256(thin).hexdigest()}
+                openssl_outputs[key]['opensslv.h'] = {
+                    'name': 'opensslv.h', 'path': 'include/openssl/opensslv.h',
+                    'bytes': len(openssl_header), 'sha256': hashlib.sha256(openssl_header).hexdigest()}
+
+        def openssl_zip(base):
+            result = io.BytesIO()
+            with zipfile.ZipFile(result, 'w') as archive:
+                for name, payload in openssl_members.items():
+                    if name.startswith(base + '.xcframework/'):
+                        info = zipfile.ZipInfo(name)
+                        info.create_system, info.external_attr = 3, 0o100644 << 16
+                        archive.writestr(info, payload)
+            return result.getvalue()
+
+        def openssl_receipt_fixture(old_version=False, wrong_source=False, forge=False):
+            matrix = []
+            for platform, arch, target, slice_name in consumer.OPENSSL_MATRIX:
+                sdk_name = {'ios': 'iPhoneOS.sdk', 'isimulator': 'iPhoneSimulator.sdk',
+                            'tvos': 'AppleTVOS.sdk', 'tvsimulator': 'AppleTVSimulator.sdk',
+                            'macos': 'MacOSX.sdk'}[platform]
+                sdk = '/fixture/Xcode/Platforms/%s.platform/Developer/SDKs/%s' % (
+                    sdk_name.removesuffix('.sdk'), sdk_name)
+                prefix = '/fixture/work/dist/openssl/%s/thin/%s' % (platform, arch)
+                build_directory = '/fixture/work/dist/openssl/%s/scratch/%s' % (platform, arch)
+                cpu = 'arm64' if arch in ('arm64', 'arm64e') else 'x86_64'
+                minimum = '12.0' if platform == 'macos' else '15.0'
+                target_triple = {'ios': cpu + '-apple-ios' + minimum,
+                                 'isimulator': cpu + '-apple-ios' + minimum + '-simulator',
+                                 'tvos': cpu + '-apple-tvos' + minimum,
+                                 'tvsimulator': cpu + '-apple-tvos' + minimum + '-simulator',
+                                 'macos': cpu + '-apple-macos' + minimum}[platform]
+                minimum_flag = {'ios': '-mios-version-min=' + minimum,
+                                'isimulator': '-mios-simulator-version-min=' + minimum,
+                                'tvos': '-mtvos-version-min=' + minimum,
+                                'tvsimulator': '-mtvos-simulator-version-min=' + minimum,
+                                'macos': '-mmacosx-version-min=' + minimum}[platform]
+                common_flags = '-arch %s -isysroot %s -target %s %s' % (
+                    arch, sdk, target_triple, minimum_flag)
+                cflags = common_flags + (' -DHAVE_FORK=0'
+                                         if platform in ('tvos', 'tvsimulator') else '')
+                pkg_config = [('/fixture/work/dist/%s/%s/thin/%s/lib/pkgconfig' %
+                               (library, platform, arch))
+                              for library in consumer.OPENSSL_PKG_LIBRARIES]
+                pkg_config.append(build_directory + '/vortx-sdk-pkgconfig')
+                env = {'CC': '/usr/bin/clang', 'CXX': '/usr/bin/clang++',
+                       'CFLAGS': cflags, 'CPPFLAGS': cflags, 'CXXFLAGS': cflags,
+                       'ASMFLAGS': cflags, 'LDFLAGS': '-lc++ ' + common_flags,
+                       'PKG_CONFIG_LIBDIR': ':'.join(pkg_config),
+                       'PKG_CONFIG_PATH': '', 'PATH': consumer.OPENSSL_DEFAULT_PATH,
+                       'CURRENT_ARCH': arch, 'LC_CTYPE': 'C',
+                       'AR': '/fixture/Xcode/Toolchains/XcodeDefault.xctoolchain/usr/bin/ar',
+                       'ARFLAGS': 'qc',
+                       'RANLIB': '/fixture/Xcode/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib',
+                       'MAKEFLAGS': '-j1', 'CMAKE_BUILD_PARALLEL_LEVEL': '1',
+                       'CARGO_BUILD_JOBS': '1'}
+                target_config = ('my %%targets = (\n'
+                                 '    "%s" => {\n'
+                                 '        inherit_from => [ "darwin-common" ],\n'
+                                 '        CC => "/usr/bin/clang",\n'
+                                 '        cflags => "-fno-common",\n'
+                                 '        lib_cppflags => "-DL_ENDIAN",\n'
+                                 '        bn_ops => "SIXTY_FOUR_BIT_LONG",\n'
+                                 '        asm_arch => "%s",\n'
+                                 '        perlasm_scheme => "%s",\n'
+                                 '        sys_id => "%s",\n'
+                                 '    },\n);\n\n' % (
+                                     target,
+                                     'aarch64' if arch in ('arm64', 'arm64e') else 'x86_64',
+                                     'ios64' if arch in ('arm64', 'arm64e') else 'macosx',
+                                     'MACOSX' if platform == 'macos' else 'iOS'))
+                outputs = [openssl_outputs[('Libssl', platform, arch)]['libssl.a'],
+                           openssl_outputs[('Libcrypto', platform, arch)]['libcrypto.a'],
+                           openssl_outputs[('Libssl', platform, arch)]['opensslv.h']]
+                effective = {'target': target, 'CC': env['CC'],
+                             'CFLAGS': [env['CFLAGS']], 'CPPFLAGS': [env['CPPFLAGS']],
+                             'CXX': env['CXX'], 'CXXFLAGS': [env['CXXFLAGS']],
+                             'LDFLAGS': [env['LDFLAGS']], 'AR': env['AR'],
+                             'ARFLAGS': ['qc'], 'RANLIB': env['RANLIB'],
+                             'CROSS_COMPILE': None, 'cflags': ['-fno-common'],
+                             'cppflags': ['-D_REENTRANT'],
+                             'lflags': ['-Wl,-search_paths_first'],
+                             'lib_cppflags': '-DL_ENDIAN'}
+                if forge and platform == 'ios' and arch == 'arm64':
+                    outputs[0] = dict(outputs[0], sha256='0' * 64)
+                matrix.append({'platform': platform, 'arch': arch, 'slice': slice_name,
+                               'configureTarget': target,
+                               'configureArguments': ['--config=' + build_directory +
+                                                      '/vortx-openssl-target.conf',
+                                                      '--prefix=' + prefix,
+                                                      *consumer.OPENSSL_CONFIGURE_FLAGS, target],
+                               'sdkRoot': sdk,
+                               'sourceDirectory': '/fixture/work/dist/openssl-4.1.0-2f4e3a5f',
+                               'buildDirectory': build_directory, 'prefix': prefix,
+                               'environment': env, 'targetConfig': target_config,
+                               'targetConfigSHA256': hashlib.sha256(target_config.encode()).hexdigest(),
+                               'effectiveConfiguration': effective,
+                               'compiled': True,
+                               'installed': True, 'outputs': outputs})
+            return {'schema': 1, 'profile': consumer.NATIVE_UPGRADES_PROFILE,
+                    'sourceProfile': consumer.OPENSSL_BOM_PROFILE,
+                    'version': '3.3.5' if old_version else consumer.OPENSSL_SOURCE_VERSION,
+                    'sourceSHA': '0' * 40 if wrong_source else consumer.OPENSSL_SOURCE_SHA,
+                    'sourceTag': consumer.OPENSSL_SOURCE_TAG,
+                    'validatorSHA256': recipe['scripts/native-media-hosted/evidence.py'],
+                    'matrix': matrix, 'runtimeSecurityTested': False, 'promotionEligible': False}
+
+        def candidate_archive(*, missing_lcms=False, include_receipt=True,
+                              local_lcms=True, changed_lcms=False, missing_dav=False,
+                              local_dav=True, changed_dav=False, shaderc_tamper=False,
+                              include_shaderc_receipt=True, missing_ssl=False,
+                              missing_crypto=False, old_openssl_version=False,
+                              wrong_openssl_source=False, forged_openssl=False,
+                              include_openssl_receipt=True, include_crypto_outputs=True,
+                              include_crypto_chain=True, tamper_crypto_source=False):
+            originals, candidate, candidate_links, package = {}, {}, {}, []
+            for base, target in targets.items():
+                if base in ('Libssl', 'Libcrypto'):
+                    body = openssl_zip(base)
+                    if ((base != 'Libssl' or not missing_ssl) and
+                            (base != 'Libcrypto' or not missing_crypto)):
+                        originals[base + '.xcframework.zip'] = body
+                    for name, payload in openssl_members.items():
+                        if name.startswith(base + '.xcframework/'):
+                            candidate['MPVKit-DVFEL/artifacts/' + target + '.xcframework/' +
+                                      name.split('/', 1)[1]] = payload
+                    package.append('.binaryTarget(\n            name: "%s",\n'
+                                   '            path: "artifacts/%s.xcframework"\n        )\n' %
+                                   (target, target))
+                    continue
+                if base in crypto_zip_bodies:
+                    originals[base + '.xcframework.zip'] = crypto_zip_bodies[base]
+                    package.append('.binaryTarget(\n            name: "%s",\n'
+                                   '            path: "artifacts/%s.xcframework"\n        )\n' %
+                                   (target, target))
+                    continue
+                payload = ('synthetic native-correspondence payload ' + base).encode()
+                library = io.BytesIO()
+                with zipfile.ZipFile(library, 'w') as archive:
+                    info = zipfile.ZipInfo(base + '.xcframework/payload')
+                    info.create_system, info.external_attr = 3, 0o100644 << 16
+                    archive.writestr(info, payload)
+                if ((base != 'lcms2' or not missing_lcms) and
+                        (base != 'Libdav1d' or not missing_dav)):
+                    originals[base + '.xcframework.zip'] = library.getvalue()
+                candidate['MPVKit-DVFEL/artifacts/' + target + '.xcframework/payload'] = (
+                    b'changed dependency bytes' if ((base == 'lcms2' and changed_lcms) or
+                                                     (base == 'Libdav1d' and changed_dav)) else payload)
+                if ((base == 'lcms2' and not local_lcms) or
+                        (base == 'Libdav1d' and not local_dav)):
+                    package.append('.binaryTarget(name: "%s", url: "https://fixture.invalid/%s.zip", '
+                                   'checksum: "%s")\n' % (base, base, 'a' * 64))
+                else:
+                    package.append('.binaryTarget(\n            name: "%s",\n'
+                                   '            path: "artifacts/%s.xcframework"\n        )\n' %
+                                   (target, target))
+            for base, body in crypto_zip_bodies.items():
+                target = targets[base]
+                with zipfile.ZipFile(io.BytesIO(body)) as library:
+                    root = base + '.xcframework/'
+                    for info in library.infolist():
+                        if info.is_dir():
+                            continue
+                        name = info.filename
+                        package_name = ('MPVKit-DVFEL/artifacts/' + target +
+                                       '.xcframework/' + name.removeprefix(root))
+                        mode = info.external_attr >> 16
+                        if stat.S_ISLNK(mode):
+                            candidate_links[package_name] = library.read(info).decode('utf-8')
+                        else:
+                            candidate[package_name] = library.read(info)
+            candidate['MPVKit-DVFEL/Package.swift'] = (''.join(package) + shaderc_target).encode()
+            candidate['MPVKit-DVFEL/.gitignore'] = ignore
+            package_body = candidate['MPVKit-DVFEL/Package.swift']
+            result = io.BytesIO()
+            with zipfile.ZipFile(result, 'w') as archive:
+                archive.writestr('apple-original-library-zips.tar', synthetic_tar(originals, False))
+                archive.writestr('apple-candidate.tar.gz', synthetic_tar(candidate, True, candidate_links))
+                archive.writestr('apple-artifact-gate.txt', '\n'.join(
+                    gates + ([profile_receipt] if include_receipt else [])) + '\n')
+                all_body = b'bad!!' if shaderc_tamper else fixture_all_body
+                archive.writestr('apple-shaderc-original-all.zip', all_body)
+                archive.writestr('apple-shaderc-original-xcframework.zip', b'xc-body')
+                if include_shaderc_receipt:
+                    archive.writestr('apple-shaderc-inputs.json',
+                                     json.dumps(shaderc_receipt_fixture()).encode())
+                if include_openssl_receipt:
+                    archive.writestr('apple-openssl-builds.json', json.dumps(
+                        openssl_receipt_fixture(old_version=old_openssl_version,
+                                                wrong_source=wrong_openssl_source,
+                                                forge=forged_openssl)).encode())
+                if include_crypto_outputs:
+                    for output, body in crypto_sources['bodies'].items():
+                        if tamper_crypto_source and output == 'apple-crypto-source-gmp.tar.xz':
+                            body = b'tampered source body'
+                        archive.writestr(output, body)
+                    archive.writestr('apple-crypto-release-sources.json', crypto_sources['receipt'])
+                    archive.writestr('apple-crypto-release-sources.tar', crypto_sources['capture'])
+                    if include_crypto_chain:
+                        archive.writestr('apple-crypto-chain.json',
+                                         crypto_chain_receipt_for(package_body))
+            result.seek(0)
+            return result
+
+        captured = {'source-0/Package.swift': source_package.encode()}
+        crypto_pins = crypto_sources['pins']
+
+        def check_apple(archive, *, validate_sources=True):
+            with patch.object(consumer, 'CRYPTO_SOURCE_OUTPUTS', crypto_pins), \
+                    patch.object(consumer, 'CRYPTO_SMB_HEADERS', crypto_smb_headers), \
+                    patch.object(consumer, 'CRYPTO_SMB_PINS', crypto_smb_pins):
+                archive_sources = (consumer.crypto_source_outputs(archive)
+                                   if validate_sources else {'profile': consumer.CRYPTO_SOURCE_PROFILE})
+                consumer.apple(archive, {}, captured, recipe, archive_sources)
+
+        with candidate_archive() as fixture, zipfile.ZipFile(fixture) as archive:
+            check_apple(archive)
+        for change, rejection in (
+                ({'missing_lcms': True}, 'Apple original ZIP set'),
+                ({'include_receipt': False}, 'artifact gates'),
+                ({'local_lcms': False}, 'Apple package/source correspondence'),
+                ({'changed_lcms': True}, 'Apple assembled/original ZIP/native source byte correspondence'),
+                ({'missing_dav': True}, 'Apple original ZIP set'),
+                ({'local_dav': False}, 'Apple package/source correspondence'),
+                ({'changed_dav': True}, 'Apple assembled/original ZIP/native source byte correspondence'),
+                ({'missing_ssl': True}, 'Apple original ZIP set'),
+                ({'missing_crypto': True}, 'Apple original ZIP set'),
+                ({'old_openssl_version': True}, 'OpenSSL receipt source/profile boundary'),
+                ({'wrong_openssl_source': True}, 'OpenSSL receipt source/profile boundary'),
+                ({'forged_openssl': True}, 'OpenSSL framework/static-library byte correspondence'),
+                ({'shaderc_tamper': True}, 'Exact published Shaderc body'),
+                ({'include_shaderc_receipt': False}, 'Missing Shaderc receipt output'),
+                ({'include_openssl_receipt': False}, 'Missing OpenSSL BOM output'),
+                ({'include_crypto_outputs': False}, 'Missing crypto source/artifact receipt output'),
+                ({'include_crypto_chain': False}, 'Missing crypto source/artifact receipt output'),
+                ({'tamper_crypto_source': True}, 'Crypto release source body differs from its fixed pin')):
+            with self.subTest(dependency_candidate=change):
+                with candidate_archive(**change) as fixture, zipfile.ZipFile(fixture) as archive:
+                    with self.assertRaisesRegex(ValueError, rejection):
+                        check_apple(archive, validate_sources=change.get('include_crypto_outputs', True))
+
+        # Equal self-reported fake hashes do not establish correspondence: the
+        # offline consumer must still bind every row to retained ZIP bytes.
+        with candidate_archive() as fixture, zipfile.ZipFile(fixture) as archive:
+            candidate_rows, captured_rows = consumer.tar_index(
+                archive, 'apple-candidate.tar.gz', file_limit=512 * 1024**2,
+                total=4 * 1024**3, capture=('MPVKit-DVFEL/Package.swift',),
+                allow_dirs=True)
+            forged = consumer.crypto_load(archive.read('apple-crypto-chain.json'))
+            forged['rows'][0]['libraries']['gmp']['thin']['sha256'] = '0' * 64
+            forged['rows'][0]['libraries']['gmp']['correspondence']['sha256'] = '0' * 64
+            forged_body = (json.dumps(forged, indent=2, sort_keys=True) + '\n').encode()
+            with patch.object(consumer, 'CRYPTO_SMB_HEADERS', crypto_smb_headers), \
+                    patch.object(consumer, 'CRYPTO_SMB_PINS', crypto_smb_pins), \
+                    self.assertRaises(ValueError):
+                consumer.crypto_chain_receipt(
+                    forged_body, crypto_zip_bodies, crypto_archive_source_rows,
+                    candidate_rows['MPVKit-DVFEL/Package.swift'],
+                    captured_rows['MPVKit-DVFEL/Package.swift'])
+
+        valid_receipt = shaderc_receipt_fixture()
+        consumer.shaderc_receipt(valid_receipt,
+                                 valid_receipt['sources'],
+                                 recipe['scripts/native-media-hosted/evidence.py'],
+                                 fixture_all_rows)
+        for index, mutate in enumerate((
+                lambda row: row.update(validatorSHA256='0' * 64),
+                lambda row: row.update(profile='old-profile'),
+                lambda row: row.update(runtimeSecurityTested=True),
+                lambda row: row['reader'].update(resolvedReader='/' + 'x' * 4096),
+                lambda row: row['reader'].update(toolchainReader='/fixture/other-xcodebuild'),
+                lambda row: row['reader'].update(toolchainSHA256='not-a-digest'),
+                lambda row: row['reader'].pop('toolchainSHA256'),
+                lambda row: row['sources'][0].update(bytes=6),
+                lambda row: row['matrix'].pop(),
+                lambda row: row['matrix'][0].update(equal=False),
+                lambda row: row['matrix'][0].update(allZipEntry='lib/ios/thin/x86_64/lib/libshaderc_combined.a'),
+                lambda row: row['matrix'][0].update(allArchiveSHA256='a' * 64,
+                                                     xcArchiveSHA256='a' * 64))):
+            observed = deepcopy(valid_receipt)
+            before_mutation = deepcopy(observed)
+            mutate(observed)
+            with self.subTest(receipt='shaderc', index=index):
+                self.assertNotEqual(observed, before_mutation,
+                                    'negative Shaderc receipt mutation is a no-op')
+                with self.assertRaises(ValueError):
+                    consumer.shaderc_receipt(observed, valid_receipt['sources'],
+                                             recipe['scripts/native-media-hosted/evidence.py'],
+                                             fixture_all_rows)
+        with self.assertRaises(ValueError):
+            consumer.shaderc_remote_target(source_package.replace(fixture_specs[1][2], '0' * 64))
+
+        valid_openssl = openssl_receipt_fixture()
+        consumer.openssl_receipt(valid_openssl, recipe['scripts/native-media-hosted/evidence.py'])
+        versioned_sdk = deepcopy(valid_openssl)
+        versioned_row = versioned_sdk['matrix'][0]
+        old_sdk = versioned_row['sdkRoot']
+        new_sdk = old_sdk.replace('iPhoneOS.sdk', 'iPhoneOS26.1.sdk')
+        versioned_row['sdkRoot'] = new_sdk
+        for key in ('CFLAGS', 'CPPFLAGS', 'CXXFLAGS', 'ASMFLAGS', 'LDFLAGS'):
+            updated = versioned_row['environment'][key].replace(old_sdk, new_sdk)
+            versioned_row['environment'][key] = updated
+            if key in ('CFLAGS', 'CPPFLAGS', 'CXXFLAGS', 'LDFLAGS'):
+                # configdata.pm serializes each make flag as one complete string,
+                # not as a tokenized argv list; keep the synthetic receipt aligned
+                # with the SDK-bound environment in this positive case.
+                versioned_row['effectiveConfiguration'][key] = [updated]
+        consumer.openssl_receipt(versioned_sdk, recipe['scripts/native-media-hosted/evidence.py'])
+        for index, sdk_mutation in enumerate((
+                lambda row: row.update(sdkRoot=row['sdkRoot'].replace('iPhoneOS.sdk', 'AppleTVOS.sdk')),
+                lambda row: row.update(sdkRoot=row['sdkRoot'].replace('iPhoneOS.sdk', 'iPhoneOS26.a.sdk')),
+                lambda row: row.update(sdkRoot=row['sdkRoot'].replace('iPhoneOS.sdk', 'iPhoneOS26.1.sdk/../iPhoneOS.sdk')))):
+            observed = deepcopy(valid_openssl)
+            before_mutation = deepcopy(observed)
+            sdk_mutation(observed['matrix'][0])
+            with self.subTest(receipt='openssl-sdk', index=index):
+                self.assertNotEqual(observed, before_mutation,
+                                    'negative OpenSSL SDK mutation is a no-op')
+                with self.assertRaises(ValueError):
+                    consumer.openssl_receipt(observed, recipe['scripts/native-media-hosted/evidence.py'])
+        for index, mutate in enumerate((
+                lambda row: row.update(version='3.3.5'),
+                lambda row: row.update(sourceSHA='0' * 40),
+                lambda row: row.update(validatorSHA256='0' * 64),
+                lambda row: row['matrix'].pop(),
+                # A valid-looking output digest is bound to raw ZIP bytes by
+                # consumer.apple; this offline receipt loop keeps a structural
+                # output mutation so it tests only the receipt schema contract.
+                lambda row: row['matrix'][0]['outputs'][0].update(name='libcrypto.a'),
+                lambda row: row['matrix'][0].update(targetConfigSHA256='0' * 64),
+                lambda row: row['matrix'][0].update(targetConfig=row['matrix'][0]['targetConfig'].replace('iOS', 'IOS')),
+                lambda row: row['matrix'][0]['configureArguments'].pop(0),
+                lambda row: row['matrix'][0]['environment'].update(unexpected='/fixture/forbidden'),
+                lambda row: row['matrix'][0].update(sdkRoot=row['matrix'][0]['sdkRoot'].replace('iPhoneOS', 'iPhoneSimulator')),
+                lambda row: row['matrix'][0]['environment'].update(CURRENT_ARCH='x86_64'),
+                lambda row: row['matrix'][0]['environment'].update(CFLAGS=row['matrix'][0]['environment']['CFLAGS'].replace('15.0', '14.0')),
+                lambda row: row['matrix'][0]['environment'].update(ARFLAGS='bad'),
+                lambda row: row['matrix'][0]['environment'].update(AR='relative/ar'),
+                lambda row: row['matrix'][0]['effectiveConfiguration'].update(ARFLAGS=['bad']),
+                lambda row: row['matrix'][0]['effectiveConfiguration'].update(CFLAGS=['forged']),
+                lambda row: row['matrix'][0]['effectiveConfiguration'].update(CROSS_COMPILE='host-'))):
+            observed = deepcopy(valid_openssl)
+            before_mutation = deepcopy(observed)
+            mutate(observed)
+            with self.subTest(receipt='openssl', index=index):
+                self.assertNotEqual(observed, before_mutation,
+                                    'negative OpenSSL receipt mutation is a no-op')
+                with self.assertRaises(ValueError):
+                    consumer.openssl_receipt(observed, recipe['scripts/native-media-hosted/evidence.py'])
+
+    def test_shaderc_sdk_tool_identity_does_not_relax_archive_single_links(self):
+        import os
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tool = root / 'sdk-tool'
+            tool.write_bytes(b'fixed SDK tool fixture')
+            os.link(tool, root / 'second-host-name')
+            self.assertEqual(tool.stat().st_nlink, 2)
+            expected = hashlib.sha256(tool.read_bytes()).hexdigest()
+            self.assertEqual(MODULE._shaderc_tool_sha(tool, 'fixture SDK tool'), expected)
+            with self.assertRaises(ValueError):
+                MODULE._shaderc_regular(tool, 'archive fixture')
+            alias = root / 'symlink-tool'
+            alias.symlink_to(tool.name)
+            for invalid in (alias, root, Path('relative-tool')):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    MODULE._shaderc_tool_sha(invalid, 'invalid SDK tool')
+            empty = root / 'empty-tool'
+            empty.write_bytes(b'')
+            with self.assertRaises(ValueError):
+                MODULE._shaderc_tool_sha(empty, 'empty SDK tool')
+
+    def test_shaderc_sdk_tool_identity_rejects_a_replacement_before_open(self):
+        import os
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tool = root / 'sdk-tool'
+            tool.write_bytes(b'original SDK tool fixture')
+            real_open = os.open
+
+            def replace_then_open(path, flags):
+                replacement = root / 'replacement'
+                replacement.write_bytes(b'replacement SDK tool fixture')
+                os.replace(replacement, tool)
+                return real_open(path, flags)
+
+            with patch.object(MODULE.os, 'open', side_effect=replace_then_open):
+                with self.assertRaisesRegex(ValueError, 'changed before open'):
+                    MODULE._shaderc_tool_sha(tool, 'changing SDK tool')
+
+    def test_shaderc_single_arch_fat_is_thinned_instead_of_copied(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, thin, lipo = root / 'xc', root / 'thin', root / 'lipo'
+            authentic_thin = b'!<arch>\nowned thin fixture'
+            source.write_bytes(authentic_thin)
+            with patch.object(MODULE, 'run') as reader:
+                MODULE._shaderc_thin_xc(source, 'arm64', thin, lipo, 1)
+                reader.assert_not_called()
+            self.assertEqual(thin.read_bytes(), authentic_thin)
+            thin.unlink()
+
+            for magic in (b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
+                          b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'):
+                with self.subTest(magic=magic.hex()):
+                    source.write_bytes(magic + b'container-only bytes' + authentic_thin)
+
+                    def actual_reader_boundary(*argv):
+                        self.assertEqual(argv, (str(lipo), str(source), '-thin', 'arm64',
+                                                '-output', str(thin)))
+                        thin.write_bytes(authentic_thin)
+                        return ''
+
+                    with patch.object(MODULE, 'run', side_effect=actual_reader_boundary) as reader:
+                        MODULE._shaderc_thin_xc(source, 'arm64', thin, lipo, 1)
+                        reader.assert_called_once()
+                    self.assertEqual(hashlib.sha256(thin.read_bytes()).hexdigest(),
+                                     hashlib.sha256(authentic_thin).hexdigest())
+                    self.assertNotEqual(hashlib.sha256(source.read_bytes()).hexdigest(),
+                                        hashlib.sha256(authentic_thin).hexdigest())
+                    thin.unlink()
+
+            source.write_bytes(authentic_thin)
+            with patch.object(MODULE, 'run') as reader:
+                with self.assertRaisesRegex(ValueError, 'multi-architecture'):
+                    MODULE._shaderc_thin_xc(source, 'arm64', thin, lipo, 2)
+                reader.assert_not_called()
+            for payload in (b'', b'\xca\xfe', b'not an archive'):
+                source.write_bytes(payload)
+                with patch.object(MODULE, 'run') as reader:
+                    with self.assertRaisesRegex(ValueError, 'not an ar or fat'):
+                        MODULE._shaderc_thin_xc(source, 'arm64', thin, lipo, 1)
+                    reader.assert_not_called()
+
+
+    def test_apple_ffmpeg_tls_cannot_autodetect_new_openssl(self):
+        carrier = (ROOT / "scripts/mpvkit-dvfel.patch").read_text()
+        self.assertIn('arguments += ["--disable-gnutls", "--disable-openssl", "--enable-securetransport"]', carrier)
+        gate = (ROOT / "scripts/verify-mpvkit-dvfel-apple-tls.sh").read_text()
+        self.assertIn("grep -Eq '^#define CONFIG_OPENSSL 0$'", gate)
+        self.assertIn("grep -Eq '^#define CONFIG_GNUTLS 0$'", gate)
+        self.assertIn("CONFIG_SECURETRANSPORT", gate)
+        self.assertIn("_SSLSetPeerDomainName", gate)
+        self.assertIn("_SecTrustEvaluate", gate)
+
+    def test_apple_native_builder_keeps_one_worker(self):
+        carrier = (ROOT / "scripts/mpvkit-dvfel.patch").read_text()
+        added = "\n".join(line[1:] for line in carrier.splitlines()
+                          if line.startswith("+") and not line.startswith("+++"))
+        for arguments in ('["compile", "--clean", "-j", "1"]',
+                          '["compile", "--verbose", "-j", "1"]',
+                          '["install", "--no-rebuild"]',
+                          '["configure", "-j1"]',
+                          '["-j1"] + wafBuildArg()',
+                          '["install", "-j1"] + wafInstallArg()',
+                          '["-j1"], currentDirectoryURL: buildURL',
+                          '["-j1", "install"]'):
+            self.assertIn(arguments, added)
+        for key, value in (("MAKEFLAGS", "-j1"),
+                           ("CMAKE_BUILD_PARALLEL_LEVEL", "1"),
+                           ("CARGO_BUILD_JOBS", "1")):
+            self.assertIn('"' + key + '": "' + value + '"', added)
+        self.assertNotIn('"-j8"', added)
+        entry = (ROOT / "scripts/build-mpvkit-dvfel.sh").read_text()
+        self.assertEqual(entry.count("swift run --jobs 1 --build-path"), 1)
 
     def test_android_python_closure_is_pinned_and_isolated(self):
         workflow = (ROOT / ".github/workflows/native-media-candidates.yml").read_text()
@@ -617,15 +1857,18 @@ class NativeMediaProducer(unittest.TestCase):
             self.run_fixture()
 
     def test_android_producer_rejects_missing_finite_reader_provider_or_import(self):
-        symbol = MODULE.REFERENCE_FFMPEG_FUNCTIONS[-1]
-        for library in (b'libavformat.so', b'libmpv.so'):
-            def missing(*args):
-                result = self.readelf(*args)
-                if '--dyn-syms' in args and library in Path(args[-1]).read_bytes():
-                    return result.replace(symbol + '@', symbol + '_missing@')
-                return result
-            with self.subTest(library=library), patch.object(MODULE, 'run', side_effect=missing), self.assertRaises(ValueError):
-                self.run_fixture()
+        # Retain the original finite negative as well as the sparse provider/import seam.
+        for symbol in ('avpriv_vortx_reference_recipe_release_v1',
+                       'avpriv_vortx_reference_sparse_budget_release_v1'):
+            self.assertIn(symbol, MODULE.REFERENCE_FFMPEG_FUNCTIONS)
+            for library in (b'libavformat.so', b'libmpv.so'):
+                def missing(*args):
+                    result = self.readelf(*args)
+                    if '--dyn-syms' in args and library in Path(args[-1]).read_bytes():
+                        return result.replace(symbol + '@', symbol + '_missing@')
+                    return result
+                with self.subTest(library=library, symbol=symbol), patch.object(MODULE, 'run', side_effect=missing), self.assertRaises(ValueError):
+                    self.run_fixture()
 
     def test_missing_library_rejects(self):
         with patch.object(MODULE, "run", side_effect=self.readelf), self.assertRaises(ValueError):
@@ -951,7 +2194,15 @@ class SentRequestABISynthetic(unittest.TestCase):
             'avpriv_vortx_reference_capture_v1', 'avpriv_vortx_reference_revalidate_v1',
             'avpriv_vortx_reference_recipe_current', 'avpriv_vortx_reference_open_prefix_v1',
             'avpriv_vortx_reference_read_v1', 'avpriv_vortx_reference_stats_v1',
-            'avpriv_vortx_reference_reader_close_v1', 'avpriv_vortx_reference_recipe_release_v1'))
+            'avpriv_vortx_reference_reader_close_v1', 'avpriv_vortx_reference_recipe_release_v1',
+            'avpriv_vortx_reference_sparse_budget_create_v1',
+            'avpriv_vortx_reference_sparse_budget_info_v1',
+            'avpriv_vortx_reference_sparse_open_v1',
+            'avpriv_vortx_reference_sparse_next_part_v1',
+            'avpriv_vortx_reference_sparse_read_part_v1',
+            'avpriv_vortx_reference_sparse_stats_v1',
+            'avpriv_vortx_reference_sparse_close_v1',
+            'avpriv_vortx_reference_sparse_budget_release_v1'))
         for role, kind in (('defined-provider', 'T'), ('undefined-import', 'U')):
             dynamic = self.dynsym(role, functions=functions)
             rows = MODULE.required_elf_functions(dynamic, functions, role)
@@ -974,6 +2225,30 @@ class SentRequestABISynthetic(unittest.TestCase):
                                change=lambda row, old=old, new=new: row.replace(old, new))
             with self.subTest(change=(old, new)), self.assertRaises(ValueError):
                 MODULE.required_elf_functions(text, functions, 'defined-provider')
+
+    def test_sparse_functions_reject_wrong_elf_and_macho_symbol_roles(self):
+        functions = MODULE.REFERENCE_FFMPEG_FUNCTIONS
+        sparse = tuple(name for name in functions if name.startswith('avpriv_vortx_reference_sparse_'))
+        self.assertEqual(len(sparse), 8)
+        for role, kind in (('defined-provider', 'T'), ('undefined-import', 'U')):
+            macho_role = 'defined-code' if role == 'defined-provider' else 'undefined-import'
+            wrong_section = (' 12 ', ' UND ') if role == 'defined-provider' else (' UND ', ' 12 ')
+            for symbol in sparse:
+                ordered = (symbol,) + tuple(name for name in functions if name != symbol)
+                for old, new in ((' FUNC ', ' OBJECT '), (' GLOBAL ', ' WEAK '),
+                                 (' DEFAULT ', ' HIDDEN '), wrong_section):
+                    dynamic = self.dynsym(role, functions=ordered,
+                        change=lambda row, old=old, new=new: row.replace(old, new))
+                    with self.subTest(role=role, symbol=symbol, mutation=(old, new)), self.assertRaises(ValueError):
+                        MODULE.required_elf_functions(dynamic, functions, role)
+                with self.subTest(role=role, duplicate=symbol), self.assertRaises(ValueError):
+                    MODULE.required_elf_functions(self.dynsym(role, functions=ordered, duplicate=True),
+                                                  functions, role)
+                remaining = tuple(name for name in functions if name != symbol)
+                for wrong_kind in (('U', 'D', 'W') if kind == 'T' else ('T', 'D', 'W')):
+                    observed = self.nm_text(remaining, kind) + self.nm_text((symbol,), wrong_kind)
+                    with self.subTest(role=role, symbol=symbol, kind=wrong_kind), self.assertRaises(ValueError):
+                        MODULE.required_macho_functions(observed, functions, macho_role)
 
     def test_apple_material_abi_rejects_old_component_missing_private_helper(self):
         required = MODULE.SENT_MPV_FUNCTIONS
@@ -1234,7 +2509,7 @@ class SentRequestOfflineEvidence(unittest.TestCase):
         consumer.reference_reader_abi(value, records, validator, sent['reader'])
         self.assertEqual(set(consumer.REFERENCE_FFMPEG_FUNCTIONS), set(MODULE.REFERENCE_FFMPEG_FUNCTIONS))
         self.assertEqual(len(value['libraries']), 6)
-        self.assertTrue(all(len(row['symbols']) == 8 for row in value['libraries']))
+        self.assertTrue(all(len(row['symbols']) == 16 for row in value['libraries']))
         explicit = deepcopy(value)
         expected_reader = deepcopy(sent['reader'])
         expected_reader['mode'] = 'explicit-read-only-inspector'
@@ -1279,6 +2554,27 @@ class SentRequestOfflineEvidence(unittest.TestCase):
         del missing_record['jni/arm64-v8a/libavformat.so']
         with self.assertRaises(ValueError):
             consumer.reference_reader_abi(original, missing_record, validator, sent['reader'])
+
+    def test_sparse_evidence_rejects_finite_only_or_wrong_sparse_symbol_roles(self):
+        consumer, original, sent, records, validator = self.reference_fixture()
+        sparse = set(name for name in MODULE.REFERENCE_FFMPEG_FUNCTIONS
+                     if name.startswith('avpriv_vortx_reference_sparse_'))
+        self.assertEqual(len(sparse), 8)
+        for index, row in enumerate(original['libraries']):
+            finite_only = deepcopy(original)
+            finite_only['libraries'][index]['symbols'] = [
+                item for item in row['symbols'] if item['name'] not in sparse]
+            self.assertEqual(len(finite_only['libraries'][index]['symbols']), 8)
+            with self.subTest(abi=row['abi'], library=row['library'], finite_only=True), self.assertRaises(ValueError):
+                consumer.reference_reader_abi(finite_only, records, validator, sent['reader'])
+            for symbol_index, symbol in enumerate(row['symbols']):
+                if symbol['name'] not in sparse:
+                    continue
+                value = deepcopy(original)
+                value['libraries'][index]['symbols'][symbol_index]['section'] = (
+                    'UND' if row['role'] == 'defined-provider' else '12')
+                with self.subTest(abi=row['abi'], library=row['library'], wrong_role=symbol['name']), self.assertRaises(ValueError):
+                    consumer.reference_reader_abi(value, records, validator, sent['reader'])
 
     def test_reference_reader_evidence_rejects_distinct_valid_inspector_identity(self):
         consumer, original, sent, records, validator = self.reference_fixture()

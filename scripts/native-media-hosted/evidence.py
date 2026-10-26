@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import io
 import json
+import lzma
 import os
 from pathlib import Path
 import posixpath
@@ -31,6 +32,1454 @@ def run(*args):
 
 def save(path, data):
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
+
+
+# The dependency-upgrade receipt is deliberately separate from the existing
+# shipping/source profile.  The coordinator seals the profile and manifest
+# literals after rebasing this recovery-only delta onto the next carrier.
+NATIVE_UPGRADES_PROFILE = 'native-upgrades-openssl410-crypto-v4'
+SHADERC_WRAPPER_VERSION = '2026.1.0'
+SHADERC_SOURCE_SPECS = (
+    ('libshaderc.zip', 124322785,
+     'd213fa58de7886846fb8cb713ea5213b77654a3ad2ba3d89b1f2fe367d945ba5'),
+    ('Libshaderc_combined.xcframework.zip', 61246203,
+     '77a3d355993cf53843a394bf58262dab99cdd93f9e6fe31d5ca6e55b03866ce1'),
+)
+SHADERC_MATRIX = (
+    ('ios-arm64', 'arm64', 'ios'),
+    ('ios-arm64_x86_64-simulator', 'arm64', 'isimulator'),
+    ('ios-arm64_x86_64-simulator', 'x86_64', 'isimulator'),
+    ('tvos-arm64_arm64e', 'arm64', 'tvos'),
+    ('tvos-arm64_arm64e', 'arm64e', 'tvos'),
+    ('tvos-arm64_x86_64-simulator', 'arm64', 'tvsimulator'),
+    ('tvos-arm64_x86_64-simulator', 'x86_64', 'tvsimulator'),
+    ('macos-arm64_x86_64', 'arm64', 'macos'),
+    ('macos-arm64_x86_64', 'x86_64', 'macos'),
+)
+SHADERC_MAX_ENTRIES = 100000
+SHADERC_MAX_MEMBER = 512 * 1024**2
+SHADERC_MAX_TOTAL = 4 * 1024**3
+SHADERC_MAX_LINK_BODY = 4096
+SHADERC_MAX_LINK_HOPS = 8
+SHADERC_XC_MAC_FRAMEWORK = (
+    'Libshaderc_combined.xcframework/macos-arm64_x86_64/'
+    'Libshaderc_combined.framework')
+SHADERC_XC_LINKS = {
+    SHADERC_XC_MAC_FRAMEWORK + '/Resources': 'Versions/Current/Resources',
+    SHADERC_XC_MAC_FRAMEWORK + '/Libshaderc_combined':
+        'Versions/Current/Libshaderc_combined',
+    SHADERC_XC_MAC_FRAMEWORK + '/Versions/Current': 'A',
+}
+
+OPENSSL_BOM_PROFILE = 'openssl-4.1.0-source-v1'
+OPENSSL_SOURCE = {
+    'repository': 'https://github.com/openssl/openssl',
+    'tag': 'openssl-4.1.0',
+    'commit': '2f4e3a5fec05394068cfa7379890ab552483a8a6',
+    'version': '4.1.0',
+}
+OPENSSL_GITLINKS = {
+    'cloudflare-quiche': '7ab6a55cfe471267d61e4d28ba43d41defcd87e0',
+    'gost-engine': '74b1f4fddbc2d6de969815b1992ddc1ae7c643fe',
+    'krb5': '784c38f50e70a739400cdd3f2620bac2e2788e6c',
+    'oqs-provider': 'c5fb439e4ffd947f24c139232fb04fd71fe3c29e',
+    'pkcs11-provider': 'eb157e48066fdb2b5735f6f327ed7ae65c51eb6f',
+    'pyca-cryptography': 'e83bbe58e373536636baaa7c33a64a6e8f04c953',
+    'python-ecdsa': '4096fa01715929e08b97e73f3173aee9d57f2a3f',
+    'fuzz/corpora': '7e3fb43a75c55275759e8bdb5c32de4b50978eab',
+    'tlsfuzzer': '61f45d9701294fd87ef92d2a7e3dfb076653a562',
+    'tlslite-ng': '77ef321dde1a9e6bcf94d73c80f8789a770d8031',
+    'wycheproof': '3fa63dd0344abb611f1fb1d77e119938603ea230',
+}
+OPENSSL_ROOT = 'openssl-4.1.0-2f4e3a5f'
+OPENSSL_OUTPUT_ROOT = 'openssl'
+OPENSSL_CONFIGURE_FLAGS = ('no-async', 'no-shared', 'no-dso', 'no-tests', 'no-apps', 'no-docs')
+OPENSSL_PKG_LIBRARIES = ('libmpv', 'FFmpeg', 'libshaderc', 'vulkan', 'lcms2', 'libdovi',
+                         'openssl', 'libunibreak', 'libfreetype', 'libfribidi', 'libharfbuzz',
+                         'libass', 'libsmbclient', 'libplacebo', 'libdav1d', 'gmp', 'nettle',
+                         'gnutls', 'libuchardet', 'libbluray', 'libluajit', 'libuavs3d')
+OPENSSL_COMPLETED_STEPS = ('Configure', 'make build_sw', 'make install_sw')
+OPENSSL_ENV_KEYS = ('CC', 'CXX', 'CFLAGS', 'CPPFLAGS', 'CXXFLAGS', 'ASMFLAGS',
+                    'LDFLAGS', 'PKG_CONFIG_LIBDIR', 'PKG_CONFIG_PATH', 'PATH',
+                    'CURRENT_ARCH', 'LC_CTYPE', 'AR', 'ARFLAGS', 'RANLIB',
+                    'MAKEFLAGS', 'CMAKE_BUILD_PARALLEL_LEVEL', 'CARGO_BUILD_JOBS')
+OPENSSL_EFFECTIVE_KEYS = ('target', 'CC', 'CFLAGS', 'CPPFLAGS', 'CXX', 'CXXFLAGS',
+                           'LDFLAGS', 'AR', 'ARFLAGS', 'RANLIB', 'CROSS_COMPILE',
+                           'cflags', 'cppflags', 'lflags', 'lib_cppflags')
+OPENSSL_DEFAULT_PATH = '/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+OPENSSL_OUTPUTS = (
+    ('libssl.a', 'lib/libssl.a', 512 * 1024**2),
+    ('libcrypto.a', 'lib/libcrypto.a', 512 * 1024**2),
+    ('opensslv.h', 'include/openssl/opensslv.h', 1024 * 1024),
+)
+OPENSSL_MATRIX = (
+    ('ios', 'arm64', 'vortx-apple-ios-arm64', 'ios-arm64'),
+    ('isimulator', 'arm64', 'vortx-apple-isimulator-arm64', 'ios-arm64_x86_64-simulator'),
+    ('isimulator', 'x86_64', 'vortx-apple-isimulator-x86_64', 'ios-arm64_x86_64-simulator'),
+    ('tvos', 'arm64', 'vortx-apple-tvos-arm64', 'tvos-arm64_arm64e'),
+    ('tvos', 'arm64e', 'vortx-apple-tvos-arm64e', 'tvos-arm64_arm64e'),
+    ('tvsimulator', 'arm64', 'vortx-apple-tvsimulator-arm64', 'tvos-arm64_x86_64-simulator'),
+    ('tvsimulator', 'x86_64', 'vortx-apple-tvsimulator-x86_64', 'tvos-arm64_x86_64-simulator'),
+    ('macos', 'arm64', 'vortx-apple-macos-arm64', 'macos-arm64_x86_64'),
+    ('macos', 'x86_64', 'vortx-apple-macos-x86_64', 'macos-arm64_x86_64'),
+)
+OPENSSL_MAX_RECEIPT = 4 * 1024 * 1024
+OPENSSL_MAX_TARGET_CONFIG = 1024 * 1024
+
+CRYPTO_SOURCE_PROFILE = 'gmp630-nettle400-gnutls3813-release-sources-v1'
+CRYPTO_CHAIN_PROFILE = 'native-upgrades-crypto-chain-v1'
+CRYPTO_CHAIN_OUTPUT = 'apple-crypto-chain.json'
+CRYPTO_SOURCE_OUTPUTS = (
+    {
+        'id': 'gmp', 'version': '6.3.0', 'archiveRoot': 'gmp-6.3.0',
+        'filename': 'gmp-6.3.0.tar.xz', 'compression': 'xz', 'bytes': 2094196,
+        'sha256': 'a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898',
+        'sourceRoot': 'gmp-6.3.0-a3c2b802',
+        'url': 'https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz',
+        'output': 'apple-crypto-source-gmp.tar.xz',
+    },
+    {
+        'id': 'nettle', 'version': '4.0', 'archiveRoot': 'nettle-4.0',
+        'filename': 'nettle-4.0.tar.gz', 'compression': 'gz', 'bytes': None,
+        'sha256': '3addbc00da01846b232fb3bc453538ea5468da43033f21bb345cb1e9073f5094',
+        'sourceRoot': 'nettle-4.0-3addbc00',
+        'url': 'https://ftp.gnu.org/gnu/nettle/nettle-4.0.tar.gz',
+        'output': 'apple-crypto-source-nettle.tar.gz',
+    },
+    {
+        'id': 'gnutls', 'version': '3.8.13', 'archiveRoot': 'gnutls-3.8.13',
+        'filename': 'gnutls-3.8.13.tar.xz', 'compression': 'xz', 'bytes': 7275324,
+        'sha256': 'ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e',
+        'sourceRoot': 'gnutls-3.8.13-ffed8ec1',
+        'url': 'https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz',
+        'output': 'apple-crypto-source-gnutls.tar.xz',
+    },
+)
+CRYPTO_CAPTURE_TAR_OUTPUT = 'apple-crypto-release-sources.tar'
+CRYPTO_CAPTURE_RECEIPT_OUTPUT = 'apple-crypto-release-sources.json'
+CRYPTO_MAX_ARCHIVE = 8 * 1024 * 1024
+CRYPTO_MAX_UNCOMPRESSED = 512 * 1024 * 1024
+CRYPTO_MAX_MEMBERS = 100000
+CRYPTO_MAX_MEMBER = 64 * 1024 * 1024
+CRYPTO_MAX_RECEIPT = 64 * 1024 * 1024
+CRYPTO_MAX_PATH = 4096
+CRYPTO_MAX_MTIME = 4102444800
+CRYPTO_INSTALLED_HELPERS = {
+    'Sources/BuildScripts/crypto-release-sources.py':
+        '3c310499d446eed72eb16521b27c16f718f23e7ab1472dec1fad79cc40ed1537',
+    'Sources/BuildScripts/crypto-chain-gate.py':
+        '041dd13e48e1821f5d7bf049bb8eb097d3772d6ea867c15a3b7646779a3c015d',
+}
+
+
+def _crypto_canonical(value):
+    return (json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode()
+
+
+def _crypto_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mode,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _crypto_read_regular(path, maximum):
+    if not path.is_absolute() or '..' in path.parts:
+        raise ValueError('crypto source input must be one absolute path')
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise ValueError('crypto source input has a linked ancestor')
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_size < 0 or before.st_size > maximum):
+        raise ValueError('crypto source input is not one bounded regular file')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as stream:
+        opened = os.fstat(stream.fileno())
+        if _crypto_identity(opened) != _crypto_identity(before):
+            raise ValueError('crypto source input changed before reading')
+        body = stream.read(maximum + 1)
+        if len(body) > maximum or _crypto_identity(os.fstat(stream.fileno())) != _crypto_identity(opened):
+            raise ValueError('crypto source input changed or exceeded its bound')
+    if _crypto_identity(path.lstat()) != _crypto_identity(before) or len(body) != before.st_size:
+        raise ValueError('crypto source input changed during reading')
+    return body
+
+
+def _crypto_member_path(value):
+    if (not isinstance(value, str) or not value or len(value.encode('utf-8')) > CRYPTO_MAX_PATH
+            or not value.isprintable() or value.startswith('/') or '\\' in value
+            or ':' in value or '\x00' in value):
+        raise ValueError('unsafe crypto source archive path')
+    parts = value.rstrip('/').split('/')
+    if any(part in ('', '.', '..') or part.casefold() == '.git' for part in parts):
+        raise ValueError('unsafe crypto source archive path component')
+    return '/'.join(parts)
+
+
+def _crypto_link_path(parent, target):
+    if (not isinstance(target, str) or not target or len(target.encode('utf-8')) > CRYPTO_MAX_PATH
+            or not target.isprintable() or target.startswith('/') or '\\' in target
+            or ':' in target or '\x00' in target):
+        raise ValueError('unsafe crypto source symlink target')
+    parts = list(parent)
+    for part in target.split('/'):
+        if part in ('', '.'):
+            continue
+        if part == '..':
+            if not parts:
+                raise ValueError('crypto source symlink escapes its release root')
+            parts.pop()
+        elif part.casefold() == '.git':
+            raise ValueError('crypto source symlink points through Git metadata')
+        else:
+            parts.append(part)
+    return '/'.join(parts)
+
+
+def _crypto_mtime(value):
+    if type(value) is not int or not 0 <= value <= CRYPTO_MAX_MTIME:
+        raise ValueError('crypto source mtime must be bounded integral seconds')
+    return value
+
+
+class _CryptoLimitedReader:
+    def __init__(self, stream, maximum):
+        self.stream, self.maximum, self.count = stream, maximum, 0
+
+    def read(self, size=-1):
+        allowance = self.maximum - self.count
+        if size < 0 or size > allowance + 1:
+            size = allowance + 1
+        block = self.stream.read(size)
+        self.count += len(block)
+        if self.count > self.maximum:
+            raise ValueError('crypto source archive exceeds its expanded bound')
+        return block
+
+
+def _crypto_tar_stream(blob, compression):
+    raw = io.BytesIO(blob)
+    if compression == 'xz':
+        decoded = lzma.LZMAFile(raw, 'rb')
+    elif compression == 'gz':
+        decoded = gzip.GzipFile(fileobj=raw, mode='rb')
+    elif compression == 'none':
+        decoded = raw
+    else:
+        raise ValueError('unknown fixed crypto source compression')
+    return tarfile.open(fileobj=_CryptoLimitedReader(decoded, CRYPTO_MAX_UNCOMPRESSED), mode='r|')
+
+
+def _crypto_file_row(member, stream):
+    if member.size < 0 or member.size > CRYPTO_MAX_MEMBER:
+        raise ValueError('crypto source member exceeds its bound')
+    hasher, count = hashlib.sha256(), 0
+    while True:
+        block = stream.read(min(1024 * 1024, member.size - count + 1))
+        if not block:
+            break
+        count += len(block)
+        if count > member.size:
+            raise ValueError('crypto source member exceeds its declared length')
+        hasher.update(block)
+    if count != member.size:
+        raise ValueError('truncated crypto source member')
+    return {'kind': 'file', 'mode': 0o755 if member.mode & 0o111 else 0o644,
+            'mtime': _crypto_mtime(member.mtime), 'bytes': count,
+            'sha256': hasher.hexdigest()}
+
+
+def _crypto_finish_index(entries):
+    for name in list(entries):
+        parts = name.split('/') if name else []
+        for end in range(1, len(parts)):
+            parent = '/'.join(parts[:end])
+            row = entries.setdefault(parent, {'kind': 'directory', 'mode': 0o755, 'mtime': 0})
+            if row['kind'] != 'directory':
+                raise ValueError('crypto source non-directory member has children')
+            if len(entries) > CRYPTO_MAX_MEMBERS:
+                raise ValueError('crypto source archive has too many paths')
+    folded = {}
+    for name in entries:
+        key = name.casefold()
+        if key in folded and folded[key] != name:
+            raise ValueError('crypto source archive has case-colliding members')
+        folded[key] = name
+
+    def resolve(name, visited=()):
+        if len(visited) >= 32:
+            raise ValueError('crypto source symlink chain exceeds its bound')
+        parts = name.split('/') if name else []
+        for end in range(1, len(parts) + 1):
+            prefix = '/'.join(parts[:end])
+            row = entries.get(prefix)
+            if row is None:
+                raise ValueError('dangling crypto source symlink')
+            if row['kind'] == 'symlink':
+                if prefix in visited:
+                    raise ValueError('cyclic crypto source symlink')
+                destination = _crypto_link_path(parts[:end - 1], row['target'])
+                tail = parts[end:]
+                following = '/'.join(([destination] if destination else []) + tail)
+                return resolve(following, visited + (prefix,))
+            if end < len(parts) and row['kind'] != 'directory':
+                raise ValueError('crypto source symlink resolves through a non-directory')
+        return name
+
+    for name, row in entries.items():
+        if row['kind'] == 'symlink':
+            resolve(name)
+    return [{'path': name, **entries[name]} for name in sorted(entries)]
+
+
+def _crypto_index_archive(pin, blob):
+    if (len(blob) > CRYPTO_MAX_ARCHIVE
+            or (pin['bytes'] is not None and len(blob) != pin['bytes'])
+            or hashlib.sha256(blob).hexdigest() != pin['sha256']):
+        raise ValueError('crypto release source body differs from its fixed pin')
+    entries = {'': {'kind': 'directory', 'mode': 0o755, 'mtime': 0}}
+    seen, total = set(), 0
+    with _crypto_tar_stream(blob, pin['compression']) as archive:
+        for member in archive:
+            if len(seen) >= CRYPTO_MAX_MEMBERS:
+                raise ValueError('crypto source archive has too many members')
+            full = _crypto_member_path(member.name)
+            root, separator, name = full.partition('/')
+            if root != pin['archiveRoot']:
+                raise ValueError('crypto source archive has a foreign top-level root')
+            if full.casefold() in seen:
+                raise ValueError('duplicate or case-colliding crypto source member')
+            seen.add(full.casefold())
+            if getattr(member, 'sparse', None) or any('sparse' in key.casefold() for key in member.pax_headers):
+                raise ValueError('sparse crypto source members are not admitted')
+            if not separator:
+                if not member.isdir():
+                    raise ValueError('crypto source archive root is not a directory')
+                entries['']['mtime'] = _crypto_mtime(member.mtime)
+                continue
+            if member.isdir():
+                row = {'kind': 'directory', 'mode': 0o755,
+                       'mtime': _crypto_mtime(member.mtime)}
+            elif member.isreg():
+                total += member.size
+                if total > CRYPTO_MAX_UNCOMPRESSED:
+                    raise ValueError('crypto source member total exceeds its bound')
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ValueError('missing crypto source member body')
+                with stream:
+                    row = _crypto_file_row(member, stream)
+            elif member.issym():
+                _crypto_link_path(name.split('/')[:-1], member.linkname)
+                body = member.linkname.encode('utf-8')
+                row = {'kind': 'symlink', 'mode': 0o777, 'bytes': len(body),
+                       'mtime': _crypto_mtime(member.mtime),
+                       'sha256': hashlib.sha256(body).hexdigest(), 'target': member.linkname}
+            else:
+                raise ValueError('crypto source hardlinks and special members are not admitted')
+            if name in entries:
+                raise ValueError('duplicate crypto source member')
+            entries[name] = row
+    rows = _crypto_finish_index(entries)
+    configure = next((row for row in rows if row['path'] == 'configure'), None)
+    if configure is None or configure['kind'] != 'file' or configure['mode'] != 0o755:
+        raise ValueError('crypto release archive lacks an executable configure')
+    return rows
+
+
+def _crypto_expected_receipt(verified):
+    roots = []
+    for pin, blob, rows in verified:
+        roots.append({
+            'id': pin['id'], 'version': pin['version'], 'url': pin['url'],
+            'archive': 'archives/' + pin['filename'], 'archiveRoot': pin['archiveRoot'],
+            'archiveBytes': len(blob), 'archiveSHA256': pin['sha256'],
+            'sourceRoot': 'dist/' + pin['sourceRoot'],
+            'membersSHA256': hashlib.sha256(_crypto_canonical(rows)).hexdigest(),
+            'members': rows,
+        })
+    return {'schema': 1, 'profile': CRYPTO_SOURCE_PROFILE,
+            'identityBasis': 'fixed-sha256-corroborated-by-package-maintainer-metadata',
+            'upstreamSignatureVerified': False, 'roots': roots}
+
+
+def _crypto_strict_json(data):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate crypto source receipt key')
+            result[key] = value
+        return result
+    return json.loads(data.decode('utf-8', errors='strict'), object_pairs_hook=unique,
+                      parse_constant=lambda _: (_ for _ in ()).throw(
+                          ValueError('non-finite crypto source receipt number')))
+
+
+def _crypto_exact_equal(left, right):
+    """JSON equality that never aliases booleans with integers."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return (set(left) == set(right) and
+                all(_crypto_exact_equal(left[key], right[key]) for key in left))
+    if isinstance(left, list):
+        return (len(left) == len(right) and
+                all(_crypto_exact_equal(a, b) for a, b in zip(left, right)))
+    return left == right
+
+
+def _crypto_capture_correspondence(path, expected):
+    if not path.is_absolute() or path.is_symlink():
+        raise ValueError('captured crypto source tar must be one absolute regular file')
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_size < 1 or before.st_size > CRYPTO_MAX_UNCOMPRESSED):
+        raise ValueError('captured crypto source tar exceeds its bound')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    observed, count, folded = set(), 0, set()
+    with os.fdopen(descriptor, 'rb') as stream:
+        opened = os.fstat(stream.fileno())
+        if _crypto_identity(opened) != _crypto_identity(before):
+            raise ValueError('captured crypto source tar changed before reading')
+        bounded = _CryptoLimitedReader(stream, CRYPTO_MAX_UNCOMPRESSED)
+        with tarfile.open(fileobj=bounded, mode='r|') as archive:
+            for member in archive:
+                name = _crypto_member_path(member.name)
+                count += 1
+                if (count > CRYPTO_MAX_MEMBERS * len(CRYPTO_SOURCE_OUTPUTS)
+                        or name in observed or name.casefold() in folded or name not in expected):
+                    raise ValueError('captured crypto source tar has an extra or duplicate member')
+                observed.add(name)
+                folded.add(name.casefold())
+                wanted = expected[name]
+                if member.isdir():
+                    actual = {'kind': 'directory', 'mode': member.mode,
+                              'mtime': _crypto_mtime(member.mtime)}
+                elif (member.isreg() and member.mode in (0o644, 0o755)
+                      and not getattr(member, 'sparse', None)
+                      and not any('sparse' in key.casefold() for key in member.pax_headers)):
+                    body = archive.extractfile(member)
+                    if body is None:
+                        raise ValueError('captured crypto source member has no body')
+                    with body:
+                        actual = _crypto_file_row(member, body)
+                elif member.issym():
+                    _crypto_link_path(name.split('/')[:-1], member.linkname)
+                    body = member.linkname.encode('utf-8')
+                    actual = {'kind': 'symlink', 'mode': 0o777, 'bytes': len(body),
+                              'mtime': _crypto_mtime(member.mtime),
+                              'sha256': hashlib.sha256(body).hexdigest(),
+                              'target': member.linkname}
+                else:
+                    raise ValueError('captured crypto source tar has an unsupported member')
+                if not _crypto_exact_equal(actual, wanted):
+                    raise ValueError('captured crypto source member differs from its raw archive')
+        if _crypto_identity(os.fstat(stream.fileno())) != _crypto_identity(opened):
+            raise ValueError('captured crypto source tar changed during reading')
+    if _crypto_identity(path.lstat()) != _crypto_identity(before) or observed != set(expected):
+        raise ValueError('captured crypto source tar changed or omitted release members')
+
+
+def crypto_source_outputs(output):
+    verified, output_rows = [], []
+    for pin in CRYPTO_SOURCE_OUTPUTS:
+        body = _crypto_read_regular(output / pin['output'], CRYPTO_MAX_ARCHIVE)
+        rows = _crypto_index_archive(pin, body)
+        verified.append((pin, body, rows))
+        output_rows.append({'logicalPath': 'archives/' + pin['filename'],
+                            'name': pin['output'], 'bytes': len(body),
+                            'sha256': hashlib.sha256(body).hexdigest()})
+    expected_receipt = _crypto_expected_receipt(verified)
+    receipt_body = _crypto_read_regular(output / CRYPTO_CAPTURE_RECEIPT_OUTPUT,
+                                        CRYPTO_MAX_RECEIPT)
+    if (not _crypto_exact_equal(_crypto_strict_json(receipt_body), expected_receipt)
+            or receipt_body != _crypto_canonical(expected_receipt)):
+        raise ValueError('captured crypto source receipt differs from raw source bodies')
+    expected_members = {}
+    for pin, _, rows in verified:
+        for row in rows:
+            name = pin['archiveRoot'] + (('/' + row['path']) if row['path'] else '')
+            if name in expected_members:
+                raise ValueError('overlapping captured crypto source roots')
+            expected_members[name] = {key: value for key, value in row.items() if key != 'path'}
+    capture_path = output / CRYPTO_CAPTURE_TAR_OUTPUT
+    _crypto_capture_correspondence(capture_path, expected_members)
+    capture_body = _crypto_read_regular(capture_path, CRYPTO_MAX_UNCOMPRESSED)
+    receipt_row = {'logicalPath': 'crypto-release-sources.json',
+                   'name': CRYPTO_CAPTURE_RECEIPT_OUTPUT, 'bytes': len(receipt_body),
+                   'sha256': hashlib.sha256(receipt_body).hexdigest()}
+    capture_row = {'logicalPath': 'crypto-release-sources.tar',
+                   'name': CRYPTO_CAPTURE_TAR_OUTPUT, 'bytes': len(capture_body),
+                   'sha256': hashlib.sha256(capture_body).hexdigest()}
+    roots = []
+    for root, pin in zip(expected_receipt['roots'], CRYPTO_SOURCE_OUTPUTS, strict=True):
+        roots.append({'id': root['id'], 'version': root['version'],
+                      'archiveRoot': root['archiveRoot'], 'sourceRoot': root['sourceRoot'],
+                      'archive': output_rows[len(roots)],
+                      'membersSHA256': root['membersSHA256']})
+    return {'profile': CRYPTO_SOURCE_PROFILE, 'roots': roots,
+            'capture': {'tar': capture_row, 'receipt': receipt_row}}
+
+
+def _shaderc_regular(path, label):
+    """Require one immutable regular input; never follow an input symlink."""
+    if (not path.is_absolute() or path.is_symlink() or not path.is_file()):
+        raise ValueError('shaderc ' + label + ' must be an absolute regular file')
+    stat_result = path.stat()
+    if not stat.S_ISREG(stat_result.st_mode) or stat_result.st_nlink != 1:
+        raise ValueError('shaderc ' + label + ' is not an exact regular file')
+    return stat_result
+
+
+def _shaderc_body(path, expected_name, expected_bytes, expected_sha256):
+    _shaderc_regular(path, expected_name)
+    observed = {'bytes': 0, 'sha256': hashlib.sha256()}
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            observed['bytes'] += len(block)
+            if observed['bytes'] > expected_bytes:
+                raise ValueError('shaderc input exceeds its pinned byte count: ' + expected_name)
+            observed['sha256'].update(block)
+    digest_value = observed['sha256'].hexdigest()
+    if observed['bytes'] != expected_bytes or digest_value != expected_sha256:
+        raise ValueError('shaderc input bytes/hash differ: ' + expected_name)
+    return {'name': expected_name, 'bytes': observed['bytes'], 'sha256': digest_value}
+
+
+def _shaderc_file_sha(path, label):
+    """Hash a bounded generated file without accepting a link or special file."""
+    _shaderc_regular(path, label)
+    size = path.stat().st_size
+    if size > SHADERC_MAX_MEMBER:
+        raise ValueError('shaderc generated file exceeds bound: ' + label)
+    h = hashlib.sha256()
+    count = 0
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            count += len(block)
+            if count > SHADERC_MAX_MEMBER:
+                raise ValueError('shaderc generated file exceeds bound: ' + label)
+            h.update(block)
+    if count != size:
+        raise ValueError('shaderc generated file length changed: ' + label)
+    return count, h.hexdigest()
+
+
+def _shaderc_archive_name(name):
+    try:
+        encoded = name.encode('utf-8') if isinstance(name, str) else b''
+    except UnicodeEncodeError as exc:
+        raise ValueError('unsafe shaderc ZIP entry name') from exc
+    if (not isinstance(name, str) or not name or len(encoded) > 4096
+            or '\x00' in name or '\\' in name or name.startswith('/')
+            or not name.isprintable()):
+        raise ValueError('unsafe shaderc ZIP entry name')
+    pieces = name.rstrip('/').split('/')
+    if not pieces or any(piece in ('', '.', '..') for piece in pieces):
+        raise ValueError('traversal shaderc ZIP entry name')
+    return '/'.join(pieces)
+
+
+def _shaderc_link_body(archive, info, name):
+    """Read and authenticate one bounded ZIP link body; never create a link."""
+    if info.file_size > SHADERC_MAX_LINK_BODY:
+        raise ValueError('shaderc ZIP symlink body exceeds bound: ' + name)
+    with archive.open(info) as stream:
+        raw = stream.read(SHADERC_MAX_LINK_BODY + 1)
+    if len(raw) != info.file_size or len(raw) > SHADERC_MAX_LINK_BODY:
+        raise ValueError('shaderc ZIP symlink body length changed: ' + name)
+    try:
+        target = raw.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise ValueError('shaderc ZIP symlink body is not UTF-8: ' + name) from exc
+    try:
+        canonical = _shaderc_archive_name(target)
+    except ValueError as exc:
+        raise ValueError('unsafe shaderc ZIP symlink target: ' + name) from exc
+    if canonical != target:
+        raise ValueError('non-canonical shaderc ZIP symlink target: ' + name)
+    return target, len(raw), hashlib.sha256(raw).hexdigest()
+
+
+def _shaderc_within_prefix(name, prefix):
+    return name == prefix or name.startswith(prefix + '/')
+
+
+def _shaderc_link_target(name, target, framework_prefix):
+    """Resolve a relative archive link without touching the filesystem."""
+    try:
+        canonical = _shaderc_archive_name(target)
+    except ValueError as exc:
+        raise ValueError('unsafe shaderc ZIP symlink target: ' + name) from exc
+    if canonical != target:
+        raise ValueError('non-canonical shaderc ZIP symlink target: ' + name)
+    parent = name.rsplit('/', 1)[0]
+    candidate = posixpath.normpath(posixpath.join(parent, canonical))
+    if (not _shaderc_within_prefix(candidate, framework_prefix)
+            or candidate == framework_prefix):
+        raise ValueError('shaderc ZIP symlink target escapes framework: ' + name)
+    return candidate
+
+
+def _shaderc_resolve_archive_path(rows, requested, framework_prefix,
+                                  *, max_hops=SHADERC_MAX_LINK_HOPS):
+    """Resolve a requested archive path through indexed links only.
+
+    The resolver follows a known link component such as Versions/Current in
+    the in-archive index.  It never calls Path.resolve/readlink and returns the
+    final indexed file or directory row.
+    """
+    if type(rows) is not dict or type(max_hops) is not int or max_hops < 0:
+        raise ValueError('invalid shaderc ZIP resolver inputs')
+    try:
+        framework_prefix = _shaderc_archive_name(framework_prefix)
+        current = _shaderc_archive_name(requested)
+    except ValueError as exc:
+        raise ValueError('unsafe shaderc ZIP resolver path') from exc
+    if not _shaderc_within_prefix(current, framework_prefix):
+        raise ValueError('shaderc ZIP resolver path escapes framework')
+
+    framework_parts = framework_prefix.split('/')
+    seen = set()
+    hops = 0
+    while True:
+        if current in seen:
+            raise ValueError('shaderc ZIP symlink cycle')
+        seen.add(current)
+        row = rows.get(current)
+        if row is not None:
+            kind = row.get('kind') if isinstance(row, dict) else None
+            if kind == 'symlink':
+                if row.get('directory') is not False:
+                    raise ValueError('shaderc ZIP symlink directory shape')
+                hops += 1
+                if hops > max_hops:
+                    raise ValueError('shaderc ZIP symlink hop bound')
+                current = _shaderc_link_target(current, row.get('target'),
+                                               framework_prefix)
+                continue
+            if kind in ('file', 'directory'):
+                return current, row
+            raise ValueError('invalid shaderc ZIP resolver row: ' + current)
+
+        # A requested target can be below a known link component.  Prefer the
+        # longest such component, then retain the suffix inside this framework.
+        parts = current.split('/')
+        link_prefix = None
+        for index in range(len(parts) - 1, len(framework_parts), -1):
+            candidate = '/'.join(parts[:index])
+            candidate_row = rows.get(candidate)
+            if candidate_row is None:
+                continue
+            candidate_kind = (candidate_row.get('kind')
+                              if isinstance(candidate_row, dict) else None)
+            if candidate_kind == 'symlink':
+                link_prefix = candidate
+                break
+            if candidate_kind != 'directory':
+                raise ValueError('shaderc ZIP regular-file ancestor: ' + candidate)
+        if link_prefix is None:
+            raise ValueError('missing shaderc ZIP symlink target: ' + current)
+        link_row = rows[link_prefix]
+        hops += 1
+        if hops > max_hops:
+            raise ValueError('shaderc ZIP symlink hop bound')
+        replacement = _shaderc_link_target(link_prefix,
+                                            link_row.get('target'),
+                                            framework_prefix)
+        suffix = current[len(link_prefix):].lstrip('/')
+        current = replacement + (('/' + suffix) if suffix else '')
+
+
+def _shaderc_validate_xc_links(rows):
+    """Require the authenticated three-link macOS framework closure."""
+    links = {name: row for name, row in rows.items()
+             if row.get('kind') == 'symlink'}
+    if set(links) != set(SHADERC_XC_LINKS):
+        raise ValueError('shaderc XCFramework symlink set differs')
+    expected_final = {
+        SHADERC_XC_MAC_FRAMEWORK + '/Resources':
+            (SHADERC_XC_MAC_FRAMEWORK + '/Versions/A/Resources', 'directory'),
+        SHADERC_XC_MAC_FRAMEWORK + '/Libshaderc_combined':
+            (SHADERC_XC_MAC_FRAMEWORK + '/Versions/A/Libshaderc_combined', 'file'),
+        SHADERC_XC_MAC_FRAMEWORK + '/Versions/Current':
+            (SHADERC_XC_MAC_FRAMEWORK + '/Versions/A', 'directory'),
+    }
+    for name, target in SHADERC_XC_LINKS.items():
+        row = links[name]
+        if row.get('target') != target:
+            raise ValueError('shaderc XCFramework symlink target differs: ' + name)
+        resolved_name, resolved_row = _shaderc_resolve_archive_path(
+            rows, name, SHADERC_XC_MAC_FRAMEWORK)
+        expected_name, expected_kind = expected_final[name]
+        if (resolved_name != expected_name
+                or resolved_row.get('kind') != expected_kind):
+            raise ValueError('shaderc XCFramework symlink target missing: ' + name)
+
+
+def _shaderc_zip_index(path, *, role='all'):
+    """Index a bounded ZIP; links are permitted only for the fixed XC role."""
+    if role not in ('all', 'xcframework'):
+        raise ValueError('invalid shaderc ZIP role')
+    rows, folded, total = {}, set(), 0
+    with zipfile.ZipFile(path) as archive:
+        infos = archive.infolist()
+        if len(infos) > SHADERC_MAX_ENTRIES:
+            raise ValueError('shaderc ZIP entry bound')
+        for info in infos:
+            name = _shaderc_archive_name(info.filename)
+            key = name.casefold()
+            if key in folded:
+                raise ValueError('duplicate/case-colliding shaderc ZIP entry')
+            folded.add(key)
+            mode = (info.external_attr >> 16) & 0xffff
+            file_type = stat.S_IFMT(mode)
+            directory = info.is_dir()
+            symlink = file_type == stat.S_IFLNK
+            if symlink:
+                if role != 'xcframework' or name not in SHADERC_XC_LINKS:
+                    raise ValueError('unlisted shaderc ZIP symlink')
+                if directory:
+                    raise ValueError('shaderc ZIP symlink directory shape')
+            elif file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+                raise ValueError('special/symlink shaderc ZIP entry')
+            if file_type == stat.S_IFDIR and not directory:
+                raise ValueError('shaderc ZIP directory shape')
+            if directory and file_type not in (0, stat.S_IFDIR):
+                raise ValueError('shaderc ZIP directory shape')
+            if info.flag_bits & 1:
+                raise ValueError('encrypted shaderc ZIP entry')
+            total += info.file_size
+            if info.file_size > SHADERC_MAX_MEMBER or total > SHADERC_MAX_TOTAL:
+                raise ValueError('shaderc ZIP inflated byte bound')
+            row = {'info': info, 'directory': directory,
+                   'bytes': info.file_size, 'compressedBytes': info.compress_size,
+                   'kind': 'symlink' if symlink else ('directory' if directory else 'file')}
+            if symlink:
+                target, raw_bytes, raw_sha256 = _shaderc_link_body(archive, info, name)
+                if target != SHADERC_XC_LINKS[name]:
+                    raise ValueError('shaderc XCFramework symlink target differs: ' + name)
+                row.update(target=target, rawBytes=raw_bytes,
+                           rawSHA256=raw_sha256)
+            rows[name] = row
+
+        # Reject case-ambiguous implicit prefixes as well as exact duplicates.
+        prefixes = {}
+        for name in rows:
+            pieces = name.split('/')
+            for index in range(1, len(pieces) + 1):
+                prefix = '/'.join(pieces[:index])
+                folded_prefix = prefix.casefold()
+                prior = prefixes.get(folded_prefix)
+                if prior is not None and prior != prefix:
+                    raise ValueError('case-colliding shaderc ZIP path')
+                prefixes[folded_prefix] = prefix
+
+        # A regular file or link may not be an ancestor of any archive entry.
+        for name, row in rows.items():
+            parts = name.split('/')
+            for index in range(1, len(parts)):
+                ancestor = '/'.join(parts[:index])
+                ancestor_row = rows.get(ancestor)
+                if ancestor_row is not None and not ancestor_row['directory']:
+                    raise ValueError('shaderc ZIP file/symlink ancestor')
+    if role == 'xcframework':
+        _shaderc_validate_xc_links(rows)
+    return rows
+
+
+def _shaderc_entry_sha(path, rows, name):
+    row = rows.get(name)
+    if row is None or row.get('kind') != 'file':
+        raise ValueError('missing shaderc ZIP regular entry: ' + name)
+    h = hashlib.sha256()
+    count = 0
+    with zipfile.ZipFile(path) as archive, archive.open(row['info']) as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            count += len(block)
+            if count > SHADERC_MAX_MEMBER:
+                raise ValueError('shaderc ZIP member exceeds bound: ' + name)
+            h.update(block)
+    if count != row['bytes']:
+        raise ValueError('shaderc ZIP member length changed: ' + name)
+    return count, h.hexdigest()
+
+
+def _shaderc_receipt_rows(path):
+    """Return authenticated hashes for the nine retained all-ZIP members."""
+    rows = _shaderc_zip_index(path, role='all')
+    result = {}
+    for _, arch, platform_name in SHADERC_MATRIX:
+        name = f'lib/{platform_name}/thin/{arch}/lib/libshaderc_combined.a'
+        count, checksum = _shaderc_entry_sha(path, rows, name)
+        result[name] = {'kind': 'file', 'bytes': count, 'sha256': checksum}
+    return result
+
+
+def _shaderc_tool_sha(path, label):
+    """Hash a stable SDK tool; host hardlinks do not waive archive-input rules."""
+    if not path.is_absolute() or path.is_symlink():
+        raise ValueError('shaderc ' + label + ' must be an absolute regular SDK tool')
+
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    before = path.lstat()
+    maximum = 128 * 1024**2
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink < 1
+            or not 0 < before.st_size <= maximum):
+        raise ValueError('shaderc ' + label + ' is not a bounded regular SDK tool')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    checksum = hashlib.sha256()
+    count = 0
+    with os.fdopen(descriptor, 'rb') as source:
+        if identity(os.fstat(source.fileno())) != identity(before):
+            raise ValueError('shaderc SDK tool changed before open: ' + label)
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            count += len(block)
+            if count > maximum or count > before.st_size:
+                raise ValueError('shaderc SDK tool exceeded its bound: ' + label)
+            checksum.update(block)
+        if identity(os.fstat(source.fileno())) != identity(before):
+            raise ValueError('shaderc SDK tool changed while hashing: ' + label)
+    if count != before.st_size or identity(path.lstat()) != identity(before):
+        raise ValueError('shaderc SDK tool identity changed: ' + label)
+    return checksum.hexdigest()
+
+
+def _shaderc_lipo_identity():
+    requested = Path('/usr/bin/xcrun')
+    finder_sha256 = _shaderc_tool_sha(requested, 'xcrun finder')
+    resolved_text = run('/usr/bin/xcrun', '--find', 'lipo').strip()
+    if _shaderc_tool_sha(requested, 'xcrun finder') != finder_sha256:
+        raise ValueError('shaderc xcrun finder changed during lookup')
+    if (not resolved_text or '\x00' in resolved_text or not resolved_text.startswith('/')
+            or len(resolved_text) > 4096):
+        raise ValueError('xcrun returned an invalid lipo path')
+    resolved = Path(resolved_text).resolve(strict=True)
+    reader_sha256 = _shaderc_tool_sha(resolved, 'resolved lipo reader')
+    toolchain = Path('/usr/bin/xcodebuild')
+    toolchain_sha256 = _shaderc_tool_sha(toolchain, 'xcodebuild identity reader')
+    toolchain_version = run('/usr/bin/xcodebuild', '-version').strip()
+    if not toolchain_version or '\x00' in toolchain_version or len(toolchain_version) > 4096:
+        raise ValueError('xcodebuild toolchain identity is invalid')
+    if _shaderc_tool_sha(toolchain, 'xcodebuild identity reader') != toolchain_sha256:
+        raise ValueError('shaderc xcodebuild identity reader changed during inspection')
+    return ({'mode': 'xcrun-resolved-lipo', 'requestedReader': str(requested),
+             'resolvedReader': str(resolved), 'readerSHA256': reader_sha256,
+             'toolchainReader': str(toolchain), 'toolchainSHA256': toolchain_sha256,
+             'toolchainVersion': toolchain_version}, resolved)
+
+
+def _shaderc_thin_xc(source, arch, thin, lipo, architecture_count):
+    """Only a true single-arch ar can be copied; a fat wrapper must be thinned."""
+    with source.open('rb') as stream:
+        prefix = stream.read(8)
+    if prefix == b'!<arch>\n':
+        if architecture_count != 1:
+            raise ValueError('shaderc multi-architecture XCFramework binary is not fat')
+        shutil.copyfile(source, thin)
+    elif prefix[:4] in (b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
+                        b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'):
+        run(str(lipo), str(source), '-thin', arch, '-output', str(thin))
+    else:
+        raise ValueError('shaderc XCFramework binary is not an ar or fat archive')
+
+
+def _shaderc_matrix_from_archives(all_zip, xc_zip, work):
+    all_rows = _shaderc_zip_index(all_zip, role='all')
+    xc_rows = _shaderc_zip_index(xc_zip, role='xcframework')
+    expected_all = {}
+    expected_xc = {}
+    for slice_name, arch, platform_name in SHADERC_MATRIX:
+        all_name = f'lib/{platform_name}/thin/{arch}/lib/libshaderc_combined.a'
+        xc_name = ('Libshaderc_combined.xcframework/' + slice_name +
+                   '/Libshaderc_combined.framework/Libshaderc_combined')
+        expected_all[(slice_name, arch)] = all_name
+        expected_xc[(slice_name, arch)] = xc_name
+    if set(expected_all.values()) - set(all_rows) or set(expected_xc.values()) - set(xc_rows):
+        raise ValueError('shaderc ZIP lacks an exact nine-architecture input')
+    reader, lipo = _shaderc_lipo_identity()
+    slice_arches = {}
+    for slice_name, arch, _ in SHADERC_MATRIX:
+        slice_arches.setdefault(slice_name, set()).add(arch)
+    rows = []
+    with tempfile.TemporaryDirectory(prefix='.shaderc-lipo-', dir=work) as temporary:
+        temporary = Path(temporary)
+        sources = {}
+        for source_index, slice_name in enumerate(slice_arches):
+            xc_name = next(expected_xc[(candidate, candidate_arch)]
+                           for candidate, candidate_arch, _ in SHADERC_MATRIX
+                           if candidate == slice_name)
+            framework_prefix = xc_name.rsplit('/Libshaderc_combined', 1)[0]
+            resolved_xc_name, resolved_xc_row = _shaderc_resolve_archive_path(
+                xc_rows, xc_name, framework_prefix)
+            expected_xc_name = xc_name
+            if slice_name == 'macos-arm64_x86_64':
+                expected_xc_name = framework_prefix + '/Versions/A/Libshaderc_combined'
+            if (resolved_xc_name != expected_xc_name
+                    or resolved_xc_row.get('kind') != 'file'):
+                raise ValueError('shaderc XCFramework binary did not resolve to a regular member: '
+                                 + xc_name)
+            source = temporary / ('source-' + str(source_index))
+            with zipfile.ZipFile(xc_zip) as archive, archive.open(
+                    resolved_xc_row['info']) as stream:
+                with source.open('xb') as sink:
+                    copied = 0
+                    for block in iter(lambda: stream.read(1024 * 1024), b''):
+                        copied += len(block)
+                        if copied > SHADERC_MAX_MEMBER:
+                            raise ValueError('shaderc XCFramework binary exceeds bound')
+                        sink.write(block)
+            if copied != resolved_xc_row['bytes']:
+                raise ValueError('shaderc XCFramework binary length changed')
+            _shaderc_regular(source, 'temporary XCFramework binary')
+            listed_arches = run(str(lipo), '-archs', str(source)).split()
+            expected_arches = slice_arches[slice_name]
+            if len(listed_arches) != len(set(listed_arches)) or set(listed_arches) != expected_arches:
+                raise ValueError('shaderc XCFramework architecture set differs: ' + slice_name)
+            sources[slice_name] = source
+        for index, (slice_name, arch, platform_name) in enumerate(SHADERC_MATRIX):
+            all_name = expected_all[(slice_name, arch)]
+            all_bytes, all_sha256 = _shaderc_entry_sha(all_zip, all_rows, all_name)
+            restored = (work / 'dist' / 'libshaderc' / platform_name / 'thin' / arch / 'lib'
+                        / 'libshaderc_combined.a')
+            if restored.parent.resolve() != restored.parent:
+                raise ValueError('shaderc restored archive path contains a link')
+            restored_bytes, restored_sha256 = _shaderc_file_sha(
+                restored, 'restored ' + all_name)
+            if (restored_bytes, restored_sha256) != (all_bytes, all_sha256):
+                raise ValueError('shaderc restored thin archive differs: ' + all_name)
+            source = sources[slice_name]
+            thin = temporary / ('thin-' + str(index))
+            _shaderc_thin_xc(source, arch, thin, lipo, len(slice_arches[slice_name]))
+            xc_bytes, xc_sha256 = _shaderc_file_sha(thin, 'lipo output')
+            if all_sha256 != xc_sha256:
+                raise ValueError('shaderc all/XCFramework archive mismatch: ' + all_name)
+            rows.append({'slice': slice_name, 'arch': arch, 'allZipEntry': all_name,
+                         'allArchiveSHA256': all_sha256, 'xcArchiveSHA256': xc_sha256,
+                         'equal': all_sha256 == xc_sha256})
+    if _shaderc_tool_sha(lipo, 'resolved lipo reader') != reader['readerSHA256']:
+        raise ValueError('shaderc lipo reader changed during matrix inspection')
+    if (_shaderc_tool_sha(Path(reader['toolchainReader']), 'xcodebuild identity reader')
+            != reader['toolchainSHA256']):
+        raise ValueError('shaderc xcodebuild reader changed during matrix inspection')
+    return reader, rows
+
+
+def apple_shaderc_inputs(work):
+    """Inspect fixed Shaderc inputs once and emit the producer coherence receipt."""
+    work = work.absolute()
+    if work.is_symlink() or not work.is_dir() or work.resolve() != work:
+        raise ValueError('shaderc WORK must be a real absolute directory')
+    input_dir = work / 'dist' / ('libshaderc-' + SHADERC_WRAPPER_VERSION)
+    if input_dir.is_symlink() or not input_dir.is_dir() or input_dir.resolve() != input_dir:
+        raise ValueError('shaderc input directory is not a real wrapper directory')
+    all_zip, xc_zip = (input_dir / name for name, _, _ in SHADERC_SOURCE_SPECS)
+    sources = [_shaderc_body(path, name, size, checksum)
+               for path, (name, size, checksum) in zip((all_zip, xc_zip), SHADERC_SOURCE_SPECS, strict=True)]
+    reader, matrix = _shaderc_matrix_from_archives(all_zip, xc_zip, work)
+    receipt = {'schema': 1, 'profile': NATIVE_UPGRADES_PROFILE,
+               'wrapperVersion': SHADERC_WRAPPER_VERSION,
+               'validatorSHA256': digest(Path(__file__)), 'reader': reader,
+               'sources': sources, 'matrix': matrix,
+               'runtimeSecurityTested': False, 'promotionEligible': False}
+    destination = input_dir / 'vortx-shaderc-inputs.json'
+    if destination.exists() or destination.is_symlink():
+        raise ValueError('refusing an existing Shaderc input receipt')
+    save(destination, receipt)
+    print('PASS apple-shaderc-inputs')
+
+
+def apple_shaderc_receipt(input_dir):
+    """Revalidate receipt/body identity only; never run lipo or native inspection."""
+    input_dir = input_dir.absolute()
+    if input_dir.is_symlink() or not input_dir.is_dir() or input_dir.resolve() != input_dir:
+        raise ValueError('shaderc receipt directory is not a real absolute directory')
+    receipt_path = input_dir / 'vortx-shaderc-inputs.json'
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        raise ValueError('missing Shaderc input receipt')
+    _shaderc_regular(receipt_path, 'receipt')
+    if receipt_path.stat().st_size > 1024 * 1024:
+        raise ValueError('Shaderc receipt exceeds bound')
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate Shaderc receipt key')
+            result[key] = value
+        return result
+    with receipt_path.open('rb') as stream:
+        encoded = stream.read(1024 * 1024 + 1)
+    if len(encoded) > 1024 * 1024:
+        raise ValueError('Shaderc receipt exceeds bound')
+    value = json.loads(encoded, object_pairs_hook=unique,
+                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite receipt JSON')))
+    for name, size, checksum in SHADERC_SOURCE_SPECS:
+        _shaderc_body(input_dir / name, name, size, checksum)
+    _shaderc_receipt_shape(value, {name: {'bytes': size, 'sha256': checksum}
+                                   for name, size, checksum in SHADERC_SOURCE_SPECS},
+                           digest(Path(__file__)),
+                           _shaderc_receipt_rows(input_dir / SHADERC_SOURCE_SPECS[0][0]))
+    print('PASS apple-shaderc-receipt')
+
+
+def _shaderc_receipt_shape(value, source_specs, validator_sha256, retained_all_rows=None):
+    """Strict receipt shape shared by the producer re-read and offline policy."""
+    if retained_all_rows is not None and type(retained_all_rows) is not dict:
+        raise ValueError('invalid retained Shaderc all-ZIP index')
+    if type(value) is not dict or set(value) != {'schema', 'profile', 'wrapperVersion',
+        'validatorSHA256', 'reader', 'sources', 'matrix', 'runtimeSecurityTested',
+        'promotionEligible'}:
+        raise ValueError('unexpected Shaderc receipt keys')
+    if (type(value['schema']) is not int or value['schema'] != 1
+            or value['profile'] != NATIVE_UPGRADES_PROFILE
+            or value['wrapperVersion'] != SHADERC_WRAPPER_VERSION
+            or value['validatorSHA256'] != validator_sha256
+            or value['runtimeSecurityTested'] is not False
+            or value['promotionEligible'] is not False):
+        raise ValueError('invalid Shaderc receipt identity/boundary')
+    reader = value['reader']
+    if (type(reader) is not dict or set(reader) != {'mode', 'requestedReader', 'resolvedReader',
+        'readerSHA256', 'toolchainReader', 'toolchainSHA256', 'toolchainVersion'}
+            or reader['mode'] != 'xcrun-resolved-lipo'
+            or reader['requestedReader'] != '/usr/bin/xcrun'
+            or reader['toolchainReader'] != '/usr/bin/xcodebuild'
+            or not isinstance(reader['toolchainSHA256'], str)
+            or not re.fullmatch(r'[0-9a-f]{64}', reader['toolchainSHA256'])
+            or not isinstance(reader['resolvedReader'], str)
+            or not reader['resolvedReader'].startswith('/')
+            or '\x00' in reader['resolvedReader']
+            or len(reader['resolvedReader']) > 4096
+            or not isinstance(reader['readerSHA256'], str)
+            or not isinstance(reader['toolchainVersion'], str)
+            or not reader['toolchainVersion'].strip()
+            or '\x00' in reader['toolchainVersion']
+            or len(reader['toolchainVersion']) > 4096
+            or not re.fullmatch(r'[0-9a-f]{64}', reader['readerSHA256'])):
+        raise ValueError('invalid Shaderc reader identity')
+    sources = value['sources']
+    if type(sources) is not list or len(sources) != len(SHADERC_SOURCE_SPECS):
+        raise ValueError('invalid Shaderc source rows')
+    seen = set()
+    for row in sources:
+        if type(row) is not dict or set(row) != {'name', 'bytes', 'sha256'}:
+            raise ValueError('invalid Shaderc source row')
+        name = row['name']
+        if (not isinstance(name, str) or name in seen or name not in source_specs
+                or type(row['bytes']) is not int or not isinstance(row['sha256'], str)):
+            raise ValueError('unexpected Shaderc source name/bytes')
+        if row != dict(name=name, bytes=source_specs[name]['bytes'], sha256=source_specs[name]['sha256']):
+            raise ValueError('Shaderc source identity differs from pinned body')
+        seen.add(name)
+    if seen != set(source_specs):
+        raise ValueError('incomplete Shaderc source set')
+    expected = {(slice_name, arch, platform_name):
+                ('lib/' + platform_name + '/thin/' + arch + '/lib/libshaderc_combined.a',
+                 'Libshaderc_combined.xcframework/' + slice_name +
+                 '/Libshaderc_combined.framework/Libshaderc_combined')
+                for slice_name, arch, platform_name in SHADERC_MATRIX}
+    matrix = value['matrix']
+    if type(matrix) is not list or len(matrix) != len(expected):
+        raise ValueError('invalid Shaderc matrix rows')
+    observed = set()
+    for row in matrix:
+        if type(row) is not dict or set(row) != {'slice', 'arch', 'allZipEntry',
+            'allArchiveSHA256', 'xcArchiveSHA256', 'equal'}:
+            raise ValueError('invalid Shaderc matrix row')
+        if (not isinstance(row['slice'], str) or not isinstance(row['arch'], str)
+                or not isinstance(row['allZipEntry'], str)
+                or not isinstance(row['allArchiveSHA256'], str)
+                or not isinstance(row['xcArchiveSHA256'], str)):
+            raise ValueError('invalid Shaderc matrix row types')
+        identity = (row['slice'], row['arch'])
+        key = next((candidate for candidate in expected if candidate[:2] == identity), None)
+        if key is None or key in observed or row['allZipEntry'] != expected[key][0]:
+            raise ValueError('unexpected Shaderc matrix path/identity')
+        if (not re.fullmatch(r'[0-9a-f]{64}', row['allArchiveSHA256'])
+                or not re.fullmatch(r'[0-9a-f]{64}', row['xcArchiveSHA256'])
+                or row['equal'] is not True
+                or row['allArchiveSHA256'] != row['xcArchiveSHA256']):
+            raise ValueError('Shaderc matrix digest mismatch')
+        if retained_all_rows is not None:
+            retained = retained_all_rows.get(row['allZipEntry'])
+            if (not isinstance(retained, dict) or retained.get('kind') != 'file'
+                    or retained.get('sha256') != row['allArchiveSHA256']):
+                raise ValueError('Shaderc matrix digest differs from retained all-ZIP member')
+        if expected[key][1] != ('Libshaderc_combined.xcframework/' + identity[0] +
+                                '/Libshaderc_combined.framework/Libshaderc_combined'):
+            raise ValueError('Shaderc matrix XCFramework path mapping')
+        observed.add(key)
+    if observed != set(expected):
+        raise ValueError('incomplete Shaderc matrix')
+    return value
+
+
+def _openssl_load(path, label):
+    _shaderc_regular(path, label)
+    if path.stat().st_size > OPENSSL_MAX_RECEIPT:
+        raise ValueError('OpenSSL ' + label + ' exceeds its JSON bound')
+
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate OpenSSL ' + label + ' key')
+            result[key] = value
+        return result
+
+    with path.open('rb') as stream:
+        encoded = stream.read(OPENSSL_MAX_RECEIPT + 1)
+    if len(encoded) > OPENSSL_MAX_RECEIPT:
+        raise ValueError('OpenSSL ' + label + ' exceeds its JSON bound')
+    return json.loads(encoded, object_pairs_hook=unique,
+                      parse_constant=lambda _: (_ for _ in ()).throw(
+                          ValueError('nonfinite OpenSSL JSON')))
+
+
+def _openssl_expected(platform, arch, work):
+    for candidate_platform, candidate_arch, target, slice_name in OPENSSL_MATRIX:
+        if (candidate_platform, candidate_arch) == (platform, arch):
+            prefix = work / 'dist' / 'openssl' / platform / 'thin' / arch
+            return target, slice_name, prefix
+    raise ValueError('unknown OpenSSL platform/architecture')
+
+
+def _openssl_effective_configuration(value, environment, target):
+    """Validate the bounded configdata.pm whitelist emitted after install_sw."""
+    if type(value) is not dict or set(value) != set(OPENSSL_EFFECTIVE_KEYS):
+        raise ValueError('OpenSSL effective configuration keys differ from the fixed whitelist')
+    for key in OPENSSL_EFFECTIVE_KEYS:
+        item = value[key]
+        if key == 'CROSS_COMPILE':
+            if item is not None:
+                raise ValueError('OpenSSL CROSS_COMPILE must be JSON null for this profile')
+            continue
+        if isinstance(item, str):
+            if not item or len(item) > 65536 or '\x00' in item:
+                raise ValueError('OpenSSL effective configuration string is unbounded')
+        elif isinstance(item, list):
+            if len(item) > 4096 or any(not isinstance(part, str) or not part
+                                       or len(part) > 65536 or '\x00' in part
+                                       for part in item):
+                raise ValueError('OpenSSL effective configuration list is unbounded')
+        else:
+            raise ValueError('OpenSSL effective configuration value is not JSON text/list')
+    if (value['target'] != target or value['CC'] != environment['CC']
+            or value['CXX'] != environment['CXX'] or value['AR'] != environment['AR']
+            or value['RANLIB'] != environment['RANLIB']
+            or value['ARFLAGS'] != ['qc']):
+        raise ValueError('OpenSSL effective compiler/tool configuration differs from the environment')
+    if (value['CFLAGS'] != [environment['CFLAGS']]
+            or value['CPPFLAGS'] != [environment['CPPFLAGS']]
+            or value['CXXFLAGS'] != [environment['CXXFLAGS']]
+            or value['LDFLAGS'] != [environment['LDFLAGS']]):
+        raise ValueError('OpenSSL effective make flags differ from the fixed environment')
+    if value['lib_cppflags'] != '-DL_ENDIAN':
+        raise ValueError('OpenSSL effective library CPP flags differ from the target config')
+    cflags = value['cflags'] if isinstance(value['cflags'], list) else [value['cflags']]
+    if '-fno-common' not in cflags:
+        raise ValueError('OpenSSL effective C flags omit the fixed target flag')
+    return value
+
+
+def _openssl_environment(value, platform, arch, sdk_root, source_directory, build_directory):
+    if type(value) is not dict or set(value) != set(OPENSSL_ENV_KEYS):
+        raise ValueError('OpenSSL environment keys differ from the fixed build map')
+    if any(not isinstance(value[key], str) or len(value[key]) > 65536
+           or '\x00' in value[key] for key in OPENSSL_ENV_KEYS):
+        raise ValueError('OpenSSL environment value is not bounded text')
+    if (value['CC'] != '/usr/bin/clang' or value['CXX'] != '/usr/bin/clang++'
+            or value['CURRENT_ARCH'] != arch or value['LC_CTYPE'] != 'C'
+            or value['PKG_CONFIG_PATH'] != '' or value['PATH'] != OPENSSL_DEFAULT_PATH
+            or value['ARFLAGS'] != 'qc' or value['MAKEFLAGS'] != '-j1'
+            or value['CMAKE_BUILD_PARALLEL_LEVEL'] != '1'
+            or value['CARGO_BUILD_JOBS'] != '1'):
+        raise ValueError('OpenSSL environment has an unexpected fixed value')
+    for key, suffix in (('AR', 'ar'), ('RANLIB', 'ranlib')):
+        path = value[key]
+        if (not path.startswith('/') or '..' in Path(path).parts
+                or len(path) > 4096 or Path(path).name != suffix
+                or not re.fullmatch(r'/.+/Toolchains/[^/]+\.xctoolchain/usr/bin/' + suffix, path)):
+            raise ValueError('OpenSSL ' + key + ' is not the selected absolute SDK tool')
+    sdk = Path(sdk_root)
+    if (not sdk_root.startswith('/') or '\x00' in sdk_root or '..' in sdk.parts):
+        raise ValueError('OpenSSL SDK root is not a safe absolute path')
+    sdk_suffix = {
+        'ios': ('iPhoneOS', 'iPhoneOS.sdk'),
+        'isimulator': ('iPhoneSimulator', 'iPhoneSimulator.sdk'),
+        'tvos': ('AppleTVOS', 'AppleTVOS.sdk'),
+        'tvsimulator': ('AppleTVSimulator', 'AppleTVSimulator.sdk'),
+        'macos': ('MacOSX', 'MacOSX.sdk'),
+    }[platform]
+    sdk_pattern = (r'.*/' + re.escape(sdk_suffix[0]) +
+                   r'\.platform/Developer/SDKs/' + re.escape(sdk_suffix[0]) +
+                   r'(?:[0-9]{1,3}(?:\.[0-9]{1,3}){0,3})?\.sdk')
+    if not re.fullmatch(sdk_pattern, str(sdk)):
+        raise ValueError('OpenSSL SDK root does not match the fixed platform')
+    cpu = 'arm64' if arch in ('arm64', 'arm64e') else 'x86_64'
+    minimum = {'ios': '15.0', 'isimulator': '15.0', 'tvos': '15.0',
+               'tvsimulator': '15.0', 'macos': '12.0'}[platform]
+    target = {
+        'ios': cpu + '-apple-ios' + minimum,
+        'isimulator': cpu + '-apple-ios' + minimum + '-simulator',
+        'tvos': cpu + '-apple-tvos' + minimum,
+        'tvsimulator': cpu + '-apple-tvos' + minimum + '-simulator',
+        'macos': cpu + '-apple-macos' + minimum,
+    }[platform]
+    minimum_flag = {
+        'ios': '-mios-version-min=' + minimum,
+        'isimulator': '-mios-simulator-version-min=' + minimum,
+        'tvos': '-mtvos-version-min=' + minimum,
+        'tvsimulator': '-mtvos-simulator-version-min=' + minimum,
+        'macos': '-mmacosx-version-min=' + minimum,
+    }[platform]
+    common = '-arch ' + arch + ' -isysroot ' + sdk_root + ' -target ' + target + ' ' + minimum_flag
+    cflags = common + (' -DHAVE_FORK=0' if platform in ('tvos', 'tvsimulator') else '')
+    if not (value['CFLAGS'] == value['CPPFLAGS'] == value['CXXFLAGS'] == value['ASMFLAGS'] == cflags
+            and value['LDFLAGS'] == '-lc++ ' + common):
+        raise ValueError('OpenSSL compiler/linker flags differ from the fixed platform policy')
+    source = Path(source_directory)
+    build = Path(build_directory)
+    if (not source_directory.startswith('/') or not build_directory.startswith('/')
+            or '\x00' in source_directory or '\x00' in build_directory
+            or source.name != OPENSSL_ROOT or source.parent.name != 'dist'
+            or build != source.parent / OPENSSL_OUTPUT_ROOT / platform / 'scratch' / arch):
+        raise ValueError('OpenSSL source/build directory identity differs from the fixed layout')
+    expected_pkg = [str(source.parent / library / platform / 'thin' / arch / 'lib' / 'pkgconfig')
+                    for library in OPENSSL_PKG_LIBRARIES]
+    expected_pkg.append(str(build / 'vortx-sdk-pkgconfig'))
+    if value['PKG_CONFIG_LIBDIR'] != ':'.join(expected_pkg):
+        raise ValueError('OpenSSL pkg-config target roots differ from the fixed ordered map')
+    return value
+
+
+def _openssl_target_config(value, platform, arch, target):
+    if (not isinstance(value, str) or not value or len(value.encode('utf-8')) > OPENSSL_MAX_TARGET_CONFIG
+            or '\x00' in value or not value.endswith('\n')):
+        raise ValueError('OpenSSL generated target config is not bounded text')
+    expected = ('my %targets = (\n'
+                '    "' + target + '" => {\n'
+                '        inherit_from => [ "darwin-common" ],\n'
+                '        CC => "/usr/bin/clang",\n'
+                '        cflags => "-fno-common",\n'
+                '        lib_cppflags => "-DL_ENDIAN",\n'
+                '        bn_ops => "SIXTY_FOUR_BIT_LONG",\n'
+                '        asm_arch => "' + ('aarch64' if arch in ('arm64', 'arm64e') else 'x86_64') + '",\n'
+                '        perlasm_scheme => "' + ('ios64' if arch in ('arm64', 'arm64e') else 'macosx') + '",\n'
+                '        sys_id => "' + ('MACOSX' if platform == 'macos' else 'iOS') + '",\n'
+                '    },\n'
+                ');\n\n')
+    if value != expected:
+        raise ValueError('OpenSSL generated target config differs from the fixed template')
+    return value
+
+
+def _openssl_validate_scratch(value, work, platform, arch, scratch):
+    target, slice_name, prefix = _openssl_expected(platform, arch, work)
+    expected_keys = {'schema', 'version', 'sourceSHA', 'sourceTag', 'platform', 'arch',
+                     'configureTarget', 'configureArguments', 'sdkRoot', 'sourceDirectory',
+                     'buildDirectory', 'prefix', 'environment', 'targetConfig',
+                     'targetConfigSHA256', 'effectiveConfiguration', 'compiled', 'installed'}
+    if type(value) is not dict or set(value) != expected_keys:
+        raise ValueError('unexpected OpenSSL scratch record keys')
+    if (type(value['schema']) is not int or value['schema'] != 1
+            or value['version'] != OPENSSL_SOURCE['version']
+            or value['sourceSHA'] != OPENSSL_SOURCE['commit']
+            or value['sourceTag'] != OPENSSL_SOURCE['tag']
+            or value['platform'] != platform or value['arch'] != arch
+            or value['configureTarget'] != target or value['compiled'] is not True
+            or value['installed'] is not True):
+        raise ValueError('OpenSSL scratch source/platform/target/completion differs from the fixed profile')
+    for field in ('sdkRoot', 'sourceDirectory', 'buildDirectory', 'prefix'):
+        if (not isinstance(value[field], str) or not value[field].startswith('/')
+                or '\x00' in value[field] or len(value[field]) > 4096):
+            raise ValueError('OpenSSL scratch ' + field + ' is not a bounded absolute path')
+    if Path(value['buildDirectory']).resolve() != scratch.resolve():
+        raise ValueError('OpenSSL scratch build directory differs from its exact scratch path')
+    if Path(value['sourceDirectory']).resolve() != (work / 'dist' / OPENSSL_ROOT).resolve():
+        raise ValueError('OpenSSL scratch source directory differs from the pinned source root')
+    if Path(value['prefix']).resolve() != prefix.resolve():
+        raise ValueError('OpenSSL scratch prefix differs from the expected thin root')
+    expected_args = ['--config=' + str(scratch / 'vortx-openssl-target.conf'),
+                     '--prefix=' + value['prefix'], *OPENSSL_CONFIGURE_FLAGS, target]
+    if value['configureArguments'] != expected_args:
+        raise ValueError('OpenSSL Configure arguments differ from the fixed profile')
+    _openssl_environment(value['environment'], platform, arch, value['sdkRoot'],
+                          value['sourceDirectory'], value['buildDirectory'])
+    _openssl_target_config(value['targetConfig'], platform, arch, target)
+    if value['targetConfigSHA256'] != hashlib.sha256(value['targetConfig'].encode('utf-8')).hexdigest():
+        raise ValueError('OpenSSL generated target config digest differs')
+    _openssl_effective_configuration(value['effectiveConfiguration'], value['environment'], target)
+    return target, slice_name, prefix
+
+
+def _openssl_hash_outputs(prefix):
+    result = []
+    for name, relative, limit in OPENSSL_OUTPUTS:
+        path = prefix / relative
+        count, checksum = _shaderc_file_sha(path, 'installed ' + name)
+        if count > limit:
+            raise ValueError('OpenSSL installed output exceeds its bound: ' + name)
+        result.append({'name': name, 'path': relative, 'bytes': count, 'sha256': checksum})
+    return result
+
+
+def _openssl_receipt_shape(value, validator_sha256):
+    expected_keys = {'schema', 'profile', 'sourceProfile', 'version', 'sourceSHA', 'sourceTag',
+                     'validatorSHA256', 'matrix', 'runtimeSecurityTested', 'promotionEligible'}
+    if type(value) is not dict or set(value) != expected_keys:
+        raise ValueError('unexpected OpenSSL receipt keys')
+    if (type(value['schema']) is not int or value['schema'] != 1
+            or value['profile'] != NATIVE_UPGRADES_PROFILE
+            or value['sourceProfile'] != OPENSSL_BOM_PROFILE
+            or value['version'] != OPENSSL_SOURCE['version']
+            or value['sourceSHA'] != OPENSSL_SOURCE['commit']
+            or value['sourceTag'] != OPENSSL_SOURCE['tag']
+            or value['validatorSHA256'] != validator_sha256
+            or value['runtimeSecurityTested'] is not False
+            or value['promotionEligible'] is not False):
+        raise ValueError('invalid OpenSSL receipt identity/boundary')
+    matrix = value['matrix']
+    if type(matrix) is not list or len(matrix) != len(OPENSSL_MATRIX):
+        raise ValueError('OpenSSL receipt must contain exactly nine matrix rows')
+    expected = {(platform, arch): (target, slice_name)
+                for platform, arch, target, slice_name in OPENSSL_MATRIX}
+    observed = set()
+    header_hashes = set()
+    for row in matrix:
+        row_keys = {'platform', 'arch', 'slice', 'configureTarget', 'configureArguments',
+                    'sdkRoot', 'sourceDirectory', 'buildDirectory', 'prefix', 'environment',
+                    'targetConfig', 'targetConfigSHA256', 'effectiveConfiguration',
+                    'compiled', 'installed', 'outputs'}
+        if type(row) is not dict or set(row) != row_keys:
+            raise ValueError('unexpected OpenSSL receipt row keys')
+        identity = (row['platform'], row['arch'])
+        if (identity not in expected or identity in observed
+                or row['slice'] != expected[identity][1]
+                or row['configureTarget'] != expected[identity][0]
+                or row['compiled'] is not True or row['installed'] is not True):
+            raise ValueError('unexpected OpenSSL receipt platform/architecture/completion')
+        for field in ('sdkRoot', 'sourceDirectory', 'buildDirectory', 'prefix'):
+            if (not isinstance(row[field], str) or not row[field].startswith('/')
+                    or '\x00' in row[field] or len(row[field]) > 4096):
+                raise ValueError('OpenSSL receipt ' + field + ' is not a bounded absolute path')
+        source_root = Path(row['sourceDirectory'])
+        if (source_root.name != OPENSSL_ROOT or source_root.parent.name != 'dist'
+                or Path(row['buildDirectory']) != source_root.parent / OPENSSL_OUTPUT_ROOT / row['platform'] /
+                'scratch' / row['arch']
+                or Path(row['prefix']) != source_root.parent / OPENSSL_OUTPUT_ROOT / row['platform'] /
+                'thin' / row['arch']):
+            raise ValueError('OpenSSL receipt source/build/prefix layout differs from the fixed tree')
+        if not row['prefix'].endswith('/dist/' + OPENSSL_OUTPUT_ROOT + '/' + row['platform'] + '/thin/' + row['arch']):
+            raise ValueError('OpenSSL receipt prefix differs from the fixed thin layout')
+        expected_args = ['--config=' + row['buildDirectory'] + '/vortx-openssl-target.conf',
+                         '--prefix=' + row['prefix'], *OPENSSL_CONFIGURE_FLAGS,
+                         expected[identity][0]]
+        if row['configureArguments'] != expected_args:
+            raise ValueError('OpenSSL receipt Configure arguments differ from the fixed profile')
+        _openssl_environment(row['environment'], row['platform'], row['arch'], row['sdkRoot'],
+                             row['sourceDirectory'], row['buildDirectory'])
+        _openssl_target_config(row['targetConfig'], row['platform'], row['arch'],
+                               expected[identity][0])
+        if row['targetConfigSHA256'] != hashlib.sha256(row['targetConfig'].encode('utf-8')).hexdigest():
+            raise ValueError('OpenSSL receipt target config digest differs')
+        _openssl_effective_configuration(row['effectiveConfiguration'], row['environment'],
+                                          expected[identity][0])
+        outputs = row['outputs']
+        if type(outputs) is not list or len(outputs) != len(OPENSSL_OUTPUTS):
+            raise ValueError('OpenSSL receipt output count differs from the fixed set')
+        seen_outputs = set()
+        for output in outputs:
+            if type(output) is not dict or set(output) != {'name', 'path', 'bytes', 'sha256'}:
+                raise ValueError('unexpected OpenSSL receipt output keys')
+            name = output['name']
+            fixed = next((candidate for candidate in OPENSSL_OUTPUTS if candidate[0] == name), None)
+            if fixed is None or name in seen_outputs or output['path'] != fixed[1]:
+                raise ValueError('unexpected OpenSSL receipt output path/name')
+            if (type(output['bytes']) is not int or output['bytes'] < 1
+                    or output['bytes'] > fixed[2]
+                    or not re.fullmatch(r'[0-9a-f]{64}', output['sha256'])):
+                raise ValueError('invalid OpenSSL receipt output bytes/hash')
+            if name == 'opensslv.h':
+                header_hashes.add(output['sha256'])
+            seen_outputs.add(name)
+        if seen_outputs != {name for name, _, _ in OPENSSL_OUTPUTS}:
+            raise ValueError('incomplete OpenSSL receipt output set')
+        observed.add(identity)
+    if observed != set(expected) or len(header_hashes) != 1:
+        raise ValueError('incomplete OpenSSL receipt matrix')
+    return value
+
+
+def _openssl_receipt_rows_from_scratch(value, outputs):
+    return {'platform': value['platform'], 'arch': value['arch'],
+            'slice': next(slice_name for platform, arch, _, slice_name in OPENSSL_MATRIX
+                          if (platform, arch) == (value['platform'], value['arch'])),
+            'configureTarget': value['configureTarget'],
+            'configureArguments': value['configureArguments'], 'sdkRoot': value['sdkRoot'],
+            'sourceDirectory': value['sourceDirectory'], 'buildDirectory': value['buildDirectory'],
+            'prefix': value['prefix'], 'environment': value['environment'],
+            'targetConfig': value['targetConfig'],
+            'targetConfigSHA256': value['targetConfigSHA256'],
+            'effectiveConfiguration': value['effectiveConfiguration'],
+            'compiled': value['compiled'], 'installed': value['installed'], 'outputs': outputs}
+
+
+def apple_openssl_builds(work):
+    """Hash successful OpenSSL thin installs and emit the fixed source BOM."""
+    work = work.absolute()
+    if work.is_symlink() or not work.is_dir() or work.resolve() != work:
+        raise ValueError('OpenSSL WORK must be a real absolute directory')
+    matrix = []
+    for platform, arch, _, _ in OPENSSL_MATRIX:
+        scratch = work / 'dist' / 'openssl' / platform / 'scratch' / arch / 'vortx-openssl-build.json'
+        record = _openssl_load(scratch, 'scratch record')
+        _openssl_validate_scratch(record, work, platform, arch, scratch.parent)
+        matrix.append(_openssl_receipt_rows_from_scratch(record,
+                                                         _openssl_hash_outputs(
+                                                             _openssl_expected(platform, arch, work)[2])))
+    destination_root = work / 'dist' / OPENSSL_OUTPUT_ROOT
+    if (destination_root.is_symlink() or not destination_root.is_dir()
+            or destination_root.resolve() != destination_root):
+        raise ValueError('OpenSSL destination root is not a real build directory')
+    destination = destination_root / 'vortx-openssl-builds.json'
+    if destination.exists() or destination.is_symlink():
+        raise ValueError('refusing an existing OpenSSL BOM receipt')
+    save(destination, {'schema': 1, 'profile': NATIVE_UPGRADES_PROFILE,
+                       'sourceProfile': OPENSSL_BOM_PROFILE, 'version': OPENSSL_SOURCE['version'],
+                       'sourceSHA': OPENSSL_SOURCE['commit'], 'sourceTag': OPENSSL_SOURCE['tag'],
+                       'validatorSHA256': digest(Path(__file__)), 'matrix': matrix,
+                       'runtimeSecurityTested': False, 'promotionEligible': False})
+    print('PASS openssl-profile ' + OPENSSL_BOM_PROFILE)
+    print('PASS apple-openssl-builds')
+
+
+def apple_openssl_receipt(receipt_path):
+    """Revalidate one OpenSSL BOM file and its installed outputs without native tools."""
+    receipt_path = receipt_path.absolute()
+    if (not receipt_path.is_absolute() or receipt_path.is_symlink()
+            or receipt_path.resolve() != receipt_path
+            or receipt_path.name != 'vortx-openssl-builds.json'
+            or receipt_path.parent.name != OPENSSL_OUTPUT_ROOT
+            or receipt_path.parent.parent.name != 'dist'):
+        raise ValueError('OpenSSL receipt must be the exact generated BOM file')
+    work = receipt_path.parent.parent.parent
+    if work.is_symlink() or not work.is_dir() or work.resolve() != work:
+        raise ValueError('OpenSSL receipt work root is not a real absolute directory')
+    value = _openssl_load(receipt_path, 'receipt')
+    _openssl_receipt_shape(value, digest(Path(__file__)))
+    expected_rows = {(row['platform'], row['arch']): row for row in value['matrix']}
+    for platform, arch, _, _ in OPENSSL_MATRIX:
+        row = expected_rows[(platform, arch)]
+        actual = _openssl_hash_outputs(work / 'dist' / 'openssl' / platform / 'thin' / arch)
+        if actual != row['outputs']:
+            raise ValueError('OpenSSL installed files differ from the BOM: ' + platform + '/' + arch)
+    print('PASS openssl-profile ' + OPENSSL_BOM_PROFILE)
+    print('PASS apple-openssl-receipt')
 
 
 def relro_16k_safe(row, loads):
@@ -66,7 +1515,15 @@ REFERENCE_FFMPEG_FUNCTIONS = (
     'avpriv_vortx_reference_capture_v1', 'avpriv_vortx_reference_revalidate_v1',
     'avpriv_vortx_reference_recipe_current', 'avpriv_vortx_reference_open_prefix_v1',
     'avpriv_vortx_reference_read_v1', 'avpriv_vortx_reference_stats_v1',
-    'avpriv_vortx_reference_reader_close_v1', 'avpriv_vortx_reference_recipe_release_v1')
+    'avpriv_vortx_reference_reader_close_v1', 'avpriv_vortx_reference_recipe_release_v1',
+    'avpriv_vortx_reference_sparse_budget_create_v1',
+    'avpriv_vortx_reference_sparse_budget_info_v1',
+    'avpriv_vortx_reference_sparse_open_v1',
+    'avpriv_vortx_reference_sparse_next_part_v1',
+    'avpriv_vortx_reference_sparse_read_part_v1',
+    'avpriv_vortx_reference_sparse_stats_v1',
+    'avpriv_vortx_reference_sparse_close_v1',
+    'avpriv_vortx_reference_sparse_budget_release_v1')
 RETIRED_SENT_FFMPEG_FUNCTIONS = (
     'avpriv_vortx_http_copy_sent_request', 'avpriv_vortx_http_sent_request_clear')
 PRIVATE_MPV_FUNCTIONS = ('stream_reference_sent_request_copy_transport',)
@@ -380,7 +1837,7 @@ def android(out, upstream, sdk, *, readelf=None):
 # Exact source-evidence profile for FUTURE successful native candidates. This
 # carries source bytes, including new/untracked patch outputs, rather than
 # substituting tracked diffs for a complete corresponding-source snapshot.
-CURRENT_SOURCE_PROFILE = 'original-http-finite-reference-reader-v1'
+CURRENT_SOURCE_PROFILE = 'original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-candidate'
 CURRENT_RECIPE_PATHS = {
     'scripts/assemble-mpvkit-dvfel.sh', 'scripts/build-mpvkit-dvfel.sh',
     'scripts/ffmpeg-response-witness.patch', 'scripts/ffmpeg-response-generation.patch',
@@ -408,17 +1865,17 @@ CURRENT_RECIPE_PATHS = {
 }
 CURRENT_NATIVE_PINS = {'mpv': '8c67647b50059406c5c0444903597281b81516cf',
                        'ffmpeg': '946fcce07b6dcd0331c8cc609192aeff5e1924f8',
-                       'libplacebo': '4c426e466814536def653cb23f1d1c287ea7a7f5'}
+                       'libplacebo': '275f7dea27924cdd34ab2e6c20e448b6bc4fab65'}
 # Full-file postcomposition hashes retain cancellation plus owned observation.
 CURRENT_CANCEL_FILES = {
     'misc/thread_tools.c': '151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9',
     'misc/thread_tools.h': '62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f',
-    'stream/stream_lavf.c': 'b8c78d8239af8c968c53ca83f601f91e521090d6d2d7522101fb68b332074940',
-    'stream/reference_source.h': 'dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b',
+    'stream/stream_lavf.c': '650bf7b94771e70a6b934b21e362bc77f66ceb1d23ee684d2b169c6e694544a5',
+    'stream/reference_source.h': '1f606a977b55f18fdb9f9fc7f5e4549b5774bef10a06c33b06ab945531909b29',
                      'stream/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9',
 }
 CURRENT_RESPONSE_FILES = {
-    'libavformat/http.c': 'd4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802',
+    'libavformat/http.c': 'd1301474b4389256f9862565a399a8888366a68d2e3630338848289fe8a9c831',
     'libavformat/url.h': '14e3acc5a6715d48edb3dadb2f5248deaa38c36b30ff763e9be4b89edf2b1a0c',
     'libavformat/avio.c': '16bf38abc7a5b5586268c71723041df2b90b7b99a8fbaeb06c8b20926534fe7a',
     'libavformat/tcp.c': 'cc9c11534ff5017d5931bb06788f95f10e9809953e5ec1cc03114a3a877cdcce',
@@ -428,23 +1885,33 @@ CURRENT_RESPONSE_FILES = {
 }
 CURRENT_READER_FFMPEG_CREATED = {
     'libavformat/vortx_reference_reader.inc': 'a8c74f929942423550dba65f738fd4d2ad2d63d975665f64e6da1b00f5001645',
-    'libavformat/vortx_reference_pin.h': '1000225eb4660e936bdf5984b62c6cbd7ae2c747472e55aabb6dc620d4f386dc',
+    'libavformat/vortx_reference_pin.h': 'e0ccea8466e28169d0882fd664081baa09d3a39626d5351a31804b6dc4bb4e94',
     'libavformat/vortx_reference_reader_stream.h': 'adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87',
+    'libavformat/vortx_reference_sparse.h': 'fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c',
+    'libavformat/vortx_reference_sparse.inc': '0e3201c26657765a1e6e7a15fe9db1bcac5cf96a8cb7e9d691533e0f4bf3f15f',
 }
 CURRENT_READER_MPV_FILES = {
-    'demux/demux.c': 'e5f08305137ed3f7b28fa24ee431e19222153a6cfed10f12d109b92da55567a4',
+    'demux/demux.c': 'f5a4cd7bf4e29902ef965e43027755c19ded1423129a3fbe9808ad89e64c0e1c',
     'demux/demux.h': 'bee52b38477ce7c8efd9a50e778f720ea8c9eec577afab29998682c26ffe75e2',
     'demux/demux_lavf.c': 'd945ae1699d383c3d645d2ab963abb166fd0c19f10a4ab144505e7fbfb0408fb',
-    'demux/reference_reader.c': '322fa3a90ad9a461c549b2aaebf50adba07b9862d11b8690355a6d789571c752',
-    'demux/reference_reader.h': '4894866fc49f8ab7af9f4d5b3a29bfc7d1ac4153483fd04354db3e89e55cad03',
-    'demux/reference_reader_internal.h': '6b21e2b72c87c49d609fdfca0252c32635d50054abe4eaae33340fc5b7da1a9c',
+    'demux/reference_reader.c': '222ec8920d38971d386470d8172e45a89a52350eb352124ddf954be9409b792b',
+    'demux/reference_reader.h': '59d669fb370bc12f01856031b8f9d908eb1d50a927d955ecb1fe0b4484c2407d',
+    'demux/reference_reader_internal.h': 'ded5dc02785e98934a966de87df4337e4c6aed0275bce26da2017883917f4c8d',
+    'demux/demux_mkv.c': '1b7cc4d40efa0620bd10669dc44a7d6b32d0236e2ae2be3510a3bac0829e39c2',
+    'demux/reference_mkv.h': '38df7814efc3aa7434e5afe269406a989ab6a5fa22a200aa28149a3ab68e46d9',
+    'demux/reference_mkv_reader.c': '3ac442e8ff489d11f4a5df6b86f8d964457753f66ce5f3eb530d7db3746b6f7c',
+    'demux/reference_mkv_sparse.h': '4b013b6e794257a576bc01f6becb9d120cb878e0851b2e0bdd2225dcf7b18df2',
+    'demux/reference_mkv_sparse_planner.c': 'e36c6a879138b26e125f647c9254b41674b22b338ab12838376fe8d38bdae056',
+    'demux/reference_mkv_sparse_planner.h': 'c88597a42186ceb81f45f1f44b3734469cf06889ea3bf91e4853b861943e84fe',
+    'demux/reference_mkv_sparse_worker.c': '5deae68bf3c680aa4898ca6c8e0c0e76aa4628bffa693d0ae2d6dd287d9a5e64',
+    'stream/vortx_reference_sparse.h': 'fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c',
     'stream/stream_lavf.c': CURRENT_CANCEL_FILES['stream/stream_lavf.c'],
     'stream/reference_source.h': CURRENT_CANCEL_FILES['stream/reference_source.h'],
     'stream/vortx_reference_reader_stream.h': 'adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87',
-    'player/owned_subtitle.c': '242697e6be2bd2e10272679a3d618f07a07138b7a15b3b94cdbfdf521599bb25',
+    'player/owned_subtitle.c': '014b93845488ef873a4d29c4c8dd4ada69d244626e7a7b38bac82809989c6b29',
     'player/owned_subtitle.h': '8d2f0ee5c972d1da69213cd80fbe249bcf3f19d9de8a2ef87e241d2f08f06284',
-    'player/command.c': '661388627775cf58dec688388d36aba9e457b0f3e97d349a91033f3f5f1f6e3b',
-    'player/reference_owned.inc': '4402bcd094a80a769479320ac852c329acb39781fa8fc478d0ed79af10ae19e2',
+    'player/command.c': 'e7a19f392bb69e9d208382f157234ac3c908d22a0d4afee5f372ee8f9d33dade',
+    'player/reference_owned.inc': '23ac96bfedefcab2234afa2a6f329a36fac6735effca6798b4043d777b060217',
     'sub/owned_text_slot.h': '63c498dd4bdc9fa9c6d128f1be8f37d7cdf377c853888342897f6639601662f6',
     'sub/osd.c': '9b57ccd08e5777e2bc644cbf8001df0301552edf5cf24e36185a54f4cd667195',
     'sub/dec_sub.c': '6e2137b90fe7f2915a528bdd83426448afbd099229f65342dbfd85d1ba1d347b',
@@ -453,8 +1920,8 @@ CURRENT_READER_MPV_FILES = {
 # Both maintained source lanes retain SENT/PREFIX's seven Android-conditional
 # roots; only the Apple source includes MPVKit's MoltenVK configuration block.
 CURRENT_READER_MPV_MESON = {
-    'apple': '4c748249732131a2942b66087fa7142a2f9c239274cc272a35ec36221c010205',
-    'android': '316e9aca3c4960701eab42e62ca1005379e082e1a21b4788b7581811ca360147',
+    'apple': 'c2abd8f89a772717fdd4bcdbb4a2236d9fb28eca029acfe84bf12f7333df5a55',
+    'android': '32c9a1321883f6a980652173061c9c01727ef83b7a0dfe6e8e3a22364b753d47',
 }
 CURRENT_MBEDTLS_FILES = {'apple': '77d72cb88fc662b984f051335b356abc3e76e97ce39302dde6961ecdbba7a332',
                          'android': '7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac'}
@@ -464,19 +1931,22 @@ CURRENT_SOURCE_ROOTS = {'android': {'_native-publisher': 'fcf6745703dc1265bca88f
              'fontconfig': '0f236723a3c26bd9745e32ba2b3ee21e5f809295',
              'freetype': '0a0221a1347e2f1e07c395263540026e9a0aa7c7',
              'fribidi': 'b93119f5fdc7ea47672cc304c1455ffa6dfe7536',
-             'harfbuzz': 'c7a7457b7385f33178e8cf87615ca077a810bbe7',
+             'harfbuzz': '35f656a1a2bab548ea7f54a6dd3fba2b09680d14',
              'libass': '4a05d8127f525943ebf45fdc6497c9e665947f0d',
-             'libplacebo': '4c426e466814536def653cb23f1d1c287ea7a7f5',
+             'libplacebo': '275f7dea27924cdd34ab2e6c20e448b6bc4fab65',
              'libxml2': '96498992efa48d52b0e8b83058bd88dbdaf153c1',
              'mbedtls': '068ff080b369adfac81509f9b57b2afabaf82dc5',
              'mpv': '8c67647b50059406c5c0444903597281b81516cf'},
  'apple': {'FFmpeg-9.0.2-946fcce0': '946fcce07b6dcd0331c8cc609192aeff5e1924f8',
            '_native-mpvkit': '2103893078c5e339073b11737b86f7f22b9c4491',
            'libmpv-master-8c67647b': '8c67647b50059406c5c0444903597281b81516cf',
-           'libplacebo-master-4c426e46': '4c426e466814536def653cb23f1d1c287ea7a7f5'}}
+           'libplacebo-7.387.0-275f7dea': '275f7dea27924cdd34ab2e6c20e448b6bc4fab65',
+           'lcms2-2.20rc1-13154341': '1315434113566bcf3eb46c2485fcc1c0a56ab806',
+           'libdav1d-1.5.4-54706fc6': '54706fc6bc0cdecab7e9593974a4039cc038fca7',
+           'openssl-4.1.0-2f4e3a5f': '2f4e3a5fec05394068cfa7379890ab552483a8a6'}}
 CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/include/download-libunibreak.sh': '34ce1ee52187a287ff7da6e18efd7368e5671ac77cc7da5c5a8027a3c63a0418',
-                                   'buildscripts/patches/ffmpeg/0006-finite-reference-reader.patch': '6927705a432e987d2e13e2d5922756cb6c395d5c060268191cf6c1d94063b2df',
-                                   'buildscripts/patches/mpv/0014-finite-reference-reader.patch': 'c8752eb80824a5487f5d80addc473da09778d6dd8cb1adac899079aa2bc211f2',
+                                   'buildscripts/patches/ffmpeg/0006-finite-reference-reader.patch': 'a06f4b8b9eadc12eace93b1b340e0555116061188d0674f063698ea75d953abd',
+                                   'buildscripts/patches/mpv/0014-finite-reference-reader.patch': '42c020f9f6550af5072a8eff1b5860249bb9df5f9418855cb4636cd15854f7f2',
                                    'buildscripts/patches/ffmpeg/0005-original-transport-evidence.patch': '480302686b9fff135cd0665e7af76d635fc21d83f54ee0096578ddd6bd6d83e5',
                                    'buildscripts/patches/mpv/0013-original-transport-evidence.patch': 'dad7f2d20ea14eb4661ef853978be78806e1b01fce67653e3ffec9b57d4a0e82',
                                    'buildscripts/include/download-lua.sh': 'bdfb58aa6fc85ec4dabd095bf11c760482fbbff86b94abbe835044ea49f06f93',
@@ -515,14 +1985,22 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
                      'demux/reference_reader.h': CURRENT_READER_MPV_FILES['demux/reference_reader.h'],
                      'demux/reference_reader_internal.h': CURRENT_READER_MPV_FILES['demux/reference_reader_internal.h'],
                      'stream/vortx_reference_reader_stream.h': CURRENT_READER_MPV_FILES['stream/vortx_reference_reader_stream.h'],
+                     'demux/reference_mkv.h': CURRENT_READER_MPV_FILES['demux/reference_mkv.h'],
+                     'demux/reference_mkv_reader.c': CURRENT_READER_MPV_FILES['demux/reference_mkv_reader.c'],
+                     'demux/reference_mkv_sparse.h': CURRENT_READER_MPV_FILES['demux/reference_mkv_sparse.h'],
+                     'demux/reference_mkv_sparse_planner.c': CURRENT_READER_MPV_FILES['demux/reference_mkv_sparse_planner.c'],
+                     'demux/reference_mkv_sparse_planner.h': CURRENT_READER_MPV_FILES['demux/reference_mkv_sparse_planner.h'],
+                     'demux/reference_mkv_sparse_worker.c': CURRENT_READER_MPV_FILES['demux/reference_mkv_sparse_worker.c'],
+                     'stream/vortx_reference_sparse.h': CURRENT_READER_MPV_FILES['stream/vortx_reference_sparse.h'],
                      'stream/reference_source.h': CURRENT_CANCEL_FILES['stream/reference_source.h'],
                      'stream/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9',
                      'sub/owned_text_slot.h': CURRENT_READER_MPV_FILES['sub/owned_text_slot.h']}},
  'apple': {'FFmpeg-9.0.2-946fcce0': {**CURRENT_READER_FFMPEG_CREATED,
                                   'libavformat/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9'},
-           '_native-mpvkit': {'Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch': '085b66cb5623ed8087481d3217b65da587b2970cd345a45896e7e87823dec9c9',
-                              'Sources/BuildScripts/patch/FFmpeg/0005-finite-reference-reader.patch': '6927705a432e987d2e13e2d5922756cb6c395d5c060268191cf6c1d94063b2df',
-                              'Sources/BuildScripts/patch/libmpv/0019-finite-reference-reader.patch': 'c8752eb80824a5487f5d80addc473da09778d6dd8cb1adac899079aa2bc211f2',
+           '_native-mpvkit': {**CRYPTO_INSTALLED_HELPERS,
+                              'Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch': '085b66cb5623ed8087481d3217b65da587b2970cd345a45896e7e87823dec9c9',
+                              'Sources/BuildScripts/patch/FFmpeg/0005-finite-reference-reader.patch': 'a06f4b8b9eadc12eace93b1b340e0555116061188d0674f063698ea75d953abd',
+                              'Sources/BuildScripts/patch/libmpv/0019-finite-reference-reader.patch': '42c020f9f6550af5072a8eff1b5860249bb9df5f9418855cb4636cd15854f7f2',
                               'Sources/BuildScripts/patch/FFmpeg/0004-original-transport-evidence.patch': '480302686b9fff135cd0665e7af76d635fc21d83f54ee0096578ddd6bd6d83e5',
                               'Sources/BuildScripts/patch/libmpv/0018-original-transport-evidence.patch': 'dad7f2d20ea14eb4661ef853978be78806e1b01fce67653e3ffec9b57d4a0e82',
                               'Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch': 'e3840084725be1f4948fb90c6fec87c35d55665f8310854713ebff496e1358bf',
@@ -548,11 +2026,21 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
                                       'demux/reference_reader.h': CURRENT_READER_MPV_FILES['demux/reference_reader.h'],
                                       'demux/reference_reader_internal.h': CURRENT_READER_MPV_FILES['demux/reference_reader_internal.h'],
                                       'stream/vortx_reference_reader_stream.h': CURRENT_READER_MPV_FILES['stream/vortx_reference_reader_stream.h'],
+                                      'demux/reference_mkv.h': CURRENT_READER_MPV_FILES['demux/reference_mkv.h'],
+                                      'demux/reference_mkv_reader.c': CURRENT_READER_MPV_FILES['demux/reference_mkv_reader.c'],
+                                      'demux/reference_mkv_sparse.h': CURRENT_READER_MPV_FILES['demux/reference_mkv_sparse.h'],
+                                      'demux/reference_mkv_sparse_planner.c': CURRENT_READER_MPV_FILES['demux/reference_mkv_sparse_planner.c'],
+                                      'demux/reference_mkv_sparse_planner.h': CURRENT_READER_MPV_FILES['demux/reference_mkv_sparse_planner.h'],
+                                      'demux/reference_mkv_sparse_worker.c': CURRENT_READER_MPV_FILES['demux/reference_mkv_sparse_worker.c'],
+                                      'stream/vortx_reference_sparse.h': CURRENT_READER_MPV_FILES['stream/vortx_reference_sparse.h'],
                                       'stream/reference_source.h': CURRENT_CANCEL_FILES['stream/reference_source.h'],
                      'stream/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9',
                                       'sub/owned_text_slot.h': CURRENT_READER_MPV_FILES['sub/owned_text_slot.h'],
                                       'video/out/vulkan/context_moltenvk.m': '00d2842ddb0dca5070feaf890c0190a0fe62beef9b29ec36e94e329d29a3da5e'},
-           'libplacebo-master-4c426e46': {}}}
+           'libplacebo-7.387.0-275f7dea': {},
+           'lcms2-2.20rc1-13154341': {},
+           'libdav1d-1.5.4-54706fc6': {},
+           'openssl-4.1.0-2f4e3a5f': {}}}
 
 SOURCE_MAX_FILE = 64 * 1024**2
 SOURCE_MAX_TOTAL = 2 * 1024**3
@@ -592,9 +2080,22 @@ def source_git(root, *args):
                                     '-C', str(root), *args], env=env, timeout=60)
 
 
+def _openssl_gitlink_placeholder(child):
+    """Admit only an absent or empty real directory for a no-fetch submodule."""
+    if child.is_symlink():
+        raise ValueError('OpenSSL gitlink checkout must not be a symlink')
+    if not child.exists():
+        return
+    if (not child.is_dir() or child.resolve() != child.absolute()
+            or any(True for _ in child.iterdir())):
+        raise ValueError('OpenSSL gitlink checkout must be absent or empty')
+
+
 def source_paths(root, allowed_untracked):
     """Only pinned public Git roots and exact recipe-created untracked paths."""
     paths, tracked, gitlinks, seen, identities = [], set(), [], set(), []
+    openssl_root = (root.name == OPENSSL_ROOT and
+                    source_git(root, 'rev-parse', 'HEAD').decode().strip() == OPENSSL_SOURCE['commit'])
     def visit(tree, prefix=''):
         if tree.is_symlink() or tree.resolve() != tree.absolute():
             raise ValueError('linked source checkout')
@@ -611,10 +2112,16 @@ def source_paths(root, allowed_untracked):
                 raise ValueError('unsupported source Git index entry')
             if mode == '160000':
                 child = tree / name
-                if source_git(child, 'rev-parse', 'HEAD').decode().strip() != oid:
-                    raise ValueError('native gitlink checkout differs from its pin')
-                gitlinks.append({'path': relative, 'commit': oid})
-                visit(child, relative + '/')
+                if openssl_root:
+                    if relative not in OPENSSL_GITLINKS or OPENSSL_GITLINKS[relative] != oid:
+                        raise ValueError('OpenSSL source Gitlink differs from the pinned root tree')
+                    _openssl_gitlink_placeholder(child)
+                    gitlinks.append({'path': relative, 'commit': oid})
+                else:
+                    if source_git(child, 'rev-parse', 'HEAD').decode().strip() != oid:
+                        raise ValueError('native gitlink checkout differs from its pin')
+                    gitlinks.append({'path': relative, 'commit': oid})
+                    visit(child, relative + '/')
             else:
                 paths.append(relative)
                 tracked.add(relative)
@@ -626,6 +2133,8 @@ def source_paths(root, allowed_untracked):
     visit(root)
     if set(paths) - tracked != set(allowed_untracked):
         raise ValueError('recipe-created native source set is incomplete')
+    if openssl_root and {row['path']: row['commit'] for row in gitlinks} != OPENSSL_GITLINKS:
+        raise ValueError('OpenSSL source Gitlink set is incomplete or has extras')
     for name in paths:
         if name.casefold() in seen:
             raise ValueError('duplicate/case-colliding source path')
@@ -864,6 +2373,10 @@ def capture_current_source_evidence(lane, out, upstream, roots, legacy, staged):
             raise ValueError('native source changed after legacy receipt')
         allowed = CURRENT_UNTRACKED_FILES[lane][old['directory']]
         names, gitlinks, tracked, nested_identities = source_paths(root, allowed)
+        if old['directory'] == OPENSSL_ROOT:
+            observed_gitlinks = {row['path']: row['commit'] for row in gitlinks}
+            if observed_gitlinks != OPENSSL_GITLINKS:
+                raise ValueError('OpenSSL source Gitlink map differs from the pinned root tree')
         boundaries.append((root, old, allowed, (names, gitlinks, tracked, nested_identities)))
         groups.append({'receiptIndex': index, 'directory': old['directory'],
                        'commit': old['commit'], 'root': 'source-' + str(index), 'gitlinks': gitlinks})
@@ -889,7 +2402,11 @@ def capture_current_source_evidence(lane, out, upstream, roots, legacy, staged):
         raise ValueError('native source root set changed during capture')
     for group, files in zip(groups, inventories, strict=True):
         group['files'] = files
-    for name, pin in CURRENT_NATIVE_PINS.items():
+    required_pins = dict(CURRENT_NATIVE_PINS)
+    if lane == 'apple':
+        required_pins['lcms2-prerelease-candidate'] = '1315434113566bcf3eb46c2485fcc1c0a56ab806'
+        required_pins['openssl-4.1.0-source'] = '2f4e3a5fec05394068cfa7379890ab552483a8a6'
+    for name, pin in required_pins.items():
         if len([row for row in groups if row['commit'] == pin]) != 1:
             raise ValueError('missing/ambiguous required native source pin: ' + name)
     mpv = next(row for row in groups if row['commit'] == CURRENT_NATIVE_PINS['mpv'])
@@ -902,9 +2419,18 @@ def capture_current_source_evidence(lane, out, upstream, roots, legacy, staged):
     ffmpeg = next(row for row in groups if row['commit'] == CURRENT_NATIVE_PINS['ffmpeg'])
     require_current_response_source({row['path']: row for row in ffmpeg['files']}, lane)
     outputs = {'apple': ['apple-candidate.tar.gz', 'apple-original-library-zips.tar',
-                         'apple-artifact-gate.txt'],
+                         'apple-artifact-gate.txt', 'apple-shaderc-original-all.zip',
+                         'apple-shaderc-original-xcframework.zip',
+                         'apple-shaderc-inputs.json', 'apple-openssl-builds.json',
+                         'apple-crypto-source-gmp.tar.xz',
+                         'apple-crypto-source-nettle.tar.gz',
+                         'apple-crypto-source-gnutls.tar.xz',
+                         'apple-crypto-release-sources.tar',
+                         'apple-crypto-release-sources.json',
+                         'apple-crypto-chain.json'],
                'android': ['libmpv-release-candidate.aar', 'android-artifact-evidence.json',
                            'android-corresponding-sources.tar.gz', 'android-build-configs.tar.gz']}[lane]
+    archive_sources = crypto_source_outputs(out) if lane == 'apple' else None
     def record(name):
         path = (staged if name in ('producer-inputs-v2.tar.gz', 'native-sources-v2.tar.gz') else out) / name
         if path.is_symlink() or not path.is_file():
@@ -916,7 +2442,8 @@ def capture_current_source_evidence(lane, out, upstream, roots, legacy, staged):
         'recipeManifestSHA256': digest(manifest), 'legacyReceiptSHA256': digest(out / 'result.json'),
         'producerArchive': record('producer-inputs-v2.tar.gz'),
         'nativeArchive': record('native-sources-v2.tar.gz'), 'producerFiles': producer_rows,
-        'sources': groups, 'outputs': [record(name) for name in outputs]})
+        'sources': groups, 'archiveSources': archive_sources,
+        'outputs': [record(name) for name in outputs]})
 
 
 def receipt(lane, out, upstream, exit_code):
@@ -951,6 +2478,22 @@ if __name__ == '__main__':
                 readelf=Path(sys.argv[6]) if len(sys.argv) == 7 else None)
     elif sys.argv[1] == 'receipt':
         receipt(sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), int(sys.argv[5]))
+    elif sys.argv[1] == 'apple-shaderc-inputs':
+        if len(sys.argv) != 3:
+            raise SystemExit('apple-shaderc-inputs WORK')
+        apple_shaderc_inputs(Path(sys.argv[2]))
+    elif sys.argv[1] == 'apple-shaderc-receipt':
+        if len(sys.argv) != 3:
+            raise SystemExit('apple-shaderc-receipt INPUT_DIR')
+        apple_shaderc_receipt(Path(sys.argv[2]))
+    elif sys.argv[1] == 'apple-openssl-builds':
+        if len(sys.argv) != 3:
+            raise SystemExit('apple-openssl-builds WORK')
+        apple_openssl_builds(Path(sys.argv[2]))
+    elif sys.argv[1] == 'apple-openssl-receipt':
+        if len(sys.argv) != 3:
+            raise SystemExit('apple-openssl-receipt FILE')
+        apple_openssl_receipt(Path(sys.argv[2]))
     elif sys.argv[1] == 'apple-sent-abi':
         if len(sys.argv) < 3 or len(sys.argv[3:]) % 2:
             raise SystemExit('apple-sent-abi PACKAGE [--lipo /absolute/lipo] [--nm /absolute/nm]')

@@ -124,3 +124,41 @@ count for every platform or configuration. Timer-driven pending-grant expiry,
 natural termination with a deliberately held reader, external network/TLS
 handshakes, Swift/account admission, matched shipping SDKs, app/device acceptance
 and end-to-end automatic alignment remain unproved by this fixture.
+
+## Hidden-reference v2 public fixture successor
+
+The current public_reader_fixture.c is the reviewed v2 successor of the
+original public source described above; the retained165 result applies only to
+that original v1 source and is not v2 acceptance. The beforeimage and original
+source pins remain in the recovery packet. New mapping_media.inc is a literal
+memory-only mux/demux helper included by this main. Keep it in this directory;
+the existing source-relative VPR_GENUINE_RIG_SOURCE contract remains mandatory.
+The public command buffer holds one command name plus at most11 arguments; the
+production command-definition capacity remains unchanged.
+
+The exact v2 output maps separate embedded reference SID/command index/raw
+stream index from actual visible primary SID/external/visibility. The source
+profile is original-http-sparse-native-reference-reader-v2. The command-only
+primary-flags mask retains bit0external/bit1visible and rejects reserved bits;
+the JSON cue payload remains its separate version1 schema. The source adds
+initial Off and ordinary external-primary/secondary cases while preserving
+actual visible selections through READ/PREPARE/COMMIT and retirement. Existing
+real OSD bitmap, held-reader/reaper, manual timing, revoke, natural teardown and
+blocked-body cancellation schedules remain. Old v1 arities are submitted as
+actual parser negatives. No embedded track is selected temporarily for analysis.
+
+The new unequal-index case genuinely muxes DATA0/PCM1/MOV_TEXT2 in bounded
+memory, independently verifies the demuxed nine-cue corpus, and requires the
+actual MPV lavf inventory to show command index2 versus raw index1 before READ.
+Unsupported muxing/demuxing or mapping is a hard prerequisite failure, not a
+skip or substituted identity. The two disposable external SRTs are exclusively
+created only under the root-supplied fresh config directory and removed after
+real client termination.
+
+These new source files remain uncompiled/unrun by the carrier-preparation lane.
+They require the coherent v2 native source/header/object cohort, including the
+sparse/unknown-start reader pieces, and fresh strict link/input/owner/readback
+admission before one separately authorized loopback-only runtime. No historical
+artifact exception, original165 receipt or diagnostic object certifies them.
+Native-MKV sparse coverage, local state12, host/account integration, external
+network/TLS, matched platform artifacts and device acceptance remain separate.

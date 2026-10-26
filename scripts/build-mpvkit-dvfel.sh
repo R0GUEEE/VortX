@@ -8,7 +8,8 @@
 # got NO Dolby Vision metadata at all on the libmpv lane. mpv master added BL+EL pairing and
 # libplacebo master added the renderer-side FEL composite that consumes it.
 #
-# Neither is in any release, and they are coupled: every line of mpv's FEL code sits behind
+# libplacebo now has a stable FEL release; it remains coupled to the custom mpv base:
+# every line of mpv's FEL code sits behind
 # `#if PL_API_VER >= 367`, and the extra gate at video/mp_image.c:1191 (`#elif PL_API_VER < 370`)
 # is what stops P7 FEL streams being filtered out of DV metadata mapping entirely. Upstream MPVKit
 # links a PREBUILT libplacebo 7.360.1 = PL_API_VER 360, so bumping only mpv would compile the whole
@@ -17,7 +18,11 @@
 #
 # WHAT IS PINNED (exact SHAs, never a moving master, so builds are reproducible)
 #   mpv        8c67647b50059406c5c0444903597281b81516cf  master, 2026-07-24
-#   libplacebo 4c426e466814536def653cb23f1d1c287ea7a7f5  master, 2026-07-24, PL_API_VER 371
+#   libplacebo 275f7dea27924cdd34ab2e6c20e448b6bc4fab65  v7.387.0 stable, PL_API_VER 387
+#   LittleCMS  1315434113566bcf3eb46c2485fcc1c0a56ab806  lcms2.20rc1 PRERELEASE TEST CANDIDATE
+#   dav1d      54706fc6bc0cdecab7e9593974a4039cc038fca7  1.5.4 source candidate
+#   Shaderc    2026.1.0 wrapper; paired published all-ZIP/XCFramework identities checked
+#   OpenSSL    2f4e3a5fec05394068cfa7379890ab552483a8a6 4.1.0 latest-stable source candidate
 #   FFmpeg     946fcce07b6dcd0331c8cc609192aeff5e1924f8  n9.0.2 maintenance
 #
 # FFmpeg MOVED, and this paragraph is the record of why and of what it cost. The pin was n8.1.2
@@ -76,8 +81,8 @@
 #                                     cleanup. Installed as 0005; no mpv version/audio policy bump.
 #   scripts/mpv-http-seek-interrupt.patch interrupts obsolete HTTP I/O for an accepted seek
 #                                     and reopens only that source at its exact byte offset (0006).
-# Everything not listed above still comes from upstream MPVKit's own prebuilt zips at the versions
-# the MPVKit 1.0.0 base already used.
+# LittleCMS is also built from exact official RC source and assembled as a local target.
+# Every other unlisted library retains the MPVKit 1.0.0 wrapper pin.
 #
 # Cost: a full clean run builds 9 slices (ios, isimulator x2, tvos x2, tvsimulator x2, macos x2)
 # of FFmpeg, libplacebo and mpv from source. Budget hours, not minutes, and ~20 GB of scratch.
@@ -144,13 +149,66 @@ matches_exact_patch_tree() {
     fi
   done < <(git -C "$MPVKIT_DIR" ls-tree -r --name-only HEAD)
 
+  # The crypto helpers are deliberately untracked carrier files. If either appears in the
+  # candidate checkout, the exact approved patch must also create a regular, byte-identical file
+  # in the temporary patched tree. This closes the dirty-check gap without admitting arbitrary
+  # untracked files or JSON receipts.
+  for helper in Sources/BuildScripts/crypto-release-sources.py Sources/BuildScripts/crypto-chain-gate.py; do
+    if [ -e "$MPVKIT_DIR/$helper" ] || [ -e "$temporary/$helper" ]; then
+      if [ ! -f "$MPVKIT_DIR/$helper" ] || [ -L "$MPVKIT_DIR/$helper" ] ||
+         [ ! -f "$temporary/$helper" ] || [ -L "$temporary/$helper" ] ||
+         ! cmp -s "$MPVKIT_DIR/$helper" "$temporary/$helper"; then
+        rm -rf "$temporary"
+        return 1
+      fi
+    fi
+  done
+
   rm -rf "$temporary"
   return 0
 }
 
-for tool in meson ninja cmake pkg-config nasm wget; do
+for tool in meson ninja cmake pkg-config nasm wget curl; do
   command -v "$tool" >/dev/null || { echo "missing build tool: $tool (brew install $tool)" >&2; exit 1; }
 done
+
+# The combined candidate consumes only these fixed release bodies. The download directory is
+# deliberately fresh and outside every Git source root; no caller-supplied URL, archive, hash or
+# cache is accepted. This function is inert in preflight mode and runs only after the exact MPVKit
+# source/patch admission above has succeeded.
+prepare_crypto_sources() {
+  local helper="$MPVKIT_DIR/Sources/BuildScripts/crypto-release-sources.py"
+  local stage="$WORK/dist/crypto-source-download"
+  [ -f "$helper" ] && [ ! -L "$helper" ] || fail "crypto source helper is missing or linked"
+  [ ! -e "$stage" ] && [ ! -L "$stage" ] || fail "crypto source staging directory must be fresh"
+  mkdir -p "$stage"
+  local python_bin="$(command -v python3)"
+  [ -x "$python_bin" ] || fail "supported python3 executable is required"
+  "$python_bin" - <<'PY'
+import sys
+import zipfile
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10 or newer is required for strict archive handling")
+if not hasattr(zipfile, "ZipFile"):
+    raise SystemExit("strict archive reader is unavailable")
+PY
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --retry 3 --max-time 600 --max-filesize 8388608 --output "$stage/gmp-6.3.0.tar.xz" \
+    https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --retry 3 --max-time 600 --max-filesize 8388608 --output "$stage/nettle-4.0.tar.gz" \
+    https://ftp.gnu.org/gnu/nettle/nettle-4.0.tar.gz
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --retry 3 --max-time 600 --max-filesize 8388608 --output "$stage/gnutls-3.8.13.tar.xz" \
+    https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz
+  [ "$(wc -c <"$stage/gmp-6.3.0.tar.xz" | tr -d ' ')" = 2094196 ] || fail "GMP release size differs"
+  [ "$(wc -c <"$stage/gnutls-3.8.13.tar.xz" | tr -d ' ')" = 7275324 ] || fail "GnuTLS release size differs"
+  [ "$(wc -c <"$stage/nettle-4.0.tar.gz" | tr -d ' ')" -le 8388608 ] || fail "Nettle release exceeds bound"
+  printf '%s  %s\n' \
+    a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898 "$stage/gmp-6.3.0.tar.xz" \
+    3addbc00da01846b232fb3bc453538ea5468da43033f21bb345cb1e9073f5094 "$stage/nettle-4.0.tar.gz" \
+    ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e "$stage/gnutls-3.8.13.tar.xz" | shasum -a 256 -c - ||
+    fail "crypto release body digest differs"
+  "$python_bin" "$helper" prepare "$WORK" "$stage"
+  "$python_bin" "$helper" verify "$WORK"
+}
 
 if [ ! -e "$MPVKIT_DIR" ]; then
   mkdir -p "$(dirname "$MPVKIT_DIR")"
@@ -181,6 +239,10 @@ else
     [ -z "$line" ] && continue
     case "$line" in
       '?? Sources/BuildScripts/patch/FFmpeg/0005-finite-reference-reader.patch'|'?? Sources/BuildScripts/patch/libmpv/0019-finite-reference-reader.patch') ;;
+      '?? Sources/BuildScripts/crypto-release-sources.py'|'?? Sources/BuildScripts/crypto-chain-gate.py')
+        helper_path="${line#?? }"
+        [ -f "$MPVKIT_DIR/$helper_path" ] && [ ! -L "$MPVKIT_DIR/$helper_path" ] ||
+          fail "crypto helper must be a regular file: $MPVKIT_DIR/$helper_path" ;;
       ' M Package.swift'|'M Package.swift'|' M Sources/BuildScripts/XCFrameworkBuild/main.swift'|'M Sources/BuildScripts/XCFrameworkBuild/main.swift'|' M Sources/BuildScripts/XCFrameworkBuild/base.swift'|'M Sources/BuildScripts/XCFrameworkBuild/base.swift'|' M Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch'|'M Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch') ;;
       '?? .build/'*|'?? dist/'*|'?? Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch'|'?? Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch'|'?? Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch'|'?? Sources/BuildScripts/patch/libmpv/0007-upstream-audio-layout-bounds.patch'|'?? Sources/BuildScripts/patch/libmpv/0008-upstream-gpu-next-seek-reset.patch'|'?? Sources/BuildScripts/patch/libmpv/0009-original-local-file-witness.patch'|'?? Sources/BuildScripts/patch/libmpv/0010-upstream-edition-title-lifetime.patch'|'?? Sources/BuildScripts/patch/libmpv/0011-owned-subtitle-constructor.patch'|'?? Sources/BuildScripts/patch/libmpv/0012-owned-subtitle-publication.patch'|'?? Sources/BuildScripts/patch/libmpv/0013-original-http-reference-recipe.patch'|'?? Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch'|'?? Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0017-bounded-prefix-request.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0004-original-transport-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0018-original-transport-evidence.patch') ;;
       *) fail "existing MPVKit checkout has unexpected dirty state: $line" ;;
@@ -283,8 +345,8 @@ READER_FFMPEG_PATCH="$REPO/scripts/ffmpeg-finite-reference-reader.patch"
 READER_MPV_PATCH="$REPO/scripts/mpv-finite-reference-reader.patch"
 READER_FFMPEG_HASH="$(shasum -a 256 "$READER_FFMPEG_PATCH")"
 READER_MPV_HASH="$(shasum -a 256 "$READER_MPV_PATCH")"
-[ "${READER_FFMPEG_HASH%% *}" = "6927705a432e987d2e13e2d5922756cb6c395d5c060268191cf6c1d94063b2df" ] || fail "FFmpeg finite-reference reader patch differs"
-[ "${READER_MPV_HASH%% *}" = "c8752eb80824a5487f5d80addc473da09778d6dd8cb1adac899079aa2bc211f2" ] || fail "MPV finite-reference reader patch differs"
+[ "${READER_FFMPEG_HASH%% *}" = "a06f4b8b9eadc12eace93b1b340e0555116061188d0674f063698ea75d953abd" ] || fail "FFmpeg finite-reference reader patch differs"
+[ "${READER_MPV_HASH%% *}" = "42c020f9f6550af5072a8eff1b5860249bb9df5f9418855cb4636cd15854f7f2" ] || fail "MPV finite-reference reader patch differs"
 GENERATED_READER_FFMPEG_PATCH="$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0005-finite-reference-reader.patch"
 GENERATED_READER_MPV_PATCH="$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/0019-finite-reference-reader.patch"
 for generated in "$GENERATED_READER_FFMPEG_PATCH" "$GENERATED_READER_MPV_PATCH"; do
@@ -299,6 +361,19 @@ if [ "$PREFLIGHT_ONLY" = "1" ]; then
   echo "build-mpvkit-dvfel: preflight-only checkout and patch validation passed"
   exit 0
 fi
+
+CRYPTO_SOURCE_HELPER="$MPVKIT_DIR/Sources/BuildScripts/crypto-release-sources.py"
+CRYPTO_GATE_HELPER="$MPVKIT_DIR/Sources/BuildScripts/crypto-chain-gate.py"
+CRYPTO_SOURCE_HELPER_SHA256="3c310499d446eed72eb16521b27c16f718f23e7ab1472dec1fad79cc40ed1537"
+CRYPTO_GATE_HELPER_SHA256="041dd13e48e1821f5d7bf049bb8eb097d3772d6ea867c15a3b7646779a3c015d"
+[ -f "$CRYPTO_SOURCE_HELPER" ] && [ ! -L "$CRYPTO_SOURCE_HELPER" ] || fail "crypto release-source helper missing"
+[ -f "$CRYPTO_GATE_HELPER" ] && [ ! -L "$CRYPTO_GATE_HELPER" ] || fail "crypto chain gate helper missing"
+[ "$(shasum -a 256 "$CRYPTO_SOURCE_HELPER" | awk '{print $1}')" = "$CRYPTO_SOURCE_HELPER_SHA256" ] ||
+  fail "crypto release-source helper hash is not the resealed parent pin"
+[ "$(shasum -a 256 "$CRYPTO_GATE_HELPER" | awk '{print $1}')" = "$CRYPTO_GATE_HELPER_SHA256" ] ||
+  fail "crypto chain gate helper hash is not the resealed parent pin"
+
+prepare_crypto_sources
 
 # Install our mpv-side patch alongside MPVKit's own libmpv patches. SpikeGit.applyPatches (added by
 # mpvkit-dvfel.patch) applies that directory in sorted order, so the 0004 prefix guarantees it runs
@@ -367,7 +442,7 @@ OBSOLETE_PATCH="$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0001-no-private-se
 # GPL variant: VortX consumes the MPVKit-GPL product (libsmbclient + -Dgpl=true).
 BUILD_STARTED_MARKER="$(mktemp)"
 trap 'rm -f "$BUILD_STARTED_MARKER"' EXIT
-swift run --build-path ./.build --package-path Sources/BuildScripts \
+swift run --jobs 1 --build-path ./.build --package-path Sources/BuildScripts \
   build enable-gpl platform=ios,tvos,macos version=0.0.0-dvfel
 
 # Post-build source composition gate before artifact/package acceptance. The native
@@ -375,7 +450,7 @@ swift run --build-path ./.build --package-path Sources/BuildScripts \
 FFMPEG_RESPONSE_SOURCE="$WORK/dist/FFmpeg-9.0.2-946fcce0"
 [ "$(git -C "$FFMPEG_RESPONSE_SOURCE" rev-parse HEAD)" = "946fcce07b6dcd0331c8cc609192aeff5e1924f8" ] ||
   fail "FFmpeg response-witness source has a different upstream pin"
-printf '%s  %s\n' d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802 \
+printf '%s  %s\n' d1301474b4389256f9862565a399a8888366a68d2e3630338848289fe8a9c831 \
   "$FFMPEG_RESPONSE_SOURCE/libavformat/http.c" | shasum -a 256 -c - ||
   fail "FFmpeg finite-reader source differs from the reviewed n9.0.2 composition"
 # Every affected transport/layout source must come from the same freshly built
@@ -389,31 +464,41 @@ printf '%s  %s\n' \
   b04fb28df85f1ef3883b4927d0bfab4477f400128c122f794ff13b4b9c85bebc "$FFMPEG_RESPONSE_SOURCE/libavformat/tls_securetransport.c" \
   77d72cb88fc662b984f051335b356abc3e76e97ce39302dde6961ecdbba7a332 "$FFMPEG_RESPONSE_SOURCE/libavformat/tls_mbedtls.c" \
   a8c74f929942423550dba65f738fd4d2ad2d63d975665f64e6da1b00f5001645 "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_reader.inc" \
-  1000225eb4660e936bdf5984b62c6cbd7ae2c747472e55aabb6dc620d4f386dc "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_pin.h" \
-  adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87 "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_reader_stream.h" | shasum -a 256 -c - ||
+  e0ccea8466e28169d0882fd664081baa09d3a39626d5351a31804b6dc4bb4e94 "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_pin.h" \
+  adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87 "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_reader_stream.h" \
+  fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_sparse.h" \
+  0e3201c26657765a1e6e7a15fe9db1bcac5cf96a8cb7e9d691533e0f4bf3f15f "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_sparse.inc" | shasum -a 256 -c - ||
   fail "FFmpeg finite-reader source family differs from the reviewed composition"
 MPV_OBSERVATION_SOURCE="$WORK/dist/libmpv-master-8c67647b"
 [ "$(git -C "$MPV_OBSERVATION_SOURCE" rev-parse HEAD)" = "8c67647b50059406c5c0444903597281b81516cf" ] ||
   fail "MPV response observation source has a different upstream pin"
 printf '%s  %s\n' \
-  e5f08305137ed3f7b28fa24ee431e19222153a6cfed10f12d109b92da55567a4 "$MPV_OBSERVATION_SOURCE/demux/demux.c" \
+  f5a4cd7bf4e29902ef965e43027755c19ded1423129a3fbe9808ad89e64c0e1c "$MPV_OBSERVATION_SOURCE/demux/demux.c" \
   bee52b38477ce7c8efd9a50e778f720ea8c9eec577afab29998682c26ffe75e2 "$MPV_OBSERVATION_SOURCE/demux/demux.h" \
   d945ae1699d383c3d645d2ab963abb166fd0c19f10a4ab144505e7fbfb0408fb "$MPV_OBSERVATION_SOURCE/demux/demux_lavf.c" \
-  322fa3a90ad9a461c549b2aaebf50adba07b9862d11b8690355a6d789571c752 "$MPV_OBSERVATION_SOURCE/demux/reference_reader.c" \
-  4894866fc49f8ab7af9f4d5b3a29bfc7d1ac4153483fd04354db3e89e55cad03 "$MPV_OBSERVATION_SOURCE/demux/reference_reader.h" \
-  6b21e2b72c87c49d609fdfca0252c32635d50054abe4eaae33340fc5b7da1a9c "$MPV_OBSERVATION_SOURCE/demux/reference_reader_internal.h" \
-  b8c78d8239af8c968c53ca83f601f91e521090d6d2d7522101fb68b332074940 "$MPV_OBSERVATION_SOURCE/stream/stream_lavf.c" \
-  dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b "$MPV_OBSERVATION_SOURCE/stream/reference_source.h" \
+  222ec8920d38971d386470d8172e45a89a52350eb352124ddf954be9409b792b "$MPV_OBSERVATION_SOURCE/demux/reference_reader.c" \
+  59d669fb370bc12f01856031b8f9d908eb1d50a927d955ecb1fe0b4484c2407d "$MPV_OBSERVATION_SOURCE/demux/reference_reader.h" \
+  ded5dc02785e98934a966de87df4337e4c6aed0275bce26da2017883917f4c8d "$MPV_OBSERVATION_SOURCE/demux/reference_reader_internal.h" \
+  650bf7b94771e70a6b934b21e362bc77f66ceb1d23ee684d2b169c6e694544a5 "$MPV_OBSERVATION_SOURCE/stream/stream_lavf.c" \
+  1f606a977b55f18fdb9f9fc7f5e4549b5774bef10a06c33b06ab945531909b29 "$MPV_OBSERVATION_SOURCE/stream/reference_source.h" \
   adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87 "$MPV_OBSERVATION_SOURCE/stream/vortx_reference_reader_stream.h" \
-  4c748249732131a2942b66087fa7142a2f9c239274cc272a35ec36221c010205 "$MPV_OBSERVATION_SOURCE/meson.build" \
-  242697e6be2bd2e10272679a3d618f07a07138b7a15b3b94cdbfdf521599bb25 "$MPV_OBSERVATION_SOURCE/player/owned_subtitle.c" \
+  c2abd8f89a772717fdd4bcdbb4a2236d9fb28eca029acfe84bf12f7333df5a55 "$MPV_OBSERVATION_SOURCE/meson.build" \
+  014b93845488ef873a4d29c4c8dd4ada69d244626e7a7b38bac82809989c6b29 "$MPV_OBSERVATION_SOURCE/player/owned_subtitle.c" \
   8d2f0ee5c972d1da69213cd80fbe249bcf3f19d9de8a2ef87e241d2f08f06284 "$MPV_OBSERVATION_SOURCE/player/owned_subtitle.h" \
-  661388627775cf58dec688388d36aba9e457b0f3e97d349a91033f3f5f1f6e3b "$MPV_OBSERVATION_SOURCE/player/command.c" \
-  4402bcd094a80a769479320ac852c329acb39781fa8fc478d0ed79af10ae19e2 "$MPV_OBSERVATION_SOURCE/player/reference_owned.inc" \
+  e7a19f392bb69e9d208382f157234ac3c908d22a0d4afee5f372ee8f9d33dade "$MPV_OBSERVATION_SOURCE/player/command.c" \
+  23ac96bfedefcab2234afa2a6f329a36fac6735effca6798b4043d777b060217 "$MPV_OBSERVATION_SOURCE/player/reference_owned.inc" \
   63c498dd4bdc9fa9c6d128f1be8f37d7cdf377c853888342897f6639601662f6 "$MPV_OBSERVATION_SOURCE/sub/owned_text_slot.h" \
   9b57ccd08e5777e2bc644cbf8001df0301552edf5cf24e36185a54f4cd667195 "$MPV_OBSERVATION_SOURCE/sub/osd.c" \
   6e2137b90fe7f2915a528bdd83426448afbd099229f65342dbfd85d1ba1d347b "$MPV_OBSERVATION_SOURCE/sub/dec_sub.c" \
-  cb9b5af7c3f87a8dda584617c1f20a90a9331182d54a50c7e5fb8e64e74b384f "$MPV_OBSERVATION_SOURCE/sub/dec_sub.h" | shasum -a 256 -c - ||
+  cb9b5af7c3f87a8dda584617c1f20a90a9331182d54a50c7e5fb8e64e74b384f "$MPV_OBSERVATION_SOURCE/sub/dec_sub.h" \
+  1b7cc4d40efa0620bd10669dc44a7d6b32d0236e2ae2be3510a3bac0829e39c2 "$MPV_OBSERVATION_SOURCE/demux/demux_mkv.c" \
+  38df7814efc3aa7434e5afe269406a989ab6a5fa22a200aa28149a3ab68e46d9 "$MPV_OBSERVATION_SOURCE/demux/reference_mkv.h" \
+  3ac442e8ff489d11f4a5df6b86f8d964457753f66ce5f3eb530d7db3746b6f7c "$MPV_OBSERVATION_SOURCE/demux/reference_mkv_reader.c" \
+  4b013b6e794257a576bc01f6becb9d120cb878e0851b2e0bdd2225dcf7b18df2 "$MPV_OBSERVATION_SOURCE/demux/reference_mkv_sparse.h" \
+  e36c6a879138b26e125f647c9254b41674b22b338ab12838376fe8d38bdae056 "$MPV_OBSERVATION_SOURCE/demux/reference_mkv_sparse_planner.c" \
+  c88597a42186ceb81f45f1f44b3734469cf06889ea3bf91e4853b861943e84fe "$MPV_OBSERVATION_SOURCE/demux/reference_mkv_sparse_planner.h" \
+  5deae68bf3c680aa4898ca6c8e0c0e76aa4628bffa693d0ae2d6dd287d9a5e64 "$MPV_OBSERVATION_SOURCE/demux/reference_mkv_sparse_worker.c" \
+  fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c "$MPV_OBSERVATION_SOURCE/stream/vortx_reference_sparse.h" | shasum -a 256 -c - ||
   fail "MPV finite-reader source family differs from the reviewed composition"
 for private_header in "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_http_request.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_http_request.h"; do
   [ -f "$private_header" ] && [ ! -L "$private_header" ] || fail "private sent-request header must be a regular source file"
@@ -421,12 +506,19 @@ for private_header in "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_http_request.h"
 done
 cmp -s "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_http_request.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_http_request.h" || fail "private sent-request headers disagree"
 cmp -s "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_reader_stream.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_reference_reader_stream.h" || fail "private finite-reader headers disagree"
+for sparse_header in "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_sparse.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_reference_sparse.h"; do
+  [ -f "$sparse_header" ] && [ ! -L "$sparse_header" ] || fail "private sparse header must be a regular source file"
+  printf '%s  %s\n' fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c "$sparse_header" | shasum -a 256 -c - || fail "private sparse header differs"
+done
+cmp -s "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_sparse.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_reference_sparse.h" || fail "private sparse headers disagree"
 
-# Assembly reads the per-library release ZIP, not slice scratch directories.
+# Assembly reads the per-library release ZIP, not slice scratch directories. Historical
+# native-upgrades-dav1d154-shaderc20261-hb150-v2 and native-upgrades-openssl410-v3 verifier
+# profiles remain readable; this caller selects only the combined v4 candidate below.
 # Refuse to package a stale ZIP after an interrupted or incorrectly cached run.
 # Libmpv must be fresh too: a rebuilt FFmpeg archive alone cannot carry the
 # CoreAudio lifetime fix. Never silently repackage the old vulnerable player.
-for library in Libavformat Libmpv; do
+for library in Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient; do
   library_zip="$WORK/dist/release/$library.xcframework.zip"
   [ -f "$library_zip" ] || {
     echo "missing rebuilt artifact: $library_zip" >&2
@@ -445,8 +537,24 @@ STAGED_DEST="$(mktemp -d "${DEST}.staged.XXXXXX")"
 PREVIOUS_DEST="${DEST}.previous"
 trap 'rm -rf "$STAGED_DEST"' EXIT
 
+# Capture the authenticated archive/tree closure into a fresh path before the artifact gate.
+"$(command -v python3)" "$CRYPTO_SOURCE_HELPER" verify "$WORK"
+CRYPTO_CAPTURE="$WORK/dist/crypto-capture"
+[ ! -e "$CRYPTO_CAPTURE" ] && [ ! -L "$CRYPTO_CAPTURE" ] || fail "crypto capture path must be fresh"
+"$(command -v python3)" "$CRYPTO_SOURCE_HELPER" capture "$WORK" "$CRYPTO_CAPTURE"
+
+# Compare the two pinned original Shaderc inputs once with the trusted Apple toolchain.
+python3 "$HERE/native-media-hosted/evidence.py" apple-shaderc-inputs "$WORK"
+python3 "$HERE/native-media-hosted/evidence.py" apple-openssl-builds "$WORK"
 "$HERE/assemble-mpvkit-dvfel.sh" "$WORK" "$STAGED_DEST"
-"$HERE/verify-mpvkit-dvfel-artifacts.sh" "$STAGED_DEST"
+"$(command -v python3)" "$CRYPTO_SOURCE_HELPER" verify "$WORK"
+"$(command -v python3)" "$CRYPTO_GATE_HELPER" capture "$WORK" "$STAGED_DEST" \
+  --dependency-profile native-upgrades-crypto-chain-v1
+"$HERE/verify-mpvkit-dvfel-artifacts.sh" "$STAGED_DEST" \
+  --dependency-profile native-upgrades-openssl410-crypto-v4 \
+  --shaderc-inputs "$WORK/dist/libshaderc-2026.1.0" \
+  --openssl-builds "$WORK/dist/openssl/vortx-openssl-builds.json" \
+  --crypto-work "$WORK"
 # Candidate-only private ABI gate; the universal shipping verifier stays unchanged.
 python3 "$HERE/native-media-hosted/evidence.py" apple-sent-abi "$STAGED_DEST"
 

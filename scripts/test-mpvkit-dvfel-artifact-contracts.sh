@@ -71,6 +71,49 @@ grep -Fq 'expected exact pin' "$PATCH" || fail "SpikeGit must assert the fresh c
 grep -Fq 'git apply --reverse --check' "$PATCH" || fail "SpikeGit must support an exact already-applied patch"
 grep -Fq 'patch neither applies cleanly nor is already applied' "$PATCH" || fail "SpikeGit must fail actionable patch conflicts"
 
+# The next fixed dependency profile retains the shipping verifier and requires
+# a source-built dav1d framework plus the two pinned Shaderc input bodies/receipt.
+grep -Fq 'native-upgrades-dav1d154-shaderc20261-hb150-v2' "$BUILD" || fail "next candidate profile missing"
+grep -Fq 'for library in Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient; do' "$BUILD" || fail "combined candidate must require all eighteen fresh ZIPs"
+grep -Fq 'apple-shaderc-inputs "$WORK"' "$BUILD" || fail "Shaderc inputs must be compared before acceptance"
+grep -Fq 'private class BuildDav1d: BaseBuild' "$PATCH" || fail "dav1d must use exact source build route"
+grep -Fq 'static let dav1dPinnedSHA = "54706fc6bc0cdecab7e9593974a4039cc038fca7"' "$PATCH" || fail "dav1d source pin differs"
+grep -Fq '"-Dxxhash_muxer=disabled"' "$PATCH" || fail "dav1d option type changed"
+grep -Fq 'return "2026.1.0"' "$PATCH" || fail "Shaderc wrapper selector differs"
+grep -Fq '77a3d355993cf53843a394bf58262dab99cdd93f9e6fe31d5ca6e55b03866ce1' "$PATCH" || fail "Shaderc XCFramework hash differs"
+grep -Fq 'd213fa58de7886846fb8cb713ea5213b77654a3ad2ba3d89b1f2fe367d945ba5' "$PATCH" || fail "Shaderc all-ZIP hash differs"
+grep -Fq 'DEPENDENCY_PROFILE=shipping' "$VERIFY" || fail "default shipping contract changed"
+grep -Fq 'apple-shaderc-receipt "$SHADERC_INPUTS"' "$VERIFY" || fail "candidate must require Shaderc receipt"
+grep -Fq 'dav1d_version_api' "$VERIFY" || fail "dav1d identity gate missing actual code check"
+
+# The combined crypto profile is opt-in and keeps the helper/source closure explicit. The default
+# shipping branch and historical candidate profiles must continue to parse without these inputs.
+grep -Fq 'native-upgrades-openssl410-crypto-v4' "$BUILD" || fail "combined source profile missing"
+grep -Fq 'native-upgrades-openssl410-crypto-v4' "$VERIFY" || fail "combined verifier profile missing"
+grep -Fq 'native-upgrades-crypto-chain-v1' "$BUILD" || fail "subordinate crypto capture profile missing"
+grep -Fq 'crypto-release-sources.py' "$BUILD" || fail "release source helper invocation missing"
+grep -Fq 'crypto-chain-gate.py' "$BUILD" || fail "crypto chain gate invocation missing"
+grep -Fq '3c310499d446eed72eb16521b27c16f718f23e7ab1472dec1fad79cc40ed1537' "$BUILD" || fail "builder helper hash binding missing"
+grep -Fq '041dd13e48e1821f5d7bf049bb8eb097d3772d6ea867c15a3b7646779a3c015d' "$VERIFY" || fail "verifier helper hash binding missing"
+grep -Fq 'swift run --jobs 1 --build-path' "$BUILD" || fail "SwiftPM jobs-one guard missing"
+grep -Fq 'apple-crypto-source-gmp.tar.xz' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted crypto source output missing"
+grep -Fq 'apple-crypto-chain.json' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted crypto receipt output missing"
+
+# OpenSSL latest-stable candidate is an exact source build with an explicit Apple target configuration.
+grep -Fq 'private class BuildOpenSSL: BaseBuild' "$PATCH" || fail "OpenSSL must use source route"
+grep -Fq 'static let opensslPinnedSHA = "2f4e3a5fec05394068cfa7379890ab552483a8a6"' "$PATCH" || fail "OpenSSL source pin differs"
+grep -Fq 'vortx-openssl-target.conf' "$PATCH" || fail "OpenSSL target configuration missing"
+grep -Fq '"build_sw"' "$PATCH" || fail "OpenSSL software build phase missing"
+grep -Fq '"install_sw"' "$PATCH" || fail "OpenSSL software install phase missing"
+grep -Fq 'arguments: ["-j1", "build_sw"]' "$PATCH" || fail "new OpenSSL build must use jobs one"
+grep -Fq 'arguments: ["-j1", "install_sw"]' "$PATCH" || fail "new OpenSSL install must use jobs one"
+grep -Fq 'apple-openssl-builds "$WORK"' "$BUILD" || fail "OpenSSL build evidence missing"
+grep -Fq 'PASS openssl-profile openssl-4.1.0-source-v1' "$VERIFY" || fail "OpenSSL latest-stable candidate content receipt missing"
+
+# The new OpenSSL provider must not change the selected Apple FFmpeg backend.
+grep -Fq 'arguments += ["--disable-gnutls", "--disable-openssl", "--enable-securetransport"]' "$PATCH" || fail "FFmpeg OpenSSL autodetection must remain disabled"
+grep -Fq 'CONFIG_OPENSSL 0' "$ROOT/scripts/verify-mpvkit-dvfel-apple-tls.sh" || fail "real Apple artifact gate must require CONFIG_OPENSSL 0"
+
 # Future producer source contracts are distinct from current shipping binary gates.
 RESPONSE_HASH="$(shasum -a 256 "$RESPONSE_PATCH")"
 [ "${RESPONSE_HASH%% *}" = "6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b" ] ||
@@ -79,7 +122,8 @@ grep -Fq '"$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0001-response-witness.p
   fail "Apple must put the response witness in the FFmpeg patch sequence"
 grep -Fq 'copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"' "$BUILD" ||
   fail "Apple must preserve exact response-witness patch-copy semantics"
-grep -Fq 'd4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802' "$BUILD" ||
+# The separately pinned response delta precedes this complete final composition.
+grep -Fq 'd1301474b4389256f9862565a399a8888366a68d2e3630338848289fe8a9c831' "$BUILD" ||
   fail "Apple must require the exact reviewed HTTP source composition"
 GENERATION_HASH="$(shasum -a 256 "$GENERATION_PATCH")"
 [ "${GENERATION_HASH%% *}" = "ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098" ] ||
@@ -119,10 +163,10 @@ grep -Fq 'copy_exact "$TRANSPORT_FFMPEG_PATCH" "$GENERATED_TRANSPORT_FFMPEG_PATC
 grep -Fq 'copy_exact "$TRANSPORT_MPV_PATCH" "$GENERATED_TRANSPORT_MPV_PATCH"' "$BUILD" ||
   fail "Apple must retain the exact MPV original-transport generated copy"
 READER_FFMPEG_HASH="$(shasum -a 256 "$READER_FFMPEG_PATCH")"
-[ "${READER_FFMPEG_HASH%% *}" = "6927705a432e987d2e13e2d5922756cb6c395d5c060268191cf6c1d94063b2df" ] ||
+[ "${READER_FFMPEG_HASH%% *}" = "a06f4b8b9eadc12eace93b1b340e0555116061188d0674f063698ea75d953abd" ] ||
   fail "FFmpeg finite-reader carrier differs from the reviewed source"
 READER_MPV_HASH="$(shasum -a 256 "$READER_MPV_PATCH")"
-[ "${READER_MPV_HASH%% *}" = "c8752eb80824a5487f5d80addc473da09778d6dd8cb1adac899079aa2bc211f2" ] ||
+[ "${READER_MPV_HASH%% *}" = "42c020f9f6550af5072a8eff1b5860249bb9df5f9418855cb4636cd15854f7f2" ] ||
   fail "MPV finite-reader carrier differs from the reviewed source"
 grep -Fq 'copy_exact "$READER_FFMPEG_PATCH" "$GENERATED_READER_FFMPEG_PATCH"' "$BUILD" ||
   fail "Apple must retain the exact finite-reader FFmpeg generated copy"
@@ -132,16 +176,18 @@ grep -Fq 'Sources/BuildScripts/patch/FFmpeg/0005-finite-reference-reader.patch' 
   fail "Apple finite-reader FFmpeg patch must follow the original-transport patch"
 grep -Fq 'Sources/BuildScripts/patch/libmpv/0019-finite-reference-reader.patch' "$BUILD" ||
   fail "Apple finite-reader MPV patch must follow the original-transport patch"
-# These eight producer source hashes do not substitute for applying the full FFmpeg
+# These ten producer source hashes do not substitute for applying the full FFmpeg
 # sequence to its genuine n9.0.2 source, which remains a separate source-build gate.
-for hash in d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802 \
+for hash in d1301474b4389256f9862565a399a8888366a68d2e3630338848289fe8a9c831 \
   14e3acc5a6715d48edb3dadb2f5248deaa38c36b30ff763e9be4b89edf2b1a0c \
   16bf38abc7a5b5586268c71723041df2b90b7b99a8fbaeb06c8b20926534fe7a \
   cc9c11534ff5017d5931bb06788f95f10e9809953e5ec1cc03114a3a877cdcce \
   0f07be92b62cefb53c6db5552951c658c756fac36ce22b03ccca8a044f1911f2 \
   a8c74f929942423550dba65f738fd4d2ad2d63d975665f64e6da1b00f5001645 \
-  1000225eb4660e936bdf5984b62c6cbd7ae2c747472e55aabb6dc620d4f386dc \
-  adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87; do
+  e0ccea8466e28169d0882fd664081baa09d3a39626d5351a31804b6dc4bb4e94 \
+  adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87 \
+  fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c \
+  0e3201c26657765a1e6e7a15fe9db1bcac5cf96a8cb7e9d691533e0f4bf3f15f; do
   grep -Fq "$hash" "$BUILD" || fail "Apple builder lacks a reviewed finite-reader FFmpeg source hash: $hash"
 done
 
@@ -188,6 +234,11 @@ SOURCE="$FIXTURE/mpvkit"
 FIXTURE_PATCH="$FIXTURE/approved.patch"
 mkdir -p "$TOOLS" "$SOURCE"
 cleanup_fixture() {
+  local status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "Retained failed contract fixture: $FIXTURE" >&2
+    return "$status"
+  fi
   rm -rf "$FIXTURE"
   rmdir "$TEST_BUILD_ROOT" 2>/dev/null || true
 }
@@ -559,8 +610,11 @@ check_native_source sub/owned_text_slot.h b5f99151efb15ba937f630d1c2589c1e6634a4
 check_native_source sub/osd.c c317f4aa5445a950d19f52c8007c8378399523d65a7e360c4267919448a9553e
 check_native_source sub/dec_sub.c 31fc5af8a06194484001be3ccc2534d656fce9dbde3def4dee0d9397df473310
 check_native_source sub/dec_sub.h 504a5f7020d66da50eed51c28617c1e7d88f03ec4de8113bc153a16febad2008
+check_native_source demux/demux_mkv.c 1f726a3fbc4ccadf85dac3af82f59c07ea5ff6bad62cc327e7c4315c4d8e14d7
 for relative in demux/reference_reader.c demux/reference_reader.h demux/reference_reader_internal.h \
-  player/reference_owned.inc stream/vortx_reference_reader_stream.h; do
+  stream/vortx_reference_reader_stream.h player/reference_owned.inc demux/reference_mkv.h \
+  demux/reference_mkv_reader.c demux/reference_mkv_sparse.h demux/reference_mkv_sparse_planner.c \
+  demux/reference_mkv_sparse_planner.h demux/reference_mkv_sparse_worker.c stream/vortx_reference_sparse.h; do
   if native_git ls-files --error-unmatch -- "$relative" >/dev/null 2>&1; then
     fail "finite-reader source unexpectedly exists before its carrier: $relative"
   fi
@@ -568,30 +622,49 @@ done
 READER_PRE_TREE="$(native_git write-tree)"
 native_git apply --cached "$READER_MPV_PATCH"
 [ "$(native_git diff --cached --name-only "$READER_PRE_TREE" --)" = "$(printf '%s\n' \
-  demux/demux.c demux/demux.h demux/demux_lavf.c demux/reference_reader.c \
-  demux/reference_reader.h demux/reference_reader_internal.h meson.build \
-  player/command.c player/owned_subtitle.c player/owned_subtitle.h player/reference_owned.inc \
+  demux/demux.c demux/demux.h demux/demux_lavf.c \
+  demux/demux_mkv.c demux/reference_mkv.h demux/reference_mkv_reader.c \
+  demux/reference_mkv_sparse.h demux/reference_mkv_sparse_planner.c demux/reference_mkv_sparse_planner.h \
+  demux/reference_mkv_sparse_worker.c demux/reference_reader.c demux/reference_reader.h \
+  demux/reference_reader_internal.h meson.build player/command.c \
+  player/owned_subtitle.c player/owned_subtitle.h player/reference_owned.inc \
   stream/reference_source.h stream/stream_lavf.c stream/vortx_reference_reader_stream.h \
-  sub/dec_sub.c sub/dec_sub.h sub/osd.c sub/owned_text_slot.h)" ] ||
+  stream/vortx_reference_sparse.h sub/dec_sub.c sub/dec_sub.h \
+  sub/osd.c sub/owned_text_slot.h)" ] ||
   fail "native finite-reader carrier changed unexpected source paths"
-check_native_source demux/demux.c e5f08305137ed3f7b28fa24ee431e19222153a6cfed10f12d109b92da55567a4
+check_native_source demux/demux.c f5a4cd7bf4e29902ef965e43027755c19ded1423129a3fbe9808ad89e64c0e1c
 check_native_source demux/demux.h bee52b38477ce7c8efd9a50e778f720ea8c9eec577afab29998682c26ffe75e2
 check_native_source demux/demux_lavf.c d945ae1699d383c3d645d2ab963abb166fd0c19f10a4ab144505e7fbfb0408fb
-check_native_source demux/reference_reader.c 322fa3a90ad9a461c549b2aaebf50adba07b9862d11b8690355a6d789571c752
-check_native_source demux/reference_reader.h 4894866fc49f8ab7af9f4d5b3a29bfc7d1ac4153483fd04354db3e89e55cad03
-check_native_source demux/reference_reader_internal.h 6b21e2b72c87c49d609fdfca0252c32635d50054abe4eaae33340fc5b7da1a9c
-check_native_source meson.build 316e9aca3c4960701eab42e62ca1005379e082e1a21b4788b7581811ca360147
-check_native_source player/command.c 661388627775cf58dec688388d36aba9e457b0f3e97d349a91033f3f5f1f6e3b
-check_native_source player/owned_subtitle.c 242697e6be2bd2e10272679a3d618f07a07138b7a15b3b94cdbfdf521599bb25
+check_native_source demux/demux_mkv.c 1b7cc4d40efa0620bd10669dc44a7d6b32d0236e2ae2be3510a3bac0829e39c2
+check_native_source demux/reference_mkv.h 38df7814efc3aa7434e5afe269406a989ab6a5fa22a200aa28149a3ab68e46d9
+check_native_source demux/reference_mkv_reader.c 3ac442e8ff489d11f4a5df6b86f8d964457753f66ce5f3eb530d7db3746b6f7c
+check_native_source demux/reference_mkv_sparse.h 4b013b6e794257a576bc01f6becb9d120cb878e0851b2e0bdd2225dcf7b18df2
+check_native_source demux/reference_mkv_sparse_planner.c e36c6a879138b26e125f647c9254b41674b22b338ab12838376fe8d38bdae056
+check_native_source demux/reference_mkv_sparse_planner.h c88597a42186ceb81f45f1f44b3734469cf06889ea3bf91e4853b861943e84fe
+check_native_source demux/reference_mkv_sparse_worker.c 5deae68bf3c680aa4898ca6c8e0c0e76aa4628bffa693d0ae2d6dd287d9a5e64
+check_native_source demux/reference_reader.c 222ec8920d38971d386470d8172e45a89a52350eb352124ddf954be9409b792b
+check_native_source demux/reference_reader.h 59d669fb370bc12f01856031b8f9d908eb1d50a927d955ecb1fe0b4484c2407d
+check_native_source demux/reference_reader_internal.h ded5dc02785e98934a966de87df4337e4c6aed0275bce26da2017883917f4c8d
+check_native_source meson.build 32c9a1321883f6a980652173061c9c01727ef83b7a0dfe6e8e3a22364b753d47
+check_native_source player/command.c e7a19f392bb69e9d208382f157234ac3c908d22a0d4afee5f372ee8f9d33dade
+check_native_source player/owned_subtitle.c 014b93845488ef873a4d29c4c8dd4ada69d244626e7a7b38bac82809989c6b29
 check_native_source player/owned_subtitle.h 8d2f0ee5c972d1da69213cd80fbe249bcf3f19d9de8a2ef87e241d2f08f06284
-check_native_source player/reference_owned.inc 4402bcd094a80a769479320ac852c329acb39781fa8fc478d0ed79af10ae19e2
-check_native_source stream/reference_source.h dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b
-check_native_source stream/stream_lavf.c b8c78d8239af8c968c53ca83f601f91e521090d6d2d7522101fb68b332074940
+check_native_source player/reference_owned.inc 23ac96bfedefcab2234afa2a6f329a36fac6735effca6798b4043d777b060217
+check_native_source stream/reference_source.h 1f606a977b55f18fdb9f9fc7f5e4549b5774bef10a06c33b06ab945531909b29
+check_native_source stream/stream_lavf.c 650bf7b94771e70a6b934b21e362bc77f66ceb1d23ee684d2b169c6e694544a5
 check_native_source stream/vortx_reference_reader_stream.h adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87
+check_native_source stream/vortx_reference_sparse.h fa5f8e163d9368b30db6a9c7f0c69ed36e91d6a23ca409b7ba468c7d2282751c
 check_native_source sub/dec_sub.c 6e2137b90fe7f2915a528bdd83426448afbd099229f65342dbfd85d1ba1d347b
 check_native_source sub/dec_sub.h cb9b5af7c3f87a8dda584617c1f20a90a9331182d54a50c7e5fb8e64e74b384f
 check_native_source sub/osd.c 9b57ccd08e5777e2bc644cbf8001df0301552edf5cf24e36185a54f4cd667195
 check_native_source sub/owned_text_slot.h 63c498dd4bdc9fa9c6d128f1be8f37d7cdf377c853888342897f6639601662f6
+native_git show :meson.build >"$FIXTURE/native-sparse-meson.build"
+[ "$(grep -c -- '-Wl,--undefined=stream_reference_' "$FIXTURE/native-sparse-meson.build")" = 7 ] ||
+  fail "native sparse carrier must retain all seven existing private roots"
+grep -Fq "if host_machine.system() == 'android'" "$FIXTURE/native-sparse-meson.build" ||
+  fail "native sparse roots must remain Android-only"
+grep -Fq "gnu_symbol_visibility: 'hidden'" "$FIXTURE/native-sparse-meson.build" ||
+  fail "native sparse carrier must retain hidden visibility"
 # Unchanged source authority/cancellation remains separate from the reader wave.
 check_native_source misc/thread_tools.c 151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9
 check_native_source misc/thread_tools.h 62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f
@@ -611,7 +684,7 @@ GIT_INDEX_FILE="$PATCHED_INDEX" git -C "$CANONICAL_MPVKIT" show :Sources/BuildSc
 swiftc -j 1 -num-threads 1 -parse "$PATCHED_SOURCE" ||
   fail "actual patched MPVKit BuildScripts source did not parse"
 SPIKE_BLOCK="$FIXTURE/spikegit-production.swift"
-sed -n '/^enum SpikeGit {/,/^private class BuildOpenSSL: ZipBaseBuild {/p' \
+sed -n '/^enum SpikeGit {/,/^private class BuildOpenSSL: BaseBuild {/p' \
   "$PATCHED_SOURCE" | sed '$d' >"$SPIKE_BLOCK"
 [ -s "$SPIKE_BLOCK" ] || fail "could not extract the patched production SpikeGit implementation"
 SMB_METADATA_BLOCK="$FIXTURE/smb-metadata-production.swift"
