@@ -2888,14 +2888,15 @@ struct TVPlayerView: View {
         // settings cluster (gear, aspect, speed, sources, quality), then the centre transport, then
         // the right track cluster (audio, subs, episodes, chapters). Keeping this in step with the
         // visual order is what makes d-pad focus land where the eye expects.
+        let episodeControls = episodeControlAvailability
         var c: [Control] = [.settings, .aspect, .playback]
         if hasAlternateSources { c.append(.sources) }
         if hasQualityOptions { c.append(.quality) }
         c.append(.restart)
         c.append(.back)
-        if showsPreviousEpisodeControl { c.append(.prev) }
+        if episodeControls.previous { c.append(.prev) }
         c.append(.play)
-        if showsNextEpisodeControl { c.append(.next) }
+        if episodeControls.next { c.append(.next) }
         c.append(.fwd)
         if !audioTracks.isEmpty { c.append(.audio) }
         c.append(.subs)
@@ -3119,7 +3120,8 @@ struct TVPlayerView: View {
     }
 
     private var controlBar: some View {
-        VStack(spacing: 0) {
+        let episodeControls = episodeControlAvailability
+        return VStack(spacing: 0) {
             HStack(alignment: .top, spacing: Theme.Space.lg) {
                 ctrlButton(.close, "chevron.left")
                 Spacer(minLength: Theme.Space.lg)
@@ -3152,9 +3154,9 @@ struct TVPlayerView: View {
                     HStack(spacing: Theme.Space.md) {
                         ctrlButton(.restart, "arrow.counterclockwise")
                         ctrlButton(.back, "gobackward.\(seekStep)")
-                        if showsPreviousEpisodeControl { ctrlButton(.prev, "backward.end.fill") }
+                        if episodeControls.previous { ctrlButton(.prev, "backward.end.fill") }
                         ctrlButton(.play, isPaused ? "play.fill" : "pause.fill", big: true)
-                        if showsNextEpisodeControl { ctrlButton(.next, "forward.end.fill") }
+                        if episodeControls.next { ctrlButton(.next, "forward.end.fill") }
                         ctrlButton(.fwd, "goforward.\(seekStep)")
                     }
                     // Left cluster: the gear plus the "how it plays" controls (aspect, speed, source and
@@ -9497,12 +9499,20 @@ struct TVPlayerView: View {
         }
     }
 
-    private var showsPreviousEpisodeControl: Bool {
-        isEpisodePlaybackContext && (directResumeInventoryRefreshPending || hasPrevEpisode)
-    }
-
-    private var showsNextEpisodeControl: Bool {
-        isEpisodePlaybackContext && (directResumeInventoryRefreshPending || hasNextEpisode)
+    /// One ephemeral projection per control-row construction. Both directions use the same
+    /// ordered inventory and index; no cache can outlive a profile/source/episode change.
+    private var episodeControlAvailability: (previous: Bool, next: Bool) {
+        guard isEpisodePlaybackContext else { return (false, false) }
+        if directResumeInventoryRefreshPending { return (true, true) }
+        guard let m = curMeta else { return (false, false) }
+        let inventory = manualEpisodeNavigationInventory
+        guard let index = AppleManualEpisodeNavigationPolicy.currentIndex(
+            currentID: m.videoId,
+            currentSeason: m.season,
+            currentEpisode: m.episode,
+            inventory: inventory
+        ) else { return (false, false) }
+        return (index > 0, index + 1 < inventory.count)
     }
 
     private var episodeIndex: Int? {
@@ -9515,7 +9525,6 @@ struct TVPlayerView: View {
         )
     }
     private var hasNextEpisode: Bool { episodeIndex.map { $0 + 1 < allEpisodes.count } ?? false }
-    private var hasPrevEpisode: Bool { (episodeIndex ?? 0) > 0 }
 
     /// The `CoreVideo` for the episode currently playing, resolved from the loaded episode list.
     /// Matches on the engine video id first (canonical), falling back to season+episode for direct
