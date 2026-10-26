@@ -14,19 +14,15 @@ object CastEligibility {
     /// The receiver refetches the final resolved URL. Torrent identity is not a transport veto: a
     /// chosen remote streaming server may serve it. Ordinary self-hosted LAN/Tailscale URLs retain
     /// their existing receiver route; only a torrent requires selected-server origin/path authority.
-    fun isCastable(playable: Playable, selectedServerUrl: String? = null): Boolean {
+    fun isCastable(playable: Playable): Boolean {
         if (playable.isTrailer || playable.headers.isNotEmpty() || playable.audioUrl != null ||
             playable.userAgent != null || playable.playbackLease != null) return false
         if (!isRemoteHttpUrl(playable.url)) return false
         if (playable.isTorrent) {
-            // Torrent provenance requires the selected server even for a public resolved endpoint.
-            // Direct/debrid URLs with isTorrent=false retain their ordinary receiver URL policy.
-            val server = parse(selectedServerUrl ?: return false) ?: return false
-            val media = parse(playable.url) ?: return false
-            if (!sameOrigin(media, server)) return false
-            val prefix = server.path.orEmpty().trimEnd('/') + "/"
-            if (!media.path.startsWith(prefix)) return false
-            if (!Regex("[a-fA-F0-9]{40}/[0-9]+").matches(media.path.removePrefix(prefix))) return false
+            // The actual resolver captures this exact server/hash/file before I/O. Neither a caller's
+            // current preference nor an add-on URL can grant a torrent a receiver lifetime.
+            val route = playable.streamingServerRoute ?: return false
+            if (!playable.viaStreamingServer || route.contentType == null || !route.permits(playable.url)) return false
         }
         return true
     }
@@ -45,10 +41,6 @@ object CastEligibility {
         it.scheme?.lowercase() in setOf("http", "https") && !it.host.isNullOrBlank()
             && it.rawUserInfo == null && it.fragment == null && (it.port == -1 || it.port in 1..65535)
     }
-    private fun sameOrigin(a: URI, b: URI): Boolean = a.scheme.equals(b.scheme, true)
-        && a.host.trimEnd('.').equals(b.host.trimEnd('.'), true)
-        && port(a) == port(b)
-    private fun port(uri: URI): Int = if (uri.port != -1) uri.port else if (uri.scheme.equals("https", true)) 443 else 80
 
     private fun hostScope(raw: String): Scope {
         val host = raw.lowercase().removePrefix("[").removeSuffix("]").trimEnd('.')
@@ -89,6 +81,14 @@ object CastEligibility {
     /// The lower-cased host of [url], or null when it cannot be parsed.
     fun hostOf(url: String): String? =
         runCatching { URI(url.trim()).host }.getOrNull()?.lowercase()?.takeIf { it.isNotBlank() }
+
+    /** The hash/file endpoint has no extension; use its original resolver-owned file metadata. */
+    fun receiverContentType(playable: Playable): String {
+        val route = playable.streamingServerRoute
+        if (playable.isTorrent && route?.permits(playable.url) == true)
+            return route.contentType ?: "application/octet-stream"
+        return contentType(playable.url)
+    }
 
     /// A best-effort content-type for the receiver, guessed from the URL path extension. The Default Media
     /// Receiver keys its playback pipeline off this MIME, so an HLS playlist MUST be typed as

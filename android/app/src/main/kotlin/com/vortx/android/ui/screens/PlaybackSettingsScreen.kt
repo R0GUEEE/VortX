@@ -170,6 +170,8 @@ fun PlaybackSettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(VortXTheme.spacing.md),
         ) {
+            StreamingServerSettingsSection()
+
             SettingsSection(
                 title = "Audio output",
                 footer = "Applies to the built-in libmpv player. On the ExoPlayer path Android negotiates " +

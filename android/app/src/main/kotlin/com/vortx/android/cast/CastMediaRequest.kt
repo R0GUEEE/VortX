@@ -34,7 +34,7 @@ object CastMediaRequest {
 
         val mediaInfo = MediaInfo.Builder(playable.url)
             .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
-            .setContentType(CastEligibility.contentType(playable.url))
+            .setContentType(CastEligibility.receiverContentType(playable))
             .setMetadata(metadata)
             .apply { if (subtitleTracks.isNotEmpty()) setMediaTracks(subtitleTracks) }
             .build()

@@ -183,7 +183,11 @@ class CastManager(appContext: Context) {
     private fun loadCurrent() {
         val rmc = remoteMediaClient ?: return
         val playable = nowPlaying ?: return
-        rmc.load(CastMediaRequest.build(playable, positionProvider()))
+        if (!CastEligibility.isCastable(playable)) return
+        val request = CastMediaRequest.build(playable, positionProvider())
+        // Recheck after request construction: source/account or the saved server can retire a receipt.
+        if (!CastEligibility.isCastable(playable)) return
+        rmc.load(request)
     }
 
     private fun captureLastPosition() {
