@@ -95,6 +95,7 @@ internal class NativeOwnerHistoryCoordinator private constructor(
         try {
             val v = Verify(scope, c.target, current.readOwnerUID, authority, bindings, nextSources, Mode.FORK, c.fence, peer = peer)
             val f = captureNative(fork, v)
+            beginKeyedCheckpoint(fork, f, c.fence, v)
             return Candidate(this, c, tx, nextSources, peer, fork, v, base, f)
         } catch (failure: Throwable) { if (!retire(fork)) throw Uncertain(failure); throw failure }
     }
@@ -174,7 +175,8 @@ internal class NativeOwnerHistoryCoordinator private constructor(
                     require(if (old == null || next == null) old == null && next == null else old.contentEquals(next))
                 }
                 state = base.full(reply.raw("state"), fence)
-            } else state = base.delta(native.request(request("checkpoint_delta", fence), 0, verifier.callback), capture.fence)
+            } else state = base.delta(native.request(checkpointDeltaRequest(fence, verifier), 0, verifier.callback),
+                capture.fence, verifier.keyedCheckpoints, fence)
             localReplacement?.let { state = state.localOverlay(it) }
             if (retainedReplacement.isNotEmpty()) state = state.retained(retainedReplacement)
         }
@@ -194,7 +196,9 @@ internal class NativeOwnerHistoryCoordinator private constructor(
         val c = candidate.capture; requireCapture(c); check(!candidate.accepted)
         // Even a host-only transaction must obtain a native checkpoint before accept.
         if (candidate.state === state || !OHJson.equal(candidate.state.fence, candidate.fence)) {
-            candidate.state = candidate.state.retarget(c.fence).delta(candidate.native.request(request("checkpoint_delta", candidate.fence), 0, candidate.verifier.callback), c.fence)
+            candidate.state = candidate.state.retarget(c.fence).delta(candidate.native.request(
+                checkpointDeltaRequest(candidate.fence, candidate.verifier), 0, candidate.verifier.callback),
+                c.fence, candidate.verifier.keyedCheckpoints, candidate.fence)
         }
         val tx = candidate.transaction; val projection = hostProjection(hostPreferences)
         var next = Checkpoint(scope, candidate.state.bytes(), hostPreferences, candidate.nextSources.local(), tx.account.encoded(), current.readOwnerUID)
@@ -241,6 +245,13 @@ internal class NativeOwnerHistoryCoordinator private constructor(
         private val peer: Peer? = null, private val openingNative: ByteArray? = null) {
         var fence: ByteArray? = if (mode == Mode.FIXED) expected?.copyOf() else null
         var full: ByteArray? = null; var fullCount = 0
+        var keyedCheckpoints = false
+            private set
+        fun negotiateCheckpointFormats(raw: ByteArray?) {
+            val formats = raw?.let { OHJson.array(it).map(OHJson::text) } ?: emptyList()
+            require(formats.size <= 16 && formats.toSet().size == formats.size)
+            keyedCheckpoints = OHState.KEYED_FORMAT in formats
+        }
         val callback = NativeOwnerHistoryVerifier { bytes -> runCatching { verify(bytes); true }.getOrDefault(false) }
         private fun verify(bytes: ByteArray) {
             authority.withActive { }; val wrapper = OHJson.Obj(bytes); val check = wrapper.obj("check")
@@ -396,7 +407,21 @@ internal class NativeOwnerHistoryCoordinator private constructor(
             val reply = response(runtime.request(request("capture", extra = mapOf("profileId" to OHJson.quote(verifier.target.profileID),
                 "authenticatedUid" to OHJson.quote(verifier.target.verifiedUID))), 0, verifier.callback))
             require(reply.text("kind") == "capture" && isFalse(reply, "advertise") && OHJson.equal(reply.raw("fence"), requireNotNull(verifier.fence)))
+            verifier.negotiateCheckpointFormats(reply["checkpointDeltaFormats"])
             return reply.raw("fence")
+        }
+        private fun checkpointDeltaRequest(fence: ByteArray, verifier: Verify) = request("checkpoint_delta", fence,
+            if (verifier.keyedCheckpoints) mapOf("format" to OHJson.quote(OHState.KEYED_FORMAT)) else emptyMap())
+        private fun beginKeyedCheckpoint(native: NativeOwnerHistoryRuntime, fence: ByteArray, parent: ByteArray, verifier: Verify) {
+            if (!verifier.keyedCheckpoints) return
+            val reply = response(native.request(checkpointDeltaRequest(fence, verifier), 0, verifier.callback))
+            require(reply.keys == setOf("kind", "fence", "preparedAgainst", "deltaEncoding", "keyedStateSteps",
+                "reuseExactOwnerHistoryFromWitness", "requiresCompleteArchiveEnvelope", "durableAck") &&
+                reply.text("kind") == "checkpoint_delta" && reply.text("deltaEncoding") == OHState.KEYED_FORMAT &&
+                OHJson.equal(reply.raw("fence"), fence) && OHJson.equal(reply.raw("preparedAgainst"), parent) &&
+                isFalse(reply, "durableAck") && isTrue(reply, "requiresCompleteArchiveEnvelope") &&
+                reply.text("reuseExactOwnerHistoryFromWitness") == OHJson.Obj(parent).text("sourceSetWitnessId") &&
+                OHJson.array(reply.raw("keyedStateSteps")).isEmpty())
         }
         private fun isFalse(o: OHJson.Obj, k: String) = OHJson.utf8(o.raw(k)) == "false"
         private fun isTrue(o: OHJson.Obj, k: String) = OHJson.utf8(o.raw(k)) == "true"
