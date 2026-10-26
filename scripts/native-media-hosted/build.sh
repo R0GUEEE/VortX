@@ -156,12 +156,15 @@ PYTHON_TOOLCHAIN
     cp "$root/scripts/mpv-bounded-prefix-request.patch" "$upstream/buildscripts/patches/mpv/0012-bounded-prefix-request.patch"
     # Original route/TLS policy observation only; hidden native getter is not a public ABI.
     cp "$root/scripts/mpv-original-transport-evidence.patch" "$upstream/buildscripts/patches/mpv/0013-original-transport-evidence.patch"
+    # Coherent finite reader and native owned publication follow the route prerequisite.
+    cp "$root/scripts/mpv-finite-reference-reader.patch" "$upstream/buildscripts/patches/mpv/0014-finite-reference-reader.patch"
     # FFmpeg's sorted sequence keeps the existing TLS distrust patch first.
     # The same source bytes as Apple add optional paired response metadata only.
     cp "$root/scripts/ffmpeg-response-witness.patch" "$upstream/buildscripts/patches/ffmpeg/0002-response-witness.patch"
     cp "$root/scripts/ffmpeg-response-generation.patch" "$upstream/buildscripts/patches/ffmpeg/0003-response-generation.patch"
     cp "$root/scripts/ffmpeg-sent-request-evidence.patch" "$upstream/buildscripts/patches/ffmpeg/0004-sent-request-evidence.patch"
     cp "$root/scripts/ffmpeg-original-transport-evidence.patch" "$upstream/buildscripts/patches/ffmpeg/0005-original-transport-evidence.patch"
+    cp "$root/scripts/ffmpeg-finite-reference-reader.patch" "$upstream/buildscripts/patches/ffmpeg/0006-finite-reference-reader.patch"
     git -C "$upstream" apply --check "$root/scripts/native-media-hosted/android-assembly.patch"
     git -C "$upstream" apply "$root/scripts/native-media-hosted/android-assembly.patch"
     # Use the hosted SDK; bypass upstream download-sdk.sh's moving gas-preprocessor/master fetch.
@@ -190,25 +193,46 @@ PYTHON_TOOLCHAIN
     bash patch.sh
     # Require the exact reviewed HTTP afterimage before any native compilation.
     [[ $(git -C deps/ffmpeg rev-parse HEAD) == 946fcce07b6dcd0331c8cc609192aeff5e1924f8 ]] || exit 1
-    printf '%s  %s\n' 6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22 \
+    printf '%s  %s\n' d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802 \
         deps/ffmpeg/libavformat/http.c | shasum -a 256 -c -
     # Layout and actual TLS producer changes must come from the same full source build.
     printf '%s  %s\n' \
-        0a9f01a0f14a7b75dbbf1f81b177caf6a2503cde9897b827d9000e959d67bb4c deps/ffmpeg/libavformat/url.h \
-        eeec3c97e3572cf2272dc577576626716186f11539034ecaa4b45edb4855fab6 deps/ffmpeg/libavformat/tls.c \
+        14e3acc5a6715d48edb3dadb2f5248deaa38c36b30ff763e9be4b89edf2b1a0c deps/ffmpeg/libavformat/url.h \
+        16bf38abc7a5b5586268c71723041df2b90b7b99a8fbaeb06c8b20926534fe7a deps/ffmpeg/libavformat/avio.c \
+        cc9c11534ff5017d5931bb06788f95f10e9809953e5ec1cc03114a3a877cdcce deps/ffmpeg/libavformat/tcp.c \
+        0f07be92b62cefb53c6db5552951c658c756fac36ce22b03ccca8a044f1911f2 deps/ffmpeg/libavformat/tls.c \
         257c76932de48ed84bf849a44ca9ea6fe85adb93a26bb4f7112b19000084ff19 deps/ffmpeg/libavformat/tls.h \
         b04fb28df85f1ef3883b4927d0bfab4477f400128c122f794ff13b4b9c85bebc deps/ffmpeg/libavformat/tls_securetransport.c \
-        7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac deps/ffmpeg/libavformat/tls_mbedtls.c | shasum -a 256 -c -
+        7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac deps/ffmpeg/libavformat/tls_mbedtls.c \
+        a8c74f929942423550dba65f738fd4d2ad2d63d975665f64e6da1b00f5001645 deps/ffmpeg/libavformat/vortx_reference_reader.inc \
+        1000225eb4660e936bdf5984b62c6cbd7ae2c747472e55aabb6dc620d4f386dc deps/ffmpeg/libavformat/vortx_reference_pin.h \
+        adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87 deps/ffmpeg/libavformat/vortx_reference_reader_stream.h | shasum -a 256 -c -
     [[ $(git -C deps/mpv rev-parse HEAD) == 8c67647b50059406c5c0444903597281b81516cf ]] || exit 1
-    printf '%s  %s\n' 25047d80eb9c12e30ca13476ddd3c3153e5c7bf9ed6857ed197fd956ac70175b \
-        deps/mpv/stream/stream_lavf.c | shasum -a 256 -c -
-    printf '%s  %s\n' 1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835 \
-        deps/mpv/stream/reference_source.h | shasum -a 256 -c -
+    printf '%s  %s\n' \
+        e5f08305137ed3f7b28fa24ee431e19222153a6cfed10f12d109b92da55567a4 deps/mpv/demux/demux.c \
+        bee52b38477ce7c8efd9a50e778f720ea8c9eec577afab29998682c26ffe75e2 deps/mpv/demux/demux.h \
+        d945ae1699d383c3d645d2ab963abb166fd0c19f10a4ab144505e7fbfb0408fb deps/mpv/demux/demux_lavf.c \
+        6947238ab25a71d7de74d75ce9c2e4590ad0d83e1e9c8ca898d561f74461df7e deps/mpv/demux/reference_reader.c \
+        4894866fc49f8ab7af9f4d5b3a29bfc7d1ac4153483fd04354db3e89e55cad03 deps/mpv/demux/reference_reader.h \
+        6b21e2b72c87c49d609fdfca0252c32635d50054abe4eaae33340fc5b7da1a9c deps/mpv/demux/reference_reader_internal.h \
+        b8c78d8239af8c968c53ca83f601f91e521090d6d2d7522101fb68b332074940 deps/mpv/stream/stream_lavf.c \
+        dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b deps/mpv/stream/reference_source.h \
+        adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87 deps/mpv/stream/vortx_reference_reader_stream.h \
+        316e9aca3c4960701eab42e62ca1005379e082e1a21b4788b7581811ca360147 deps/mpv/meson.build \
+        242697e6be2bd2e10272679a3d618f07a07138b7a15b3b94cdbfdf521599bb25 deps/mpv/player/owned_subtitle.c \
+        8d2f0ee5c972d1da69213cd80fbe249bcf3f19d9de8a2ef87e241d2f08f06284 deps/mpv/player/owned_subtitle.h \
+        661388627775cf58dec688388d36aba9e457b0f3e97d349a91033f3f5f1f6e3b deps/mpv/player/command.c \
+        4402bcd094a80a769479320ac852c329acb39781fa8fc478d0ed79af10ae19e2 deps/mpv/player/reference_owned.inc \
+        63c498dd4bdc9fa9c6d128f1be8f37d7cdf377c853888342897f6639601662f6 deps/mpv/sub/owned_text_slot.h \
+        9b57ccd08e5777e2bc644cbf8001df0301552edf5cf24e36185a54f4cd667195 deps/mpv/sub/osd.c \
+        6e2137b90fe7f2915a528bdd83426448afbd099229f65342dbfd85d1ba1d347b deps/mpv/sub/dec_sub.c \
+        cb9b5af7c3f87a8dda584617c1f20a90a9331182d54a50c7e5fb8e64e74b384f deps/mpv/sub/dec_sub.h | shasum -a 256 -c -
     for private_header in deps/ffmpeg/libavformat/vortx_http_request.h deps/mpv/stream/vortx_http_request.h; do
         [[ -f "$private_header" && ! -L "$private_header" ]] || exit 1
         printf '%s  %s\n' d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9 "$private_header" | shasum -a 256 -c -
     done
     cmp -s deps/ffmpeg/libavformat/vortx_http_request.h deps/mpv/stream/vortx_http_request.h
+    cmp -s deps/ffmpeg/libavformat/vortx_reference_reader_stream.h deps/mpv/stream/vortx_reference_reader_stream.h
     # Retain exactly the reviewed native source/patch state before any compiler runs.
     git -C deps/ffmpeg diff --binary > "$out/ffmpeg-applied.patch"
     cp deps/ffmpeg/libavformat/tls_mbedtls_vortx_distrust.h "$out/tls_mbedtls_vortx_distrust.h"

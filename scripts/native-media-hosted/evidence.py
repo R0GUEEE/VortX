@@ -62,6 +62,11 @@ def relro_16k_safe(row, loads):
 
 SENT_FFMPEG_FUNCTIONS = (
     'avpriv_vortx_http_copy_sent_request_v2', 'avpriv_vortx_http_sent_request_clear_v2')
+REFERENCE_FFMPEG_FUNCTIONS = (
+    'avpriv_vortx_reference_capture_v1', 'avpriv_vortx_reference_revalidate_v1',
+    'avpriv_vortx_reference_recipe_current', 'avpriv_vortx_reference_open_prefix_v1',
+    'avpriv_vortx_reference_read_v1', 'avpriv_vortx_reference_stats_v1',
+    'avpriv_vortx_reference_reader_close_v1', 'avpriv_vortx_reference_recipe_release_v1')
 RETIRED_SENT_FFMPEG_FUNCTIONS = (
     'avpriv_vortx_http_copy_sent_request', 'avpriv_vortx_http_sent_request_clear')
 PRIVATE_MPV_FUNCTIONS = ('stream_reference_sent_request_copy_transport',)
@@ -244,7 +249,8 @@ def apple_sent_abi(package, *, lipo=None, nm=None):
     lipo_command = (str(lipo),) if lipo is not None else ('xcrun', 'lipo')
     nm_command = (str(nm),) if nm is not None else ('xcrun', 'nm')
     with tempfile.TemporaryDirectory(prefix='.sent-request-abi-', dir=package.parent) as temporary:
-        for library, functions in (('Libavformat', SENT_FFMPEG_FUNCTIONS), ('Libmpv', SENT_MPV_FUNCTIONS)):
+        for library, functions in (('Libavformat', SENT_FFMPEG_FUNCTIONS + REFERENCE_FFMPEG_FUNCTIONS),
+                                   ('Libmpv', SENT_MPV_FUNCTIONS)):
             xc = package / 'artifacts' / (library + '-GPL.xcframework')
             if not xc.is_dir():
                 raise ValueError('missing sent-request XCFramework')
@@ -268,9 +274,10 @@ def apple_sent_abi(package, *, lipo=None, nm=None):
                                              RETIRED_SENT_FFMPEG_FUNCTIONS)
                     if library == 'Libmpv':
                         required_macho_functions(run(*nm_command, '-gu', str(thin)),
-                                                SENT_FFMPEG_FUNCTIONS, 'undefined-import',
+                                                SENT_FFMPEG_FUNCTIONS + REFERENCE_FFMPEG_FUNCTIONS, 'undefined-import',
                                                 RETIRED_SENT_FFMPEG_FUNCTIONS)
     print('PASS apple-sent-abi')
+    print('PASS apple-reference-abi')
 
 
 def android(out, upstream, sdk, *, readelf=None):
@@ -292,7 +299,7 @@ def android(out, upstream, sdk, *, readelf=None):
             for line in source_header.splitlines() if '}, /* EM' in line]
     if len(keys) != 8 or any(len(key) != 32 for key in keys):
         raise ValueError('unexpected reviewed distrust table')
-    records, sent_records, private_records = [], [], []
+    records, sent_records, private_records, reference_records = [], [], [], []
     with zipfile.ZipFile(aar) as archive, tempfile.TemporaryDirectory(dir=out) as temporary:
         names = archive.namelist()
         if len(names) != len(set(names)):
@@ -338,6 +345,11 @@ def android(out, upstream, sdk, *, readelf=None):
                                          'binarySHA256': hashlib.sha256(data).hexdigest(),
                                          'dynsymTextSHA256': hashlib.sha256(dynamic.encode('utf-8')).hexdigest(),
                                          'symbols': symbols})
+                    reference = required_elf_functions(dynamic, REFERENCE_FFMPEG_FUNCTIONS, role)
+                    reference_records.append({'abi': abi, 'library': library, 'role': role,
+                                              'binarySHA256': hashlib.sha256(data).hexdigest(),
+                                              'dynsymTextSHA256': hashlib.sha256(dynamic.encode('utf-8')).hexdigest(),
+                                              'symbols': reference})
                     if library == 'libmpv.so':
                         full = run(str(readelf), '--symbols', '--wide', str(target))
                         private = required_private_elf_functions(full, PRIVATE_MPV_FUNCTIONS)
@@ -357,6 +369,7 @@ def android(out, upstream, sdk, *, readelf=None):
         'appAndSeamBindingChanged': False, 'promotionEligible': False,
         'sentRequestABI': {'schema': 2, 'reader': reader, 'libraries': sent_records,
                            'retiredV1Absent': True},
+        'referenceReaderABI': {'schema': 1, 'reader': reader, 'libraries': reference_records},
         'privateOwnerABI': {'schema': 1, 'reader': reader, 'libraries': private_records}}
     if inspection is not None:
         # This describes only the inspection host/tool, never the original producer's NDK.
@@ -367,7 +380,7 @@ def android(out, upstream, sdk, *, readelf=None):
 # Exact source-evidence profile for FUTURE successful native candidates. This
 # carries source bytes, including new/untracked patch outputs, rather than
 # substituting tracked diffs for a complete corresponding-source snapshot.
-CURRENT_SOURCE_PROFILE = 'original-http-transport-observation-v2'
+CURRENT_SOURCE_PROFILE = 'original-http-finite-reference-reader-v1'
 CURRENT_RECIPE_PATHS = {
     'scripts/assemble-mpvkit-dvfel.sh', 'scripts/build-mpvkit-dvfel.sh',
     'scripts/ffmpeg-response-witness.patch', 'scripts/ffmpeg-response-generation.patch',
@@ -375,6 +388,7 @@ CURRENT_RECIPE_PATHS = {
     'scripts/ffmpeg-sent-request-evidence.patch', 'scripts/mpv-sent-request-evidence.patch',
     'scripts/mpv-bounded-prefix-request.patch',
     'scripts/ffmpeg-original-transport-evidence.patch', 'scripts/mpv-original-transport-evidence.patch',
+    'scripts/ffmpeg-finite-reference-reader.patch', 'scripts/mpv-finite-reference-reader.patch',
     'scripts/mpv-coreaudio-hotplug-lifecycle.patch', 'scripts/mpv-http-seek-interrupt.patch',
     'scripts/mpv-moltenvk-resize.patch', 'scripts/mpv-original-http-reference-recipe.patch',
     'scripts/mpv-original-http-cancel-lifetime.patch', 'scripts/mpv-original-local-file-witness.patch',
@@ -399,16 +413,48 @@ CURRENT_NATIVE_PINS = {'mpv': '8c67647b50059406c5c0444903597281b81516cf',
 CURRENT_CANCEL_FILES = {
     'misc/thread_tools.c': '151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9',
     'misc/thread_tools.h': '62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f',
-    'stream/stream_lavf.c': '25047d80eb9c12e30ca13476ddd3c3153e5c7bf9ed6857ed197fd956ac70175b',
-    'stream/reference_source.h': '1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835',
+    'stream/stream_lavf.c': 'b8c78d8239af8c968c53ca83f601f91e521090d6d2d7522101fb68b332074940',
+    'stream/reference_source.h': 'dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b',
                      'stream/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9',
 }
 CURRENT_RESPONSE_FILES = {
-    'libavformat/http.c': '6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22',
-    'libavformat/url.h': '0a9f01a0f14a7b75dbbf1f81b177caf6a2503cde9897b827d9000e959d67bb4c',
-    'libavformat/tls.c': 'eeec3c97e3572cf2272dc577576626716186f11539034ecaa4b45edb4855fab6',
+    'libavformat/http.c': 'd4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802',
+    'libavformat/url.h': '14e3acc5a6715d48edb3dadb2f5248deaa38c36b30ff763e9be4b89edf2b1a0c',
+    'libavformat/avio.c': '16bf38abc7a5b5586268c71723041df2b90b7b99a8fbaeb06c8b20926534fe7a',
+    'libavformat/tcp.c': 'cc9c11534ff5017d5931bb06788f95f10e9809953e5ec1cc03114a3a877cdcce',
+    'libavformat/tls.c': '0f07be92b62cefb53c6db5552951c658c756fac36ce22b03ccca8a044f1911f2',
     'libavformat/tls.h': '257c76932de48ed84bf849a44ca9ea6fe85adb93a26bb4f7112b19000084ff19',
     'libavformat/tls_securetransport.c': 'b04fb28df85f1ef3883b4927d0bfab4477f400128c122f794ff13b4b9c85bebc',
+}
+CURRENT_READER_FFMPEG_CREATED = {
+    'libavformat/vortx_reference_reader.inc': 'a8c74f929942423550dba65f738fd4d2ad2d63d975665f64e6da1b00f5001645',
+    'libavformat/vortx_reference_pin.h': '1000225eb4660e936bdf5984b62c6cbd7ae2c747472e55aabb6dc620d4f386dc',
+    'libavformat/vortx_reference_reader_stream.h': 'adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87',
+}
+CURRENT_READER_MPV_FILES = {
+    'demux/demux.c': 'e5f08305137ed3f7b28fa24ee431e19222153a6cfed10f12d109b92da55567a4',
+    'demux/demux.h': 'bee52b38477ce7c8efd9a50e778f720ea8c9eec577afab29998682c26ffe75e2',
+    'demux/demux_lavf.c': 'd945ae1699d383c3d645d2ab963abb166fd0c19f10a4ab144505e7fbfb0408fb',
+    'demux/reference_reader.c': '6947238ab25a71d7de74d75ce9c2e4590ad0d83e1e9c8ca898d561f74461df7e',
+    'demux/reference_reader.h': '4894866fc49f8ab7af9f4d5b3a29bfc7d1ac4153483fd04354db3e89e55cad03',
+    'demux/reference_reader_internal.h': '6b21e2b72c87c49d609fdfca0252c32635d50054abe4eaae33340fc5b7da1a9c',
+    'stream/stream_lavf.c': CURRENT_CANCEL_FILES['stream/stream_lavf.c'],
+    'stream/reference_source.h': CURRENT_CANCEL_FILES['stream/reference_source.h'],
+    'stream/vortx_reference_reader_stream.h': 'adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87',
+    'player/owned_subtitle.c': '242697e6be2bd2e10272679a3d618f07a07138b7a15b3b94cdbfdf521599bb25',
+    'player/owned_subtitle.h': '8d2f0ee5c972d1da69213cd80fbe249bcf3f19d9de8a2ef87e241d2f08f06284',
+    'player/command.c': '661388627775cf58dec688388d36aba9e457b0f3e97d349a91033f3f5f1f6e3b',
+    'player/reference_owned.inc': '4402bcd094a80a769479320ac852c329acb39781fa8fc478d0ed79af10ae19e2',
+    'sub/owned_text_slot.h': '63c498dd4bdc9fa9c6d128f1be8f37d7cdf377c853888342897f6639601662f6',
+    'sub/osd.c': '9b57ccd08e5777e2bc644cbf8001df0301552edf5cf24e36185a54f4cd667195',
+    'sub/dec_sub.c': '6e2137b90fe7f2915a528bdd83426448afbd099229f65342dbfd85d1ba1d347b',
+    'sub/dec_sub.h': 'cb9b5af7c3f87a8dda584617c1f20a90a9331182d54a50c7e5fb8e64e74b384f',
+}
+# Both maintained source lanes retain SENT/PREFIX's seven Android-conditional
+# roots; only the Apple source includes MPVKit's MoltenVK configuration block.
+CURRENT_READER_MPV_MESON = {
+    'apple': '4c748249732131a2942b66087fa7142a2f9c239274cc272a35ec36221c010205',
+    'android': '316e9aca3c4960701eab42e62ca1005379e082e1a21b4788b7581811ca360147',
 }
 CURRENT_MBEDTLS_FILES = {'apple': '77d72cb88fc662b984f051335b356abc3e76e97ce39302dde6961ecdbba7a332',
                          'android': '7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac'}
@@ -429,6 +475,8 @@ CURRENT_SOURCE_ROOTS = {'android': {'_native-publisher': 'fcf6745703dc1265bca88f
            'libmpv-master-8c67647b': '8c67647b50059406c5c0444903597281b81516cf',
            'libplacebo-master-4c426e46': '4c426e466814536def653cb23f1d1c287ea7a7f5'}}
 CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/include/download-libunibreak.sh': '34ce1ee52187a287ff7da6e18efd7368e5671ac77cc7da5c5a8027a3c63a0418',
+                                   'buildscripts/patches/ffmpeg/0006-finite-reference-reader.patch': '6927705a432e987d2e13e2d5922756cb6c395d5c060268191cf6c1d94063b2df',
+                                   'buildscripts/patches/mpv/0014-finite-reference-reader.patch': 'd902f2637c535c92ed135e0cdda659355bcf08f492b1586cdbe537f01f8cb991',
                                    'buildscripts/patches/ffmpeg/0005-original-transport-evidence.patch': '480302686b9fff135cd0665e7af76d635fc21d83f54ee0096578ddd6bd6d83e5',
                                    'buildscripts/patches/mpv/0013-original-transport-evidence.patch': 'dad7f2d20ea14eb4661ef853978be78806e1b01fce67653e3ffec9b57d4a0e82',
                                    'buildscripts/include/download-lua.sh': 'bdfb58aa6fc85ec4dabd095bf11c760482fbbff86b94abbe835044ea49f06f93',
@@ -449,7 +497,8 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
                                    'buildscripts/patches/mpv/0008-original-http-reference-recipe.patch': '7d4eaa5236fa8b1b7fb2bd1500ff71aac48fa79fca9e790dfab0dee6d3f0023e',
                                    'buildscripts/patches/mpv/0009-original-http-cancel-lifetime.patch': '778b58c05129e397ed2f90408718f6b3a3feca84492485657d89e784bbee5722'},
              'dav1d': {},
-             'ffmpeg': {'libavformat/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9',
+             'ffmpeg': {**CURRENT_READER_FFMPEG_CREATED,
+                        'libavformat/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9',
                         'libavformat/tls_mbedtls_vortx_distrust.h': '376bd507b67b3b912443bda657465204b808518ea353d161e23e47e9b64c0bf4'},
              'fontconfig': {},
              'freetype': {},
@@ -459,13 +508,21 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
              'libplacebo': {},
              'libxml2': {},
              'mbedtls': {},
-             'mpv': {'player/owned_subtitle.c': '875d9f0192cd5f45acca2654765bdc667df5d12dd6eabf9aef5caec5cdec821d',
-                     'player/owned_subtitle.h': '2e9e64d92938e41c14c3397c9fbe7d064c2fe8aa5d2dcd05db4b9a74f4bad22e',
-                     'stream/reference_source.h': '1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835',
+             'mpv': {'player/owned_subtitle.c': CURRENT_READER_MPV_FILES['player/owned_subtitle.c'],
+                     'player/owned_subtitle.h': CURRENT_READER_MPV_FILES['player/owned_subtitle.h'],
+                     'player/reference_owned.inc': CURRENT_READER_MPV_FILES['player/reference_owned.inc'],
+                     'demux/reference_reader.c': CURRENT_READER_MPV_FILES['demux/reference_reader.c'],
+                     'demux/reference_reader.h': CURRENT_READER_MPV_FILES['demux/reference_reader.h'],
+                     'demux/reference_reader_internal.h': CURRENT_READER_MPV_FILES['demux/reference_reader_internal.h'],
+                     'stream/vortx_reference_reader_stream.h': CURRENT_READER_MPV_FILES['stream/vortx_reference_reader_stream.h'],
+                     'stream/reference_source.h': CURRENT_CANCEL_FILES['stream/reference_source.h'],
                      'stream/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9',
-                     'sub/owned_text_slot.h': 'b5f99151efb15ba937f630d1c2589c1e6634a4bebb744a161283cb70b3e250b6'}},
- 'apple': {'FFmpeg-9.0.2-946fcce0': {'libavformat/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9'},
+                     'sub/owned_text_slot.h': CURRENT_READER_MPV_FILES['sub/owned_text_slot.h']}},
+ 'apple': {'FFmpeg-9.0.2-946fcce0': {**CURRENT_READER_FFMPEG_CREATED,
+                                  'libavformat/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9'},
            '_native-mpvkit': {'Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch': '085b66cb5623ed8087481d3217b65da587b2970cd345a45896e7e87823dec9c9',
+                              'Sources/BuildScripts/patch/FFmpeg/0005-finite-reference-reader.patch': '6927705a432e987d2e13e2d5922756cb6c395d5c060268191cf6c1d94063b2df',
+                              'Sources/BuildScripts/patch/libmpv/0019-finite-reference-reader.patch': 'd902f2637c535c92ed135e0cdda659355bcf08f492b1586cdbe537f01f8cb991',
                               'Sources/BuildScripts/patch/FFmpeg/0004-original-transport-evidence.patch': '480302686b9fff135cd0665e7af76d635fc21d83f54ee0096578ddd6bd6d83e5',
                               'Sources/BuildScripts/patch/libmpv/0018-original-transport-evidence.patch': 'dad7f2d20ea14eb4661ef853978be78806e1b01fce67653e3ffec9b57d4a0e82',
                               'Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch': 'e3840084725be1f4948fb90c6fec87c35d55665f8310854713ebff496e1358bf',
@@ -484,11 +541,16 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
                               'Sources/BuildScripts/patch/libmpv/0012-owned-subtitle-publication.patch': '54b29e4101e4cf7ef95d450462725beb8ac44c2733f7a444961f66b41df78341',
                               'Sources/BuildScripts/patch/libmpv/0013-original-http-reference-recipe.patch': '7d4eaa5236fa8b1b7fb2bd1500ff71aac48fa79fca9e790dfab0dee6d3f0023e',
                               'Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch': '778b58c05129e397ed2f90408718f6b3a3feca84492485657d89e784bbee5722'},
-           'libmpv-master-8c67647b': {'player/owned_subtitle.c': '875d9f0192cd5f45acca2654765bdc667df5d12dd6eabf9aef5caec5cdec821d',
-                                      'player/owned_subtitle.h': '2e9e64d92938e41c14c3397c9fbe7d064c2fe8aa5d2dcd05db4b9a74f4bad22e',
-                                      'stream/reference_source.h': '1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835',
+           'libmpv-master-8c67647b': {'player/owned_subtitle.c': CURRENT_READER_MPV_FILES['player/owned_subtitle.c'],
+                                      'player/owned_subtitle.h': CURRENT_READER_MPV_FILES['player/owned_subtitle.h'],
+                                      'player/reference_owned.inc': CURRENT_READER_MPV_FILES['player/reference_owned.inc'],
+                                      'demux/reference_reader.c': CURRENT_READER_MPV_FILES['demux/reference_reader.c'],
+                                      'demux/reference_reader.h': CURRENT_READER_MPV_FILES['demux/reference_reader.h'],
+                                      'demux/reference_reader_internal.h': CURRENT_READER_MPV_FILES['demux/reference_reader_internal.h'],
+                                      'stream/vortx_reference_reader_stream.h': CURRENT_READER_MPV_FILES['stream/vortx_reference_reader_stream.h'],
+                                      'stream/reference_source.h': CURRENT_CANCEL_FILES['stream/reference_source.h'],
                      'stream/vortx_http_request.h': 'd7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9',
-                                      'sub/owned_text_slot.h': 'b5f99151efb15ba937f630d1c2589c1e6634a4bebb744a161283cb70b3e250b6',
+                                      'sub/owned_text_slot.h': CURRENT_READER_MPV_FILES['sub/owned_text_slot.h'],
                                       'video/out/vulkan/context_moltenvk.m': '00d2842ddb0dca5070feaf890c0190a0fe62beef9b29ec36e94e329d29a3da5e'},
            'libplacebo-master-4c426e46': {}}}
 
@@ -507,6 +569,10 @@ def require_current_response_source(files, lane):
         row = files.get(name, {})
         if row.get('kind') != 'file' or row.get('tracked') is not True or row.get('sha256') != checksum:
             raise ValueError('native source snapshot lacks exact response-witness afterimage: ' + name)
+    for name, checksum in CURRENT_READER_FFMPEG_CREATED.items():
+        row = files.get(name, {})
+        if row.get('kind') != 'file' or row.get('tracked') is not False or row.get('sha256') != checksum:
+            raise ValueError('native source snapshot lacks exact finite-reader private file: ' + name)
 
 
 def source_name(name):
@@ -748,7 +814,7 @@ def capture_current_source_evidence(lane, out, upstream, roots, legacy, staged):
             raise ValueError('duplicate or malformed recipe hash')
         inputs[source_name(name)] = value
     if set(inputs) != CURRENT_RECIPE_PATHS:
-        raise ValueError('not the exact 34-input transport-observation source family')
+        raise ValueError('not the exact 36-input finite-reference-reader source family')
     names = sorted(inputs | {'scripts/native-media-hosted/inputs.sha256': digest(manifest),
                              '.github/workflows/native-media-candidates.yml': None})
     entries = []
@@ -829,8 +895,10 @@ def capture_current_source_evidence(lane, out, upstream, roots, legacy, staged):
     mpv = next(row for row in groups if row['commit'] == CURRENT_NATIVE_PINS['mpv'])
     actual = {row['path']: row for row in mpv['files']}
     if any(actual.get(name, {}).get('kind') != 'file'
-           or actual[name]['sha256'] != value for name, value in CURRENT_CANCEL_FILES.items()):
-        raise ValueError('native source snapshot lacks exact cancellation afterimages')
+           or actual[name]['sha256'] != value
+           for name, value in (CURRENT_CANCEL_FILES | CURRENT_READER_MPV_FILES |
+                               {'meson.build': CURRENT_READER_MPV_MESON[lane]}).items()):
+        raise ValueError('native source snapshot lacks exact cancellation/finite-reader afterimages')
     ffmpeg = next(row for row in groups if row['commit'] == CURRENT_NATIVE_PINS['ffmpeg'])
     require_current_response_source({row['path']: row for row in ffmpeg['files']}, lane)
     outputs = {'apple': ['apple-candidate.tar.gz', 'apple-original-library-zips.tar',

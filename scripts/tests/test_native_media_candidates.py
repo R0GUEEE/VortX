@@ -29,7 +29,7 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertNotIn(name, names)
             names.add(name)
             self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), expected)
-        self.assertEqual(len(names), 34)
+        self.assertEqual(len(names), 36)
         self.assertEqual(names, {
             'scripts/assemble-mpvkit-dvfel.sh',
             'scripts/build-mpvkit-dvfel.sh',
@@ -41,6 +41,8 @@ class NativeMediaProducer(unittest.TestCase):
             'scripts/mpv-bounded-prefix-request.patch',
             'scripts/ffmpeg-original-transport-evidence.patch',
             'scripts/mpv-original-transport-evidence.patch',
+            'scripts/ffmpeg-finite-reference-reader.patch',
+            'scripts/mpv-finite-reference-reader.patch',
             'scripts/mpv-coreaudio-hotplug-lifecycle.patch',
             'scripts/mpv-http-seek-interrupt.patch',
             'scripts/mpv-moltenvk-resize.patch',
@@ -111,7 +113,8 @@ class NativeMediaProducer(unittest.TestCase):
                 ("mpv-completed-response-observation.patch", "0015-completed-response-observation.patch", "0010-completed-response-observation.patch"),
                 ("mpv-sent-request-evidence.patch", "0016-sent-request-evidence.patch", "0011-sent-request-evidence.patch"),
                 ("mpv-bounded-prefix-request.patch", "0017-bounded-prefix-request.patch", "0012-bounded-prefix-request.patch"),
-                ("mpv-original-transport-evidence.patch", "0018-original-transport-evidence.patch", "0013-original-transport-evidence.patch")]:
+                ("mpv-original-transport-evidence.patch", "0018-original-transport-evidence.patch", "0013-original-transport-evidence.patch"),
+                ("mpv-finite-reference-reader.patch", "0019-finite-reference-reader.patch", "0014-finite-reference-reader.patch")]:
             if source == "mpv-sent-request-evidence.patch":
                 self.assertIn('SENT_MPV_PATCH="$REPO/scripts/' + source + '"', apple)
                 self.assertIn('copy_exact "$SENT_MPV_PATCH" "$GENERATED_SENT_MPV_PATCH"', apple)
@@ -121,6 +124,9 @@ class NativeMediaProducer(unittest.TestCase):
             elif source == "mpv-original-transport-evidence.patch":
                 self.assertIn('TRANSPORT_MPV_PATCH="$REPO/scripts/' + source + '"', apple)
                 self.assertIn('copy_exact "$TRANSPORT_MPV_PATCH" "$GENERATED_TRANSPORT_MPV_PATCH"', apple)
+            elif source == "mpv-finite-reference-reader.patch":
+                self.assertIn('READER_MPV_PATCH="$REPO/scripts/' + source + '"', apple)
+                self.assertIn('copy_exact "$READER_MPV_PATCH" "$GENERATED_READER_MPV_PATCH"', apple)
             else:
                 self.assertIn('copy_exact "$REPO/scripts/' + source + '"', apple)
             self.assertIn('"$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/' + apple_number + '"', apple)
@@ -195,7 +201,7 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertLess(source_check, android.index('for arch in armv7l arm64 x86_64;'))
         for recipe in (apple, android):
             self.assertIn("946fcce07b6dcd0331c8cc609192aeff5e1924f8", recipe)
-            self.assertIn("6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22", recipe)
+            self.assertIn("d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802", recipe)
         # The preexisting lexical patcher remains the dependency sequence authority.
         patcher = (ROOT / "scripts/native-media-hosted/android/buildscripts/patch.sh").read_text()
         self.assertIn('PATCHES=(patches/*)', patcher)
@@ -241,9 +247,9 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertLess(android.index('cp "$root/scripts/ffmpeg-response-witness.patch"'), android.index(copy))
         self.assertLess(android.index(copy), android.index("bash patch.sh"))
         for recipe in (apple, android):
-            for afterimage in ("6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22",
-                               "25047d80eb9c12e30ca13476ddd3c3153e5c7bf9ed6857ed197fd956ac70175b",
-                               "1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835"):
+            for afterimage in ("d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802",
+                               "b8c78d8239af8c968c53ca83f601f91e521090d6d2d7522101fb68b332074940",
+                               "dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b"):
                 self.assertIn(afterimage, recipe)
         # Source contracts only. This does not exercise an HTTP owner or reader.
 
@@ -316,7 +322,7 @@ class NativeMediaProducer(unittest.TestCase):
         for lane, groups in MODULE.CURRENT_SOURCE_ROOTS.items():
             native = next(name for name, pin in groups.items() if pin == MODULE.CURRENT_NATIVE_PINS["mpv"])
             self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES[lane][native]["stream/reference_source.h"],
-                             "1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835")
+                             "dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b")
 
     def test_transport_carriers_are_exact_ordered_v2_and_keep_private_retention(self):
         ffmpeg = (ROOT / "scripts/ffmpeg-original-transport-evidence.patch").read_bytes()
@@ -371,25 +377,85 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertNotIn('--export-dynamic', assembly)
         self.assertNotIn('--dynamic-list', assembly)
 
+    def test_finite_reference_reader_carriers_preserve_full_source_and_patch_order(self):
+        ffmpeg = (ROOT / 'scripts/ffmpeg-finite-reference-reader.patch').read_bytes()
+        mpv = (ROOT / 'scripts/mpv-finite-reference-reader.patch').read_bytes()
+        self.assertEqual(hashlib.sha256(ffmpeg).hexdigest(),
+                         '6927705a432e987d2e13e2d5922756cb6c395d5c060268191cf6c1d94063b2df')
+        self.assertEqual(hashlib.sha256(mpv).hexdigest(),
+                         'd902f2637c535c92ed135e0cdda659355bcf08f492b1586cdbe537f01f8cb991')
+        self.assertEqual([line for line in ffmpeg.decode().splitlines() if line.startswith('+++ ')],
+                         ['+++ b/libavformat/' + name for name in
+                          ('http.c', 'url.h', 'avio.c', 'tcp.c', 'tls.c',
+                           'vortx_reference_reader.inc', 'vortx_reference_pin.h',
+                           'vortx_reference_reader_stream.h')])
+        self.assertEqual([line for line in mpv.decode().splitlines() if line.startswith('+++ ')],
+                         ['+++ b/' + name for name in
+                          ('demux/demux.c', 'demux/demux.h', 'demux/demux_lavf.c',
+                           'demux/reference_reader.c', 'demux/reference_reader.h',
+                           'demux/reference_reader_internal.h', 'stream/stream_lavf.c',
+                           'stream/reference_source.h', 'stream/vortx_reference_reader_stream.h',
+                           'meson.build', 'player/owned_subtitle.c', 'player/owned_subtitle.h',
+                           'player/command.c', 'player/reference_owned.inc', 'sub/owned_text_slot.h',
+                           'sub/osd.c', 'sub/dec_sub.c', 'sub/dec_sub.h')])
+        for text in (ffmpeg.decode(), mpv.decode()):
+            self.assertNotIn('--export-dynamic', text)
+            self.assertNotIn('--dynamic-list', text)
+        apple = (ROOT / 'scripts/build-mpvkit-dvfel.sh').read_text()
+        android = (ROOT / 'scripts/native-media-hosted/build.sh').read_text()
+        for kind, folder, apple_number, android_number in (
+                ('FFMPEG', 'ffmpeg', '0005', '0006'), ('MPV', 'mpv', '0019', '0014')):
+            source = folder + '-finite-reference-reader.patch'
+            copy = 'copy_exact "$READER_' + kind + '_PATCH" "$GENERATED_READER_' + kind + '_PATCH"'
+            previous = 'copy_exact "$TRANSPORT_' + kind + '_PATCH" "$GENERATED_TRANSPORT_' + kind + '_PATCH"'
+            self.assertIn('READER_' + kind + '_PATCH="$REPO/scripts/' + source + '"', apple)
+            self.assertIn(apple_number + '-finite-reference-reader.patch', apple)
+            self.assertLess(apple.index(previous), apple.index(copy))
+            self.assertLess(apple.index(copy), apple.index('swift run --build-path'))
+            android_copy = ('cp "$root/scripts/' + source + '" "$upstream/buildscripts/patches/' +
+                            folder + '/' + android_number + '-finite-reference-reader.patch"')
+            self.assertLess(android.index('cp "$root/scripts/' + folder + '-original-transport-evidence.patch"'),
+                            android.index(android_copy))
+            self.assertLess(android.index(android_copy), android.index('bash patch.sh'))
+        # Source-carrier pairing only; these assertions execute no native/network reader.
+        for lane, groups in MODULE.CURRENT_SOURCE_ROOTS.items():
+            ffroot = next(name for name, pin in groups.items() if pin == MODULE.CURRENT_NATIVE_PINS['ffmpeg'])
+            mproot = next(name for name, pin in groups.items() if pin == MODULE.CURRENT_NATIVE_PINS['mpv'])
+            self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES[lane][ffroot]['libavformat/vortx_reference_reader_stream.h'],
+                             'adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87')
+            self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES[lane][ffroot]['libavformat/vortx_reference_reader_stream.h'],
+                             MODULE.CURRENT_UNTRACKED_FILES[lane][mproot]['stream/vortx_reference_reader_stream.h'])
+
     def test_response_witness_source_evidence_profile_preserves_exact_capture_and_consumer(self):
         spec = importlib.util.spec_from_file_location(
             "current_native_response_packager", ROOT / "scripts/package-native-current-component.py")
         consumer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(consumer)
         self.assertEqual(MODULE.CURRENT_SOURCE_PROFILE, consumer.PROFILE)
-        self.assertEqual(consumer.PROFILE, "original-http-transport-observation-v2")
+        self.assertEqual(consumer.PROFILE, "original-http-finite-reference-reader-v1")
         self.assertEqual(MODULE.CURRENT_RECIPE_PATHS, consumer.RECIPE_PATHS)
-        self.assertEqual(len(consumer.RECIPE_PATHS), 34)
+        self.assertEqual(len(consumer.RECIPE_PATHS), 36)
         manifest = ROOT / "scripts/native-media-hosted/inputs.sha256"
         self.assertEqual(hashlib.sha256(manifest.read_bytes()).hexdigest(), consumer.PROFILE_MANIFEST_SHA256)
         recipe = dict((name, checksum) for checksum, name in
                       (line.split("  ", 1) for line in manifest.read_text().splitlines()))
         self.assertEqual(MODULE.CURRENT_RESPONSE_FILES, consumer.RESPONSE)
+        self.assertEqual(MODULE.CURRENT_READER_FFMPEG_CREATED, consumer.READER_FFMPEG_CREATED)
+        self.assertEqual(MODULE.CURRENT_READER_MPV_FILES, consumer.READER_MPV)
+        self.assertEqual(len(consumer.READER_FFMPEG_CREATED), 3)
+        self.assertEqual(len(consumer.READER_MPV), 17)
+        self.assertNotIn("meson.build", consumer.READER_MPV)
+        meson = {
+            "apple": "4c748249732131a2942b66087fa7142a2f9c239274cc272a35ec36221c010205",
+            "android": "316e9aca3c4960701eab42e62ca1005379e082e1a21b4788b7581811ca360147"}
+        self.assertEqual(MODULE.CURRENT_READER_MPV_MESON, meson)
+        self.assertEqual(consumer.READER_MPV_MESON, meson)
         self.assertEqual(MODULE.CURRENT_MBEDTLS_FILES, consumer.MBEDTLS)
         self.assertEqual(consumer.MBEDTLS, {
             "apple": "77d72cb88fc662b984f051335b356abc3e76e97ce39302dde6961ecdbba7a332",
             "android": "7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac"})
         for lane, groups in MODULE.CURRENT_SOURCE_ROOTS.items():
+            self.assertEqual(len(consumer.READER_MPV | {"meson.build": consumer.READER_MPV_MESON[lane]}), 18)
             for directory, commit in groups.items():
                 self.assertEqual(consumer.untracked(lane, {"commit": commit}, recipe),
                                  MODULE.CURRENT_UNTRACKED_FILES[lane][directory])
@@ -397,7 +463,8 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES["android"]["_native-publisher"][helper],
                              recipe["scripts/native-media-hosted/android/" + helper])
         # These are synthetic source observations, not native tar/binary or HTTP execution.
-        old_sources = ("3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa",
+        old_sources = ("6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22",
+                       "3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa",
                        "db1b96a39966a51edbb10975b1cc67a69a6c744fa4101931470717cd63d44da0",
                        "b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f",
                        "205a083b57dd105078e3f71a1d0fad1fb6342d023d9fae32a60cbf6227218e74",
@@ -406,7 +473,10 @@ class NativeMediaProducer(unittest.TestCase):
             expected = dict(consumer.RESPONSE, **{"libavformat/tls_mbedtls.c": consumer.MBEDTLS[lane]})
             valid = {name: {"kind": "file", "tracked": True, "sha256": checksum}
                      for name, checksum in expected.items()}
-            self.assertEqual(len(valid), 6)
+            valid.update({name: {"kind": "file", "tracked": False, "sha256": checksum}
+                          for name, checksum in consumer.READER_FFMPEG_CREATED.items()})
+            self.assertEqual(len(expected), 8)
+            self.assertEqual(len(valid), 11)
             for guard in (MODULE.require_current_response_source, consumer.require_response_source):
                 guard(valid, lane)
                 for path in expected:
@@ -422,6 +492,16 @@ class NativeMediaProducer(unittest.TestCase):
                 for old in old_sources:
                     observed = deepcopy(valid)
                     observed["libavformat/http.c"]["sha256"] = old
+                    with self.assertRaises(ValueError):
+                        guard(observed, lane)
+                for path in consumer.READER_FFMPEG_CREATED:
+                    for field, value in (("tracked", True), ("kind", "symlink"), ("sha256", "0" * 64)):
+                        observed = deepcopy(valid)
+                        observed[path][field] = value
+                        with self.subTest(lane=lane, path=path, field=field), self.assertRaises(ValueError):
+                            guard(observed, lane)
+                    observed = deepcopy(valid)
+                    del observed[path]
                     with self.assertRaises(ValueError):
                         guard(observed, lane)
                 with self.assertRaises(ValueError):
@@ -508,7 +588,9 @@ class NativeMediaProducer(unittest.TestCase):
             return 'LLVM synthetic inspection fixture'
         data = Path(args[-1]).read_bytes()
         if '--dyn-syms' in args:
-            return SentRequestABISynthetic.dynsym('defined-provider' if b'libavformat.so' in data else 'undefined-import')
+            return SentRequestABISynthetic.dynsym(
+                'defined-provider' if b'libavformat.so' in data else 'undefined-import',
+                functions=MODULE.SENT_FFMPEG_FUNCTIONS + MODULE.REFERENCE_FFMPEG_FUNCTIONS)
         if '--symbols' in args:
             return SentRequestABISynthetic.symtab()
         elf_class, machine = ("ELF32", "ARM") if b"armeabi-v7a" in data else (
@@ -533,6 +615,17 @@ class NativeMediaProducer(unittest.TestCase):
     def test_three_abi_receipt_remains_unpromoted(self):
         with patch.object(MODULE, "run", side_effect=self.readelf):
             self.run_fixture()
+
+    def test_android_producer_rejects_missing_finite_reader_provider_or_import(self):
+        symbol = MODULE.REFERENCE_FFMPEG_FUNCTIONS[-1]
+        for library in (b'libavformat.so', b'libmpv.so'):
+            def missing(*args):
+                result = self.readelf(*args)
+                if '--dyn-syms' in args and library in Path(args[-1]).read_bytes():
+                    return result.replace(symbol + '@', symbol + '_missing@')
+                return result
+            with self.subTest(library=library), patch.object(MODULE, 'run', side_effect=missing), self.assertRaises(ValueError):
+                self.run_fixture()
 
     def test_missing_library_rejects(self):
         with patch.object(MODULE, "run", side_effect=self.readelf), self.assertRaises(ValueError):
@@ -792,9 +885,10 @@ class AndroidMpvComponentBinding(unittest.TestCase):
 
 class SentRequestABISynthetic(unittest.TestCase):
     @staticmethod
-    def dynsym(role, *, change=None, duplicate=False, missing=False):
+    def dynsym(role, *, change=None, duplicate=False, missing=False, functions=None):
         rows = ['0: 0000000000000000 0 NOTYPE LOCAL DEFAULT UND']
-        names = MODULE.SENT_FFMPEG_FUNCTIONS[:1] if missing else MODULE.SENT_FFMPEG_FUNCTIONS
+        functions = MODULE.SENT_FFMPEG_FUNCTIONS if functions is None else functions
+        names = functions[:1] if missing else functions
         for index, name in enumerate(names, 1):
             section = '12' if role == 'defined-provider' else 'UND'
             suffix = '@@LIBAVFORMAT_63' if role == 'defined-provider' else '@LIBAVFORMAT_63 (2)'
@@ -802,7 +896,7 @@ class SentRequestABISynthetic(unittest.TestCase):
             rows.append(change(row) if change and index == 1 else row)
         if duplicate:
             rows.append(f'{len(rows)}: 0000000000000000 16 FUNC GLOBAL DEFAULT 12 '
-                        f'{MODULE.SENT_FFMPEG_FUNCTIONS[0]}@OTHER_VERSION')
+                        f'{functions[0]}@OTHER_VERSION')
         return f"Symbol table '.dynsym' contains {len(rows)} entries:\n" + '\n'.join(rows) + '\n'
 
     @staticmethod
@@ -850,6 +944,36 @@ class SentRequestABISynthetic(unittest.TestCase):
                      self.nm_text(MODULE.SENT_FFMPEG_FUNCTIONS).replace('_avpriv_', '__avpriv_', 1)):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 MODULE.required_macho_functions(text, MODULE.SENT_FFMPEG_FUNCTIONS, 'defined-code')
+
+    def test_finite_reader_elf_and_macho_require_every_function_and_correct_role(self):
+        functions = MODULE.REFERENCE_FFMPEG_FUNCTIONS
+        self.assertEqual(functions, (
+            'avpriv_vortx_reference_capture_v1', 'avpriv_vortx_reference_revalidate_v1',
+            'avpriv_vortx_reference_recipe_current', 'avpriv_vortx_reference_open_prefix_v1',
+            'avpriv_vortx_reference_read_v1', 'avpriv_vortx_reference_stats_v1',
+            'avpriv_vortx_reference_reader_close_v1', 'avpriv_vortx_reference_recipe_release_v1'))
+        for role, kind in (('defined-provider', 'T'), ('undefined-import', 'U')):
+            dynamic = self.dynsym(role, functions=functions)
+            rows = MODULE.required_elf_functions(dynamic, functions, role)
+            self.assertEqual([row['name'] for row in rows], sorted(functions))
+            macho_role = 'defined-code' if role == 'defined-provider' else 'undefined-import'
+            self.assertEqual(MODULE.required_macho_functions(self.nm_text(functions, kind),
+                                                           functions, macho_role), sorted(functions))
+            opposite_role = 'undefined-import' if role == 'defined-provider' else 'defined-provider'
+            with self.assertRaises(ValueError):
+                MODULE.required_elf_functions(dynamic, functions, opposite_role)
+            for missing in functions:
+                remaining = tuple(name for name in functions if name != missing)
+                with self.subTest(role=role, missing=missing), self.assertRaises(ValueError):
+                    MODULE.required_elf_functions(self.dynsym(role, functions=remaining), functions, role)
+                with self.subTest(role=role, missing=missing), self.assertRaises(ValueError):
+                    MODULE.required_macho_functions(self.nm_text(remaining, kind), functions, macho_role)
+        for old, new in ((' FUNC ', ' OBJECT '), (' GLOBAL ', ' WEAK '),
+                         (' DEFAULT ', ' HIDDEN '), (' 12 ', ' UND ')):
+            text = self.dynsym('defined-provider', functions=functions,
+                               change=lambda row, old=old, new=new: row.replace(old, new))
+            with self.subTest(change=(old, new)), self.assertRaises(ValueError):
+                MODULE.required_elf_functions(text, functions, 'defined-provider')
 
     def test_apple_material_abi_rejects_old_component_missing_private_helper(self):
         required = MODULE.SENT_MPV_FUNCTIONS
@@ -926,7 +1050,8 @@ class SentRequestABISynthetic(unittest.TestCase):
                 data = Path(args[-1]).read_bytes()
                 if '--dyn-syms' in args:
                     self.assertIn('--wide', args)
-                    return self.dynsym('defined-provider' if b'libavformat.so' in data else 'undefined-import')
+                    return self.dynsym('defined-provider' if b'libavformat.so' in data else 'undefined-import',
+                                       functions=MODULE.SENT_FFMPEG_FUNCTIONS + MODULE.REFERENCE_FFMPEG_FUNCTIONS)
                 if '--symbols' in args:
                     self.assertIn('--wide', args)
                     self.assertIn(b'libmpv.so', data)
@@ -959,7 +1084,23 @@ class SentRequestABISynthetic(unittest.TestCase):
             self.assertEqual(private['reader'], abi['reader'])
             self.assertEqual(len(private['libraries']), 3)
             self.assertEqual({row['abi'] for row in private['libraries']}, {'armeabi-v7a', 'arm64-v8a', 'x86_64'})
+            reference = evidence['referenceReaderABI']
+            self.assertEqual(reference['schema'], 1)
+            self.assertEqual(reference['reader'], abi['reader'])
+            self.assertEqual(len(reference['libraries']), 6)
+            self.assertEqual({(row['abi'], row['library'], row['role']) for row in reference['libraries']},
+                             {(native_abi, library, role) for native_abi in ('armeabi-v7a', 'arm64-v8a', 'x86_64')
+                              for library, role in (('libavformat.so', 'defined-provider'),
+                                                    ('libmpv.so', 'undefined-import'))})
             with zipfile.ZipFile(root / 'libmpv-release-candidate.aar') as archive:
+                for row in reference['libraries']:
+                    dynamic = self.dynsym(row['role'], functions=(MODULE.SENT_FFMPEG_FUNCTIONS +
+                                                                 MODULE.REFERENCE_FFMPEG_FUNCTIONS))
+                    self.assertEqual(row['binarySHA256'], hashlib.sha256(
+                        archive.read('jni/' + row['abi'] + '/' + row['library'])).hexdigest())
+                    self.assertEqual(row['dynsymTextSHA256'], hashlib.sha256(dynamic.encode()).hexdigest())
+                    self.assertEqual(row['symbols'], MODULE.required_elf_functions(
+                        dynamic, MODULE.REFERENCE_FFMPEG_FUNCTIONS, row['role']))
                 for row in private['libraries']:
                     self.assertEqual(row['library'], 'libmpv.so')
                     self.assertEqual(row['binarySHA256'], hashlib.sha256(
@@ -999,12 +1140,13 @@ class SentRequestABISynthetic(unittest.TestCase):
                     return ''
                 library = Path(args[-1]).read_text().split('|')[0]
                 if '-gu' in args:
-                    return self.nm_text(MODULE.SENT_FFMPEG_FUNCTIONS, 'U')
-                return self.nm_text(MODULE.SENT_FFMPEG_FUNCTIONS if library == 'Libavformat' else MODULE.SENT_MPV_FUNCTIONS)
+                    return self.nm_text(MODULE.SENT_FFMPEG_FUNCTIONS + MODULE.REFERENCE_FFMPEG_FUNCTIONS, 'U')
+                return self.nm_text(MODULE.SENT_FFMPEG_FUNCTIONS + MODULE.REFERENCE_FFMPEG_FUNCTIONS
+                                    if library == 'Libavformat' else MODULE.SENT_MPV_FUNCTIONS)
             output = io.StringIO()
             with patch.object(MODULE, 'run', side_effect=inspect) as calls, redirect_stdout(output):
                 MODULE.apple_sent_abi(package)
-            self.assertEqual(output.getvalue(), 'PASS apple-sent-abi\n')
+            self.assertEqual(output.getvalue(), 'PASS apple-sent-abi\nPASS apple-reference-abi\n')
             self.assertEqual(len([c for c in calls.call_args_list if '-gU' in c.args]), 18)
             self.assertEqual(len([c for c in calls.call_args_list if '-gu' in c.args]), 9)
             self.assertEqual(sorted(path.name for path in root.iterdir()), ['package'])
@@ -1073,6 +1215,88 @@ class SentRequestOfflineEvidence(unittest.TestCase):
                 consumer.sent_request_abi(value, records, validator)
         with self.assertRaises(ValueError):
             consumer.sent_request_abi({}, records, validator)
+
+    @staticmethod
+    def reference_fixture():
+        consumer, sent, records, validator = SentRequestOfflineEvidence.fixture()
+        value = {'schema': 1, 'reader': deepcopy(sent['reader']), 'libraries': []}
+        for row in sent['libraries']:
+            reference = deepcopy(row)
+            reference['symbols'] = MODULE.required_elf_functions(
+                SentRequestABISynthetic.dynsym(row['role'], functions=MODULE.REFERENCE_FFMPEG_FUNCTIONS),
+                MODULE.REFERENCE_FFMPEG_FUNCTIONS, row['role'])
+            value['libraries'].append(reference)
+        return consumer, value, sent, records, validator
+
+    def test_reference_reader_evidence_binds_all_eight_functions_and_same_inspector(self):
+        consumer, value, sent, records, validator = self.reference_fixture()
+        consumer.sent_request_abi(sent, records, validator)
+        consumer.reference_reader_abi(value, records, validator, sent['reader'])
+        self.assertEqual(set(consumer.REFERENCE_FFMPEG_FUNCTIONS), set(MODULE.REFERENCE_FFMPEG_FUNCTIONS))
+        self.assertEqual(len(value['libraries']), 6)
+        self.assertTrue(all(len(row['symbols']) == 8 for row in value['libraries']))
+        explicit = deepcopy(value)
+        expected_reader = deepcopy(sent['reader'])
+        expected_reader['mode'] = 'explicit-read-only-inspector'
+        explicit['reader'] = deepcopy(expected_reader)
+        consumer.reference_reader_abi(explicit, records, validator, expected_reader)
+        self.assertIn('"PASS apple-reference-abi" in gate.splitlines()',
+                      (ROOT / 'scripts/package-native-current-component.py').read_text())
+
+    def test_reference_reader_evidence_rejects_missing_functions_wrong_roles_and_bytes(self):
+        consumer, original, sent, records, validator = self.reference_fixture()
+        for index, row in enumerate(original['libraries']):
+            for symbol_index, symbol in enumerate(row['symbols']):
+                value = deepcopy(original)
+                value['libraries'][index]['symbols'].pop(symbol_index)
+                with self.subTest(abi=row['abi'], library=row['library'], missing=symbol['name']), self.assertRaises(ValueError):
+                    consumer.reference_reader_abi(value, records, validator, sent['reader'])
+        for change in (lambda value: value.update(schema=2),
+                       lambda value: value.update(schema=True),
+                       lambda value: value['libraries'].pop(),
+                       lambda value: value['libraries'].append(deepcopy(value['libraries'][0])),
+                       lambda value: value['libraries'][0].update(role='undefined-import'),
+                       lambda value: value['libraries'][1].update(role='defined-provider'),
+                       lambda value: value['libraries'][0].update(binarySHA256='c' * 64),
+                       lambda value: value['libraries'][0].update(dynsymTextSHA256='not-a-digest'),
+                       lambda value: value['libraries'][0]['symbols'][0].update(type='OBJECT'),
+                       lambda value: value['libraries'][0]['symbols'][0].update(binding='WEAK'),
+                       lambda value: value['libraries'][0]['symbols'][0].update(visibility='HIDDEN'),
+                       lambda value: value['libraries'][0]['symbols'][0].update(section='UND'),
+                       lambda value: value['libraries'][1]['symbols'][0].update(section='12'),
+                       lambda value: value['libraries'][0]['symbols'][0].update(
+                           name='avpriv_vortx_http_copy_sent_request_v2'),
+                       lambda value: value['libraries'][0]['symbols'].append(
+                           deepcopy(value['libraries'][0]['symbols'][0])),
+                       lambda value: value.update(unrecognized=True)):
+            value = deepcopy(original)
+            change(value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                consumer.reference_reader_abi(value, records, validator, sent['reader'])
+        with self.assertRaises(ValueError):
+            consumer.reference_reader_abi({}, records, validator, sent['reader'])
+        missing_record = dict(records)
+        del missing_record['jni/arm64-v8a/libavformat.so']
+        with self.assertRaises(ValueError):
+            consumer.reference_reader_abi(original, missing_record, validator, sent['reader'])
+
+    def test_reference_reader_evidence_rejects_distinct_valid_inspector_identity(self):
+        consumer, original, sent, records, validator = self.reference_fixture()
+        # Each altered reader remains individually well formed and validator-bound;
+        # rejection must come from equality with the original sent-request reader.
+        for field, replacement in (('mode', 'explicit-read-only-inspector'),
+                                   ('requestedReader', '/another/llvm-readelf'),
+                                   ('resolvedReader', '/another/llvm-readobj'),
+                                   ('readerSHA256', 'd' * 64),
+                                   ('readerVersion', 'another synthetic LLVM')):
+            value = deepcopy(original)
+            value['reader'][field] = replacement
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'inspector identity'):
+                consumer.reference_reader_abi(value, records, validator, sent['reader'])
+        forged_validator = deepcopy(original)
+        forged_validator['reader']['validatorSHA256'] = 'd' * 64
+        with self.assertRaises(ValueError):
+            consumer.reference_reader_abi(forged_validator, records, validator, sent['reader'])
 
     @staticmethod
     def private_fixture():

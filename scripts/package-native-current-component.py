@@ -17,8 +17,8 @@ import zipfile
 
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
-PROFILE = "original-http-transport-observation-v2"
-PROFILE_MANIFEST_SHA256 = "f75888fd30982d3a98250d26ce2915e3d1a3227f6d4d75475466c6f1e2bb4014"
+PROFILE = "original-http-finite-reference-reader-v1"
+PROFILE_MANIFEST_SHA256 = "88f83546bb2b17e07aa3f3596595dd275e5b4aa696c313179a9e284cb69e16a5"
 RECIPE_PATHS = frozenset("""
 scripts/assemble-mpvkit-dvfel.sh scripts/build-mpvkit-dvfel.sh
 scripts/ffmpeg-response-witness.patch scripts/ffmpeg-response-generation.patch
@@ -26,6 +26,7 @@ scripts/mpv-completed-response-observation.patch
 scripts/ffmpeg-sent-request-evidence.patch scripts/mpv-sent-request-evidence.patch
 scripts/mpv-bounded-prefix-request.patch
 scripts/ffmpeg-original-transport-evidence.patch scripts/mpv-original-transport-evidence.patch
+scripts/ffmpeg-finite-reference-reader.patch scripts/mpv-finite-reference-reader.patch
 scripts/mpv-coreaudio-hotplug-lifecycle.patch scripts/mpv-http-seek-interrupt.patch
 scripts/mpv-moltenvk-resize.patch scripts/mpv-original-http-cancel-lifetime.patch
 scripts/mpv-original-http-reference-recipe.patch scripts/mpv-original-local-file-witness.patch
@@ -64,15 +65,45 @@ WRAPPER = {"apple": "2103893078c5e339073b11737b86f7f22b9c4491",
 # Full-file postcomposition hashes retain cancellation plus owned observation.
 CANCEL = {"misc/thread_tools.c": "151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9",
           "misc/thread_tools.h": "62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f",
-          "stream/stream_lavf.c": "25047d80eb9c12e30ca13476ddd3c3153e5c7bf9ed6857ed197fd956ac70175b",
-          "stream/reference_source.h": "1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835",
+          "stream/stream_lavf.c": "b8c78d8239af8c968c53ca83f601f91e521090d6d2d7522101fb68b332074940",
+          "stream/reference_source.h": "dacfde2ba2aacfb07bd959f23e7e6e367125dbde47d4a31b36c21c24eba0c38b",
           "stream/vortx_http_request.h": "d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9"}
 RESPONSE = {
-    "libavformat/http.c": "6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22",
-    "libavformat/url.h": "0a9f01a0f14a7b75dbbf1f81b177caf6a2503cde9897b827d9000e959d67bb4c",
-    "libavformat/tls.c": "eeec3c97e3572cf2272dc577576626716186f11539034ecaa4b45edb4855fab6",
+    "libavformat/http.c": "d4ec29f40e9302f6bb1abedcbd0c5adf87c20b11236a8ad8aff42fea46616802",
+    "libavformat/url.h": "14e3acc5a6715d48edb3dadb2f5248deaa38c36b30ff763e9be4b89edf2b1a0c",
+    "libavformat/avio.c": "16bf38abc7a5b5586268c71723041df2b90b7b99a8fbaeb06c8b20926534fe7a",
+    "libavformat/tcp.c": "cc9c11534ff5017d5931bb06788f95f10e9809953e5ec1cc03114a3a877cdcce",
+    "libavformat/tls.c": "0f07be92b62cefb53c6db5552951c658c756fac36ce22b03ccca8a044f1911f2",
     "libavformat/tls.h": "257c76932de48ed84bf849a44ca9ea6fe85adb93a26bb4f7112b19000084ff19",
     "libavformat/tls_securetransport.c": "b04fb28df85f1ef3883b4927d0bfab4477f400128c122f794ff13b4b9c85bebc",
+}
+READER_FFMPEG_CREATED = {
+    "libavformat/vortx_reference_reader.inc": "a8c74f929942423550dba65f738fd4d2ad2d63d975665f64e6da1b00f5001645",
+    "libavformat/vortx_reference_pin.h": "1000225eb4660e936bdf5984b62c6cbd7ae2c747472e55aabb6dc620d4f386dc",
+    "libavformat/vortx_reference_reader_stream.h": "adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87",
+}
+READER_MPV = {
+    "demux/demux.c": "e5f08305137ed3f7b28fa24ee431e19222153a6cfed10f12d109b92da55567a4",
+    "demux/demux.h": "bee52b38477ce7c8efd9a50e778f720ea8c9eec577afab29998682c26ffe75e2",
+    "demux/demux_lavf.c": "d945ae1699d383c3d645d2ab963abb166fd0c19f10a4ab144505e7fbfb0408fb",
+    "demux/reference_reader.c": "6947238ab25a71d7de74d75ce9c2e4590ad0d83e1e9c8ca898d561f74461df7e",
+    "demux/reference_reader.h": "4894866fc49f8ab7af9f4d5b3a29bfc7d1ac4153483fd04354db3e89e55cad03",
+    "demux/reference_reader_internal.h": "6b21e2b72c87c49d609fdfca0252c32635d50054abe4eaae33340fc5b7da1a9c",
+    "stream/stream_lavf.c": CANCEL["stream/stream_lavf.c"],
+    "stream/reference_source.h": CANCEL["stream/reference_source.h"],
+    "stream/vortx_reference_reader_stream.h": "adaeb9d58c20ba3305bce4784205c20d6276ba67a758a9ec7207c850c7ba8d87",
+    "player/owned_subtitle.c": "242697e6be2bd2e10272679a3d618f07a07138b7a15b3b94cdbfdf521599bb25",
+    "player/owned_subtitle.h": "8d2f0ee5c972d1da69213cd80fbe249bcf3f19d9de8a2ef87e241d2f08f06284",
+    "player/command.c": "661388627775cf58dec688388d36aba9e457b0f3e97d349a91033f3f5f1f6e3b",
+    "player/reference_owned.inc": "4402bcd094a80a769479320ac852c329acb39781fa8fc478d0ed79af10ae19e2",
+    "sub/owned_text_slot.h": "63c498dd4bdc9fa9c6d128f1be8f37d7cdf377c853888342897f6639601662f6",
+    "sub/osd.c": "9b57ccd08e5777e2bc644cbf8001df0301552edf5cf24e36185a54f4cd667195",
+    "sub/dec_sub.c": "6e2137b90fe7f2915a528bdd83426448afbd099229f65342dbfd85d1ba1d347b",
+    "sub/dec_sub.h": "cb9b5af7c3f87a8dda584617c1f20a90a9331182d54a50c7e5fb8e64e74b384f",
+}
+READER_MPV_MESON = {
+    "apple": "4c748249732131a2942b66087fa7142a2f9c239274cc272a35ec36221c010205",
+    "android": "316e9aca3c4960701eab42e62ca1005379e082e1a21b4788b7581811ca360147",
 }
 MBEDTLS = {"apple": "77d72cb88fc662b984f051335b356abc3e76e97ce39302dde6961ecdbba7a332",
            "android": "7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac"}
@@ -83,9 +114,14 @@ GITLINKS = {"3rdparty/Vulkan-Headers": "74d8a6cb930c68ef617b202c3ff3c59d919e086b
             "3rdparty/markupsafe": "297fc8e356e6836a62087949245d09a28e9f1b13",
             "demos/3rdparty/nuklear": "242f35efa067a46c595645eeda7b1771ea1f83b1"}
 LIBRARIES = "Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo".split()
-CREATED_MPV = {"player/owned_subtitle.c": "875d9f0192cd5f45acca2654765bdc667df5d12dd6eabf9aef5caec5cdec821d",
-               "player/owned_subtitle.h": "2e9e64d92938e41c14c3397c9fbe7d064c2fe8aa5d2dcd05db4b9a74f4bad22e",
-               "sub/owned_text_slot.h": "b5f99151efb15ba937f630d1c2589c1e6634a4bebb744a161283cb70b3e250b6",
+CREATED_MPV = {"player/owned_subtitle.c": READER_MPV["player/owned_subtitle.c"],
+               "player/owned_subtitle.h": READER_MPV["player/owned_subtitle.h"],
+               "player/reference_owned.inc": READER_MPV["player/reference_owned.inc"],
+               "demux/reference_reader.c": READER_MPV["demux/reference_reader.c"],
+               "demux/reference_reader.h": READER_MPV["demux/reference_reader.h"],
+               "demux/reference_reader_internal.h": READER_MPV["demux/reference_reader_internal.h"],
+               "stream/vortx_reference_reader_stream.h": READER_MPV["stream/vortx_reference_reader_stream.h"],
+               "sub/owned_text_slot.h": READER_MPV["sub/owned_text_slot.h"],
                "stream/reference_source.h": CANCEL["stream/reference_source.h"],
                "stream/vortx_http_request.h": "d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9"}
 PATCH_COPIES = [
@@ -103,7 +139,8 @@ PATCH_COPIES = [
     ("0015-completed-response-observation.patch", "0010-completed-response-observation.patch", "mpv-completed-response-observation.patch"),
     ("0016-sent-request-evidence.patch", "0011-sent-request-evidence.patch", "mpv-sent-request-evidence.patch"),
     ("0017-bounded-prefix-request.patch", "0012-bounded-prefix-request.patch", "mpv-bounded-prefix-request.patch"),
-    ("0018-original-transport-evidence.patch", "0013-original-transport-evidence.patch", "mpv-original-transport-evidence.patch")]
+    ("0018-original-transport-evidence.patch", "0013-original-transport-evidence.patch", "mpv-original-transport-evidence.patch"),
+    ("0019-finite-reference-reader.patch", "0014-finite-reference-reader.patch", "mpv-finite-reference-reader.patch")]
 
 
 def untracked(lane, row, recipe):
@@ -123,6 +160,9 @@ def untracked(lane, row, recipe):
         transport_path = ("Sources/BuildScripts/patch/FFmpeg/0004-original-transport-evidence.patch" if lane == "apple"
                           else "buildscripts/patches/ffmpeg/0005-original-transport-evidence.patch")
         result[transport_path] = recipe["scripts/ffmpeg-original-transport-evidence.patch"]
+        reader_path = ("Sources/BuildScripts/patch/FFmpeg/0005-finite-reference-reader.patch" if lane == "apple"
+                       else "buildscripts/patches/ffmpeg/0006-finite-reference-reader.patch")
+        result[reader_path] = recipe["scripts/ffmpeg-finite-reference-reader.patch"]
         if lane == "android":
             result["buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"] = recipe["scripts/native-media-hosted/android/buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"]
             for helper in ("download-lua.sh", "download-libunibreak.sh"):
@@ -135,7 +175,8 @@ def untracked(lane, row, recipe):
             result["video/out/vulkan/context_moltenvk.m"] = "00d2842ddb0dca5070feaf890c0190a0fe62beef9b29ec36e94e329d29a3da5e"
         return result
     if row["commit"] == PINS["ffmpeg"]:
-        result = {"libavformat/vortx_http_request.h": "d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9"}
+        result = dict(READER_FFMPEG_CREATED, **{"libavformat/vortx_http_request.h":
+                      "d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9"})
         if lane == "android":
             result["libavformat/tls_mbedtls_vortx_distrust.h"] = "376bd507b67b3b912443bda657465204b808518ea353d161e23e47e9b64c0bf4"
         return result
@@ -150,6 +191,10 @@ def require_response_source(files, lane):
         row = files.get(name, {})
         need(row.get("kind") == "file" and row.get("tracked") is True and row.get("sha256") == checksum,
              "Response-witness afterimage: " + name)
+    for name, checksum in READER_FFMPEG_CREATED.items():
+        row = files.get(name, {})
+        need(row.get("kind") == "file" and row.get("tracked") is False and row.get("sha256") == checksum,
+             "Finite-reader private source: " + name)
 
 
 def need(ok, message):
@@ -421,17 +466,22 @@ def git_blob(repo, commit, name):
 
 
 SENT_FFMPEG_FUNCTIONS = frozenset(("avpriv_vortx_http_copy_sent_request_v2", "avpriv_vortx_http_sent_request_clear_v2"))
+REFERENCE_FFMPEG_FUNCTIONS = frozenset((
+    "avpriv_vortx_reference_capture_v1", "avpriv_vortx_reference_revalidate_v1",
+    "avpriv_vortx_reference_recipe_current", "avpriv_vortx_reference_open_prefix_v1",
+    "avpriv_vortx_reference_read_v1", "avpriv_vortx_reference_stats_v1",
+    "avpriv_vortx_reference_reader_close_v1", "avpriv_vortx_reference_recipe_release_v1"))
 PRIVATE_MPV_FUNCTIONS = frozenset(("stream_reference_sent_request_copy_transport",))
 
 
-def sent_request_abi(value, records, validator_sha256):
+def dynamic_bridge_abi(value, records, validator_sha256, functions, schema, retired_v1):
     """Validate producer inspection metadata against already byte-bound JNI rows.
 
     This offline consumer does not execute an inspector or independently certify ELF.
     """
-    keys(value, "schema reader libraries retiredV1Absent")
-    need(type(value["schema"]) is int and value["schema"] == 2 and value["retiredV1Absent"] is True,
-         "V2 sent-request ABI and retired-provider absence")
+    keys(value, "schema reader libraries" + (" retiredV1Absent" if retired_v1 else ""))
+    need(type(value["schema"]) is int and value["schema"] == schema and
+         (not retired_v1 or value["retiredV1Absent"] is True), "Exact dynamic bridge ABI schema")
     reader = value["reader"]
     keys(reader, "mode requestedReader resolvedReader readerSHA256 readerVersion validatorSHA256")
     need(reader["mode"] in {"hosted-ndk-reader", "explicit-read-only-inspector"}, "Sent-request reader mode")
@@ -455,12 +505,12 @@ def sent_request_abi(value, records, validator_sha256):
         entry = "jni/" + row["abi"] + "/" + row["library"]
         need(entry in records and digest(row["binarySHA256"]) == records[entry]["sha256"], "Sent-request inspected JNI bytes")
         digest(row["dynsymTextSHA256"])
-        need(type(row["symbols"]) is list and len(row["symbols"]) == len(SENT_FFMPEG_FUNCTIONS), "Sent-request function count")
+        need(type(row["symbols"]) is list and len(row["symbols"]) == len(functions), "Dynamic bridge function count")
         names = []
         for symbol in row["symbols"]:
             keys(symbol, "name version defaultVersion type binding visibility section")
             name, version = symbol["name"], symbol["version"]
-            need(name in SENT_FFMPEG_FUNCTIONS and name not in names and symbol["type"] == "FUNC" and
+            need(name in functions and name not in names and symbol["type"] == "FUNC" and
                  symbol["binding"] == "GLOBAL" and symbol["visibility"] == "DEFAULT", "Sent-request exact function identity")
             names.append(name)
             need(type(symbol["defaultVersion"]) is bool and (version is None or
@@ -469,8 +519,17 @@ def sent_request_abi(value, records, validator_sha256):
             section = symbol["section"]
             need(type(section) is str and (section == "UND" if row["role"] == "undefined-import" else
                  re.fullmatch(r"[0-9]+", section) is not None and int(section) > 0), "Sent-request function definition/import role")
-        need(names == sorted(SENT_FFMPEG_FUNCTIONS), "Sent-request canonical function order")
+        need(names == sorted(functions), "Dynamic bridge canonical function order")
     need(seen == set(expected), "Sent-request complete ABI/library coverage")
+
+
+def sent_request_abi(value, records, validator_sha256):
+    dynamic_bridge_abi(value, records, validator_sha256, SENT_FFMPEG_FUNCTIONS, 2, True)
+
+
+def reference_reader_abi(value, records, validator_sha256, expected_reader):
+    dynamic_bridge_abi(value, records, validator_sha256, REFERENCE_FFMPEG_FUNCTIONS, 1, False)
+    need(value["reader"] == expected_reader, "Finite-reader and sent-request inspector identity")
 
 
 def private_owner_abi(value, records, expected_reader):
@@ -510,7 +569,7 @@ def private_owner_abi(value, records, expected_reader):
 
 def android(archive, inputs, recipe):
     evidence = load(read(archive, "android-artifact-evidence.json"))
-    keys(evidence, "aarSHA256 libraries runtimeSecurityTested appAndSeamBindingChanged promotionEligible sentRequestABI privateOwnerABI" +
+    keys(evidence, "aarSHA256 libraries runtimeSecurityTested appAndSeamBindingChanged promotionEligible sentRequestABI privateOwnerABI referenceReaderABI" +
          (" inspection" if "inspection" in evidence else ""))
     need(evidence["aarSHA256"] == inputs["libmpv-release-candidate.aar"]["sha256"] and
          all(evidence[key] is False for key in ("runtimeSecurityTested", "appAndSeamBindingChanged", "promotionEligible")), "Android receipt boundary")
@@ -535,6 +594,8 @@ def android(archive, inputs, recipe):
     need(set(records) == set(jni) and {name.split("/")[1] for name in jni} == admitted and all(
          required <= {name.split("/")[-1] for name in jni if name.startswith("jni/" + abi + "/")} for abi in admitted), "Android ABI/library coverage")
     sent_request_abi(evidence["sentRequestABI"], records, recipe["scripts/native-media-hosted/evidence.py"])
+    reference_reader_abi(evidence["referenceReaderABI"], records,
+                         recipe["scripts/native-media-hosted/evidence.py"], evidence["sentRequestABI"]["reader"])
     private_owner_abi(evidence["privateOwnerABI"], records, evidence["sentRequestABI"]["reader"])
     if "inspection" in evidence:
         need(evidence["inspection"] == evidence["sentRequestABI"]["reader"] and
@@ -547,7 +608,8 @@ def apple(archive, native, captured):
     gate = read(archive, "apple-artifact-gate.txt", MIB).decode("utf-8")
     need("TLS VERIFY PASSED: 5 Apple slices and 9 architectures use SecureTransport" in gate.splitlines() and
          "MPVKit-DVFEL ARTIFACT VERIFY PASSED: FFmpeg 9.0.2 (libavcodec/libavformat 63.1.102), dovi_split, and Apple TLS gates" in gate.splitlines() and
-         "PASS apple-sent-abi" in gate.splitlines() and "FAILED" not in gate, "Apple original and sent-request artifact gates")
+         "PASS apple-sent-abi" in gate.splitlines() and "PASS apple-reference-abi" in gate.splitlines() and
+         "FAILED" not in gate, "Apple original, sent-request and finite-reader artifact gates")
     candidate, actual = tar_index(archive, "apple-candidate.tar.gz", file_limit=512 * MIB, total=4 * 1024**3, capture=("MPVKit-DVFEL/Package.swift",), allow_dirs=True)
     zips, _ = tar_index(archive, "apple-original-library-zips.tar", compressed=False, file_limit=512 * MIB, total=4 * 1024**3, allow_dirs=True)
     need(set(zips) == {name + ".xcframework.zip" for name in LIBRARIES} and all(row["kind"] == "file" for row in zips.values()), "Apple original ZIP set")
@@ -622,9 +684,9 @@ def package(args):
                 checksum, name = line.split("  ")
                 need(name not in recipe, "Duplicate reviewed input")
                 recipe[path(name)] = checksum
-            need(set(recipe) == RECIPE_PATHS and len(recipe) == 34, "Exact 34 reviewed recipe identities")
+            need(set(recipe) == RECIPE_PATHS and len(recipe) == 36, "Exact 36 reviewed recipe identities")
             producer = declared(meta["producerFiles"], "producer")
-            need(set(producer) == {"producer/" + name for name in RECIPE_PATHS | {INPUT_MANIFEST, WORKFLOW}}, "Exact 36 producer files")
+            need(set(producer) == {"producer/" + name for name in RECIPE_PATHS | {INPUT_MANIFEST, WORKFLOW}}, "Exact 38 producer files")
             for name, row in producer.items():
                 need(row == git_blob(args.repo, args.source_commit, name.removeprefix("producer/")) and row["kind"] == "file", "Immutable producer Git blob/mode")
                 relative = name.removeprefix("producer/")
@@ -660,9 +722,9 @@ def package(args):
                  all(groups[name]["commit"] == commit for name, commit in known.items()), "Exact admitted public native roots/revisions")
             need(len(native) <= 100000 and sum(row["bytes"] for row in native.values() if row["kind"] == "file") <= 2 * 1024**3, "Combined native bounds")
             mpv = next(row for row in meta["sources"] if row["commit"] == PINS["mpv"])
-            for name, checksum in CANCEL.items():
+            for name, checksum in (CANCEL | READER_MPV | {"meson.build": READER_MPV_MESON[args.lane]}).items():
                 row = native.get(mpv["root"] + "/" + name)
-                need(row and row["kind"] == "file" and row["sha256"] == checksum, "Cancellation afterimage: " + name)
+                need(row and row["kind"] == "file" and row["sha256"] == checksum, "Cancellation/finite-reader afterimage: " + name)
             ffmpeg = next(row for row in meta["sources"] if row["commit"] == PINS["ffmpeg"])
             require_response_source({row["path"]: row for row in ffmpeg["files"]}, args.lane)
             for key, name, expected_rows in (("producerArchive", "producer-inputs-v2.tar.gz", producer), ("nativeArchive", "native-sources-v2.tar.gz", native)):
