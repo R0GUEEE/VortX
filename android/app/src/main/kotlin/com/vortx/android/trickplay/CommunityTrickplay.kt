@@ -279,7 +279,23 @@ object CommunityTrickplay {
                 cols = cols,
                 tileW = tileW,
                 tileH = tileH,
-            ) ?: return null
+            )
+            return cropCue(cue)
+        }
+
+        /** Approximate resident-sheet fallback. The cue retains its actual capture interval. */
+        fun nearestCrop(time: Double): Bitmap? = cropCue(TrickplayTimeline.nearestCue(
+            time = time,
+            parsedCues = cues,
+            frameCount = frameCount,
+            legacyInterval = intervalS,
+            cols = cols,
+            tileW = tileW,
+            tileH = tileH,
+        ))
+
+        private fun cropCue(cue: TrickplayTimelineCue?): Bitmap? {
+            cue ?: return null
             if (cue.x < 0 || cue.y < 0 || cue.x + cue.width > bitmap.width ||
                 cue.y + cue.height > bitmap.height
             ) {

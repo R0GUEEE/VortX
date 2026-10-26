@@ -122,10 +122,18 @@ class TrickplaySession(context: Context) {
             resolution.reset()
             deferredUpload = null
             uploadCoordinator.revokeAdmissions()
-            // A new configuration cannot register a child until revocation has finished cancelling
-            // old children. No suspending cleanup is placed behind this monitor.
+            // Concurrent job-finally removals may shrink this CHM view after a size probe.
+            // Iterate its weakly consistent iterator directly; Collection.toList's singleton
+            // shortcut can otherwise call next() on an already-empty view.
+            val requestsToRevoke = buildList {
+                val requests = activeRequests.iterator()
+                while (requests.hasNext()) add(requests.next())
+            }
+            // Capture before cancellation can deregister an old request in its finally block.
+            // The same monitor excludes new-source admissions until old children are cancelled;
+            // actual network disconnection remains outside this monitor below.
             scope.coroutineContext.cancelChildren()
-            activeRequests.toList()
+            requestsToRevoke
         }
         // Disconnect only the captured old set, never a request registered after re-enabling.
         revokedRequests.forEach(CommunityTrickplayRequestControl::cancel)
@@ -307,7 +315,10 @@ class TrickplaySession(context: Context) {
         if (!consentGate.permits(expected.request.source.consentGeneration)) return null
         // Both layers are derived from ONE identity. Neither cropping nor the resident-cache read holds
         // the metadata monitor, and neither performs disk or network I/O.
+        // Like Apple, prefer exact community coverage and local captures before an approximate
+        // resident community tile. The seek destination stays [timeSeconds], not the tile's time.
         val result = expected.sheet?.crop(timeSeconds) ?: localCache.previewAt(expected.key, timeSeconds)
+            ?: expected.sheet?.nearestCrop(timeSeconds)
         return publication.withState {
             if (publication.isCurrent(expected) &&
                 consentGate.permits(expected.request.source.consentGeneration)
