@@ -363,6 +363,7 @@ fun PlayerScreen(
     }
     var subtitleDelaySeconds by remember(playbackSessionKey) { mutableStateOf(savedSubtitleDelay ?: 0.0) }
     val subtitleTiming = remember(playbackSessionKey) { SubtitleTimingSession(savedSubtitleDelay) }
+    var subtitlePoolRetry by remember(playbackSessionKey) { mutableStateOf(0L) }
     DisposableEffect(subtitleTiming) { onDispose { subtitleTiming.retire() } }
     // Capture BEFORE the original manager/UI/account/profile proof; never adopt a successor epoch.
     val originalOwnerCandidate = remember { PlaybackOwnerEpoch.capture() }
@@ -1422,9 +1423,6 @@ fun PlayerScreen(
     // identity from inventory count/order, which can change when unrelated sidecars finish.
     var addonSubtitles by remember(playbackSessionKey) { mutableStateOf<List<AddonSubtitle>>(emptyList()) }
     var trackSelectionPhases by remember(playbackSessionKey, engine) { mutableStateOf(TrackSelectionPhases()) }
-    fun mountAddonSubtitle(sub: AddonSubtitle, original: PlayerSubtitleSelection) {
-        engine.addExternalSubtitle(sub.url, original)
-    }
     // Shared by phone and TV: pool IO is owned by the exact source/account/profile lifetime.
     // Freeze the first real duration/release query rather than applying a duration-0 pool offset.
     val subtitlePoolScope = rememberCoroutineScope()
@@ -1446,7 +1444,33 @@ fun PlayerScreen(
     fun admitCurrentSubtitleEngine(action: () -> Boolean): Boolean = withCurrentSubtitleOwner {
         latestSubtitleEngine === engine && action()
     }
-    LaunchedEffect(playbackSessionKey, engine, subtitlePoolQuery, poolThin, poolSignedIn) {
+    fun mountAddonSubtitle(sub: AddonSubtitle, original: PlayerSubtitleSelection) {
+        if (!withCurrentSubtitleOwner { engine.isSubtitleSelectionCurrent(original) }) return
+        val timingAttempt = subtitleTiming.beginAlignment() ?: return
+        subtitlePoolScope.launch {
+            var aligned = false
+            try {
+                if (!subtitleTiming.prepareAlignment(timingAttempt, ::admitCurrentSubtitleEngine) {
+                        if (!engine.setSubtitleDelay(0.0, original)) false else {
+                            subtitleDelaySeconds = 0.0
+                            true
+                        }
+                    }) return@launch
+                if (!engine.isSubtitleSelectionCurrent(original)) return@launch
+                val result = engine.selectExternalSubtitleAutomatically(sub.url, sub.lang, original)
+                currentCoroutineContext().ensureActive()
+                aligned = result == PlayerExternalSubtitleSelectionResult.ALIGNED &&
+                    withCurrentSubtitleOwner { latestSubtitleEngine === engine && engine.isSubtitleSelectionCurrent(original) }
+            } finally {
+                // Retrying only releases the exact older hold. A newer selection keeps its own hold.
+                if (subtitleTiming.finishAlignment(timingAttempt, aligned) && !aligned &&
+                    withCurrentSubtitleOwner { true }) {
+                    subtitlePoolRetry += 1L
+                }
+            }
+        }
+    }
+    LaunchedEffect(playbackSessionKey, engine, subtitlePoolQuery, poolThin, poolSignedIn, subtitlePoolRetry) {
         val query = subtitlePoolQuery ?: return@LaunchedEffect
         val original = engine.captureSubtitleSelection() ?: return@LaunchedEffect
         val syncEnabled = com.vortx.android.config.RemoteConfig.isFeatureOn("subtitleSync",
@@ -1728,10 +1752,11 @@ fun PlayerScreen(
     // Community trickplay (shared scrub previews). Three seams, all fail-soft, all keyed per title:
     //   1. KEY + FETCH  -- below, once the engine reports a real duration.
     //   2. CAPTURE      -- the wall-clock driver further down.
-    //   3. SERVE        -- [previewAt] handed to the chrome's scrubber.
+    //   3. SERVE        -- suspendable worker preview handed to the chrome's scrubber.
     // The session owns its own scope (it must outlive this composition to flush on exit), so it is only
     // remembered here, never scoped to the composition.
     val trickplay = remember(playbackSessionKey) { TrickplaySession(context) }
+    val trickplayPreviewRevision by trickplay.previewRevision.collectAsStateWithLifecycle()
 
     // KEY + FETCH. Gated on a real reported duration because the content key is
     // sha1(imdb:season:episode:durationBucket) -- keying on 0 would compute the WRONG key and index a
@@ -2413,11 +2438,10 @@ fun PlayerScreen(
             } else {
                 null
             },
-            // SERVE: the community scrub preview. Synchronous by contract -- the chrome calls this for
-            // every drag frame, so it only ever crops an already-downloaded sprite in memory. Returns null
-            // until (or unless) this title has a community sheet, and the scrubber then simply shows no
-            // thumbnail, exactly as it does today.
-            scrubPreview = trickplay::previewAt,
+            // SERVE: bitmap work and bounded local disk fallback stay on the session's worker context.
+            // Revision also refreshes a stationary scrub when a sheet or local frame arrives.
+            scrubPreview = trickplay::loadPreviewAt,
+            scrubPreviewRevision = trickplayPreviewRevision,
             // TV-only chrome opt-ins (both default off on the phone host, leaving its chrome unchanged).
             shareLink = shareLink,
             isTvPlayer = isTvPlayer,

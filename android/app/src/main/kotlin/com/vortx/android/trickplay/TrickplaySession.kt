@@ -11,6 +11,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
@@ -66,6 +72,11 @@ class TrickplaySession(context: Context) {
     /** Per-device local frame cache, behind the immutable community preview snapshot. */
     private val localCache = LocalTrickplayFrameCache(context)
 
+    /** Refreshes a stationary scrub after a sheet or local frame becomes available. */
+    private val previewRevisionState = MutableStateFlow(0L)
+    val previewRevision: StateFlow<Long> = previewRevisionState.asStateFlow()
+    private fun previewChanged() { previewRevisionState.update { it + 1L } }
+
     /** Identity of the title currently keyed. Guarded by [publication]'s monitor. */
     private var contentKey: String? = null
     private var imdbId: String? = null
@@ -117,6 +128,7 @@ class TrickplaySession(context: Context) {
         val revokedRequests = publication.withState {
             consentGate.revoke()
             publication.invalidate()
+            previewChanged()
             resetRetainedState()
             sourceOwner = null
             resolution.reset()
@@ -279,12 +291,14 @@ class TrickplaySession(context: Context) {
             // Captured frames stay valid: they are time-indexed, not bucket-indexed.
             if (wasKeyed) existingFrameCount = 0
             if (!publication.bind(request, key)) return@withState null
+            previewChanged()
             wasKeyed
         } ?: return
         // Publish the local-cache key and warm this device's own frames for it from disk, so a re-opened
         // title serves the viewer's previous previews before any fresh capture lands.
-        localCache.warm(key)
+        localCache.warm(key) { requestIsCurrent(request) }
         if (!requestIsCurrent(request)) return
+        previewChanged()
         Log.d(TAG, "community ${if (rekeying) "re-keyed" else "keyed"}: $key (imdb=$tt)")
 
         val requestControl = requestControl(request) ?: return
@@ -299,6 +313,7 @@ class TrickplaySession(context: Context) {
                 !publication.publish(request, key, fetched)
             ) return@withState false
             existingFrameCount = fetched.frameCount
+            previewChanged()
             true
         }
         if (accepted) Log.d(TAG, "community sheet HIT key=$key frames=${fetched.frameCount}")
@@ -324,6 +339,26 @@ class TrickplaySession(context: Context) {
                 consentGate.permits(expected.request.source.consentGeneration)
             ) result else null
         }
+    }
+
+    /**
+     * Worker-owned scrub resolution. Exact community coverage still wins; a resident local miss can
+     * consult the requested disk range before falling back to an approximate community tile. The one
+     * original immutable publication claim fences every suspension and the final result.
+     */
+    suspend fun loadPreviewAt(timeSeconds: Double): Bitmap? = withContext(Dispatchers.Default) {
+        currentCoroutineContext().ensureActive()
+        if (!timeSeconds.isFinite() || timeSeconds < 0.0) return@withContext null
+        val expected = publication.snapshot() ?: return@withContext null
+        fun isCurrent(): Boolean = publication.withState {
+            publication.isCurrent(expected) && contributionIsCurrent(expected.request.source.consentGeneration)
+        }
+        if (!isCurrent()) return@withContext null
+        val result = expected.sheet?.crop(timeSeconds) ?: localCache.previewAt(expected.key, timeSeconds)
+            ?: localCache.loadPreviewAt(expected.key, timeSeconds, ::isCurrent)
+            ?: expected.sheet?.nearestCrop(timeSeconds)
+        currentCoroutineContext().ensureActive()
+        publication.withState { if (isCurrent()) result else null }
     }
 
     /**
@@ -372,6 +407,11 @@ class TrickplaySession(context: Context) {
             admitted?.let { (key, push) ->
                 // Use the key admitted with THIS frame, never a later title's volatile local key.
                 localCache.store(key, timeSeconds, jpeg)
+                publication.withState {
+                    if (publication.isCurrent(source) && sourceOwner === source &&
+                        contributionIsCurrent(source.consentGeneration)
+                    ) previewChanged()
+                }
                 push?.let(::launchUpload)
             }
         }
@@ -445,6 +485,7 @@ class TrickplaySession(context: Context) {
     fun finishAndFlush() {
         publication.withState {
             val source = publication.close()
+            previewChanged()
             admissionQueue.closeAndEnqueue {
                 val push = publication.withState {
                     source?.let { uploadDecision(progressive = false, source = it) }

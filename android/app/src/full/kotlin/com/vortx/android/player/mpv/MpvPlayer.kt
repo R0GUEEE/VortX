@@ -39,6 +39,8 @@ import com.vortx.android.player.SessionAudioPresetSession
 import com.vortx.android.player.SessionAudioRouteRequest
 import com.vortx.android.player.SubtitleStyle
 import com.vortx.android.player.PlayerSubtitleSelection
+import com.vortx.android.player.PlayerExternalSubtitleSelectionResult
+import com.vortx.android.player.subtitles.SubtitleAlignmentFile
 import com.vortx.android.player.SubtitleSelectionAuthority
 import com.vortx.android.player.PlaybackOwnerToken
 import com.vortx.android.player.VideoScaleMode
@@ -140,13 +142,17 @@ class MpvPlayer private constructor(
     /// The former eof-reached flag heuristic is GONE: it was a global, non-source-scoped property that
     /// could stale-race across source generations; with real reasons there is nothing left to infer.
     private val failureCoordinator = EngineFailureCoordinator<EngineTerminalVerdict>()
+    // Read/written ONLY by publication callbacks under MpvTerminalGate's own lock. Pending verdicts
+    // retain this original source generation; never rename old EOF using a later host load counter.
+    private var terminalSourceGeneration = 0L
     private val terminalGate = MpvTerminalGate { hasEnded, hasError, isBuffering, terminal ->
-        val verdict = EngineTerminalVerdict(hasEnded, hasError, isBuffering)
+        val verdict = EngineTerminalVerdict(hasEnded, hasError, isBuffering, terminalSourceGeneration)
         if (terminal) {
             applyFailureResolution(failureCoordinator.onTerminal(verdict))
         } else {
             // Source reset runs under the terminal gate's lock, preserving one global lock order:
             // terminal gate -> failure coordinator. Old async opportunity completions then become no-ops.
+            terminalSourceGeneration = subtitleLoadGeneration.get()
             failureCoordinator.reset()
             _state.update {
                 it.copy(hasEnded = hasEnded, hasError = hasError, isBuffering = isBuffering)
@@ -161,13 +167,8 @@ class MpvPlayer private constructor(
         if (!shouldPublishMpvFailureResolution(released.get())) return
         when (resolution) {
             EngineFailureResolution.None -> Unit
-            is EngineFailureResolution.CommitTerminal -> _state.update {
-                it.copy(
-                    hasEnded = resolution.terminal.hasEnded,
-                    hasError = resolution.terminal.hasError,
-                    isBuffering = resolution.terminal.isBuffering,
-                )
-            }
+            is EngineFailureResolution.CommitTerminal -> applySubtitleRetirement(
+                subtitleRetirements.onTerminal(resolution.terminal.sourceGeneration, resolution.terminal))
             is EngineFailureResolution.Demote -> {
                 _state.update { it.requestEngineFallback(resolution.reason) }
                 Log.e(TAG, "libmpv ${resolution.reason}; requesting Media3 fallback")
@@ -188,9 +189,39 @@ class MpvPlayer private constructor(
     private var pendingResumeSeekMs: Long = 0L
 
     private val runtimePolicyScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /** A whole-handle failure remains valid across source resets, never across engine/owner rebinding. */
+    private fun applySubtitleRetirement(resolution: MpvSubtitleRetirementGate.Resolution<EngineTerminalVerdict>) {
+        synchronized(subtitleGenerationGate) {
+            if (released.get() || originalPlaybackOwner?.isActive != true) return
+            when (resolution) {
+                MpvSubtitleRetirementGate.Resolution.None -> Unit
+                MpvSubtitleRetirementGate.Resolution.HandleUnavailable -> _state.update {
+                    it.requestEngineFallback(EngineFallbackReason.SUBTITLE_RETIREMENT_UNCONFIRMED)
+                }
+                is MpvSubtitleRetirementGate.Resolution.Terminal -> {
+                    if (subtitleRetirements.isUsable && subtitleLoadGeneration.get() == resolution.generation) _state.update {
+                        it.copy(hasEnded = resolution.verdict.hasEnded, hasError = resolution.verdict.hasError,
+                            isBuffering = resolution.verdict.isBuffering)
+                    }
+                }
+            }
+        }
+    }
+
     private val subtitleLoadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val subtitleLoadGeneration = AtomicLong()
     private val subtitleGenerationGate = Any()
+    private val subtitleRetirements = MpvSubtitleRetirementGate<EngineTerminalVerdict>()
+    private val automaticSubtitleAlignment = MpvAutomaticSubtitleAlignment {
+        val ticket = subtitleRetirements.beginRetirement()
+        val completion: (com.vortx.android.player.mpv.seam.MpvReferenceClose) -> Unit = { close ->
+            if (ticket != null) applySubtitleRetirement(subtitleRetirements.complete(ticket,
+                close == com.vortx.android.player.mpv.seam.MpvReferenceClose.TEARDOWN_REQUESTED))
+        }
+        completion
+    }
+    // Bounded owned raw fallbacks, never deleted by a different request or a cache-wide sweep.
+    private val alignmentFiles = mutableListOf<File>()
     // All mutation/retirement and final local-file/native property admission use the EXISTING gate.
     // The receipt helper itself performs no IO/callback and holds no lock across a native call.
     private val subtitleSelections = SubtitleSelectionAuthority()
@@ -430,9 +461,12 @@ class MpvPlayer private constructor(
 
     override fun load(playable: Playable) {
         if (released.get() || originalPlaybackOwner?.isActive != true) return
+        var retireAlignment: (() -> Unit)? = null
         val (loadGeneration, initialSubtitleSelection) = synchronized(subtitleGenerationGate) {
             if (released.get() || originalPlaybackOwner?.isActive != true) return
+            retireAlignment = automaticSubtitleAlignment.takeRetirement()
             val generation = subtitleLoadGeneration.incrementAndGet()
+            if (!subtitleRetirements.beginSource(generation)) return
             val original = subtitleSelections.beginSource(generation) ?: return
             metadataLoadIdentity.begin(generation)
             startupSampleBudget = StartupSampleBudget(SystemClock.elapsedRealtime())
@@ -443,6 +477,7 @@ class MpvPlayer private constructor(
                 sessionAudioPreset = sessionAudioPreset.state, startupEvidence = PlaybackStartupEvidence.AWAITING) }
             generation to original
         }
+        retireAlignment?.invoke()
         // Reset terminal classification and invalidate the previous source's opportunity tokens before
         // cancelling its jobs. Their finally blocks may run immediately; completion must be a no-op for
         // this new source generation.
@@ -653,10 +688,8 @@ class MpvPlayer private constructor(
     override fun selectAudioTrack(id: Int) { mpv.setPropertyString(PROP_AID, id.toString()) }
 
     override fun selectSubtitleTrack(id: Int?) {
-        synchronized(subtitleGenerationGate) {
-            if (released.get() || originalPlaybackOwner?.isActive != true || subtitleSelections.beginChoice() == null) return
-            mpv.setPropertyString(PROP_SID, id?.toString() ?: "no")
-        }
+        val original = beginSubtitleSelection() ?: return
+        selectSubtitleTrack(id, original)
     }
 
     override fun addExternalSubtitle(url: String) {
@@ -664,8 +697,14 @@ class MpvPlayer private constructor(
         addExternalSubtitle(url, original)
     }
 
-    override fun beginSubtitleSelection(): PlayerSubtitleSelection? = synchronized(subtitleGenerationGate) {
-        if (released.get() || originalPlaybackOwner?.isActive != true) null else subtitleSelections.beginChoice()
+    override fun beginSubtitleSelection(): PlayerSubtitleSelection? {
+        val captured = synchronized(subtitleGenerationGate) {
+            if (released.get() || originalPlaybackOwner?.isActive != true) return null
+            val request = subtitleSelections.beginChoice() ?: return null
+            request to automaticSubtitleAlignment.takeRetirement()
+        }
+        captured.second()
+        return captured.first
     }
     override fun captureSubtitleSelection(): PlayerSubtitleSelection? = synchronized(subtitleGenerationGate) {
         if (released.get() || originalPlaybackOwner?.isActive != true) null else subtitleSelections.capture()
@@ -692,6 +731,73 @@ class MpvPlayer private constructor(
         }
         mountExternalSubtitle(ExternalSubtitle(url = url), generation, request)
         return true
+    }
+
+    override suspend fun selectExternalSubtitleAutomatically(
+        url: String,
+        language: String,
+        request: PlayerSubtitleSelection,
+    ): PlayerExternalSubtitleSelectionResult {
+        val start = synchronized(subtitleGenerationGate) {
+            if (!isSubtitleSelectionCurrentLocked(request)) return PlayerExternalSubtitleSelectionResult.SUPERSEDED
+            automaticSubtitleAlignment.begin(request)
+        }
+        start.second()
+        val attempt = start.first
+        var result = PlayerExternalSubtitleSelectionResult.FAILED
+        val opportunity = failureCoordinator.beginOpportunity()
+        var mounted = false
+        var owned: SubtitleAlignmentFile? = null
+        try {
+            val selectedId = withContext(Dispatchers.IO) {
+                if (!isSubtitleSelectionCurrent(request) || !automaticSubtitleAlignment.isCurrent(attempt)) return@withContext null
+                val local = boundedSubtitleFile(ExternalSubtitle(url = url)) ?: return@withContext null
+                currentCoroutineContext().ensureActive()
+                val file = try { local.inputStream().use { SubtitleAlignmentFile.freeze(it, appContext.cacheDir) } }
+                    catch (_: java.io.IOException) { null }
+                    catch (_: SecurityException) { null }
+                    ?: return@withContext null
+                owned = file
+                currentCoroutineContext().ensureActive()
+                synchronized(subtitleGenerationGate) {
+                    if (!isSubtitleSelectionCurrentLocked(request) || !automaticSubtitleAlignment.isCurrent(attempt) ||
+                        alignmentFiles.size >= 16) return@synchronized null
+                    alignmentFiles.add(file.file)
+                    mounted = true
+                    mpv.command(arrayOf("sub-add", file.file.absolutePath, "select"))
+                    uniqueMpvExternalSubtitleId(mpv.getPropertyString(PROP_TRACK_LIST), file.file.absolutePath,
+                        mpv.getPropertyInt(PROP_SID))
+                }
+            }
+            if (selectedId == null) {
+                result = when {
+                    !isSubtitleSelectionCurrent(request) -> PlayerExternalSubtitleSelectionResult.SUPERSEDED
+                    !mounted && addExternalSubtitle(url, request) -> PlayerExternalSubtitleSelectionResult.SELECTED_WITHOUT_ALIGNMENT
+                    else -> PlayerExternalSubtitleSelectionResult.FAILED
+                }
+                return result
+            }
+            val originalBytes = owned?.bytes ?: return PlayerExternalSubtitleSelectionResult.FAILED
+            result = withContext(Dispatchers.IO) {
+                automaticSubtitleAlignment.alignMounted(attempt, originalBytes, language, selectedId,
+                    cleanupScope = subtitleLoadScope,
+                    current = { isSubtitleSelectionCurrent(request) },
+                    openOriginal = {
+                        synchronized(subtitleGenerationGate) {
+                            if (!isSubtitleSelectionCurrentLocked(request) || !automaticSubtitleAlignment.isCurrent(attempt)) null
+                            else currentPlayingEntryID()?.let(mpv::openSubtitleReference)
+                        }
+                    })
+            }
+            return result
+        } finally {
+            if (result != PlayerExternalSubtitleSelectionResult.ALIGNED) automaticSubtitleAlignment.discard(attempt)
+            applyFailureResolution(failureCoordinator.completeOpportunity(opportunity,
+                if (result == PlayerExternalSubtitleSelectionResult.NEEDS_STOP)
+                    EngineFallbackReason.SUBTITLE_RETIREMENT_UNCONFIRMED else null))
+            // A mounted raw file remains the native fallback even when matching is unavailable.
+            if (!mounted) owned?.file?.delete()
+        }
     }
 
     private fun mountExternalSubtitle(source: ExternalSubtitle, generation: Long, original: PlayerSubtitleSelection) {
@@ -822,10 +928,8 @@ class MpvPlayer private constructor(
     }
 
     override fun setSubtitleDelay(seconds: Double) {
-        synchronized(subtitleGenerationGate) {
-            if (released.get() || originalPlaybackOwner?.isActive != true) return
-            mpv.setPropertyString(PROP_SUB_DELAY, seconds.toString())
-        }
+        val original = beginSubtitleSelection() ?: return
+        setSubtitleDelay(seconds, original)
     }
 
     override fun setSubtitleDelay(seconds: Double, request: PlayerSubtitleSelection): Boolean =
@@ -840,8 +944,9 @@ class MpvPlayer private constructor(
     /// republishes [PlayerState.subtitleTracks] so the chrome re-reads [secondarySubtitleId]. Mirrors Apple
     /// `setSecondarySubtitleTrack`.
     override fun setSecondarySubtitleTrack(id: Int?) {
+        val original = beginSubtitleSelection() ?: return
         synchronized(subtitleGenerationGate) {
-            if (released.get() || originalPlaybackOwner?.isActive != true || subtitleSelections.beginChoice() == null) return
+            if (!isSubtitleSelectionCurrentLocked(original)) return
             mpv.setPropertyString(PROP_SECONDARY_SID, id?.takeIf { it >= 0 }?.toString() ?: "no")
         }
     }
@@ -1292,11 +1397,14 @@ class MpvPlayer private constructor(
     }
 
     override fun release() {
+        var retireAlignment: (() -> Unit)? = null
         synchronized(subtitleGenerationGate) {
             // Retirement and load-owned publication share one monitor. A callback cannot pass a final
             // released check then publish after a concurrent release has claimed this instance.
             if (!released.compareAndSet(false, true)) return
+            retireAlignment = automaticSubtitleAlignment.takeRetirement()
             subtitleSelections.retire()
+            subtitleRetirements.retire()
             subtitleLoadGeneration.incrementAndGet()
             metadataLoadIdentity.retire()
             startupSample = null
@@ -1306,6 +1414,7 @@ class MpvPlayer private constructor(
             _state.update { it.copy(metadata = com.vortx.android.player.PlaybackMetadata(),
                 sessionAudioPreset = sessionAudioPreset.state, startupEvidence = PlaybackStartupEvidence.UNAVAILABLE) }
         }
+        retireAlignment?.invoke()
         // Retire every held terminal/opportunity before cancellation. A cancelled audio-health coroutine
         // runs its `finally` and may complete its old opportunity immediately; after reset that completion
         // is a no-op instead of publishing an EOF/error while teardown owns the player.
@@ -1324,6 +1433,8 @@ class MpvPlayer private constructor(
         // Native destruction owns final cleanup of any still-attached surface. SurfaceHolder may deliver
         // surfaceDestroyed before or after this call; both paths are idempotent at the seam.
         mpv.destroy()
+        val retiredFiles = synchronized(subtitleGenerationGate) { alignmentFiles.toList().also { alignmentFiles.clear() } }
+        retiredFiles.forEach { it.delete() }
         // A finished title must not leave a large on-disk cache behind (DiskCacheSetting's second owner
         // guardrail: the cache is wiped on a genuine playback exit). No-op when the disk cache is OFF.
         if (DiskCacheSetting.diskCacheEnabled(appContext)) {
@@ -1659,6 +1770,7 @@ private data class EngineTerminalVerdict(
     val hasEnded: Boolean,
     val hasError: Boolean,
     val isBuffering: Boolean,
+    val sourceGeneration: Long,
 )
 
 /** Fatal-aware surface attach seam: expected runtime failures demote; process-fatal failures propagate. */
