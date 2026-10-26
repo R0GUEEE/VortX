@@ -72,6 +72,9 @@ private enum SubtitleEmbeddedExtractor {
         func cancel() { preconditionFailure("Alignment extraction is outside this fixture") }
     }
 }
+private final class MPVRemoteReferenceCancellation: Sendable {
+    func cancel() { preconditionFailure("Remote reading is outside this nil-collaborator manual fixture") }
+}
 private enum CredentialPublicationOutbox {
     struct SubtitleRendererRegistration: Sendable {}
     static func unregisterSubtitleRenderer(_ registration: SubtitleRendererRegistration) {

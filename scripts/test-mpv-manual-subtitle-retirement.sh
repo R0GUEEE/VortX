@@ -84,6 +84,8 @@ if (supportsOwnedRetirement) stateMembers.push(
   '        var subtitleRendererRegistration: CredentialPublicationOutbox.SubtitleRendererRegistration?',
   '        var alignedSubtitle: MPVAlignedSubtitleRecord?'
 );
+const remoteCancellationMember = '        var subtitleRemoteCancellation: MPVRemoteReferenceCancellation?';
+if (fullState.includes(remoteCancellationMember + '\n')) stateMembers.push(remoteCancellationMember);
 for (const member of stateMembers) once(fullState, member + '\n');
 const projectedNative = native.replace(fullState, '    struct State: Sendable {\n' + stateMembers.join('\n') + '\n    }');
 for (const marker of ['let transaction = NSRecursiveLock()', 'OSAllocatedUnfairLock(initialState: State())', 'transaction.lock(); defer { transaction.unlock() }']) {
