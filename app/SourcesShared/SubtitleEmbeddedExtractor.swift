@@ -573,18 +573,24 @@ enum SubtitleEmbeddedExtractor {
                 assCommas: assCommas, window: window) {
                 // Check BEFORE append. Overflow is a failed extraction, never an
                 // apparently complete prefix that the matcher might trust.
-                if cues.last != cue {
-                    guard cues.count < 1_024 else { throw TimingWindowFailure.budget("cues") }
-                    cues.append(cue)
-                }
+                try appendTimingCue(cue, to: &cues)
             }
         }
         try reader.checkStop()
-        let ordered = cues.sorted {
-            $0.startSeconds == $1.startSeconds
-                ? $0.endSeconds < $1.endSeconds : $0.startSeconds < $1.startSeconds
+        return (cues, packets)
+    }
+
+    /// Keep the complete decoder-order evidence corpus. Equal starts and identical intervals
+    /// may be separate dialogue; they remain separate entries in the confidence denominator.
+    static func appendTimingCue(_ cue: TimingCue, to cues: inout [TimingCue]) throws {
+        guard cue.startSeconds.isFinite, cue.endSeconds.isFinite,
+              cue.startSeconds >= 0, cue.endSeconds <= 86_400,
+              cue.startSeconds < cue.endSeconds else { throw TimingWindowFailure.invalidCueTiming }
+        if let previous = cues.last, cue.startSeconds < previous.startSeconds {
+            throw TimingWindowFailure.invalidCueTiming
         }
-        return (ordered, packets)
+        guard cues.count < 1_024 else { throw TimingWindowFailure.budget("cues") }
+        cues.append(cue)
     }
 
     /// The decoder's bytes-consumed receipt is independent of whether it emits
