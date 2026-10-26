@@ -132,6 +132,8 @@ PYTHON_TOOLCHAIN
     cp "$root/scripts/mpv-owned-subtitle-publication.patch" "$upstream/buildscripts/patches/mpv/0007-owned-subtitle-publication.patch"
     # Same immutable INITIAL_REQUEST_ONLY prerequisite; no remote reader/node/UI activation.
     cp "$root/scripts/mpv-original-http-reference-recipe.patch" "$upstream/buildscripts/patches/mpv/0008-original-http-reference-recipe.patch"
+    # Same original-cancel observer lifetime prerequisite as Apple; no reader activation.
+    cp "$root/scripts/mpv-original-http-cancel-lifetime.patch" "$upstream/buildscripts/patches/mpv/0009-original-http-cancel-lifetime.patch"
     git -C "$upstream" apply --check "$root/scripts/native-media-hosted/android-assembly.patch"
     git -C "$upstream" apply "$root/scripts/native-media-hosted/android-assembly.patch"
     # Use the hosted SDK; bypass upstream download-sdk.sh's moving gas-preprocessor/master fetch.

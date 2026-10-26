@@ -8,6 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/scripts/build-mpvkit-dvfel.sh"
 PATCH="$ROOT/scripts/mpvkit-dvfel.patch"
 REFERENCE_PATCH="$ROOT/scripts/mpv-original-http-reference-recipe.patch"
+CANCEL_PATCH="$ROOT/scripts/mpv-original-http-cancel-lifetime.patch"
 VERIFY="$ROOT/scripts/verify-mpvkit-dvfel-artifacts.sh"
 WORKFLOW="$ROOT/.github/workflows/release-tvos.yml"
 
@@ -16,7 +17,7 @@ fail() {
   exit 1
 }
 
-for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$VERIFY" "$WORKFLOW"; do
+for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$CANCEL_PATCH" "$VERIFY" "$WORKFLOW"; do
   [ -f "$file" ] || fail "missing required source: $file"
 done
 
@@ -272,6 +273,23 @@ check_native_source stream/stream.h a5f1b6fd23f58bcb0282e36448f34dde0121768abac9
 check_native_source stream/stream.c 6da9c9c7e1efb4da5a37fe4c7a92188d9f3d4732bdfd4a4c976fe7e9f30145e9
 check_native_source stream/stream_lavf.c 15a7a08223efe0db0a33b2bc7b39616dd43fecfc1eca1e0ced23f16c7a839ad9
 check_native_source stream/reference_source.h 6330b5056700efacd2655a31b011a88c3e4e8b6424360bfe6ee1d728fd7399a1
+# Add only the reviewed ongoing original-cancel lifetime delta AFTER its carrier.
+# The demux-owner API is not part of this maintained recipe; do not import its
+# unrelated dirty source or the five-path packet's comment-only demux header hunk.
+CANCEL_HASH="$(shasum -a 256 "$CANCEL_PATCH")"
+[ "${CANCEL_HASH%% *}" = "778b58c05129e397ed2f90408718f6b3a3feca84492485657d89e784bbee5722" ] ||
+  fail "native original-cancel lifetime delta differs from the reviewed source"
+check_native_source misc/thread_tools.c 3874eb003bb6ca02ca117644ec951799fcf50b7099d3b8d9681172c22f587cf8
+check_native_source misc/thread_tools.h 0aa4e23391d2b4ce66938ccfce95dbfa85be4a72da82177697886c7dd89271ad
+CANCEL_PRE_TREE="$(native_git write-tree)"
+native_git apply --cached "$CANCEL_PATCH"
+[ "$(native_git diff --cached --name-only "$CANCEL_PRE_TREE" --)" = "$(printf '%s\n' \
+  misc/thread_tools.c misc/thread_tools.h stream/reference_source.h stream/stream_lavf.c)" ] ||
+  fail "native original-cancel lifetime delta changed unexpected source paths"
+check_native_source misc/thread_tools.c 151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9
+check_native_source misc/thread_tools.h 62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f
+check_native_source stream/stream_lavf.c e0c69d92332e29a53d3d4458d4afa582919a9456d0fd63f7703cf342064cd16a
+check_native_source stream/reference_source.h ce22ce201e6a41899c8c05b98fb9d9912f565090c5ffa0209492118a2a1a07f8
 [ "$(shasum -a 256 "$NATIVE_REAL_INDEX")" = "$NATIVE_INDEX_BEFORE" ] ||
   fail "native canonical index changed during the isolated carrier contract"
 
