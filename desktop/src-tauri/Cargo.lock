@@ -356,9 +356,9 @@ dependencies = [
 
 [[package]]
 name = "brotli"
-version = "9.0.0"
+version = "9.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8b851b75c23ca7873623d612fe49bd1989aeb03d08fb9432187eb253d3d4c6b"
+checksum = "6737ce8b81460bf9407909f73ff50bf13f7cb8577e1e76715f57ed0eba58ba44"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -367,9 +367,9 @@ dependencies = [
 
 [[package]]
 name = "brotli-decompressor"
-version = "6.0.1"
+version = "6.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "941cd9bd4ddab83cb46fa5a2d428f1c857b24ac78cb876cf7beb710840934bd7"
+checksum = "34c6783f42c21c952ad7112b354f0ba2f10760e9decea5b1b60523d6e270faaf"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -1070,9 +1070,9 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "erased-serde"
-version = "0.4.10"
+version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2add8a07dd6a8d93ff627029c51de145e12686fbc36ecb298ac22e74cf02dec"
+checksum = "1e59b668157f32d3459d4bd634861a06ffa2503a461ca5f0916b9f0252605e66"
 dependencies = [
  "serde",
  "serde_core",
@@ -2256,7 +2256,7 @@ dependencies = [
 [[package]]
 name = "librqbit"
 version = "8.1.1"
-source = "git+https://github.com/VortXTV/vortx-core?rev=0c30f4782aee544a2b7e33169ad60d03630d4097#0c30f4782aee544a2b7e33169ad60d03630d4097"
+source = "git+https://github.com/VortXTV/vortx-core?rev=7b79b45d62dd06716661ff196a845e76330a140f#7b79b45d62dd06716661ff196a845e76330a140f"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2399,8 +2399,7 @@ dependencies = [
 [[package]]
 name = "librqbit-dualstack-sockets"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7189f1ff66ca75055137a38b062ba7df9691d071b7172e5090997c62eb4b4de"
+source = "git+https://github.com/VortXTV/vortx-core?rev=7b79b45d62dd06716661ff196a845e76330a140f#7b79b45d62dd06716661ff196a845e76330a140f"
 dependencies = [
  "backon",
  "futures",
@@ -2468,8 +2467,7 @@ dependencies = [
 [[package]]
 name = "librqbit-upnp"
 version = "9.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b950b4dfe2102d3047f3fac70763c494b63a50f04a00d3dd36102d740e9bf33"
+source = "git+https://github.com/VortXTV/vortx-core?rev=7b79b45d62dd06716661ff196a845e76330a140f#7b79b45d62dd06716661ff196a845e76330a140f"
 dependencies = [
  "anyhow",
  "bstr",
@@ -2532,9 +2530,9 @@ dependencies = [
 
 [[package]]
 name = "lzma-rust2"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1c46f3fcd2e888afdb01a07efc071cb21300e07c68d32c3e8b01b5c8cb1fcaa"
+checksum = "490750560fa7851fbbf5d3ab1a8750f09350ed361ed8aed85b1e1e40587812ee"
 
 [[package]]
 name = "markup5ever"
@@ -5092,7 +5090,7 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 [[package]]
 name = "vortx-archive"
 version = "0.0.1"
-source = "git+https://github.com/VortXTV/vortx-core?rev=0c30f4782aee544a2b7e33169ad60d03630d4097#0c30f4782aee544a2b7e33169ad60d03630d4097"
+source = "git+https://github.com/VortXTV/vortx-core?rev=7b79b45d62dd06716661ff196a845e76330a140f#7b79b45d62dd06716661ff196a845e76330a140f"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5108,7 +5106,7 @@ dependencies = [
 [[package]]
 name = "vortx-nntp"
 version = "0.0.1"
-source = "git+https://github.com/VortXTV/vortx-core?rev=0c30f4782aee544a2b7e33169ad60d03630d4097#0c30f4782aee544a2b7e33169ad60d03630d4097"
+source = "git+https://github.com/VortXTV/vortx-core?rev=7b79b45d62dd06716661ff196a845e76330a140f#7b79b45d62dd06716661ff196a845e76330a140f"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -5128,7 +5126,7 @@ dependencies = [
 [[package]]
 name = "vortx-nzb"
 version = "0.0.1"
-source = "git+https://github.com/VortXTV/vortx-core?rev=0c30f4782aee544a2b7e33169ad60d03630d4097#0c30f4782aee544a2b7e33169ad60d03630d4097"
+source = "git+https://github.com/VortXTV/vortx-core?rev=7b79b45d62dd06716661ff196a845e76330a140f#7b79b45d62dd06716661ff196a845e76330a140f"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -5137,7 +5135,7 @@ dependencies = [
 [[package]]
 name = "vortx-streaming-server"
 version = "0.0.1"
-source = "git+https://github.com/VortXTV/vortx-core?rev=0c30f4782aee544a2b7e33169ad60d03630d4097#0c30f4782aee544a2b7e33169ad60d03630d4097"
+source = "git+https://github.com/VortXTV/vortx-core?rev=7b79b45d62dd06716661ff196a845e76330a140f#7b79b45d62dd06716661ff196a845e76330a140f"
 dependencies = [
  "anyhow",
  "async-trait",
