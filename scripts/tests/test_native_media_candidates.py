@@ -29,7 +29,7 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertNotIn(name, names)
             names.add(name)
             self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), expected)
-        self.assertEqual(len(names), 32)
+        self.assertEqual(len(names), 34)
         self.assertEqual(names, {
             'scripts/assemble-mpvkit-dvfel.sh',
             'scripts/build-mpvkit-dvfel.sh',
@@ -39,6 +39,8 @@ class NativeMediaProducer(unittest.TestCase):
             'scripts/ffmpeg-sent-request-evidence.patch',
             'scripts/mpv-sent-request-evidence.patch',
             'scripts/mpv-bounded-prefix-request.patch',
+            'scripts/ffmpeg-original-transport-evidence.patch',
+            'scripts/mpv-original-transport-evidence.patch',
             'scripts/mpv-coreaudio-hotplug-lifecycle.patch',
             'scripts/mpv-http-seek-interrupt.patch',
             'scripts/mpv-moltenvk-resize.patch',
@@ -108,13 +110,17 @@ class NativeMediaProducer(unittest.TestCase):
                 ("mpv-original-http-cancel-lifetime.patch", "0014-original-http-cancel-lifetime.patch", "0009-original-http-cancel-lifetime.patch"),
                 ("mpv-completed-response-observation.patch", "0015-completed-response-observation.patch", "0010-completed-response-observation.patch"),
                 ("mpv-sent-request-evidence.patch", "0016-sent-request-evidence.patch", "0011-sent-request-evidence.patch"),
-                ("mpv-bounded-prefix-request.patch", "0017-bounded-prefix-request.patch", "0012-bounded-prefix-request.patch")]:
+                ("mpv-bounded-prefix-request.patch", "0017-bounded-prefix-request.patch", "0012-bounded-prefix-request.patch"),
+                ("mpv-original-transport-evidence.patch", "0018-original-transport-evidence.patch", "0013-original-transport-evidence.patch")]:
             if source == "mpv-sent-request-evidence.patch":
                 self.assertIn('SENT_MPV_PATCH="$REPO/scripts/' + source + '"', apple)
                 self.assertIn('copy_exact "$SENT_MPV_PATCH" "$GENERATED_SENT_MPV_PATCH"', apple)
             elif source == "mpv-bounded-prefix-request.patch":
                 self.assertIn('PREFIX_PATCH="$REPO/scripts/' + source + '"', apple)
                 self.assertIn('copy_exact "$PREFIX_PATCH" "$GENERATED_PREFIX_PATCH"', apple)
+            elif source == "mpv-original-transport-evidence.patch":
+                self.assertIn('TRANSPORT_MPV_PATCH="$REPO/scripts/' + source + '"', apple)
+                self.assertIn('copy_exact "$TRANSPORT_MPV_PATCH" "$GENERATED_TRANSPORT_MPV_PATCH"', apple)
             else:
                 self.assertIn('copy_exact "$REPO/scripts/' + source + '"', apple)
             self.assertIn('"$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/' + apple_number + '"', apple)
@@ -189,7 +195,7 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertLess(source_check, android.index('for arch in armv7l arm64 x86_64;'))
         for recipe in (apple, android):
             self.assertIn("946fcce07b6dcd0331c8cc609192aeff5e1924f8", recipe)
-            self.assertIn("24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe", recipe)
+            self.assertIn("6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22", recipe)
         # The preexisting lexical patcher remains the dependency sequence authority.
         patcher = (ROOT / "scripts/native-media-hosted/android/buildscripts/patch.sh").read_text()
         self.assertIn('PATCHES=(patches/*)', patcher)
@@ -235,9 +241,9 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertLess(android.index('cp "$root/scripts/ffmpeg-response-witness.patch"'), android.index(copy))
         self.assertLess(android.index(copy), android.index("bash patch.sh"))
         for recipe in (apple, android):
-            for afterimage in ("24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe",
-                               "721c0e25e8de5d5207c064d328f577dbdf0f3c345bd8ab4caadf410dcdfb6e83",
-                               "868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933"):
+            for afterimage in ("6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22",
+                               "25047d80eb9c12e30ca13476ddd3c3153e5c7bf9ed6857ed197fd956ac70175b",
+                               "1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835"):
                 self.assertIn(afterimage, recipe)
         # Source contracts only. This does not exercise an HTTP owner or reader.
 
@@ -280,7 +286,7 @@ class NativeMediaProducer(unittest.TestCase):
             mproot = next(name for name, pin in roots.items() if pin == MODULE.CURRENT_NATIVE_PINS["mpv"])
             ffheader = MODULE.CURRENT_UNTRACKED_FILES[lane][ffroot]["libavformat/vortx_http_request.h"]
             mpheader = MODULE.CURRENT_UNTRACKED_FILES[lane][mproot]["stream/vortx_http_request.h"]
-            self.assertEqual(ffheader, "81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765")
+            self.assertEqual(ffheader, "d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9")
             self.assertEqual(ffheader, mpheader)
         self.assertIn('native-media-hosted/evidence.py" apple-sent-abi "$STAGED_DEST"', apple)
         self.assertIn('evidence.py apple-sent-abi "$out/MPVKit-DVFEL"', android)
@@ -310,7 +316,60 @@ class NativeMediaProducer(unittest.TestCase):
         for lane, groups in MODULE.CURRENT_SOURCE_ROOTS.items():
             native = next(name for name, pin in groups.items() if pin == MODULE.CURRENT_NATIVE_PINS["mpv"])
             self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES[lane][native]["stream/reference_source.h"],
-                             "868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933")
+                             "1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835")
+
+    def test_transport_carriers_are_exact_ordered_v2_and_keep_private_retention(self):
+        ffmpeg = (ROOT / "scripts/ffmpeg-original-transport-evidence.patch").read_bytes()
+        mpv = (ROOT / "scripts/mpv-original-transport-evidence.patch").read_bytes()
+        self.assertEqual(hashlib.sha256(ffmpeg).hexdigest(),
+                         "480302686b9fff135cd0665e7af76d635fc21d83f54ee0096578ddd6bd6d83e5")
+        self.assertEqual(hashlib.sha256(mpv).hexdigest(),
+                         "dad7f2d20ea14eb4661ef853978be78806e1b01fce67653e3ffec9b57d4a0e82")
+        self.assertEqual([line for line in ffmpeg.decode().splitlines() if line.startswith("+++ ")],
+                         ["+++ b/libavformat/" + name for name in
+                          ("http.c", "url.h", "tls.c", "tls.h", "tls_securetransport.c",
+                           "tls_mbedtls.c", "vortx_http_request.h")])
+        self.assertEqual([line for line in mpv.decode().splitlines() if line.startswith("+++ ")],
+                         ["+++ b/stream/" + name for name in
+                          ("reference_source.h", "stream_lavf.c", "vortx_http_request.h")])
+        self.assertIn('+    if (!shr->listen && !shr->numerichost)', ffmpeg.decode())
+        for patch_text in (ffmpeg.decode(), mpv.decode()):
+            for symbol in MODULE.SENT_FFMPEG_FUNCTIONS:
+                self.assertIn(symbol, patch_text)
+            self.assertNotIn('--export-dynamic', patch_text)
+            self.assertNotIn('--dynamic-list', patch_text)
+        self.assertIn('stream_reference_sent_request_copy_transport', mpv.decode())
+        apple = (ROOT / "scripts/build-mpvkit-dvfel.sh").read_text()
+        android = (ROOT / "scripts/native-media-hosted/build.sh").read_text()
+        for source, apple_number, android_number in (
+                ("ffmpeg-original-transport-evidence.patch", "0004-original-transport-evidence.patch",
+                 "0005-original-transport-evidence.patch"),
+                ("mpv-original-transport-evidence.patch", "0018-original-transport-evidence.patch",
+                 "0013-original-transport-evidence.patch")):
+            kind = "FFMPEG" if source.startswith("ffmpeg") else "MPV"
+            folder = "ffmpeg" if kind == "FFMPEG" else "mpv"
+            copy = 'copy_exact "$TRANSPORT_' + kind + '_PATCH" "$GENERATED_TRANSPORT_' + kind + '_PATCH"'
+            self.assertIn(copy, apple)
+            self.assertIn(apple_number, apple)
+            self.assertLess(apple.index(copy), apple.index('swift run --build-path'))
+            android_copy = ('cp "$root/scripts/' + source + '" "$upstream/buildscripts/patches/' +
+                            folder + '/' + android_number + '"')
+            self.assertIn(android_copy, android)
+            self.assertLess(android.index(android_copy), android.index('bash patch.sh'))
+        self.assertLess(apple.index('copy_exact "$PREFIX_PATCH" "$GENERATED_PREFIX_PATCH"'),
+                        apple.index('copy_exact "$TRANSPORT_MPV_PATCH" "$GENERATED_TRANSPORT_MPV_PATCH"'))
+        self.assertLess(android.index('cp "$root/scripts/mpv-bounded-prefix-request.patch"'),
+                        android.index('cp "$root/scripts/mpv-original-transport-evidence.patch"'))
+        self.assertIn('cold_paths=(dist)', android)
+        self.assertIn('cold_paths=(buildscripts/deps buildscripts/prefix libmpv/src/main/jniLibs libmpv/build)', android)
+        self.assertIn('[[ ! -e "$upstream/$relative" && ! -L "$upstream/$relative" ]]', android)
+        assembly = (ROOT / 'scripts/native-media-hosted/android-assembly.patch').read_text()
+        self.assertIn('-Wl,-u,stream_reference_sent_request_copy_transport', assembly)
+        self.assertIn('-Dstrip=false', assembly)
+        self.assertIn('keepDebugSymbols', assembly)
+        self.assertIn('**/libmpv.so', assembly)
+        self.assertNotIn('--export-dynamic', assembly)
+        self.assertNotIn('--dynamic-list', assembly)
 
     def test_response_witness_source_evidence_profile_preserves_exact_capture_and_consumer(self):
         spec = importlib.util.spec_from_file_location(
@@ -318,14 +377,18 @@ class NativeMediaProducer(unittest.TestCase):
         consumer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(consumer)
         self.assertEqual(MODULE.CURRENT_SOURCE_PROFILE, consumer.PROFILE)
-        self.assertEqual(consumer.PROFILE, "original-http-bounded-prefix-material-v1")
+        self.assertEqual(consumer.PROFILE, "original-http-transport-observation-v2")
         self.assertEqual(MODULE.CURRENT_RECIPE_PATHS, consumer.RECIPE_PATHS)
-        self.assertEqual(len(consumer.RECIPE_PATHS), 32)
+        self.assertEqual(len(consumer.RECIPE_PATHS), 34)
         manifest = ROOT / "scripts/native-media-hosted/inputs.sha256"
         self.assertEqual(hashlib.sha256(manifest.read_bytes()).hexdigest(), consumer.PROFILE_MANIFEST_SHA256)
         recipe = dict((name, checksum) for checksum, name in
                       (line.split("  ", 1) for line in manifest.read_text().splitlines()))
         self.assertEqual(MODULE.CURRENT_RESPONSE_FILES, consumer.RESPONSE)
+        self.assertEqual(MODULE.CURRENT_MBEDTLS_FILES, consumer.MBEDTLS)
+        self.assertEqual(consumer.MBEDTLS, {
+            "apple": "77d72cb88fc662b984f051335b356abc3e76e97ce39302dde6961ecdbba7a332",
+            "android": "7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac"})
         for lane, groups in MODULE.CURRENT_SOURCE_ROOTS.items():
             for directory, commit in groups.items():
                 self.assertEqual(consumer.untracked(lane, {"commit": commit}, recipe),
@@ -334,20 +397,38 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES["android"]["_native-publisher"][helper],
                              recipe["scripts/native-media-hosted/android/" + helper])
         # These are synthetic source observations, not native tar/binary or HTTP execution.
-        path, checksum = next(iter(consumer.RESPONSE.items()))
-        valid = {path: {"kind": "file", "tracked": True, "sha256": checksum}}
         old_sources = ("3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa",
                        "db1b96a39966a51edbb10975b1cc67a69a6c744fa4101931470717cd63d44da0",
                        "b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f",
                        "205a083b57dd105078e3f71a1d0fad1fb6342d023d9fae32a60cbf6227218e74",
                        "faebc27e86d3bf4375ef9c4461526f58caeaf3a6974d776f1a52159e29cdedd2")
-        for guard in (MODULE.require_current_response_source, consumer.require_response_source):
-            guard(valid)
-            for observed in ({}, {path: dict(valid[path], tracked=False)},
-                             {path: dict(valid[path], kind="symlink")},
-                             *({path: dict(valid[path], sha256=old)} for old in old_sources)):
+        for lane in ("apple", "android"):
+            expected = dict(consumer.RESPONSE, **{"libavformat/tls_mbedtls.c": consumer.MBEDTLS[lane]})
+            valid = {name: {"kind": "file", "tracked": True, "sha256": checksum}
+                     for name, checksum in expected.items()}
+            self.assertEqual(len(valid), 6)
+            for guard in (MODULE.require_current_response_source, consumer.require_response_source):
+                guard(valid, lane)
+                for path in expected:
+                    for field, value in (("tracked", False), ("kind", "symlink"), ("sha256", "0" * 64)):
+                        observed = deepcopy(valid)
+                        observed[path][field] = value
+                        with self.subTest(lane=lane, path=path, field=field), self.assertRaises(ValueError):
+                            guard(observed, lane)
+                    observed = deepcopy(valid)
+                    del observed[path]
+                    with self.assertRaises(ValueError):
+                        guard(observed, lane)
+                for old in old_sources:
+                    observed = deepcopy(valid)
+                    observed["libavformat/http.c"]["sha256"] = old
+                    with self.assertRaises(ValueError):
+                        guard(observed, lane)
                 with self.assertRaises(ValueError):
-                    guard(observed)
+                    guard(valid, "unknown")
+                other = "android" if lane == "apple" else "apple"
+                with self.assertRaises(ValueError):
+                    guard(valid, other)
 
     def test_android_python_closure_is_pinned_and_isolated(self):
         workflow = (ROOT / ".github/workflows/native-media-candidates.yml").read_text()
@@ -428,6 +509,8 @@ class NativeMediaProducer(unittest.TestCase):
         data = Path(args[-1]).read_bytes()
         if '--dyn-syms' in args:
             return SentRequestABISynthetic.dynsym('defined-provider' if b'libavformat.so' in data else 'undefined-import')
+        if '--symbols' in args:
+            return SentRequestABISynthetic.symtab()
         elf_class, machine = ("ELF32", "ARM") if b"armeabi-v7a" in data else (
             ("ELF64", "AArch64") if b"arm64-v8a" in data else ("ELF64", "Advanced Micro Devices X86-64"))
         if "-h" in args:
@@ -488,7 +571,7 @@ class NativeMediaProducer(unittest.TestCase):
 
     def test_isolated_relro_layout_reaches_existing_full_artifact_gate(self):
         def isolated(*args):
-            if any(flag in args for flag in ('-h', '--version', '--dyn-syms')):
+            if any(flag in args for flag in ('-h', '--version', '--dyn-syms', '--symbols')):
                 return self.readelf(*args)
             return '\n'.join(self.isolated_relro_headers()) + '\n'
         with patch.object(MODULE, 'run', side_effect=isolated):
@@ -522,7 +605,7 @@ class NativeMediaProducer(unittest.TestCase):
 
     def test_isolated_relro_does_not_excuse_bad_load_alignment(self):
         def unaligned(*args):
-            if any(flag in args for flag in ('-h', '--version', '--dyn-syms')):
+            if any(flag in args for flag in ('-h', '--version', '--dyn-syms', '--symbols')):
                 return self.readelf(*args)
             return '\n'.join(self.isolated_relro_headers()).replace('E 0x4000', 'E 0x1000')
         with patch.object(MODULE, 'run', side_effect=unaligned), self.assertRaises(ValueError):
@@ -728,6 +811,15 @@ class SentRequestABISynthetic(unittest.TestCase):
             f'0000000000000000 {kind} _{name}\n' if kind != 'U' else f'                 U _{name}\n'
             for name in names)
 
+    @staticmethod
+    def symtab(binding='LOCAL', visibility='DEFAULT', *, change=None, missing=False):
+        rows = ['0: 0000000000000000 0 NOTYPE LOCAL DEFAULT UND']
+        if not missing:
+            row = ('1: 0000000000000010 16 FUNC ' + binding + ' ' + visibility +
+                   ' 12 ' + MODULE.PRIVATE_MPV_FUNCTIONS[0])
+            rows.append(change(row) if change else row)
+        return f"Symbol table '.symtab' contains {len(rows)} entries:\n" + '\n'.join(rows) + '\n'
+
     def test_exact_elf_provider_and_import_roles_and_version_normalization(self):
         for role in ('defined-provider', 'undefined-import'):
             rows = MODULE.required_elf_functions(self.dynsym(role), MODULE.SENT_FFMPEG_FUNCTIONS, role)
@@ -771,6 +863,45 @@ class SentRequestABISynthetic(unittest.TestCase):
                 MODULE.required_macho_functions(self.nm_text(old) + self.nm_text((symbol,), kind),
                                                 required, 'defined-code')
 
+    def test_private_transport_code_requires_complete_nonexported_symtab(self):
+        for binding, visibility in (('LOCAL', 'DEFAULT'), ('LOCAL', 'HIDDEN'), ('GLOBAL', 'HIDDEN')):
+            text = self.symtab(binding, visibility)
+            for observed in (text, self.dynsym('undefined-import') + text):
+                with self.subTest(binding=binding, visibility=visibility):
+                    rows = MODULE.required_private_elf_functions(observed, MODULE.PRIVATE_MPV_FUNCTIONS)
+                    self.assertEqual(rows, [{'name': MODULE.PRIVATE_MPV_FUNCTIONS[0], 'size': 16,
+                                            'type': 'FUNC', 'binding': binding, 'visibility': visibility,
+                                            'section': '12'}])
+        valid = self.symtab()
+        bad = [self.symtab(missing=True), valid + valid,
+               valid.replace("'.symtab'", "'.unknown'"),
+               valid.replace('contains 2 entries:', 'contains two entries:'),
+               valid.replace('1: 0000000000000010', '2: 0000000000000010'),
+               valid.replace('contains 2 entries:', 'contains 3 entries:') + valid.splitlines()[-1] + '\n']
+        for old, new in ((' 16 FUNC ', ' 0 FUNC '), (' FUNC ', ' OBJECT '),
+                         (' LOCAL ', ' WEAK '), (' 12 ', ' UND '), (' 12 ', ' ABS '),
+                         (' LOCAL DEFAULT 12 ', ' GLOBAL DEFAULT 12 ')):
+            bad.append(self.symtab(change=lambda row, old=old, new=new: row.replace(old, new)))
+        for observed in bad:
+            with self.subTest(text=observed), self.assertRaises(ValueError):
+                MODULE.required_private_elf_functions(observed, MODULE.PRIVATE_MPV_FUNCTIONS)
+
+    def test_dynamic_private_export_or_retired_provider_cannot_satisfy_v2(self):
+        self.assertEqual(MODULE.SENT_FFMPEG_FUNCTIONS,
+                         ('avpriv_vortx_http_copy_sent_request_v2',
+                          'avpriv_vortx_http_sent_request_clear_v2'))
+        for forbidden in MODULE.RETIRED_SENT_FFMPEG_FUNCTIONS + MODULE.PRIVATE_MPV_FUNCTIONS:
+            dynamic = self.dynsym('undefined-import').replace('contains 3 entries:', 'contains 4 entries:')
+            dynamic += f'3: 0000000000000010 16 FUNC GLOBAL DEFAULT 12 {forbidden}\n'
+            with self.subTest(name=forbidden), self.assertRaises(ValueError):
+                MODULE.required_elf_functions(dynamic, MODULE.SENT_FFMPEG_FUNCTIONS, 'undefined-import',
+                                              MODULE.RETIRED_SENT_FFMPEG_FUNCTIONS + MODULE.PRIVATE_MPV_FUNCTIONS)
+        for retired in MODULE.RETIRED_SENT_FFMPEG_FUNCTIONS:
+            with self.assertRaises(ValueError):
+                MODULE.required_macho_functions(self.nm_text(MODULE.SENT_FFMPEG_FUNCTIONS) +
+                                                self.nm_text((retired,)), MODULE.SENT_FFMPEG_FUNCTIONS,
+                                                'defined-code', MODULE.RETIRED_SENT_FFMPEG_FUNCTIONS)
+
     def test_real_android_producer_records_default_reader_and_six_symbol_roles(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -796,6 +927,12 @@ class SentRequestABISynthetic(unittest.TestCase):
                 if '--dyn-syms' in args:
                     self.assertIn('--wide', args)
                     return self.dynsym('defined-provider' if b'libavformat.so' in data else 'undefined-import')
+                if '--symbols' in args:
+                    self.assertIn('--wide', args)
+                    self.assertIn(b'libmpv.so', data)
+                    binding, visibility = ('LOCAL', 'DEFAULT') if b'armeabi-v7a' in data else (
+                        ('LOCAL', 'HIDDEN') if b'arm64-v8a' in data else ('GLOBAL', 'HIDDEN'))
+                    return self.symtab(binding, visibility)
                 if '-h' in args:
                     elf, machine = ('ELF32', 'ARM') if b'armeabi-v7a' in data else (
                         ('ELF64', 'AArch64') if b'arm64-v8a' in data else ('ELF64', 'Advanced Micro Devices X86-64'))
@@ -806,6 +943,8 @@ class SentRequestABISynthetic(unittest.TestCase):
                 MODULE.android(root, root, root)
             evidence = json.loads((root / 'android-artifact-evidence.json').read_text())
             abi = evidence['sentRequestABI']
+            self.assertEqual(abi['schema'], 2)
+            self.assertIs(abi['retiredV1Absent'], True)
             self.assertEqual(len(abi['libraries']), 6)
             self.assertEqual({row['role'] for row in abi['libraries']}, {'defined-provider', 'undefined-import'})
             self.assertEqual(abi['reader']['requestedReader'], str(reader))
@@ -814,6 +953,23 @@ class SentRequestABISynthetic(unittest.TestCase):
             self.assertEqual(abi['reader']['validatorSHA256'], hashlib.sha256(Path(MODULE.__file__).read_bytes()).hexdigest())
             self.assertEqual(abi['reader']['mode'], 'hosted-ndk-reader')
             self.assertEqual(len([c for c in calls.call_args_list if '--dyn-syms' in c.args]), 6)
+            self.assertEqual(len([c for c in calls.call_args_list if '--symbols' in c.args]), 3)
+            private = evidence['privateOwnerABI']
+            self.assertEqual(private['schema'], 1)
+            self.assertEqual(private['reader'], abi['reader'])
+            self.assertEqual(len(private['libraries']), 3)
+            self.assertEqual({row['abi'] for row in private['libraries']}, {'armeabi-v7a', 'arm64-v8a', 'x86_64'})
+            with zipfile.ZipFile(root / 'libmpv-release-candidate.aar') as archive:
+                for row in private['libraries']:
+                    self.assertEqual(row['library'], 'libmpv.so')
+                    self.assertEqual(row['binarySHA256'], hashlib.sha256(
+                        archive.read('jni/' + row['abi'] + '/libmpv.so')).hexdigest())
+                    binding, visibility = ('LOCAL', 'DEFAULT') if row['abi'] == 'armeabi-v7a' else (
+                        ('LOCAL', 'HIDDEN') if row['abi'] == 'arm64-v8a' else ('GLOBAL', 'HIDDEN'))
+                    text = self.symtab(binding, visibility)
+                    self.assertEqual(row['symtabTextSHA256'], hashlib.sha256(text.encode()).hexdigest())
+                    self.assertEqual(row['symbols'], MODULE.required_private_elf_functions(
+                        text, MODULE.PRIVATE_MPV_FUNCTIONS))
             self.assertNotIn('inspection', evidence)
             self.assertFalse(evidence['promotionEligible'])
             self.assertFalse(evidence['runtimeSecurityTested'])
@@ -867,7 +1023,8 @@ class SentRequestOfflineEvidence(unittest.TestCase):
         consumer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(consumer)
         validator = hashlib.sha256(Path(MODULE.__file__).read_bytes()).hexdigest()
-        value = {"schema": 1, "reader": {"mode": "hosted-ndk-reader", "requestedReader": "/sdk/llvm-readelf",
+        value = {"schema": 2, "retiredV1Absent": True,
+                 "reader": {"mode": "hosted-ndk-reader", "requestedReader": "/sdk/llvm-readelf",
                  "resolvedReader": "/sdk/llvm-readobj", "readerSHA256": "a" * 64,
                  "readerVersion": "synthetic LLVM", "validatorSHA256": validator}, "libraries": []}
         records = {}
@@ -892,7 +1049,9 @@ class SentRequestOfflineEvidence(unittest.TestCase):
 
     def test_stale_or_forged_normalized_evidence_is_rejected(self):
         consumer, original, records, validator = self.fixture()
-        for change in (lambda value: value["libraries"].pop(),
+        for change in (lambda value: value.update(schema=1),
+                       lambda value: value.update(retiredV1Absent=False),
+                       lambda value: value["libraries"].pop(),
                        lambda value: value["libraries"].append(deepcopy(value["libraries"][0])),
                        lambda value: value["libraries"][0].update(role="undefined-import"),
                        lambda value: value["libraries"][0].update(binarySHA256="c" * 64),
@@ -905,6 +1064,8 @@ class SentRequestOfflineEvidence(unittest.TestCase):
                        lambda value: value["libraries"][0]["symbols"][0].update(section="UND"),
                        lambda value: value["libraries"][1]["symbols"][0].update(section="12"),
                        lambda value: value["libraries"][0]["symbols"][0].update(version="bad@version"),
+                       lambda value: value["libraries"][0]["symbols"][0].update(
+                           name="avpriv_vortx_http_copy_sent_request"),
                        lambda value: value.update(ignoredUnknownField=True)):
             value = deepcopy(original)
             change(value)
@@ -912,6 +1073,60 @@ class SentRequestOfflineEvidence(unittest.TestCase):
                 consumer.sent_request_abi(value, records, validator)
         with self.assertRaises(ValueError):
             consumer.sent_request_abi({}, records, validator)
+
+    @staticmethod
+    def private_fixture():
+        consumer, sent, records, validator = SentRequestOfflineEvidence.fixture()
+        private = {"schema": 1, "reader": deepcopy(sent["reader"]), "libraries": []}
+        for abi, binding, visibility in (("armeabi-v7a", "LOCAL", "DEFAULT"),
+                                         ("arm64-v8a", "LOCAL", "HIDDEN"),
+                                         ("x86_64", "GLOBAL", "HIDDEN")):
+            private["libraries"].append({"abi": abi, "library": "libmpv.so",
+                "binarySHA256": records["jni/" + abi + "/libmpv.so"]["sha256"],
+                "symtabTextSHA256": "c" * 64,
+                "symbols": MODULE.required_private_elf_functions(
+                    SentRequestABISynthetic.symtab(binding, visibility), MODULE.PRIVATE_MPV_FUNCTIONS)})
+        return consumer, private, sent, records, validator
+
+    def test_private_code_evidence_is_bound_to_same_reader_and_three_packaged_libraries(self):
+        consumer, private, sent, records, validator = self.private_fixture()
+        consumer.sent_request_abi(sent, records, validator)
+        consumer.private_owner_abi(private, records, sent["reader"])
+        explicit = deepcopy(sent["reader"])
+        explicit["mode"] = "explicit-read-only-inspector"
+        private["reader"] = deepcopy(explicit)
+        consumer.private_owner_abi(private, records, explicit)
+
+    def test_private_code_evidence_rejects_stale_reader_bytes_and_noncode_rows(self):
+        consumer, original, sent, records, _ = self.private_fixture()
+        for change in (lambda value: value.update(schema=2),
+                       lambda value: value.update(schema=True),
+                       lambda value: value["libraries"].pop(),
+                       lambda value: value["libraries"].append(deepcopy(value["libraries"][0])),
+                       lambda value: value["libraries"][0].update(abi="mips"),
+                       lambda value: value["libraries"][0].update(library="libavformat.so"),
+                       lambda value: value["reader"].update(readerSHA256="d" * 64),
+                       lambda value: value["libraries"][0].update(binarySHA256="d" * 64),
+                       lambda value: value["libraries"][0].update(symtabTextSHA256="not-a-digest"),
+                       lambda value: value["libraries"][0]["symbols"].clear(),
+                       lambda value: value["libraries"][0]["symbols"].append(
+                           deepcopy(value["libraries"][0]["symbols"][0])),
+                       lambda value: value["libraries"][0]["symbols"][0].update(name="other_helper"),
+                       lambda value: value["libraries"][0]["symbols"][0].update(size=0),
+                       lambda value: value["libraries"][0]["symbols"][0].update(size=True),
+                       lambda value: value["libraries"][0]["symbols"][0].update(type="OBJECT"),
+                       lambda value: value["libraries"][0]["symbols"][0].update(binding="WEAK"),
+                       lambda value: value["libraries"][0]["symbols"][0].update(binding="GLOBAL"),
+                       lambda value: value["libraries"][0]["symbols"][0].update(section="UND"),
+                       lambda value: value["libraries"][0]["symbols"][0].update(section="ABS"),
+                       lambda value: value["libraries"][0]["symbols"][0].update(section="0"),
+                       lambda value: value.update(unrecognized=True)):
+            value = deepcopy(original)
+            change(value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                consumer.private_owner_abi(value, records, sent["reader"])
+        with self.assertRaises(ValueError):
+            consumer.private_owner_abi({}, records, sent["reader"])
 
 
 if __name__ == "__main__":

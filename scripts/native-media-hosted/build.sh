@@ -23,6 +23,20 @@ else
 fi
 [[ $(git -C "$upstream" rev-parse HEAD) == "$expected" ]] || exit 1
 [[ -z $(git -C "$upstream" status --porcelain --untracked-files=all) ]] || exit 1
+# URLContext's private layout grew. A clean Git status alone does not exclude
+# ignored native objects/archives with the old allocation size. Require a fresh
+# candidate native closure; fail rather than deleting or reusing unknown caches.
+if [[ $lane == apple ]]; then
+    cold_paths=(dist)
+else
+    cold_paths=(buildscripts/deps buildscripts/prefix libmpv/src/main/jniLibs libmpv/build)
+fi
+for relative in "${cold_paths[@]}"; do
+    [[ ! -e "$upstream/$relative" && ! -L "$upstream/$relative" ]] || {
+        echo "A fresh native candidate workspace is required: $relative" >&2
+        exit 1
+    }
+done
 finish() {
     result=$?
     trap - EXIT
@@ -140,11 +154,14 @@ PYTHON_TOOLCHAIN
     cp "$root/scripts/mpv-sent-request-evidence.patch" "$upstream/buildscripts/patches/mpv/0011-sent-request-evidence.patch"
     # Private bounded request material only; no duplicate open or reader activation.
     cp "$root/scripts/mpv-bounded-prefix-request.patch" "$upstream/buildscripts/patches/mpv/0012-bounded-prefix-request.patch"
+    # Original route/TLS policy observation only; hidden native getter is not a public ABI.
+    cp "$root/scripts/mpv-original-transport-evidence.patch" "$upstream/buildscripts/patches/mpv/0013-original-transport-evidence.patch"
     # FFmpeg's sorted sequence keeps the existing TLS distrust patch first.
     # The same source bytes as Apple add optional paired response metadata only.
     cp "$root/scripts/ffmpeg-response-witness.patch" "$upstream/buildscripts/patches/ffmpeg/0002-response-witness.patch"
     cp "$root/scripts/ffmpeg-response-generation.patch" "$upstream/buildscripts/patches/ffmpeg/0003-response-generation.patch"
     cp "$root/scripts/ffmpeg-sent-request-evidence.patch" "$upstream/buildscripts/patches/ffmpeg/0004-sent-request-evidence.patch"
+    cp "$root/scripts/ffmpeg-original-transport-evidence.patch" "$upstream/buildscripts/patches/ffmpeg/0005-original-transport-evidence.patch"
     git -C "$upstream" apply --check "$root/scripts/native-media-hosted/android-assembly.patch"
     git -C "$upstream" apply "$root/scripts/native-media-hosted/android-assembly.patch"
     # Use the hosted SDK; bypass upstream download-sdk.sh's moving gas-preprocessor/master fetch.
@@ -173,16 +190,23 @@ PYTHON_TOOLCHAIN
     bash patch.sh
     # Require the exact reviewed HTTP afterimage before any native compilation.
     [[ $(git -C deps/ffmpeg rev-parse HEAD) == 946fcce07b6dcd0331c8cc609192aeff5e1924f8 ]] || exit 1
-    printf '%s  %s\n' 24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe \
+    printf '%s  %s\n' 6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22 \
         deps/ffmpeg/libavformat/http.c | shasum -a 256 -c -
+    # Layout and actual TLS producer changes must come from the same full source build.
+    printf '%s  %s\n' \
+        0a9f01a0f14a7b75dbbf1f81b177caf6a2503cde9897b827d9000e959d67bb4c deps/ffmpeg/libavformat/url.h \
+        eeec3c97e3572cf2272dc577576626716186f11539034ecaa4b45edb4855fab6 deps/ffmpeg/libavformat/tls.c \
+        257c76932de48ed84bf849a44ca9ea6fe85adb93a26bb4f7112b19000084ff19 deps/ffmpeg/libavformat/tls.h \
+        b04fb28df85f1ef3883b4927d0bfab4477f400128c122f794ff13b4b9c85bebc deps/ffmpeg/libavformat/tls_securetransport.c \
+        7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac deps/ffmpeg/libavformat/tls_mbedtls.c | shasum -a 256 -c -
     [[ $(git -C deps/mpv rev-parse HEAD) == 8c67647b50059406c5c0444903597281b81516cf ]] || exit 1
-    printf '%s  %s\n' 721c0e25e8de5d5207c064d328f577dbdf0f3c345bd8ab4caadf410dcdfb6e83 \
+    printf '%s  %s\n' 25047d80eb9c12e30ca13476ddd3c3153e5c7bf9ed6857ed197fd956ac70175b \
         deps/mpv/stream/stream_lavf.c | shasum -a 256 -c -
-    printf '%s  %s\n' 868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933 \
+    printf '%s  %s\n' 1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835 \
         deps/mpv/stream/reference_source.h | shasum -a 256 -c -
     for private_header in deps/ffmpeg/libavformat/vortx_http_request.h deps/mpv/stream/vortx_http_request.h; do
         [[ -f "$private_header" && ! -L "$private_header" ]] || exit 1
-        printf '%s  %s\n' 81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765 "$private_header" | shasum -a 256 -c -
+        printf '%s  %s\n' d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9 "$private_header" | shasum -a 256 -c -
     done
     cmp -s deps/ffmpeg/libavformat/vortx_http_request.h deps/mpv/stream/vortx_http_request.h
     # Retain exactly the reviewed native source/patch state before any compiler runs.

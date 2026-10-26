@@ -17,14 +17,15 @@ import zipfile
 
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
-PROFILE = "original-http-bounded-prefix-material-v1"
-PROFILE_MANIFEST_SHA256 = "e46043132d9c2a95ed11cbec85dc3d3b03aee0dec9d208db3a99d08272dd4c18"  # Filled only with the reviewed producer profile.
+PROFILE = "original-http-transport-observation-v2"
+PROFILE_MANIFEST_SHA256 = "f75888fd30982d3a98250d26ce2915e3d1a3227f6d4d75475466c6f1e2bb4014"
 RECIPE_PATHS = frozenset("""
 scripts/assemble-mpvkit-dvfel.sh scripts/build-mpvkit-dvfel.sh
 scripts/ffmpeg-response-witness.patch scripts/ffmpeg-response-generation.patch
 scripts/mpv-completed-response-observation.patch
 scripts/ffmpeg-sent-request-evidence.patch scripts/mpv-sent-request-evidence.patch
 scripts/mpv-bounded-prefix-request.patch
+scripts/ffmpeg-original-transport-evidence.patch scripts/mpv-original-transport-evidence.patch
 scripts/mpv-coreaudio-hotplug-lifecycle.patch scripts/mpv-http-seek-interrupt.patch
 scripts/mpv-moltenvk-resize.patch scripts/mpv-original-http-cancel-lifetime.patch
 scripts/mpv-original-http-reference-recipe.patch scripts/mpv-original-local-file-witness.patch
@@ -63,10 +64,18 @@ WRAPPER = {"apple": "2103893078c5e339073b11737b86f7f22b9c4491",
 # Full-file postcomposition hashes retain cancellation plus owned observation.
 CANCEL = {"misc/thread_tools.c": "151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9",
           "misc/thread_tools.h": "62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f",
-          "stream/stream_lavf.c": "721c0e25e8de5d5207c064d328f577dbdf0f3c345bd8ab4caadf410dcdfb6e83",
-          "stream/reference_source.h": "868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933",
-          "stream/vortx_http_request.h": "81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765"}
-RESPONSE = {"libavformat/http.c": "24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe"}
+          "stream/stream_lavf.c": "25047d80eb9c12e30ca13476ddd3c3153e5c7bf9ed6857ed197fd956ac70175b",
+          "stream/reference_source.h": "1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835",
+          "stream/vortx_http_request.h": "d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9"}
+RESPONSE = {
+    "libavformat/http.c": "6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22",
+    "libavformat/url.h": "0a9f01a0f14a7b75dbbf1f81b177caf6a2503cde9897b827d9000e959d67bb4c",
+    "libavformat/tls.c": "eeec3c97e3572cf2272dc577576626716186f11539034ecaa4b45edb4855fab6",
+    "libavformat/tls.h": "257c76932de48ed84bf849a44ca9ea6fe85adb93a26bb4f7112b19000084ff19",
+    "libavformat/tls_securetransport.c": "b04fb28df85f1ef3883b4927d0bfab4477f400128c122f794ff13b4b9c85bebc",
+}
+MBEDTLS = {"apple": "77d72cb88fc662b984f051335b356abc3e76e97ce39302dde6961ecdbba7a332",
+           "android": "7099664b2c15a784db38a0db7956f718862201ef6c02d27779b2fc654b44aeac"}
 GITLINKS = {"3rdparty/Vulkan-Headers": "74d8a6cb930c68ef617b202c3ff3c59d919e086b",
             "3rdparty/fast_float": "97b54ca9e75f5303507699d27c6b4f4efe4641a1",
             "3rdparty/glad": "73db193f853e2ee079bf3ca8a64aa2eaf6459043",
@@ -78,7 +87,7 @@ CREATED_MPV = {"player/owned_subtitle.c": "875d9f0192cd5f45acca2654765bdc667df5d
                "player/owned_subtitle.h": "2e9e64d92938e41c14c3397c9fbe7d064c2fe8aa5d2dcd05db4b9a74f4bad22e",
                "sub/owned_text_slot.h": "b5f99151efb15ba937f630d1c2589c1e6634a4bebb744a161283cb70b3e250b6",
                "stream/reference_source.h": CANCEL["stream/reference_source.h"],
-               "stream/vortx_http_request.h": "81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765"}
+               "stream/vortx_http_request.h": "d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9"}
 PATCH_COPIES = [
     ("0004-moltenvk-context-check-events-resize.patch", None, "mpv-moltenvk-resize.patch"),
     ("0005-coreaudio-hotplug-lifecycle.patch", None, "mpv-coreaudio-hotplug-lifecycle.patch"),
@@ -93,7 +102,8 @@ PATCH_COPIES = [
     ("0014-original-http-cancel-lifetime.patch", "0009-original-http-cancel-lifetime.patch", "mpv-original-http-cancel-lifetime.patch"),
     ("0015-completed-response-observation.patch", "0010-completed-response-observation.patch", "mpv-completed-response-observation.patch"),
     ("0016-sent-request-evidence.patch", "0011-sent-request-evidence.patch", "mpv-sent-request-evidence.patch"),
-    ("0017-bounded-prefix-request.patch", "0012-bounded-prefix-request.patch", "mpv-bounded-prefix-request.patch")]
+    ("0017-bounded-prefix-request.patch", "0012-bounded-prefix-request.patch", "mpv-bounded-prefix-request.patch"),
+    ("0018-original-transport-evidence.patch", "0013-original-transport-evidence.patch", "mpv-original-transport-evidence.patch")]
 
 
 def untracked(lane, row, recipe):
@@ -110,6 +120,9 @@ def untracked(lane, row, recipe):
         sent_path = ("Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch" if lane == "apple"
                      else "buildscripts/patches/ffmpeg/0004-sent-request-evidence.patch")
         result[sent_path] = recipe["scripts/ffmpeg-sent-request-evidence.patch"]
+        transport_path = ("Sources/BuildScripts/patch/FFmpeg/0004-original-transport-evidence.patch" if lane == "apple"
+                          else "buildscripts/patches/ffmpeg/0005-original-transport-evidence.patch")
+        result[transport_path] = recipe["scripts/ffmpeg-original-transport-evidence.patch"]
         if lane == "android":
             result["buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"] = recipe["scripts/native-media-hosted/android/buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"]
             for helper in ("download-lua.sh", "download-libunibreak.sh"):
@@ -122,16 +135,18 @@ def untracked(lane, row, recipe):
             result["video/out/vulkan/context_moltenvk.m"] = "00d2842ddb0dca5070feaf890c0190a0fe62beef9b29ec36e94e329d29a3da5e"
         return result
     if row["commit"] == PINS["ffmpeg"]:
-        result = {"libavformat/vortx_http_request.h": "81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765"}
+        result = {"libavformat/vortx_http_request.h": "d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9"}
         if lane == "android":
             result["libavformat/tls_mbedtls_vortx_distrust.h"] = "376bd507b67b3b912443bda657465204b808518ea353d161e23e47e9b64c0bf4"
         return result
     return {}
 
 
-def require_response_source(files):
+def require_response_source(files, lane):
     # Verified native tar bytes must correspond to the exact tracked HTTP composition.
-    for name, checksum in RESPONSE.items():
+    need(lane in MBEDTLS, "Known transport-evidence source lane")
+    expected = dict(RESPONSE, **{"libavformat/tls_mbedtls.c": MBEDTLS[lane]})
+    for name, checksum in expected.items():
         row = files.get(name, {})
         need(row.get("kind") == "file" and row.get("tracked") is True and row.get("sha256") == checksum,
              "Response-witness afterimage: " + name)
@@ -405,7 +420,8 @@ def git_blob(repo, commit, name):
     return {"bytes": len(data), "sha256": sha(data), "kind": "file", "mode": int(mode[-3:], 8)}
 
 
-SENT_FFMPEG_FUNCTIONS = frozenset(("avpriv_vortx_http_copy_sent_request", "avpriv_vortx_http_sent_request_clear"))
+SENT_FFMPEG_FUNCTIONS = frozenset(("avpriv_vortx_http_copy_sent_request_v2", "avpriv_vortx_http_sent_request_clear_v2"))
+PRIVATE_MPV_FUNCTIONS = frozenset(("stream_reference_sent_request_copy_transport",))
 
 
 def sent_request_abi(value, records, validator_sha256):
@@ -413,8 +429,9 @@ def sent_request_abi(value, records, validator_sha256):
 
     This offline consumer does not execute an inspector or independently certify ELF.
     """
-    keys(value, "schema reader libraries")
-    need(type(value["schema"]) is int and value["schema"] == 1, "Sent-request ABI schema")
+    keys(value, "schema reader libraries retiredV1Absent")
+    need(type(value["schema"]) is int and value["schema"] == 2 and value["retiredV1Absent"] is True,
+         "V2 sent-request ABI and retired-provider absence")
     reader = value["reader"]
     keys(reader, "mode requestedReader resolvedReader readerSHA256 readerVersion validatorSHA256")
     need(reader["mode"] in {"hosted-ndk-reader", "explicit-read-only-inspector"}, "Sent-request reader mode")
@@ -456,9 +473,44 @@ def sent_request_abi(value, records, validator_sha256):
     need(seen == set(expected), "Sent-request complete ABI/library coverage")
 
 
+def private_owner_abi(value, records, expected_reader):
+    """Validate source-bound private-code inspection metadata, without an inspector."""
+    keys(value, "schema reader libraries")
+    need(type(value["schema"]) is int and value["schema"] == 1 and value["reader"] == expected_reader,
+         "Private owner ABI schema/reader correspondence")
+    expected = {(abi, "libmpv.so") for abi in ("arm64-v8a", "armeabi-v7a", "x86_64")}
+    need(type(value["libraries"]) is list and len(value["libraries"]) == 3, "Private owner ABI matrix")
+    seen = set()
+    for row in value["libraries"]:
+        keys(row, "abi library binarySHA256 symtabTextSHA256 symbols")
+        identity = (row["abi"], row["library"])
+        need(identity in expected and identity not in seen, "Private owner library identity")
+        seen.add(identity)
+        entry = "jni/" + row["abi"] + "/libmpv.so"
+        need(entry in records and digest(row["binarySHA256"]) == records[entry]["sha256"],
+             "Private owner inspected packaged bytes")
+        digest(row["symtabTextSHA256"])
+        need(type(row["symbols"]) is list and len(row["symbols"]) == len(PRIVATE_MPV_FUNCTIONS),
+             "Private owner function count")
+        names = []
+        for symbol in row["symbols"]:
+            keys(symbol, "name size type binding visibility section")
+            name = symbol["name"]
+            need(name in PRIVATE_MPV_FUNCTIONS and name not in names and symbol["type"] == "FUNC" and
+                 (symbol["binding"], symbol["visibility"]) in {("LOCAL", "DEFAULT"), ("LOCAL", "HIDDEN"),
+                                                              ("GLOBAL", "HIDDEN")},
+                 "Private owner nonexported exact code identity")
+            names.append(name)
+            need(integer(symbol["size"], 512 * MIB) > 0 and type(symbol["section"]) is str and
+                 re.fullmatch(r"[0-9]+", symbol["section"]) and int(symbol["section"]) > 0,
+                 "Private owner nonzero defined code")
+        need(names == sorted(PRIVATE_MPV_FUNCTIONS), "Private owner canonical function order")
+    need(seen == expected, "Private owner complete three-ABI coverage")
+
+
 def android(archive, inputs, recipe):
     evidence = load(read(archive, "android-artifact-evidence.json"))
-    keys(evidence, "aarSHA256 libraries runtimeSecurityTested appAndSeamBindingChanged promotionEligible sentRequestABI" +
+    keys(evidence, "aarSHA256 libraries runtimeSecurityTested appAndSeamBindingChanged promotionEligible sentRequestABI privateOwnerABI" +
          (" inspection" if "inspection" in evidence else ""))
     need(evidence["aarSHA256"] == inputs["libmpv-release-candidate.aar"]["sha256"] and
          all(evidence[key] is False for key in ("runtimeSecurityTested", "appAndSeamBindingChanged", "promotionEligible")), "Android receipt boundary")
@@ -483,6 +535,7 @@ def android(archive, inputs, recipe):
     need(set(records) == set(jni) and {name.split("/")[1] for name in jni} == admitted and all(
          required <= {name.split("/")[-1] for name in jni if name.startswith("jni/" + abi + "/")} for abi in admitted), "Android ABI/library coverage")
     sent_request_abi(evidence["sentRequestABI"], records, recipe["scripts/native-media-hosted/evidence.py"])
+    private_owner_abi(evidence["privateOwnerABI"], records, evidence["sentRequestABI"]["reader"])
     if "inspection" in evidence:
         need(evidence["inspection"] == evidence["sentRequestABI"]["reader"] and
              evidence["inspection"]["mode"] == "explicit-read-only-inspector", "Separate explicit inspector identity")
@@ -569,9 +622,9 @@ def package(args):
                 checksum, name = line.split("  ")
                 need(name not in recipe, "Duplicate reviewed input")
                 recipe[path(name)] = checksum
-            need(set(recipe) == RECIPE_PATHS and len(recipe) == 32, "Exact 32 reviewed recipe identities")
+            need(set(recipe) == RECIPE_PATHS and len(recipe) == 34, "Exact 34 reviewed recipe identities")
             producer = declared(meta["producerFiles"], "producer")
-            need(set(producer) == {"producer/" + name for name in RECIPE_PATHS | {INPUT_MANIFEST, WORKFLOW}}, "Exact 34 producer files")
+            need(set(producer) == {"producer/" + name for name in RECIPE_PATHS | {INPUT_MANIFEST, WORKFLOW}}, "Exact 36 producer files")
             for name, row in producer.items():
                 need(row == git_blob(args.repo, args.source_commit, name.removeprefix("producer/")) and row["kind"] == "file", "Immutable producer Git blob/mode")
                 relative = name.removeprefix("producer/")
@@ -611,7 +664,7 @@ def package(args):
                 row = native.get(mpv["root"] + "/" + name)
                 need(row and row["kind"] == "file" and row["sha256"] == checksum, "Cancellation afterimage: " + name)
             ffmpeg = next(row for row in meta["sources"] if row["commit"] == PINS["ffmpeg"])
-            require_response_source({row["path"]: row for row in ffmpeg["files"]})
+            require_response_source({row["path"]: row for row in ffmpeg["files"]}, args.lane)
             for key, name, expected_rows in (("producerArchive", "producer-inputs-v2.tar.gz", producer), ("nativeArchive", "native-sources-v2.tar.gz", native)):
                 keys(meta[key], "name sha256 bytes")
                 need(meta[key] == dict(name=name, sha256=inputs[name]["sha256"], bytes=inputs[name]["bytes"]), "V2 archive identity")

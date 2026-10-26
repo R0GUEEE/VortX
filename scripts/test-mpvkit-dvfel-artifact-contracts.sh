@@ -15,6 +15,8 @@ OBSERVATION_PATCH="$ROOT/scripts/mpv-completed-response-observation.patch"
 SENT_FFMPEG_PATCH="$ROOT/scripts/ffmpeg-sent-request-evidence.patch"
 SENT_MPV_PATCH="$ROOT/scripts/mpv-sent-request-evidence.patch"
 PREFIX_PATCH="$ROOT/scripts/mpv-bounded-prefix-request.patch"
+TRANSPORT_FFMPEG_PATCH="$ROOT/scripts/ffmpeg-original-transport-evidence.patch"
+TRANSPORT_MPV_PATCH="$ROOT/scripts/mpv-original-transport-evidence.patch"
 VERIFY="$ROOT/scripts/verify-mpvkit-dvfel-artifacts.sh"
 WORKFLOW="$ROOT/.github/workflows/release-tvos.yml"
 
@@ -23,7 +25,7 @@ fail() {
   exit 1
 }
 
-for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$CANCEL_PATCH" "$RESPONSE_PATCH" "$GENERATION_PATCH" "$OBSERVATION_PATCH" "$SENT_FFMPEG_PATCH" "$SENT_MPV_PATCH" "$VERIFY" "$WORKFLOW"; do
+for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$CANCEL_PATCH" "$RESPONSE_PATCH" "$GENERATION_PATCH" "$OBSERVATION_PATCH" "$SENT_FFMPEG_PATCH" "$SENT_MPV_PATCH" "$PREFIX_PATCH" "$TRANSPORT_FFMPEG_PATCH" "$TRANSPORT_MPV_PATCH" "$VERIFY" "$WORKFLOW"; do
   [ -f "$file" ] || fail "missing required source: $file"
 done
 
@@ -72,7 +74,7 @@ grep -Fq '"$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0001-response-witness.p
   fail "Apple must put the response witness in the FFmpeg patch sequence"
 grep -Fq 'copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"' "$BUILD" ||
   fail "Apple must preserve exact response-witness patch-copy semantics"
-grep -Fq '24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe' "$BUILD" ||
+grep -Fq '6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22' "$BUILD" ||
   fail "Apple must require the exact reviewed HTTP source composition"
 GENERATION_HASH="$(shasum -a 256 "$GENERATION_PATCH")"
 [ "${GENERATION_HASH%% *}" = "ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098" ] ||
@@ -101,6 +103,16 @@ PREFIX_HASH="$(shasum -a 256 "$PREFIX_PATCH")"
   fail "MPV bounded-prefix request carrier differs from the reviewed source"
 grep -Fq 'copy_exact "$PREFIX_PATCH" "$GENERATED_PREFIX_PATCH"' "$BUILD" ||
   fail "Apple must retain the exact bounded-prefix generated copy"
+TRANSPORT_FFMPEG_HASH="$(shasum -a 256 "$TRANSPORT_FFMPEG_PATCH")"
+[ "${TRANSPORT_FFMPEG_HASH%% *}" = "480302686b9fff135cd0665e7af76d635fc21d83f54ee0096578ddd6bd6d83e5" ] ||
+  fail "FFmpeg original-transport carrier differs from the reviewed source"
+TRANSPORT_MPV_HASH="$(shasum -a 256 "$TRANSPORT_MPV_PATCH")"
+[ "${TRANSPORT_MPV_HASH%% *}" = "dad7f2d20ea14eb4661ef853978be78806e1b01fce67653e3ffec9b57d4a0e82" ] ||
+  fail "MPV original-transport carrier differs from the reviewed source"
+grep -Fq 'copy_exact "$TRANSPORT_FFMPEG_PATCH" "$GENERATED_TRANSPORT_FFMPEG_PATCH"' "$BUILD" ||
+  fail "Apple must retain the exact FFmpeg original-transport generated copy"
+grep -Fq 'copy_exact "$TRANSPORT_MPV_PATCH" "$GENERATED_TRANSPORT_MPV_PATCH"' "$BUILD" ||
+  fail "Apple must retain the exact MPV original-transport generated copy"
 
 # The artifact verifier must inspect content, not only checksums or mtimes.
 grep -Fq 'LIBAVCODEC_VERSION_MAJOR' "$VERIFY" || fail "artifact gate must inspect libavcodec major"
@@ -253,7 +265,7 @@ grep -Fq 'generated response-witness patch must not be a symlink' "$FIXTURE/resp
 rm -f "$FIXTURE_RESPONSE_PATCH"
 
 # Each generated path has the same exact-file and no-symlink retry contract.
-for kind in generation observation sent_ffmpeg sent_mpv prefix; do
+for kind in generation observation sent_ffmpeg sent_mpv prefix transport_ffmpeg transport_mpv; do
   if [ "$kind" = generation ]; then
     canonical="$GENERATION_PATCH"
     generated="$SOURCE/Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch"
@@ -270,10 +282,18 @@ for kind in generation observation sent_ffmpeg sent_mpv prefix; do
     canonical="$SENT_MPV_PATCH"
     generated="$SOURCE/Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch"
     label="sent-request evidence"
-  else
+  elif [ "$kind" = prefix ]; then
     canonical="$PREFIX_PATCH"
     generated="$SOURCE/Sources/BuildScripts/patch/libmpv/0017-bounded-prefix-request.patch"
     label="bounded-prefix request"
+  elif [ "$kind" = transport_ffmpeg ]; then
+    canonical="$TRANSPORT_FFMPEG_PATCH"
+    generated="$SOURCE/Sources/BuildScripts/patch/FFmpeg/0004-original-transport-evidence.patch"
+    label="original-transport evidence"
+  else
+    canonical="$TRANSPORT_MPV_PATCH"
+    generated="$SOURCE/Sources/BuildScripts/patch/libmpv/0018-original-transport-evidence.patch"
+    label="original-transport evidence"
   fi
   mkdir -p "$(dirname "$generated")"
   cp "$canonical" "$generated"
@@ -448,6 +468,31 @@ grep -Fq "if host_machine.system() == 'android'" "$FIXTURE/native-prefix-meson.b
   fail "prefix material link root must remain Android-only"
 grep -Fq "gnu_symbol_visibility: 'hidden'" "$FIXTURE/native-prefix-meson.build" ||
   fail "prefix material helper must remain hidden"
+# Compose the route observation only after its exact bounded-prefix prerequisite.
+# This is genuine source/index composition, not a real transport or reader test.
+TRANSPORT_PRE_TREE="$(native_git write-tree)"
+native_git apply --cached "$TRANSPORT_MPV_PATCH"
+[ "$(native_git diff --cached --name-only "$TRANSPORT_PRE_TREE" --)" = "$(printf '%s\n' \
+  stream/reference_source.h stream/stream_lavf.c stream/vortx_http_request.h)" ] ||
+  fail "native transport carrier changed unexpected source paths"
+check_native_source misc/thread_tools.c 151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9
+check_native_source misc/thread_tools.h 62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f
+check_native_source stream/stream_lavf.c 25047d80eb9c12e30ca13476ddd3c3153e5c7bf9ed6857ed197fd956ac70175b
+check_native_source stream/reference_source.h 1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835
+check_native_source stream/vortx_http_request.h d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9
+native_git show :stream/stream_lavf.c >"$FIXTURE/native-transport-lavf.c"
+native_git show :stream/vortx_http_request.h >"$FIXTURE/native-transport-private.h"
+for symbol in avpriv_vortx_http_copy_sent_request_v2 avpriv_vortx_http_sent_request_clear_v2 \
+  stream_reference_sent_request_copy_transport; do
+  grep -Fq "$symbol" "$FIXTURE/native-transport-lavf.c" || fail "native transport symbol missing: $symbol"
+done
+if grep -Eq 'avpriv_vortx_http_(copy_sent_request|sent_request_clear)[[:space:]]*\(' \
+  "$FIXTURE/native-transport-lavf.c" "$FIXTURE/native-transport-private.h"; then
+  fail "native transport carrier retained an unsafe v1 provider/caller fallback"
+fi
+native_git show :meson.build >"$FIXTURE/native-transport-meson.build"
+cmp -s "$FIXTURE/native-prefix-meson.build" "$FIXTURE/native-transport-meson.build" ||
+  fail "transport observation changed the existing seven private native roots"
 [ "$(shasum -a 256 "$NATIVE_REAL_INDEX")" = "$NATIVE_INDEX_BEFORE" ] ||
   fail "native canonical index changed during the isolated carrier contract"
 

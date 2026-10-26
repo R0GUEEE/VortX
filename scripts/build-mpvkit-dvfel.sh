@@ -181,7 +181,7 @@ else
     [ -z "$line" ] && continue
     case "$line" in
       ' M Package.swift'|'M Package.swift'|' M Sources/BuildScripts/XCFrameworkBuild/main.swift'|'M Sources/BuildScripts/XCFrameworkBuild/main.swift'|' M Sources/BuildScripts/XCFrameworkBuild/base.swift'|'M Sources/BuildScripts/XCFrameworkBuild/base.swift'|' M Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch'|'M Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch') ;;
-      '?? .build/'*|'?? dist/'*|'?? Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch'|'?? Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch'|'?? Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch'|'?? Sources/BuildScripts/patch/libmpv/0007-upstream-audio-layout-bounds.patch'|'?? Sources/BuildScripts/patch/libmpv/0008-upstream-gpu-next-seek-reset.patch'|'?? Sources/BuildScripts/patch/libmpv/0009-original-local-file-witness.patch'|'?? Sources/BuildScripts/patch/libmpv/0010-upstream-edition-title-lifetime.patch'|'?? Sources/BuildScripts/patch/libmpv/0011-owned-subtitle-constructor.patch'|'?? Sources/BuildScripts/patch/libmpv/0012-owned-subtitle-publication.patch'|'?? Sources/BuildScripts/patch/libmpv/0013-original-http-reference-recipe.patch'|'?? Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch'|'?? Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0017-bounded-prefix-request.patch') ;;
+      '?? .build/'*|'?? dist/'*|'?? Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch'|'?? Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch'|'?? Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch'|'?? Sources/BuildScripts/patch/libmpv/0007-upstream-audio-layout-bounds.patch'|'?? Sources/BuildScripts/patch/libmpv/0008-upstream-gpu-next-seek-reset.patch'|'?? Sources/BuildScripts/patch/libmpv/0009-original-local-file-witness.patch'|'?? Sources/BuildScripts/patch/libmpv/0010-upstream-edition-title-lifetime.patch'|'?? Sources/BuildScripts/patch/libmpv/0011-owned-subtitle-constructor.patch'|'?? Sources/BuildScripts/patch/libmpv/0012-owned-subtitle-publication.patch'|'?? Sources/BuildScripts/patch/libmpv/0013-original-http-reference-recipe.patch'|'?? Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch'|'?? Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0017-bounded-prefix-request.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0004-original-transport-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0018-original-transport-evidence.patch') ;;
       *) fail "existing MPVKit checkout has unexpected dirty state: $line" ;;
     esac
   done <<< "$STATUS"
@@ -258,6 +258,24 @@ if [ -e "$GENERATED_PREFIX_PATCH" ]; then
   cmp -s "$PREFIX_PATCH" "$GENERATED_PREFIX_PATCH" || fail "existing generated bounded-prefix request patch differs: $GENERATED_PREFIX_PATCH"
 fi
 
+# Private original-route observations use a versioned provider ABI. They do not
+# authorize a second request, a remote timing reader, or weaker TLS policy.
+TRANSPORT_FFMPEG_PATCH="$REPO/scripts/ffmpeg-original-transport-evidence.patch"
+TRANSPORT_MPV_PATCH="$REPO/scripts/mpv-original-transport-evidence.patch"
+TRANSPORT_FFMPEG_HASH="$(shasum -a 256 "$TRANSPORT_FFMPEG_PATCH")"
+TRANSPORT_MPV_HASH="$(shasum -a 256 "$TRANSPORT_MPV_PATCH")"
+[ "${TRANSPORT_FFMPEG_HASH%% *}" = "480302686b9fff135cd0665e7af76d635fc21d83f54ee0096578ddd6bd6d83e5" ] || fail "FFmpeg original-transport evidence patch differs"
+[ "${TRANSPORT_MPV_HASH%% *}" = "dad7f2d20ea14eb4661ef853978be78806e1b01fce67653e3ffec9b57d4a0e82" ] || fail "MPV original-transport evidence patch differs"
+GENERATED_TRANSPORT_FFMPEG_PATCH="$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0004-original-transport-evidence.patch"
+GENERATED_TRANSPORT_MPV_PATCH="$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/0018-original-transport-evidence.patch"
+for generated in "$GENERATED_TRANSPORT_FFMPEG_PATCH" "$GENERATED_TRANSPORT_MPV_PATCH"; do
+  [ ! -L "$generated" ] || fail "generated original-transport evidence patch must not be a symlink"
+  if [ -e "$generated" ]; then
+    if [ "$generated" = "$GENERATED_TRANSPORT_FFMPEG_PATCH" ]; then canonical="$TRANSPORT_FFMPEG_PATCH"; else canonical="$TRANSPORT_MPV_PATCH"; fi
+    cmp -s "$canonical" "$generated" || fail "existing generated original-transport evidence patch differs: $generated"
+  fi
+done
+
 if [ "$PREFLIGHT_ONLY" = "1" ]; then
   echo "build-mpvkit-dvfel: preflight-only checkout and patch validation passed"
   exit 0
@@ -310,6 +328,7 @@ copy_exact "$REPO/scripts/mpv-completed-response-observation.patch" \
 # Private native header/ABI evidence; no demux or reader activation.
 copy_exact "$SENT_MPV_PATCH" "$GENERATED_SENT_MPV_PATCH"
 copy_exact "$PREFIX_PATCH" "$GENERATED_PREFIX_PATCH"
+copy_exact "$TRANSPORT_MPV_PATCH" "$GENERATED_TRANSPORT_MPV_PATCH"
 
 # FFmpeg has its own sorted sequence. This exact metadata producer is independent
 # of the MPV original-request/cancellation patches and enables no HTTP timing reader.
@@ -317,6 +336,7 @@ mkdir -p "$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg"
 copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"
 copy_exact "$RESPONSE_GENERATION_PATCH" "$GENERATED_RESPONSE_GENERATION_PATCH"
 copy_exact "$SENT_FFMPEG_PATCH" "$GENERATED_SENT_FFMPEG_PATCH"
+copy_exact "$TRANSPORT_FFMPEG_PATCH" "$GENERATED_TRANSPORT_FFMPEG_PATCH"
 
 # A prior interrupted experiment installed this retired VortX-only FFmpeg patch as an untracked
 # file. Do not delete or overwrite it implicitly; fail with an actionable path instead.
@@ -333,21 +353,30 @@ swift run --build-path ./.build --package-path Sources/BuildScripts \
 FFMPEG_RESPONSE_SOURCE="$WORK/dist/FFmpeg-9.0.2-946fcce0"
 [ "$(git -C "$FFMPEG_RESPONSE_SOURCE" rev-parse HEAD)" = "946fcce07b6dcd0331c8cc609192aeff5e1924f8" ] ||
   fail "FFmpeg response-witness source has a different upstream pin"
-printf '%s  %s\n' 24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe \
+printf '%s  %s\n' 6a34addba8bc8ce1a24b28a3faac3e6fc8b1c5d464be88946e4b0694eaf98a22 \
   "$FFMPEG_RESPONSE_SOURCE/libavformat/http.c" | shasum -a 256 -c - ||
   fail "FFmpeg response observation source differs from the reviewed n9.0.2 composition"
+# Every affected transport/layout source must come from the same freshly built
+# component family. Checking HTTP alone cannot establish this private ABI pair.
+printf '%s  %s\n' \
+  0a9f01a0f14a7b75dbbf1f81b177caf6a2503cde9897b827d9000e959d67bb4c "$FFMPEG_RESPONSE_SOURCE/libavformat/url.h" \
+  eeec3c97e3572cf2272dc577576626716186f11539034ecaa4b45edb4855fab6 "$FFMPEG_RESPONSE_SOURCE/libavformat/tls.c" \
+  257c76932de48ed84bf849a44ca9ea6fe85adb93a26bb4f7112b19000084ff19 "$FFMPEG_RESPONSE_SOURCE/libavformat/tls.h" \
+  b04fb28df85f1ef3883b4927d0bfab4477f400128c122f794ff13b4b9c85bebc "$FFMPEG_RESPONSE_SOURCE/libavformat/tls_securetransport.c" \
+  77d72cb88fc662b984f051335b356abc3e76e97ce39302dde6961ecdbba7a332 "$FFMPEG_RESPONSE_SOURCE/libavformat/tls_mbedtls.c" | shasum -a 256 -c - ||
+  fail "FFmpeg original-transport source family differs from the reviewed composition"
 MPV_OBSERVATION_SOURCE="$WORK/dist/libmpv-master-8c67647b"
 [ "$(git -C "$MPV_OBSERVATION_SOURCE" rev-parse HEAD)" = "8c67647b50059406c5c0444903597281b81516cf" ] ||
   fail "MPV response observation source has a different upstream pin"
-printf '%s  %s\n' 721c0e25e8de5d5207c064d328f577dbdf0f3c345bd8ab4caadf410dcdfb6e83 \
+printf '%s  %s\n' 25047d80eb9c12e30ca13476ddd3c3153e5c7bf9ed6857ed197fd956ac70175b \
   "$MPV_OBSERVATION_SOURCE/stream/stream_lavf.c" | shasum -a 256 -c - ||
   fail "MPV response observation source differs from the reviewed composition"
-printf '%s  %s\n' 868b13f385025791ecb2713bda68ed08fce434be8ddb0befdef6633044152933 \
+printf '%s  %s\n' 1ab5fae85e71f2f91a915b29c0dc26e19f77269c5dcc8982f9b0eb9fbfef0835 \
   "$MPV_OBSERVATION_SOURCE/stream/reference_source.h" | shasum -a 256 -c - ||
   fail "MPV response observation header differs from the reviewed composition"
 for private_header in "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_http_request.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_http_request.h"; do
   [ -f "$private_header" ] && [ ! -L "$private_header" ] || fail "private sent-request header must be a regular source file"
-  printf '%s  %s\n' 81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765 "$private_header" | shasum -a 256 -c - || fail "private sent-request header differs"
+  printf '%s  %s\n' d7730cc3492f6eaf6f6f1134fa50331c13e251fb1ddab8e577e1b912b8679dc9 "$private_header" | shasum -a 256 -c - || fail "private sent-request header differs"
 done
 cmp -s "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_http_request.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_http_request.h" || fail "private sent-request headers disagree"
 
