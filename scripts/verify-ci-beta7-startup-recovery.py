@@ -4,7 +4,8 @@
 Literal derivative of frozen direct-beta verifier ffd11e731c1074dcf34d46b0937a00db44787c588ac94e2b9bf3d4d11f466de9.
 The nine frozen source checks and normal package gates remain unchanged. This
 separate operational tool admits only the reviewed missing-optional-initializer
-repair, recording operational workflow and frozen package source independently.
+repair plus exact reviewed validation-fixture correction/restoration, recording
+operational workflow, validation inputs and frozen package source independently.
 
 Only GET requests are issued. prepare writes a new local nine-file upload directory;
 verify-draft and verify-published independently authenticate both original CI artifacts.
@@ -642,10 +643,14 @@ def build_manifest(args, pointers, stable, helper, work):
     require(canonical(pointers["android"]) == canonical(ANDROID_POINTER), "Android is not the original accepted Beta 7 handoff")
     check_tag(args.tag, source)
     apple_names, apple_matrix, android_names = file_matrix(args.tag, version)
-    apple_dir, apple_run = authenticate_recovery_build(pointers["apple"], apple_matrix | {REPAIR_RECEIPT}, work)
+    apple_dir, apple_run = authenticate_recovery_build(pointers["apple"], apple_matrix | {REPAIR_RECEIPT, FIXTURE_RECEIPT}, work)
     android_dir, android_run = authenticate_build("android", pointers["android"], args.tag, source,
                                                 android_names | {"SHA256SUMS-android.txt", "SIGNING_PROVENANCE.txt"}, work)
     apple, apple_evidence = inspect_recovery_apple(apple_dir, pointers["apple"], args.tag, source, version, build, tools, helper)
+    header_inputs = {item["sha256"] for item in read_json(apple_dir / "native-build-inputs.json")["inputs"]
+                     if item.get("kind") == "header"}
+    require(header_inputs == {apple_run["validationFixtureRuntime"]["runtimeHeaderSha256"]},
+            "live ABI runtime header differs from captured/packaged native SDK")
     require(android_run["artifactSha256"] == "f31aec2085cc498c41c96598151aae51ef6c9fab3221916bed322650e783d8de" and
             android_run["artifactSize"] == 198614978, "original Android immutable handoff content differs")
     android, android_evidence = inspect_android(android_dir, pointers["android"], args.tag, source, version,
@@ -700,8 +705,8 @@ RECOVERY_RELEASE = 423682179
 RECOVERY_BUILD = "280"
 RECOVERY_TAG_OBJECT = "8460493f719db34b39c824edb4202255ef32efde"
 RECOVERY_BRANCH = "beta-native-engine-integration-20261008"
-OP_WORKFLOW_COMMIT = "3af39fc9d6f6b52a3daa634806d65c7df9f28b92"
-OP_WORKFLOW_SHA256 = "6baa8ddb622efb185148aa74e1e5d62cec8d5c96a3a7b3e2e6ac8e2fd1076ab6"
+OP_WORKFLOW_COMMIT = "e13a97fc0890e26df22f50c675bc1ca3e0b3c9da"
+OP_WORKFLOW_SHA256 = "ba54cd942d005b16417b3a91cf02c940b78a9e07f0a3fa219293a9d329d8fb00"
 FROZEN_VERIFIER_SHA256 = "ffd11e731c1074dcf34d46b0937a00db44787c588ac94e2b9bf3d4d11f466de9"
 RECOVERY_TOOL_PATH = "scripts/verify-ci-beta7-startup-recovery.py"
 REPAIR_RECEIPT = "native-ci-environment-repair.json"
@@ -740,7 +745,7 @@ def repair_bytes(value):
 def public_source_file(commit, relative):
     # A public immutable Git object, never a caller-supplied URL or branch.
     sha(commit, 40)
-    require(relative in (RECOVERY_TOOL_PATH, ".github/workflows/release-tvos.yml"), "unapproved public source path")
+    require(relative in (RECOVERY_TOOL_PATH, ".github/workflows/release-tvos.yml", FIXTURE_PATH, FIXTURE_RUNNER_PATH), "unapproved public source path")
     response = api(f"contents/{relative}?ref={commit}")
     require(response.get("type") == "file" and response.get("path") == relative and
             response.get("encoding") == "base64", "public operational source is not a regular Git file")
@@ -762,12 +767,34 @@ def operational_contract(tool_commit):
     workflow = public_source_file(OP_WORKFLOW_COMMIT, ".github/workflows/release-tvos.yml")
     require(hashlib.sha256(workflow).hexdigest() == OP_WORKFLOW_SHA256,
             "operational workflow differs from the independently reviewed exact bytes")
+    marker = "          cat > \"$RUNNER_TEMP/beta7-live-abi-fixture.py\" <<'LIVE_ABI_FIXTURE_PY'\n"
+    embedded = workflow.decode().split(marker)
+    require(len(embedded) == 2, "expected one exact reviewed live ABI overlay helper")
+    body = embedded[1].split("          LIVE_ABI_FIXTURE_PY\n", 1)
+    require(len(body) == 2 and all(line.startswith("          ") for line in body[0].splitlines()),
+            "malformed reviewed fixture helper literal")
+    helper = "".join(line[10:] for line in body[0].splitlines(keepends=True)).encode()
+    require(hashlib.sha256(helper).hexdigest() == FIXTURE_HELPER_SHA256, "fixture overlay helper differs")
+    fixture_comparison = api(f"compare/{RECOVERY_SOURCE}...{FIXTURE_SOURCE_COMMIT}")
+    require(fixture_comparison.get("status") == "ahead" and
+            fixture_comparison.get("merge_base_commit", {}).get("sha") == RECOVERY_SOURCE and
+            [item.get("filename") for item in fixture_comparison.get("files", [])] == [FIXTURE_PATH],
+            "reviewed fixture commit changes more than the validation fixture")
+    for commit, relative, expected in ((RECOVERY_SOURCE, FIXTURE_PATH, FIXTURE_BEFORE),
+                                       (FIXTURE_SOURCE_COMMIT, FIXTURE_PATH, FIXTURE_AFTER),
+                                       (RECOVERY_SOURCE, FIXTURE_RUNNER_PATH, FIXTURE_RUNNER_SHA256)):
+        require(hashlib.sha256(public_source_file(commit, relative)).hexdigest() == expected,
+                "immutable original/corrected fixture or unchanged full runner differs")
     sha(tool_commit, 40)
     require(api(f"git/commits/{tool_commit}").get("sha") == tool_commit,
             "recovery tool commit is not an immutable public Git commit")
     tool = public_source_file(tool_commit, RECOVERY_TOOL_PATH)
     require(tool == Path(__file__).read_bytes(), "executing recovery tool differs from its public source commit")
-    return {"kind": "beta7-missing-optional-cargo-env", "frozenVerifierSha256": FROZEN_VERIFIER_SHA256,
+    return {"kind": "beta7-environment-and-live-abi-fixture-recovery", "frozenVerifierSha256": FROZEN_VERIFIER_SHA256,
+            "validationFixture": {"fixtureSourceCommit": FIXTURE_SOURCE_COMMIT, "path": FIXTURE_PATH,
+                                  "beforeSha256": FIXTURE_BEFORE, "usedSha256": FIXTURE_AFTER,
+                                  "restoredSha256": FIXTURE_BEFORE, "runnerSha256": FIXTURE_RUNNER_SHA256,
+                                  "overlayHelperSha256": FIXTURE_HELPER_SHA256, "productionSourceChanged": False},
             "workflowCommit": OP_WORKFLOW_COMMIT, "workflowSha256": OP_WORKFLOW_SHA256,
             "environment": "engine-ci", "toolSourceCommit": tool_commit,
             "toolPath": RECOVERY_TOOL_PATH, "toolSha256": hashlib.sha256(tool).hexdigest()}
@@ -775,7 +802,8 @@ def operational_contract(tool_commit):
 
 def recovery_job_contract():
     original_required, original_skipped = job_contract("apple", NATIVE_BETA7_TAG)
-    required = original_required + RECOVERED_SOURCE_STEPS + (REPAIR_PREPARE, REPAIR_VERIFY)
+    required = original_required + RECOVERED_SOURCE_STEPS + (REPAIR_PREPARE, REPAIR_VERIFY,
+                                                             FIXTURE_PREPARE, FIXTURE_RESTORE, SDK_CACHE_RESTORE)
     skipped = tuple(name for name in original_skipped if name not in RECOVERED_SOURCE_STEPS)
     return required, skipped
 
@@ -793,7 +821,12 @@ def successful_recovery_job(jobs, pointer):
             selected = [step for step in job["steps"] if step.get("name") == name]
             require(len(selected) == 1 and selected[0].get("status") == "completed" and
                     selected[0].get("conclusion") == outcome, "operational step identity/outcome differs: " + name)
-    selected = {step["name"]: step for step in job["steps"] if step.get("name") in required}
+    for name in (SDK_BUILD, SDK_EARLY_SAVE):
+        choices = [step for step in job["steps"] if step.get("name") == name]
+        require(len(choices) == 1 and choices[0].get("status") == "completed" and
+                choices[0].get("conclusion") in ("success", "skipped"), "unexpected SDK cache/build outcome")
+    selected = {step["name"]: step for step in job["steps"]
+                if step.get("name") in required + (SDK_BUILD, SDK_EARLY_SAVE)}
     # Environment setup precedes all real native builds; post-runtime proof precedes upload.
     require(selected[REPAIR_PREPARE]["number"] < selected["Verify complete native engine ABI"]["number"] and
             selected["Verify exact native app selection and linked inputs"]["number"] < selected[REPAIR_VERIFY]["number"] <
@@ -974,14 +1007,23 @@ def authenticate_recovery_build(pointer, names, work):
             "original environment repair receipt bytes differ from its producer serialization")
     with log.open(errors="strict") as lines:
         repair_log_proof(repair, pointer, selected_steps, list(lines))
+    fixture = read_json(output / FIXTURE_RECEIPT)
+    require((output / FIXTURE_RECEIPT).read_bytes() == repair_bytes(fixture),
+            "original live ABI fixture receipt bytes differ from its producer serialization")
+    with log.open(errors="strict") as lines:
+        raw_lines = list(lines)
+    live_abi = live_abi_log_proof(fixture, pointer, selected_steps, raw_lines)
+    sdk_cache = sdk_cache_proof(selected_steps, raw_lines)
     public = {**pointer, "workflow": f".github/workflows/{workflow}", "workflowId": workflow_meta["id"],
+              "validationFixtureRuntime": live_abi, "nativeSdkCache": sdk_cache,
               "sourceCommit": source, "workflowCommit": OP_WORKFLOW_COMMIT,
               "headBranch": RECOVERY_BRANCH, "event": "workflow_dispatch", "environment": "engine-ci",
               "repositoryId": repo_id, "jobId": job["id"], "jobName": job_name,
               "requiredSuccessfulSteps": list(required), "artifactName": artifact_name,
               "artifactSha256": artifact["digest"][7:], "artifactSize": artifact["size_in_bytes"],
               "artifactCreatedAt": artifact["created_at"],
-              "environmentRepairReceiptSha256": digest(output / REPAIR_RECEIPT)}
+              "environmentRepairReceiptSha256": digest(output / REPAIR_RECEIPT),
+              "liveAbiFixtureReceiptSha256": digest(output / FIXTURE_RECEIPT)}
     return output, public
 
 
@@ -992,6 +1034,8 @@ def inspect_recovery_apple(directory, pointer, tag, source, version, build, tool
     validate_recovery_workflow(workflow, pointer, tools)
     repair = read_json(directory / REPAIR_RECEIPT)
     validate_environment_repair(repair, pointer)
+    fixture = read_json(directory / FIXTURE_RECEIPT)
+    validate_fixture_repair(fixture, pointer)
     dispatch = read_json(directory / "native-ci-dispatch.json")
     validate_recovery_dispatch(dispatch, pointer)
     inputs = read_json(directory / "native-build-inputs.json")
@@ -1041,9 +1085,116 @@ def inspect_recovery_apple(directory, pointer, tag, source, version, build, tool
                 "bundleIdentifier": spec[3], "signature": spec[5], "notarization": spec[6]}
         helper.inspect_artifact(package, {**item, "acceptedAppReceipt": accepted}, key)
         records.append((package, item))
-    return records, {"originalWorkflow": workflow, "originalDispatch": dispatch, "environmentRepair": repair,
+    return records, {"originalWorkflow": workflow, "originalDispatch": dispatch, "environmentRepair": repair, "validationFixtureRepair": fixture,
                      "receiptSha256": {path.name: digest(path) for path in sorted(directory.glob("native-*.json"))}}
 
+
+
+
+
+# This validation-only fixture is distinct from the frozen production source.
+FIXTURE_SOURCE_COMMIT = "5f4faae8453599149da2d80020075517c17c9e89"
+FIXTURE_PATH = "app/Tests/VortxNativeLiveABITests.swift"
+FIXTURE_BEFORE = "2e4a8baa9067fe072e6f72ffb3b2e39ec864608104b071ef1ff4f03c90783f5a"
+FIXTURE_AFTER = "075ed7131c2262a31aaaeb021d01ffa0e4616e51d6e7dff1846e6c2de1008abc"
+FIXTURE_RUNNER_PATH = "scripts/test-native-cutover-live-abi.sh"
+FIXTURE_RUNNER_SHA256 = "cf9a771fcb49a20a86e966a6c97d7726c1a7468ea5c22ac35e42a653f9642132"
+FIXTURE_HELPER_SHA256 = "77798751c51fbdec558d5fe92727bc8b7bb2708e2115c02c24c524fbc3ca11a8"
+FIXTURE_RECEIPT = "native-ci-live-abi-fixture-repair.json"
+FIXTURE_PREPARE = "Prepare reviewed Beta7 live ABI fixture correction"
+FIXTURE_RUNTIME = "Verify native account and episode ABI against the reviewed engine"
+FIXTURE_RESTORE = "Restore immutable Beta7 fixture after full live ABI gate"
+FIXTURE_PREPARED_MARKER = "VORTX_LIVE_ABI_FIXTURE_PREPARED_SHA256="
+FIXTURE_RESTORED_MARKER = "VORTX_LIVE_ABI_FIXTURE_RESTORED_SHA256="
+SDK_CACHE_RESTORE = "Cache vortx-ffi xcframework"
+SDK_BUILD = "Build the vortx-ffi xcframework"
+SDK_EARLY_SAVE = "Save verified native SDK component before unrelated later gates"
+
+
+def validate_fixture_repair(receipt, pointer):
+    expected = {"schemaVersion": 1, "kind": "beta7-live-abi-fixture-compat",
+                "sourceCommit": RECOVERY_SOURCE, "workflowCommit": OP_WORKFLOW_COMMIT,
+                "ref": "refs/heads/" + RECOVERY_BRANCH, "tag": "", "nativeRevision": NATIVE_BETA7_ENGINE,
+                "runId": pointer["runId"], "attempt": pointer["attempt"], "testPath": FIXTURE_PATH,
+                "beforeSha256": FIXTURE_BEFORE, "fixtureSha256": FIXTURE_AFTER,
+                "runnerSha256": FIXTURE_RUNNER_SHA256, "fixtureOnlyDiff": True, "runtimeOutcome": "success",
+                "restoredSha256": FIXTURE_BEFORE, "restoredClean": True}
+    require(canonical(receipt) == canonical(expected), "live ABI fixture identity/runtime/restoration receipt differs")
+    initial = {**expected, "runtimeOutcome": None, "restoredSha256": None, "restoredClean": False}
+    return hashlib.sha256(repair_bytes(initial)).hexdigest(), hashlib.sha256(repair_bytes(expected)).hexdigest()
+
+
+def step_log_bodies(lines, step):
+    parse = lambda value: datetime.fromisoformat(value.replace("Z", "+00:00"))
+    start, end = parse(step["started_at"]), parse(step["completed_at"])
+    require(end >= start, "negative step duration")
+    result = []
+    for line in lines:
+        stamp, separator, body = line.rstrip("\r\n").partition(" ")
+        if separator:
+            when = parse(stamp)
+            if start <= when < end + timedelta(seconds=1):
+                result.append(body)
+    return result
+
+
+def live_abi_log_proof(receipt, pointer, steps, lines):
+    initial, final = validate_fixture_repair(receipt, pointer)
+    for name, marker, value in ((FIXTURE_PREPARE, FIXTURE_PREPARED_MARKER, initial),
+                                (FIXTURE_RESTORE, FIXTURE_RESTORED_MARKER, final)):
+        matches = [body for body in step_log_bodies(lines, steps[name]) if body.startswith(marker)]
+        require(matches == [marker + value] and
+                sum(line.rstrip("\r\n").partition(" ")[2].startswith(marker) for line in lines) == 1,
+                "live ABI fixture raw digest marker missing/duplicate/outside step")
+    parse = lambda value: datetime.fromisoformat(value.replace("Z", "+00:00"))
+    ordered = (FIXTURE_PREPARE, FIXTURE_RUNTIME, FIXTURE_RESTORE,
+               "Fetch the MPVKit-DVFEL artifacts (pinned, sha256-verified)", "Generate the Xcode project")
+    for first, second in zip(ordered, ordered[1:]):
+        require(steps[first]["number"] < steps[second]["number"] and
+                parse(steps[first]["completed_at"]) <= parse(steps[second]["started_at"]),
+                "live ABI fixture was not restored before app compilation")
+    for name in ("Capture exact native SDK and player inputs before app compilation",
+                 "Check shared server settings at the iOS 16 deployment target",
+                 "Smoke-test tvOS launch in a simulator (fail closed)", "Build tvOS (Full)",
+                 "Build tvOS (Lite)", "Build iOS", "Gate iOS-simulator link + dSYM (fail closed)", "Build macOS"):
+        require(steps[FIXTURE_RESTORE]["number"] < steps[name]["number"] and
+                parse(steps[FIXTURE_RESTORE]["completed_at"]) <= parse(steps[name]["started_at"]),
+                "app compilation began before exact frozen fixture restoration")
+    runtime = step_log_bodies(lines, steps[FIXTURE_RUNTIME])
+    require(runtime.count(FIXTURE_PATH + ": OK") == 1, "full ABI runner did not conserve corrected fixture input")
+    values = {}
+    for key in ("library", "header"):
+        matches = [body for body in runtime if body.startswith("Verified unchanged " + key + " ")]
+        require(len(matches) == 1 and re.fullmatch("Verified unchanged " + key + r" [0-9a-f]{64}", matches[0]),
+                "full ABI runner post-runtime library/header proof differs")
+        values[key] = matches[0].rsplit(" ", 1)[1]
+    return {"runtimeLibrarySha256": values["library"], "runtimeHeaderSha256": values["header"],
+            "consumedFixtureSha256": FIXTURE_AFTER, "restoredFixtureSha256": FIXTURE_BEFORE,
+            "runnerSha256": FIXTURE_RUNNER_SHA256, "carrierSourcesConserved": True}
+
+
+def sdk_cache_proof(steps, lines):
+    # Exact-key-only restore is performance reuse, never an ABI/runtime acceptance substitute.
+    bodies = step_log_bodies(lines, steps[SDK_CACHE_RESTORE])
+    key_pattern = r"vortx-ffi-resource-host-v1-macOS-[A-Za-z0-9._-]{1,200}-" + NATIVE_BETA7_ENGINE + r"-[0-9a-f]{64}"
+    missed = [body.removeprefix("Cache not found for input keys: ") for body in bodies
+              if body.startswith("Cache not found for input keys: ")]
+    hit = [body.removeprefix("Cache hit for: ") for body in bodies if body.startswith("Cache hit for: ")]
+    restored = [body.removeprefix("Cache restored from key: ") for body in bodies
+                if body.startswith("Cache restored from key: ")]
+    if hit:
+        require(len(hit) == 1 and re.fullmatch(key_pattern, hit[0]) and restored == hit and not missed and
+                steps[SDK_BUILD]["conclusion"] == "skipped" and steps[SDK_EARLY_SAVE]["conclusion"] == "skipped",
+                "SDK cache-hit skip lacks exact original restore proof")
+        outcome, key = "exact-hit", hit[0]
+    else:
+        require(len(missed) == 1 and re.fullmatch(key_pattern, missed[0]) and not restored and
+                steps[SDK_BUILD]["conclusion"] == "success" and steps[SDK_EARLY_SAVE]["conclusion"] == "success",
+                "SDK cache miss did not build/save the verified same-pin component")
+        outcome, key = "miss-built-and-save-step-succeeded", missed[0]
+    require(steps["Verify Apple engine artifacts (fail closed)"]["number"] < steps[SDK_EARLY_SAVE]["number"] <
+            steps[FIXTURE_PREPARE]["number"], "early component save preceded native artifact proof or followed validation")
+    return {"restore": outcome, "key": key, "validationAcceptance": False}
 
 
 def main():

@@ -5,6 +5,7 @@ build, app launch, signing, account, or package-tool invocation is performed.
 """
 import base64
 import copy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
@@ -45,18 +46,60 @@ class ExactStartupRecoveryContract(unittest.TestCase):
                 "initializer": "rustup-optional-shell-env", "created": created, "before": before,
                 "after": after, "afterRuntime": copy.deepcopy(after), "runtimeVerified": True}
 
+    def fixture(self):
+        return {"schemaVersion": 1, "kind": "beta7-live-abi-fixture-compat", "sourceCommit": V.RECOVERY_SOURCE,
+                "workflowCommit": self.W, "ref": "refs/heads/" + V.RECOVERY_BRANCH, "tag": "",
+                "nativeRevision": V.NATIVE_BETA7_ENGINE, "runId": 55, "attempt": 1, "testPath": V.FIXTURE_PATH,
+                "beforeSha256": V.FIXTURE_BEFORE, "fixtureSha256": V.FIXTURE_AFTER,
+                "runnerSha256": V.FIXTURE_RUNNER_SHA256, "fixtureOnlyDiff": True, "runtimeOutcome": "success",
+                "restoredSha256": V.FIXTURE_BEFORE, "restoredClean": True}
+
+    @staticmethod
+    def log(step, body):
+        return step["started_at"] + " " + body
+
+    def extra_logs(self, job):
+        steps = {step["name"]: step for step in job["steps"]}
+        first, final = V.validate_fixture_repair(self.fixture(), self.P)
+        return [self.log(steps[V.FIXTURE_PREPARE], V.FIXTURE_PREPARED_MARKER + first),
+                self.log(steps[V.FIXTURE_RESTORE], V.FIXTURE_RESTORED_MARKER + final),
+                self.log(steps[V.FIXTURE_RUNTIME], V.FIXTURE_PATH + ": OK"),
+                self.log(steps[V.FIXTURE_RUNTIME], "Verified unchanged library " + "a" * 64),
+                self.log(steps[V.FIXTURE_RUNTIME], "Verified unchanged header " + "d" * 64),
+                self.log(steps[V.SDK_CACHE_RESTORE], "Cache not found for input keys: " + self.cache_key())]
+
+    @staticmethod
+    def cache_key():
+        return "vortx-ffi-resource-host-v1-macOS-Xcode-26.6-Build-version-17F113--" + V.NATIVE_BETA7_ENGINE + "-" + "a" * 64
+
     def job(self):
         required, skipped = V.recovery_job_contract()
         steps = [{"name": name, "number": index + 10, "status": "completed", "conclusion": "success",
                   "started_at": "2026-10-26T01:00:00Z", "completed_at": "2026-10-26T01:00:02Z"}
                  for index, name in enumerate(required)]
-        numbers = {V.REPAIR_PREPARE: 1, "Verify complete native engine ABI": 20,
-                   "Verify exact native app selection and linked inputs": 70,
-                   V.REPAIR_VERIFY: 90, "Upload the immutable app handoff": 100}
-        for step in steps:
-            step["number"] = numbers.get(step["name"], step["number"])
         steps += [{"name": name, "number": 200 + index, "status": "completed", "conclusion": "skipped"}
                   for index, name in enumerate(skipped)]
+        steps += [{"name": name, "status": "completed", "conclusion": "success"}
+                  for name in (V.SDK_BUILD, V.SDK_EARLY_SAVE)]
+        numbers = {V.REPAIR_PREPARE: 10, V.SDK_CACHE_RESTORE: 15, V.SDK_BUILD: 16,
+                   "Verify complete native engine ABI": 20,
+                   "Build native macOS streaming server from the same pin": 21,
+                   "Verify Apple engine artifacts (fail closed)": 22, V.SDK_EARLY_SAVE: 23,
+                   V.FIXTURE_PREPARE: 30, V.FIXTURE_RUNTIME: 40, V.FIXTURE_RESTORE: 50,
+                   "Fetch the MPVKit-DVFEL artifacts (pinned, sha256-verified)": 55,
+                   "Generate the Xcode project": 60,
+                   "Capture exact native SDK and player inputs before app compilation": 61,
+                   "Check shared server settings at the iOS 16 deployment target": 62,
+                   "Smoke-test tvOS launch in a simulator (fail closed)": 65,
+                   "Build tvOS (Full)": 70, "Build tvOS (Lite)": 71, "Build iOS": 72,
+                   "Gate iOS-simulator link + dSYM (fail closed)": 73, "Build macOS": 74,
+                   "Verify exact native app selection and linked inputs": 80,
+                   V.REPAIR_VERIFY: 90, "Upload the immutable app handoff": 100}
+        base = datetime(2026, 10, 26, 1, tzinfo=timezone.utc)
+        for index, step in enumerate(steps):
+            number = numbers.get(step["name"], index + 10)
+            step.update(number=number, started_at=(base + timedelta(seconds=number * 3)).isoformat().replace("+00:00", "Z"),
+                        completed_at=(base + timedelta(seconds=number * 3 + 1)).isoformat().replace("+00:00", "Z"))
         return {"id": 99, "name": "build-tvos", "run_id": 55, "run_attempt": 1, "head_sha": self.W,
                 "status": "completed", "conclusion": "success", "steps": steps}
 
@@ -158,8 +201,8 @@ class ExactStartupRecoveryContract(unittest.TestCase):
     def test_prepare_and_post_runtime_marker_hashes_have_unique_step_chronology(self):
         receipt = self.repair(); _, steps = V.successful_recovery_job([self.job()], self.P)
         first, final = V.validate_environment_repair(receipt, self.P)
-        lines = ["2026-10-26T01:00:01Z " + V.REPAIR_PREPARED_MARKER + first,
-                 "2026-10-26T01:00:01Z " + V.REPAIR_VERIFIED_MARKER + final]
+        lines = [self.log(steps[V.REPAIR_PREPARE], V.REPAIR_PREPARED_MARKER + first),
+                 self.log(steps[V.REPAIR_VERIFY], V.REPAIR_VERIFIED_MARKER + final)]
         V.repair_log_proof(receipt, self.P, steps, lines)
         for invalid in (lines[:1], lines + lines[:1], [lines[0].replace(first, "f" * 64), lines[1]],
                         [line.replace("T01:", "T00:") for line in lines]):
@@ -170,37 +213,43 @@ class ExactStartupRecoveryContract(unittest.TestCase):
     def test_authenticated_split_keeps_original_upload_zip_and_repair_proofs(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary); archive = work / "fixture.zip"; receipt = self.repair()
-            with zipfile.ZipFile(archive, "w") as z: z.writestr(V.REPAIR_RECEIPT, V.repair_bytes(receipt))
+            with zipfile.ZipFile(archive, "w") as z:
+                z.writestr(V.REPAIR_RECEIPT, V.repair_bytes(receipt))
+                z.writestr(V.FIXTURE_RECEIPT, V.repair_bytes(self.fixture()))
             raw = archive.read_bytes(); sha = hashlib.sha256(raw).hexdigest(); job = self.job()
+            steps = {step["name"]: step for step in job["steps"]}
+            upload_time = steps["Upload the immutable app handoff"]["started_at"]
             repository = {"id": 1261501126, "full_name": V.REPO}
             run = {"id": 55, "run_attempt": 1, "event": "workflow_dispatch", "head_sha": self.W,
                    "head_branch": V.RECOVERY_BRANCH, "path": ".github/workflows/release-tvos.yml", "workflow_id": 7,
                    "status": "completed", "conclusion": "success", "repository": repository, "head_repository": repository}
             artifact = {"id": 88, "name": "VortX-tvOS-ci", "expired": False, "size_in_bytes": len(raw),
-                        "digest": "sha256:" + sha, "created_at": "2026-10-26T01:00:01Z",
+                        "digest": "sha256:" + sha, "created_at": upload_time,
                         "workflow_run": {"id": 55, "head_sha": self.W, "head_branch": V.RECOVERY_BRANCH,
                                          "repository_id": 1261501126, "head_repository_id": 1261501126}}
             metadata = {"actions/runs/55": run, "actions/workflows/release-tvos.yml": {"id": 7, "path": run["path"]},
                         "actions/runs/55/attempts/1/jobs?per_page=100&page=1": {"jobs": [job], "total_count": 1},
                         "actions/artifacts/88": artifact}
             first, final = V.validate_environment_repair(receipt, self.P)
-            lines = ["2026-10-26T01:00:00.100Z SHA256 digest of uploaded artifact is " + sha,
-                     "2026-10-26T01:00:01.100Z Artifact VortX-tvOS-ci successfully finalized. Artifact ID 88",
-                     f"2026-10-26T01:00:02.100Z Artifact VortX-tvOS-ci has been successfully uploaded! Final size is {len(raw)} bytes. Artifact ID is 88",
-                     "2026-10-26T01:00:01Z " + V.REPAIR_PREPARED_MARKER + first,
-                     "2026-10-26T01:00:01Z " + V.REPAIR_VERIFIED_MARKER + final]
+            lines = [upload_time + " SHA256 digest of uploaded artifact is " + sha,
+                     upload_time + " Artifact VortX-tvOS-ci successfully finalized. Artifact ID 88",
+                     upload_time + f" Artifact VortX-tvOS-ci has been successfully uploaded! Final size is {len(raw)} bytes. Artifact ID is 88",
+                     self.log(steps[V.REPAIR_PREPARE], V.REPAIR_PREPARED_MARKER + first),
+                     self.log(steps[V.REPAIR_VERIFY], V.REPAIR_VERIFIED_MARKER + final)] + self.extra_logs(job)
             downloads = {"actions/jobs/99/logs": ("\n".join(lines) + "\n").encode(), "actions/artifacts/88/zip": raw}
             def download(endpoint, target, limit):
                 self.assertLessEqual(len(downloads[endpoint]), limit); target.write_bytes(downloads[endpoint])
             with mock.patch.object(V, "api", side_effect=metadata.__getitem__), mock.patch.object(V, "api_download", side_effect=download):
-                output, public = V.authenticate_recovery_build(self.P, {V.REPAIR_RECEIPT}, work)
+                output, public = V.authenticate_recovery_build(self.P, {V.REPAIR_RECEIPT, V.FIXTURE_RECEIPT}, work)
             self.assertEqual(public["sourceCommit"], V.RECOVERY_SOURCE)
             self.assertEqual(public["workflowCommit"], self.W)
             self.assertEqual(public["headBranch"], V.RECOVERY_BRANCH)
             self.assertEqual(public["environmentRepairReceiptSha256"], V.digest(output / V.REPAIR_RECEIPT))
             # Reauthenticate a valid ZIP/upload carrying semantically equal but rewritten
             # receipt bytes: the original raw producer/log binding must reject it.
-            with zipfile.ZipFile(archive, "w") as z: z.writestr(V.REPAIR_RECEIPT, V.canonical(receipt))
+            with zipfile.ZipFile(archive, "w") as z:
+                z.writestr(V.REPAIR_RECEIPT, V.canonical(receipt))
+                z.writestr(V.FIXTURE_RECEIPT, V.repair_bytes(self.fixture()))
             rewritten = archive.read_bytes(); rewritten_sha = hashlib.sha256(rewritten).hexdigest()
             rewritten_metadata = copy.deepcopy(metadata)
             rewritten_metadata["actions/artifacts/88"].update(size_in_bytes=len(rewritten), digest="sha256:" + rewritten_sha)
@@ -214,7 +263,7 @@ class ExactStartupRecoveryContract(unittest.TestCase):
                     mock.patch.object(V, "api", side_effect=rewritten_metadata.__getitem__), \
                     mock.patch.object(V, "api_download", side_effect=download_rewritten), \
                     self.assertRaisesRegex(ValueError, "receipt bytes differ"):
-                V.authenticate_recovery_build(self.P, {V.REPAIR_RECEIPT}, Path(other))
+                V.authenticate_recovery_build(self.P, {V.REPAIR_RECEIPT, V.FIXTURE_RECEIPT}, Path(other))
             for item, key, invalid in ((run, "head_sha", V.RECOVERY_SOURCE), (run, "head_branch", V.NATIVE_BETA7_TAG),
                                         (run, "run_attempt", 2), (artifact["workflow_run"], "head_sha", V.RECOVERY_SOURCE),
                                         (artifact, "id", 89)):
@@ -222,7 +271,7 @@ class ExactStartupRecoveryContract(unittest.TestCase):
                 try:
                     with tempfile.TemporaryDirectory() as other, mock.patch.object(V, "api", side_effect=metadata.__getitem__), \
                             mock.patch.object(V, "api_download", side_effect=download), self.assertRaises(ValueError):
-                        V.authenticate_recovery_build(self.P, {V.REPAIR_RECEIPT}, Path(other))
+                        V.authenticate_recovery_build(self.P, {V.REPAIR_RECEIPT, V.FIXTURE_RECEIPT}, Path(other))
                 finally: item[key] = old
 
     def test_retained_nine_source_contract_and_package_guards_are_literal(self):
@@ -240,6 +289,111 @@ class ExactStartupRecoveryContract(unittest.TestCase):
         self.assertEqual(len(V.TOOLS), 9)
         self.assertEqual(V.ANDROID_POINTER, {"runId": 40237231304, "attempt": 1, "artifactId": 12616346338})
         self.assertEqual(len(V.file_matrix(V.NATIVE_BETA7_TAG, "0.5.6")[0]), 4)
+
+class LiveABIFixtureRecoveryContract(unittest.TestCase):
+    W, P = ExactStartupRecoveryContract.W, ExactStartupRecoveryContract.P
+    setUp = ExactStartupRecoveryContract.setUp
+    fixture = ExactStartupRecoveryContract.fixture
+    repair = ExactStartupRecoveryContract.repair
+    job = ExactStartupRecoveryContract.job
+    extra_logs = ExactStartupRecoveryContract.extra_logs
+    log = staticmethod(ExactStartupRecoveryContract.log)
+    cache_key = staticmethod(ExactStartupRecoveryContract.cache_key)
+
+    def test_exact_fixture_receipt_preserves_original_corrected_and_restored_hashes(self):
+        receipt = self.fixture(); original = copy.deepcopy(receipt)
+        before, after = V.validate_fixture_repair(receipt, self.P)
+        self.assertEqual(receipt, original)
+        self.assertEqual(before, hashlib.sha256(V.repair_bytes({**receipt, "runtimeOutcome": None,
+                                                               "restoredSha256": None, "restoredClean": False})).hexdigest())
+        self.assertEqual(after, hashlib.sha256(V.repair_bytes(receipt)).hexdigest())
+        self.assertEqual(receipt["beforeSha256"], receipt["restoredSha256"])
+        self.assertNotEqual(receipt["fixtureSha256"], receipt["restoredSha256"])
+
+    def test_fixture_missing_extra_type_identity_outcome_and_restoration_mutations_reject(self):
+        receipt = self.fixture()
+        for key in receipt:
+            changed = copy.deepcopy(receipt); del changed[key]
+            with self.subTest(missing=key), self.assertRaises(ValueError): V.validate_fixture_repair(changed, self.P)
+        changes = [("schemaVersion", True), ("kind", "different"), ("sourceCommit", self.W),
+                   ("workflowCommit", V.RECOVERY_SOURCE), ("ref", "refs/heads/main"), ("tag", V.NATIVE_BETA7_TAG),
+                   ("nativeRevision", "a" * 40), ("runId", 56), ("attempt", 2), ("testPath", "app/Other.swift"),
+                   ("beforeSha256", V.FIXTURE_AFTER), ("fixtureSha256", V.FIXTURE_BEFORE),
+                   ("runnerSha256", "a" * 64), ("fixtureOnlyDiff", 1), ("restoredSha256", V.FIXTURE_AFTER),
+                   ("restoredClean", False), ("restoredClean", 1)]
+        changes += [("runtimeOutcome", value) for value in (None, "failure", "cancelled", "skipped", "Success", True)]
+        for key, value in changes:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                V.validate_fixture_repair({**receipt, key: value}, self.P)
+        with self.assertRaises(ValueError): V.validate_fixture_repair({**receipt, "unknown": None}, self.P)
+
+    def test_full_runtime_and_both_fixture_markers_are_required_in_their_original_steps(self):
+        job = self.job(); _, steps = V.successful_recovery_job([job], self.P); lines = self.extra_logs(job)
+        proof = V.live_abi_log_proof(self.fixture(), self.P, steps, lines)
+        self.assertEqual(proof["runtimeHeaderSha256"], "d" * 64)
+        self.assertEqual(proof["runtimeLibrarySha256"], "a" * 64)
+        for index in range(5):
+            for mode in ("missing", "duplicate", "wrong-step", "wrong-value"):
+                changed = list(lines)
+                if mode == "missing": del changed[index]
+                elif mode == "duplicate": changed.append(changed[index])
+                elif mode == "wrong-step": changed[index] = self.log(steps[V.SDK_CACHE_RESTORE], changed[index].partition(" ")[2])
+                else: changed[index] += "-wrong"
+                with self.subTest(index=index, mode=mode), self.assertRaises(ValueError):
+                    V.live_abi_log_proof(self.fixture(), self.P, steps, changed)
+
+    def test_restoration_must_precede_every_app_compile_and_follow_full_runtime(self):
+        job = self.job(); _, steps = V.successful_recovery_job([job], self.P); lines = self.extra_logs(job)
+        names = ("Fetch the MPVKit-DVFEL artifacts (pinned, sha256-verified)", "Generate the Xcode project",
+                 "Capture exact native SDK and player inputs before app compilation",
+                 "Check shared server settings at the iOS 16 deployment target",
+                 "Smoke-test tvOS launch in a simulator (fail closed)", "Build tvOS (Full)",
+                 "Build tvOS (Lite)", "Build iOS", "Gate iOS-simulator link + dSYM (fail closed)", "Build macOS")
+        for name in names:
+            for key, value in (("number", steps[V.FIXTURE_RESTORE]["number"] - 1),
+                               ("started_at", steps[V.FIXTURE_PREPARE]["started_at"])):
+                changed = copy.deepcopy(steps); changed[name][key] = value
+                with self.subTest(name=name, key=key), self.assertRaises(ValueError):
+                    V.live_abi_log_proof(self.fixture(), self.P, changed, lines)
+        for name, neighbor in ((V.FIXTURE_PREPARE, V.FIXTURE_RUNTIME), (V.FIXTURE_RUNTIME, V.FIXTURE_RESTORE)):
+            changed = copy.deepcopy(steps); changed[name]["completed_at"] = steps[neighbor]["completed_at"]
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                V.live_abi_log_proof(self.fixture(), self.P, changed, lines)
+
+        invalid_duration = copy.deepcopy(steps[V.FIXTURE_RUNTIME])
+        raw_start = datetime.fromisoformat(invalid_duration["started_at"].replace("Z", "+00:00"))
+        invalid_duration["completed_at"] = (raw_start - timedelta(milliseconds=500)).isoformat().replace("+00:00", "Z")
+        with self.assertRaisesRegex(ValueError, "negative step duration"):
+            V.step_log_bodies(lines, invalid_duration)
+
+    def test_sdk_cache_miss_and_exact_hit_preserve_all_runtime_gates(self):
+        job = self.job(); _, steps = V.successful_recovery_job([job], self.P); lines = self.extra_logs(job)
+        self.assertEqual(V.sdk_cache_proof(steps, lines)["restore"], "miss-built-and-save-step-succeeded")
+        hit_steps = copy.deepcopy(steps)
+        hit_steps[V.SDK_BUILD]["conclusion"] = hit_steps[V.SDK_EARLY_SAVE]["conclusion"] = "skipped"
+        hit_lines = [line for line in lines if "Cache not found for input keys:" not in line] + [
+            self.log(steps[V.SDK_CACHE_RESTORE], "Cache hit for: " + self.cache_key()),
+            self.log(steps[V.SDK_CACHE_RESTORE], "Cache restored from key: " + self.cache_key())]
+        self.assertEqual(V.sdk_cache_proof(hit_steps, hit_lines)["restore"], "exact-hit")
+        # Even a legitimate cache hit does not permit the full live runtime to be skipped.
+        changed_job = copy.deepcopy(job)
+        for step in changed_job["steps"]:
+            if step["name"] in (V.SDK_BUILD, V.SDK_EARLY_SAVE): step["conclusion"] = "skipped"
+            if step["name"] == V.FIXTURE_RUNTIME: step["conclusion"] = "skipped"
+        with self.assertRaises(ValueError): V.successful_recovery_job([changed_job], self.P)
+        invalid = [(steps, hit_lines), (hit_steps, lines), (hit_steps, hit_lines[:-1]),
+                   (hit_steps, hit_lines + [hit_lines[-1]]),
+                   (hit_steps, [line.replace(V.NATIVE_BETA7_ENGINE, "a" * 40) for line in hit_lines])]
+        for selected, observed in invalid:
+            with self.subTest(observed=observed), self.assertRaises(ValueError): V.sdk_cache_proof(selected, observed)
+
+    def test_early_component_save_cannot_move_ahead_of_native_artifact_proof(self):
+        job = self.job(); _, steps = V.successful_recovery_job([job], self.P); lines = self.extra_logs(job)
+        changed = copy.deepcopy(steps)
+        changed[V.SDK_EARLY_SAVE]["number"] = steps["Verify Apple engine artifacts (fail closed)"]["number"] - 1
+        with self.assertRaises(ValueError): V.sdk_cache_proof(changed, lines)
+        changed = copy.deepcopy(steps); changed[V.SDK_EARLY_SAVE]["number"] = steps[V.FIXTURE_PREPARE]["number"] + 1
+        with self.assertRaises(ValueError): V.sdk_cache_proof(changed, lines)
 
 
 if __name__ == "__main__":
