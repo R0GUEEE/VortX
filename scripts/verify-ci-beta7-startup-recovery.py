@@ -423,7 +423,7 @@ def extract_exact(path, artifact, names, output):
                     shutil.copyfileobj(source, target)
 
 
-def authenticate_build(lane, pointer, tag, source, names, work):
+def authenticate_build(lane, pointer, tag, source, names, work, ci_archive_cache_dir=None):
     require(set(pointer) == {"runId", "attempt", "artifactId"}, "build pointer has unknown/missing fields")
     run_id, attempt, artifact_id = (positive(pointer[key]) for key in ("runId", "attempt", "artifactId"))
     workflow, job_name, artifact_name, _, _ = LANES[lane]
@@ -466,7 +466,7 @@ def authenticate_build(lane, pointer, tag, source, names, work):
     with log.open(errors="strict") as lines:
         upload_proof(artifact, upload, lines)
     archive = work / f"{lane}.zip"
-    api_download(f"actions/artifacts/{artifact_id}/zip", archive, artifact["size_in_bytes"])
+    download_ci_archive(artifact, archive, ci_archive_cache_dir)
     output = work / lane
     extract_exact(archive, artifact, names, output)
     public = {**pointer, "workflow": f".github/workflows/{workflow}", "workflowId": workflow_meta["id"],
@@ -643,9 +643,11 @@ def build_manifest(args, pointers, stable, helper, work):
     require(canonical(pointers["android"]) == canonical(ANDROID_POINTER), "Android is not the original accepted Beta 7 handoff")
     check_tag(args.tag, source)
     apple_names, apple_matrix, android_names = file_matrix(args.tag, version)
-    apple_dir, apple_run = authenticate_recovery_build(pointers["apple"], apple_matrix | {REPAIR_RECEIPT, FIXTURE_RECEIPT}, work)
+    apple_dir, apple_run = authenticate_recovery_build(pointers["apple"], apple_matrix | {REPAIR_RECEIPT, FIXTURE_RECEIPT}, work,
+                                                       getattr(args, "ci_archive_cache_dir", None))
     android_dir, android_run = authenticate_build("android", pointers["android"], args.tag, source,
-                                                android_names | {"SHA256SUMS-android.txt", "SIGNING_PROVENANCE.txt"}, work)
+                                                android_names | {"SHA256SUMS-android.txt", "SIGNING_PROVENANCE.txt"}, work,
+                                                getattr(args, "ci_archive_cache_dir", None))
     apple, apple_evidence = inspect_recovery_apple(apple_dir, pointers["apple"], args.tag, source, version, build, tools, helper)
     header_inputs = {item["sha256"] for item in read_json(apple_dir / "native-build-inputs.json")["inputs"]
                      if item.get("kind") == "header"}
@@ -954,7 +956,7 @@ def authenticate_android_host(android_run, work):
             "executed": 22, "realJniCases": 17, "skipped": 0, "failures": 0, "errors": 0}
 
 
-def authenticate_recovery_build(pointer, names, work):
+def authenticate_recovery_build(pointer, names, work, ci_archive_cache_dir=None):
     lane, tag, source = "apple", NATIVE_BETA7_TAG, RECOVERY_SOURCE
     require(set(pointer) == {"runId", "attempt", "artifactId"}, "build pointer has unknown/missing fields")
     run_id, attempt, artifact_id = (positive(pointer[key]) for key in ("runId", "attempt", "artifactId"))
@@ -999,7 +1001,7 @@ def authenticate_recovery_build(pointer, names, work):
     with log.open(errors="strict") as lines:
         upload_proof(artifact, upload, lines)
     archive = work / f"{lane}.zip"
-    api_download(f"actions/artifacts/{artifact_id}/zip", archive, artifact["size_in_bytes"])
+    download_ci_archive(artifact, archive, ci_archive_cache_dir)
     output = work / lane
     extract_exact(archive, artifact, names, output)
     repair = read_json(output / REPAIR_RECEIPT)
@@ -1222,6 +1224,68 @@ def sdk_cache_proof(steps, lines):
     return {"restore": outcome, "key": key, "validationAcceptance": False}
 
 
+
+
+# Read-only transport reuse for these two already-accepted immutable CI ZIPs only.
+CI_ARCHIVE_CACHE_PINS = {
+    12623245050: {"name": "VortX-tvOS-ci", "size": 227764777,
+                  "sha256": "2fdf4e03a3195893790f86e9493ed02b3ba137d2bd50359da5b78f1fee562b75"},
+    12616346338: {"name": "VortX-Android-release", "size": 198614978,
+                  "sha256": "f31aec2085cc498c41c96598151aae51ef6c9fab3221916bed322650e783d8de"},
+}
+
+
+def copy_ci_archive_from_cache(directory, filename, destination, size, expected_sha):
+    require(filename in {str(artifact_id) + ".zip" for artifact_id in CI_ARCHIVE_CACHE_PINS},
+            "cache filename is not an admitted original CI ZIP")
+    positive(size)
+    sha(expected_sha)
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        descriptor = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        try:
+            before = os.fstat(descriptor)
+            require(stat.S_ISREG(before.st_mode) and before.st_size == size,
+                    "cached original CI ZIP size/type differs")
+            fingerprint = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_size,
+                                         value.st_mtime_ns, value.st_ctime_ns)
+            observed, count = hashlib.sha256(), 0
+            with destination.open("xb") as target:
+                while chunk := os.read(descriptor, 1024**2):
+                    count += len(chunk)
+                    require(count <= size, "cached original CI ZIP grew during copy")
+                    observed.update(chunk)
+                    target.write(chunk)
+            after = os.fstat(descriptor)
+            require(fingerprint(before) == fingerprint(after), "cached original CI ZIP changed during copy")
+            require(count == size and observed.hexdigest() == expected_sha,
+                    "cached original CI ZIP content differs")
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(directory_fd)
+
+
+def download_ci_archive(artifact, destination, ci_archive_cache_dir=None):
+    if ci_archive_cache_dir is None:
+        # Default is literally the original live download; other raw reads never use this helper.
+        api_download(f"actions/artifacts/{artifact['id']}/zip", destination, artifact["size_in_bytes"])
+        return
+    artifact_id = positive(artifact.get("id"))
+    require(artifact_id in CI_ARCHIVE_CACHE_PINS, "only the two original Beta7 CI ZIPs may use local cache")
+    expected = CI_ARCHIVE_CACHE_PINS[artifact_id]
+    require(artifact.get("name") == expected["name"] and type(artifact.get("size_in_bytes")) is int and
+            artifact["size_in_bytes"] == expected["size"] and artifact.get("digest") == "sha256:" + expected["sha256"],
+            "fresh immutable CI ZIP metadata differs from the original cache admission")
+    # Callers have just authenticated live run/job/attempt/upload-log/artifact provenance.
+    # These local bytes are still untrusted until this FD copy and normal extraction both hash them.
+    filename = str(artifact_id) + ".zip"
+    copy_ci_archive_from_cache(ci_archive_cache_dir, filename, destination, expected["size"], expected["sha256"])
+    print("Verified untrusted local CI ZIP transport: " + json.dumps(
+        {"artifactId": artifact_id, "filename": filename, "bytes": expected["size"], "sha256": expected["sha256"]},
+        sort_keys=True), file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("prepare", "verify-draft", "verify-published"))
@@ -1231,6 +1295,8 @@ def main():
     parser.add_argument("--release-id", required=True, type=int)
     parser.add_argument("--repo-root", required=True, type=Path)
     parser.add_argument("--work-dir", required=True, type=Path)
+    parser.add_argument("--ci-archive-cache-dir", type=Path,
+                        help="Read-only, untrusted ID.zip cache for the two exact original Beta7 CI archives only")
     parser.add_argument("--bundletool", required=True, type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--provenance-sha256")

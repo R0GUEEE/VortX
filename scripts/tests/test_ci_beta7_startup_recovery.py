@@ -540,6 +540,104 @@ class UntimestampedJSONContinuationContract(unittest.TestCase):
             # A no-space record terminates the JSON continuation context, never transfers it.
             with self.assertRaises(ValueError): V.step_log_bodies([anchor, record, self.field_lines()[0]], self.step())
 
+class ExactCIArchiveReadOnlyCacheContract(unittest.TestCase):
+    filename = "12623245050.zip"
+    payload = b"original"
+
+    def expected_sha(self):
+        return hashlib.sha256(self.payload).hexdigest()
+
+    def test_regular_fd_copy_checks_size_hash_and_preserves_untrusted_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); directory = root / "cache"; directory.mkdir()
+            entry = directory / self.filename; entry.write_bytes(self.payload)
+            output = root / "fresh.zip"
+            V.copy_ci_archive_from_cache(directory, self.filename, output, len(self.payload), self.expected_sha())
+            self.assertEqual(output.read_bytes(), self.payload)
+            self.assertEqual(entry.read_bytes(), self.payload)
+            self.assertEqual(V.digest(output), self.expected_sha())
+
+    def test_default_without_explicit_cache_keeps_original_live_download(self):
+        artifact = {"id": 88, "size_in_bytes": 123}
+        with mock.patch.object(V, "api_download") as download, \
+                mock.patch.object(V, "copy_ci_archive_from_cache") as cached:
+            V.download_ci_archive(artifact, Path("new.zip"))
+        download.assert_called_once_with("actions/artifacts/88/zip", Path("new.zip"), 123)
+        cached.assert_not_called()
+
+    def test_only_two_exact_ids_names_sizes_and_digests_admit_cache_use(self):
+        self.assertEqual(set(V.CI_ARCHIVE_CACHE_PINS), {12623245050, 12616346338})
+        for artifact_id, pin in V.CI_ARCHIVE_CACHE_PINS.items():
+            artifact = {"id": artifact_id, "name": pin["name"], "size_in_bytes": pin["size"],
+                        "digest": "sha256:" + pin["sha256"]}
+            with mock.patch.object(V, "copy_ci_archive_from_cache") as cached, \
+                    mock.patch.object(V, "api_download") as network, mock.patch.object(V.sys, "stderr"):
+                V.download_ci_archive(artifact, Path("new.zip"), Path("explicit-cache"))
+                cached.assert_called_once_with(Path("explicit-cache"), str(artifact_id) + ".zip", Path("new.zip"),
+                                               pin["size"], pin["sha256"])
+                network.assert_not_called()
+            for key, value in (("id", 88), ("id", True), ("name", "wrong"), ("size_in_bytes", pin["size"] + 1),
+                               ("size_in_bytes", True), ("size_in_bytes", str(pin["size"])), ("digest", "sha256:" + "a" * 64)):
+                with self.subTest(artifact=artifact_id, key=key), \
+                        mock.patch.object(V, "copy_ci_archive_from_cache") as cached, \
+                        mock.patch.object(V, "api_download") as network, self.assertRaises(ValueError):
+                    V.download_ci_archive({**artifact, key: value}, Path("new.zip"), Path("explicit-cache"))
+                cached.assert_not_called(); network.assert_not_called()
+
+    def test_missing_poisoned_wrong_size_wrong_filename_and_existing_output_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); directory = root / "cache"; directory.mkdir(); entry = directory / self.filename
+            with self.assertRaises(FileNotFoundError):
+                V.copy_ci_archive_from_cache(directory, self.filename, root / "missing.zip", len(self.payload), self.expected_sha())
+            for index, payload in enumerate((b"poisoned", b"short", self.payload + b"longer")):
+                entry.write_bytes(payload)
+                with self.subTest(payload=payload), self.assertRaises(ValueError):
+                    V.copy_ci_archive_from_cache(directory, self.filename, root / f"poison-{index}.zip", len(self.payload), self.expected_sha())
+                self.assertEqual(entry.read_bytes(), payload)
+            entry.write_bytes(self.payload)
+            for name in ("88.zip", "../12623245050.zip", "/12623245050.zip", "12616346338.zip.extra"):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    V.copy_ci_archive_from_cache(directory, name, root / "wrong-name.zip", len(self.payload), self.expected_sha())
+            output = root / "existing.zip"; output.write_bytes(b"preserve")
+            with self.assertRaises(FileExistsError):
+                V.copy_ci_archive_from_cache(directory, self.filename, output, len(self.payload), self.expected_sha())
+            self.assertEqual(output.read_bytes(), b"preserve")
+
+    def test_cache_file_and_directory_symlinks_and_nonregular_entries_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); directory = root / "cache"; directory.mkdir(); entry = directory / self.filename
+            target = root / "actual.zip"; target.write_bytes(self.payload); entry.symlink_to(target)
+            with self.assertRaises(OSError):
+                V.copy_ci_archive_from_cache(directory, self.filename, root / "symlink.zip", len(self.payload), self.expected_sha())
+            entry.unlink(); entry.mkdir()
+            with self.assertRaises(ValueError):
+                V.copy_ci_archive_from_cache(directory, self.filename, root / "directory.zip", len(self.payload), self.expected_sha())
+            entry.rmdir(); V.os.mkfifo(entry)
+            with self.assertRaises(ValueError):
+                V.copy_ci_archive_from_cache(directory, self.filename, root / "fifo.zip", len(self.payload), self.expected_sha())
+            entry.unlink(); entry.write_bytes(self.payload)
+            alias = root / "cache-alias"; alias.symlink_to(directory, target_is_directory=True)
+            with self.assertRaises(OSError):
+                V.copy_ci_archive_from_cache(alias, self.filename, root / "directory-symlink.zip", len(self.payload), self.expected_sha())
+
+    def test_mutation_during_fd_copy_is_rejected_even_if_copied_bytes_match(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); directory = root / "cache"; directory.mkdir(); entry = directory / self.filename
+            entry.write_bytes(self.payload); prior = entry.stat(); read = V.os.read; mutated = False
+            def read_and_mutate(descriptor, size):
+                nonlocal mutated
+                value = read(descriptor, size)
+                if not mutated:
+                    mutated = True
+                    entry.write_bytes(b"changed!")
+                    V.os.utime(entry, ns=(prior.st_atime_ns, prior.st_mtime_ns + 1_000_000_000))
+                return value
+            with mock.patch.object(V.os, "read", side_effect=read_and_mutate), \
+                    self.assertRaisesRegex(ValueError, "changed during copy"):
+                V.copy_ci_archive_from_cache(directory, self.filename, root / "changed.zip", len(self.payload), self.expected_sha())
+            self.assertTrue(mutated)
+            self.assertEqual(entry.read_bytes(), b"changed!")
+
 
 if __name__ == "__main__":
     unittest.main()
