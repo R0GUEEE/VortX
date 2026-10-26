@@ -181,7 +181,7 @@ else
     [ -z "$line" ] && continue
     case "$line" in
       ' M Package.swift'|'M Package.swift'|' M Sources/BuildScripts/XCFrameworkBuild/main.swift'|'M Sources/BuildScripts/XCFrameworkBuild/main.swift'|' M Sources/BuildScripts/XCFrameworkBuild/base.swift'|'M Sources/BuildScripts/XCFrameworkBuild/base.swift'|' M Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch'|'M Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch') ;;
-      '?? .build/'*|'?? dist/'*|'?? Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch'|'?? Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch'|'?? Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch'|'?? Sources/BuildScripts/patch/libmpv/0007-upstream-audio-layout-bounds.patch'|'?? Sources/BuildScripts/patch/libmpv/0008-upstream-gpu-next-seek-reset.patch'|'?? Sources/BuildScripts/patch/libmpv/0009-original-local-file-witness.patch'|'?? Sources/BuildScripts/patch/libmpv/0010-upstream-edition-title-lifetime.patch'|'?? Sources/BuildScripts/patch/libmpv/0011-owned-subtitle-constructor.patch'|'?? Sources/BuildScripts/patch/libmpv/0012-owned-subtitle-publication.patch'|'?? Sources/BuildScripts/patch/libmpv/0013-original-http-reference-recipe.patch'|'?? Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch'|'?? Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch') ;;
+      '?? .build/'*|'?? dist/'*|'?? Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch'|'?? Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch'|'?? Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch'|'?? Sources/BuildScripts/patch/libmpv/0007-upstream-audio-layout-bounds.patch'|'?? Sources/BuildScripts/patch/libmpv/0008-upstream-gpu-next-seek-reset.patch'|'?? Sources/BuildScripts/patch/libmpv/0009-original-local-file-witness.patch'|'?? Sources/BuildScripts/patch/libmpv/0010-upstream-edition-title-lifetime.patch'|'?? Sources/BuildScripts/patch/libmpv/0011-owned-subtitle-constructor.patch'|'?? Sources/BuildScripts/patch/libmpv/0012-owned-subtitle-publication.patch'|'?? Sources/BuildScripts/patch/libmpv/0013-original-http-reference-recipe.patch'|'?? Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch'|'?? Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch') ;;
       *) fail "existing MPVKit checkout has unexpected dirty state: $line" ;;
     esac
   done <<< "$STATUS"
@@ -230,6 +230,23 @@ if [ -e "$GENERATED_OBSERVATION_PATCH" ]; then
   cmp -s "$OBSERVATION_PATCH" "$GENERATED_OBSERVATION_PATCH" ||
     fail "existing generated completed-response observation patch differs: $GENERATED_OBSERVATION_PATCH"
 fi
+
+# Actual sent-GET evidence only; old source/component profiles remain ineligible.
+SENT_FFMPEG_PATCH="$REPO/scripts/ffmpeg-sent-request-evidence.patch"
+SENT_MPV_PATCH="$REPO/scripts/mpv-sent-request-evidence.patch"
+SENT_FFMPEG_HASH="$(shasum -a 256 "$SENT_FFMPEG_PATCH")"
+SENT_MPV_HASH="$(shasum -a 256 "$SENT_MPV_PATCH")"
+[ "${SENT_FFMPEG_HASH%% *}" = "085b66cb5623ed8087481d3217b65da587b2970cd345a45896e7e87823dec9c9" ] || fail "FFmpeg sent-request evidence patch differs"
+[ "${SENT_MPV_HASH%% *}" = "e3840084725be1f4948fb90c6fec87c35d55665f8310854713ebff496e1358bf" ] || fail "MPV sent-request evidence patch differs"
+GENERATED_SENT_FFMPEG_PATCH="$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch"
+GENERATED_SENT_MPV_PATCH="$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch"
+for generated in "$GENERATED_SENT_FFMPEG_PATCH" "$GENERATED_SENT_MPV_PATCH"; do
+  [ ! -L "$generated" ] || fail "generated sent-request evidence patch must not be a symlink"
+  if [ -e "$generated" ]; then
+    if [ "$generated" = "$GENERATED_SENT_FFMPEG_PATCH" ]; then canonical="$SENT_FFMPEG_PATCH"; else canonical="$SENT_MPV_PATCH"; fi
+    cmp -s "$canonical" "$generated" || fail "existing generated sent-request evidence patch differs: $generated"
+  fi
+done
 
 if [ "$PREFLIGHT_ONLY" = "1" ]; then
   echo "build-mpvkit-dvfel: preflight-only checkout and patch validation passed"
@@ -280,12 +297,15 @@ copy_exact "$REPO/scripts/mpv-original-http-cancel-lifetime.patch" \
 # Owned header observation only; no demux/public/worker reader activation.
 copy_exact "$REPO/scripts/mpv-completed-response-observation.patch" \
   "$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch"
+# Private native header/ABI evidence; no demux or reader activation.
+copy_exact "$SENT_MPV_PATCH" "$GENERATED_SENT_MPV_PATCH"
 
 # FFmpeg has its own sorted sequence. This exact metadata producer is independent
 # of the MPV original-request/cancellation patches and enables no HTTP timing reader.
 mkdir -p "$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg"
 copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"
 copy_exact "$RESPONSE_GENERATION_PATCH" "$GENERATED_RESPONSE_GENERATION_PATCH"
+copy_exact "$SENT_FFMPEG_PATCH" "$GENERATED_SENT_FFMPEG_PATCH"
 
 # A prior interrupted experiment installed this retired VortX-only FFmpeg patch as an untracked
 # file. Do not delete or overwrite it implicitly; fail with an actionable path instead.
@@ -302,18 +322,23 @@ swift run --build-path ./.build --package-path Sources/BuildScripts \
 FFMPEG_RESPONSE_SOURCE="$WORK/dist/FFmpeg-9.0.2-946fcce0"
 [ "$(git -C "$FFMPEG_RESPONSE_SOURCE" rev-parse HEAD)" = "946fcce07b6dcd0331c8cc609192aeff5e1924f8" ] ||
   fail "FFmpeg response-witness source has a different upstream pin"
-printf '%s  %s\n' 3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa \
+printf '%s  %s\n' 24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe \
   "$FFMPEG_RESPONSE_SOURCE/libavformat/http.c" | shasum -a 256 -c - ||
   fail "FFmpeg response observation source differs from the reviewed n9.0.2 composition"
 MPV_OBSERVATION_SOURCE="$WORK/dist/libmpv-master-8c67647b"
 [ "$(git -C "$MPV_OBSERVATION_SOURCE" rev-parse HEAD)" = "8c67647b50059406c5c0444903597281b81516cf" ] ||
   fail "MPV response observation source has a different upstream pin"
-printf '%s  %s\n' c99a1956acc13ae3cc36972ec6d8fc8576e4699223c3bfb1db8fb3d171e58819 \
+printf '%s  %s\n' 174cdaa923dad4b97926ac9f80ba8cabbba8be9e850824fb6939e317cd9c8f29 \
   "$MPV_OBSERVATION_SOURCE/stream/stream_lavf.c" | shasum -a 256 -c - ||
   fail "MPV response observation source differs from the reviewed composition"
-printf '%s  %s\n' 9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577 \
+printf '%s  %s\n' d48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e \
   "$MPV_OBSERVATION_SOURCE/stream/reference_source.h" | shasum -a 256 -c - ||
   fail "MPV response observation header differs from the reviewed composition"
+for private_header in "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_http_request.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_http_request.h"; do
+  [ -f "$private_header" ] && [ ! -L "$private_header" ] || fail "private sent-request header must be a regular source file"
+  printf '%s  %s\n' 81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765 "$private_header" | shasum -a 256 -c - || fail "private sent-request header differs"
+done
+cmp -s "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_http_request.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_http_request.h" || fail "private sent-request headers disagree"
 
 # Assembly reads the per-library release ZIP, not slice scratch directories.
 # Refuse to package a stale ZIP after an interrupted or incorrectly cached run.
@@ -340,6 +365,8 @@ trap 'rm -rf "$STAGED_DEST"' EXIT
 
 "$HERE/assemble-mpvkit-dvfel.sh" "$WORK" "$STAGED_DEST"
 "$HERE/verify-mpvkit-dvfel-artifacts.sh" "$STAGED_DEST"
+# Candidate-only private ABI gate; the universal shipping verifier stays unchanged.
+python3 "$HERE/native-media-hosted/evidence.py" apple-sent-abi "$STAGED_DEST"
 
 # Promote only a package that passed every gate. Keep the prior package recoverable
 # until the staged move succeeds, so a failed verification or move cannot install a

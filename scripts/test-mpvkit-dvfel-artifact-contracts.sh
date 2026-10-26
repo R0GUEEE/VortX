@@ -12,6 +12,8 @@ CANCEL_PATCH="$ROOT/scripts/mpv-original-http-cancel-lifetime.patch"
 RESPONSE_PATCH="$ROOT/scripts/ffmpeg-response-witness.patch"
 GENERATION_PATCH="$ROOT/scripts/ffmpeg-response-generation.patch"
 OBSERVATION_PATCH="$ROOT/scripts/mpv-completed-response-observation.patch"
+SENT_FFMPEG_PATCH="$ROOT/scripts/ffmpeg-sent-request-evidence.patch"
+SENT_MPV_PATCH="$ROOT/scripts/mpv-sent-request-evidence.patch"
 VERIFY="$ROOT/scripts/verify-mpvkit-dvfel-artifacts.sh"
 WORKFLOW="$ROOT/.github/workflows/release-tvos.yml"
 
@@ -20,7 +22,7 @@ fail() {
   exit 1
 }
 
-for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$CANCEL_PATCH" "$RESPONSE_PATCH" "$GENERATION_PATCH" "$OBSERVATION_PATCH" "$VERIFY" "$WORKFLOW"; do
+for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$CANCEL_PATCH" "$RESPONSE_PATCH" "$GENERATION_PATCH" "$OBSERVATION_PATCH" "$SENT_FFMPEG_PATCH" "$SENT_MPV_PATCH" "$VERIFY" "$WORKFLOW"; do
   [ -f "$file" ] || fail "missing required source: $file"
 done
 
@@ -69,7 +71,7 @@ grep -Fq '"$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0001-response-witness.p
   fail "Apple must put the response witness in the FFmpeg patch sequence"
 grep -Fq 'copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"' "$BUILD" ||
   fail "Apple must preserve exact response-witness patch-copy semantics"
-grep -Fq '3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa' "$BUILD" ||
+grep -Fq '24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe' "$BUILD" ||
   fail "Apple must require the exact reviewed HTTP source composition"
 GENERATION_HASH="$(shasum -a 256 "$GENERATION_PATCH")"
 [ "${GENERATION_HASH%% *}" = "ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098" ] ||
@@ -81,6 +83,18 @@ grep -Fq 'copy_exact "$RESPONSE_GENERATION_PATCH" "$GENERATED_RESPONSE_GENERATIO
   fail "Apple must preserve exact response-generation patch-copy semantics"
 grep -Fq 'copy_exact "$REPO/scripts/mpv-completed-response-observation.patch"' "$BUILD" ||
   fail "Apple must install the owned observation after original-cancel lifetime"
+SENT_FFMPEG_HASH="$(shasum -a 256 "$SENT_FFMPEG_PATCH")"
+[ "${SENT_FFMPEG_HASH%% *}" = "085b66cb5623ed8087481d3217b65da587b2970cd345a45896e7e87823dec9c9" ] ||
+  fail "FFmpeg sent-request carrier differs from the reviewed source"
+SENT_MPV_HASH="$(shasum -a 256 "$SENT_MPV_PATCH")"
+[ "${SENT_MPV_HASH%% *}" = "e3840084725be1f4948fb90c6fec87c35d55665f8310854713ebff496e1358bf" ] ||
+  fail "MPV sent-request carrier differs from the reviewed source"
+grep -Fq 'copy_exact "$SENT_FFMPEG_PATCH" "$GENERATED_SENT_FFMPEG_PATCH"' "$BUILD" ||
+  fail "Apple must retain the exact FFmpeg sent-request generated copy"
+grep -Fq 'copy_exact "$SENT_MPV_PATCH" "$GENERATED_SENT_MPV_PATCH"' "$BUILD" ||
+  fail "Apple must retain the exact MPV sent-request generated copy"
+grep -Fq 'native-media-hosted/evidence.py" apple-sent-abi "$STAGED_DEST"' "$BUILD" ||
+  fail "future Apple component must run its additional real sent-request ABI gate"
 
 # The artifact verifier must inspect content, not only checksums or mtimes.
 grep -Fq 'LIBAVCODEC_VERSION_MAJOR' "$VERIFY" || fail "artifact gate must inspect libavcodec major"
@@ -232,16 +246,24 @@ grep -Fq 'generated response-witness patch must not be a symlink' "$FIXTURE/resp
   fail "response-witness symlink rejection lacked its ownership diagnostic"
 rm -f "$FIXTURE_RESPONSE_PATCH"
 
-# Both new generated paths have the same exact-file and no-symlink retry contract.
-for kind in generation observation; do
+# Each generated path has the same exact-file and no-symlink retry contract.
+for kind in generation observation sent_ffmpeg sent_mpv; do
   if [ "$kind" = generation ]; then
     canonical="$GENERATION_PATCH"
     generated="$SOURCE/Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch"
     label="response-generation"
-  else
+  elif [ "$kind" = observation ]; then
     canonical="$OBSERVATION_PATCH"
     generated="$SOURCE/Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch"
     label="completed-response observation"
+  elif [ "$kind" = sent_ffmpeg ]; then
+    canonical="$SENT_FFMPEG_PATCH"
+    generated="$SOURCE/Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch"
+    label="sent-request evidence"
+  else
+    canonical="$SENT_MPV_PATCH"
+    generated="$SOURCE/Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch"
+    label="sent-request evidence"
   fi
   mkdir -p "$(dirname "$generated")"
   cp "$canonical" "$generated"
@@ -376,6 +398,28 @@ check_native_source misc/thread_tools.c 151102f6fc8584e119317e3526502bbae492353b
 check_native_source misc/thread_tools.h 62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f
 check_native_source stream/stream_lavf.c c99a1956acc13ae3cc36972ec6d8fc8576e4699223c3bfb1db8fb3d171e58819
 check_native_source stream/reference_source.h 9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577
+# The next native-only delta retains exact observation/cancel semantics, adds the
+# private ABI header and Android-only hidden link roots. No native compilation runs.
+if native_git ls-files --error-unmatch -- stream/vortx_http_request.h >/dev/null 2>&1; then
+  fail "private sent-request header unexpectedly exists before its carrier"
+fi
+SENT_PRE_TREE="$(native_git write-tree)"
+native_git apply --cached "$SENT_MPV_PATCH"
+[ "$(native_git diff --cached --name-only "$SENT_PRE_TREE" --)" = "$(printf '%s\n' \
+  meson.build stream/reference_source.h stream/stream_lavf.c stream/vortx_http_request.h)" ] ||
+  fail "native sent-request carrier changed unexpected source paths"
+check_native_source misc/thread_tools.c 151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9
+check_native_source misc/thread_tools.h 62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f
+check_native_source stream/stream_lavf.c 174cdaa923dad4b97926ac9f80ba8cabbba8be9e850824fb6939e317cd9c8f29
+check_native_source stream/reference_source.h d48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e
+check_native_source stream/vortx_http_request.h 81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765
+native_git show :meson.build >"$FIXTURE/native-sent-meson.build"
+[ "$(grep -c -- '-Wl,--undefined=stream_reference_' "$FIXTURE/native-sent-meson.build")" = 6 ] ||
+  fail "Android sent-request carrier must retain exactly six native-only roots"
+grep -Fq "if host_machine.system() == 'android'" "$FIXTURE/native-sent-meson.build" ||
+  fail "native-only link roots must be conditional on Android"
+grep -Fq "gnu_symbol_visibility: 'hidden'" "$FIXTURE/native-sent-meson.build" ||
+  fail "native-only helpers must retain hidden visibility"
 [ "$(shasum -a 256 "$NATIVE_REAL_INDEX")" = "$NATIVE_INDEX_BEFORE" ] ||
   fail "native canonical index changed during the isolated carrier contract"
 

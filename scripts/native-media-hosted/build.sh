@@ -49,6 +49,7 @@ if [[ $lane == apple ]]; then
         bash scripts/build-mpvkit-dvfel.sh
     # Existing builder already runs these; explicit retained log identifies candidate acceptance only.
     bash scripts/verify-mpvkit-dvfel-artifacts.sh "$out/MPVKit-DVFEL" > "$out/apple-artifact-gate.txt" 2>&1
+    python3 scripts/native-media-hosted/evidence.py apple-sent-abi "$out/MPVKit-DVFEL" >> "$out/apple-artifact-gate.txt" 2>&1
     tar -czf "$out/apple-candidate.tar.gz" -C "$out" MPVKit-DVFEL
     # Keep the original per-library ZIP bytes used by assembly, separately from the assembled package.
     tar -cf "$out/apple-original-library-zips.tar" -C "$upstream/dist/release" \
@@ -136,10 +137,12 @@ PYTHON_TOOLCHAIN
     cp "$root/scripts/mpv-original-http-cancel-lifetime.patch" "$upstream/buildscripts/patches/mpv/0009-original-http-cancel-lifetime.patch"
     # Owned observation only; INITIAL_REQUEST_ONLY and reader admission remain unchanged.
     cp "$root/scripts/mpv-completed-response-observation.patch" "$upstream/buildscripts/patches/mpv/0010-completed-response-observation.patch"
+    cp "$root/scripts/mpv-sent-request-evidence.patch" "$upstream/buildscripts/patches/mpv/0011-sent-request-evidence.patch"
     # FFmpeg's sorted sequence keeps the existing TLS distrust patch first.
     # The same source bytes as Apple add optional paired response metadata only.
     cp "$root/scripts/ffmpeg-response-witness.patch" "$upstream/buildscripts/patches/ffmpeg/0002-response-witness.patch"
     cp "$root/scripts/ffmpeg-response-generation.patch" "$upstream/buildscripts/patches/ffmpeg/0003-response-generation.patch"
+    cp "$root/scripts/ffmpeg-sent-request-evidence.patch" "$upstream/buildscripts/patches/ffmpeg/0004-sent-request-evidence.patch"
     git -C "$upstream" apply --check "$root/scripts/native-media-hosted/android-assembly.patch"
     git -C "$upstream" apply "$root/scripts/native-media-hosted/android-assembly.patch"
     # Use the hosted SDK; bypass upstream download-sdk.sh's moving gas-preprocessor/master fetch.
@@ -168,13 +171,18 @@ PYTHON_TOOLCHAIN
     bash patch.sh
     # Require the exact reviewed HTTP afterimage before any native compilation.
     [[ $(git -C deps/ffmpeg rev-parse HEAD) == 946fcce07b6dcd0331c8cc609192aeff5e1924f8 ]] || exit 1
-    printf '%s  %s\n' 3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa \
+    printf '%s  %s\n' 24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe \
         deps/ffmpeg/libavformat/http.c | shasum -a 256 -c -
     [[ $(git -C deps/mpv rev-parse HEAD) == 8c67647b50059406c5c0444903597281b81516cf ]] || exit 1
-    printf '%s  %s\n' c99a1956acc13ae3cc36972ec6d8fc8576e4699223c3bfb1db8fb3d171e58819 \
+    printf '%s  %s\n' 174cdaa923dad4b97926ac9f80ba8cabbba8be9e850824fb6939e317cd9c8f29 \
         deps/mpv/stream/stream_lavf.c | shasum -a 256 -c -
-    printf '%s  %s\n' 9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577 \
+    printf '%s  %s\n' d48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e \
         deps/mpv/stream/reference_source.h | shasum -a 256 -c -
+    for private_header in deps/ffmpeg/libavformat/vortx_http_request.h deps/mpv/stream/vortx_http_request.h; do
+        [[ -f "$private_header" && ! -L "$private_header" ]] || exit 1
+        printf '%s  %s\n' 81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765 "$private_header" | shasum -a 256 -c -
+    done
+    cmp -s deps/ffmpeg/libavformat/vortx_http_request.h deps/mpv/stream/vortx_http_request.h
     # Retain exactly the reviewed native source/patch state before any compiler runs.
     git -C deps/ffmpeg diff --binary > "$out/ffmpeg-applied.patch"
     cp deps/ffmpeg/libavformat/tls_mbedtls_vortx_distrust.h "$out/tls_mbedtls_vortx_distrust.h"

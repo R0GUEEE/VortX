@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import posixpath
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -59,27 +60,160 @@ def relro_16k_safe(row, loads):
     return True
 
 
+SENT_FFMPEG_FUNCTIONS = (
+    'avpriv_vortx_http_copy_sent_request', 'avpriv_vortx_http_sent_request_clear')
+SENT_MPV_FUNCTIONS = (
+    'stream_reference_source_observe_sent_request',
+    'stream_reference_source_revalidate_sent_request',
+    'stream_reference_sent_request_cancelled',
+    'stream_reference_sent_request_copy_values',
+    'stream_reference_sent_request_values_clear', 'stream_reference_sent_request_release')
+
+
+def required_elf_functions(text, required, role):
+    """Require one real .dynsym GLOBAL DEFAULT FUNC per exact normalized name."""
+    if role not in ('defined-provider', 'undefined-import') or not required or len(set(required)) != len(required):
+        raise ValueError('invalid required ELF function contract')
+    if not isinstance(text, str) or '\0' in text or len(text) > 16 * 1024**2:
+        raise ValueError('invalid or oversized dynamic symbol text')
+    lines = text.splitlines()
+    if len(lines) > 200000 or any(len(line) > 16384 for line in lines):
+        raise ValueError('oversized dynamic symbol table')
+    header = [re.fullmatch(r"Symbol table '\.dynsym' contains ([0-9]+) entries:", line.strip())
+              for line in lines if line.strip().startswith('Symbol table ')]
+    if len(header) != 1 or header[0] is None:
+        raise ValueError('expected exactly one complete .dynsym table')
+    count = int(header[0].group(1))
+    if count < 1 or count > 200000:
+        raise ValueError('invalid dynamic symbol count')
+    rows, found = set(), {}
+    pattern = re.compile(r'\s*([0-9]+):\s+([0-9a-fA-F]+)\s+([0-9]+)\s+'
+                         r'(\S+)\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(\S+)(?:\s+\([0-9]+\))?)?\s*')
+    for line in lines:
+        if not re.match(r'\s*[0-9]+:', line):
+            continue
+        row = pattern.fullmatch(line)
+        if not row or len(row.group(2)) > 16:
+            raise ValueError('malformed dynamic symbol row')
+        index, value, size, kind, binding, visibility, section, raw = row.groups()
+        index = int(index)
+        if index >= count or index in rows:
+            raise ValueError('duplicate or out-of-range dynamic symbol index')
+        rows.add(index)
+        if not raw or raw.split('@', 1)[0] not in required:
+            continue
+        name = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_]*)(?:(@@?)([A-Za-z_][A-Za-z0-9_.-]{0,127}))?', raw)
+        if not name or len(raw) > 384:
+            raise ValueError('malformed required versioned ELF name')
+        base, version_kind, version = name.groups()
+        if base in found or kind != 'FUNC' or binding != 'GLOBAL' or visibility != 'DEFAULT':
+            raise ValueError('duplicate, weak, non-function or hidden required ELF symbol: ' + base)
+        defined = re.fullmatch(r'[0-9]+', section) is not None and int(section) > 0
+        if (role == 'defined-provider' and not defined) or (role == 'undefined-import' and section != 'UND'):
+            raise ValueError('wrong required ELF function role: ' + base)
+        found[base] = {'name': base, 'version': version, 'defaultVersion': version_kind == '@@',
+                       'type': kind, 'binding': binding, 'visibility': visibility, 'section': section}
+    if rows != set(range(count)) or set(found) != set(required):
+        raise ValueError('incomplete dynamic table or missing required ELF functions')
+    return [found[name] for name in sorted(required)]
+
+
+def reader_identity(reader, mode):
+    requested = reader.absolute()
+    resolved = requested.resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError('selected inspection reader is not a regular file')
+    # Preserve argv[0]: llvm-readelf can be a symlink to llvm-readobj, whose
+    # resolved basename would select another output format if invoked directly.
+    version = run(str(requested), '--version').strip()
+    if not version or '\0' in version or len(version) > 4096:
+        raise ValueError('unexpected inspection reader version output')
+    return {'mode': mode, 'requestedReader': str(requested), 'resolvedReader': str(resolved),
+            'readerSHA256': digest(resolved), 'readerVersion': version,
+            'validatorSHA256': digest(Path(__file__))}
+
+
+def required_macho_functions(text, required, role):
+    """The caller selects real nm -gU definitions or -gu undefined externals."""
+    if role not in ('defined-code', 'undefined-import') or not required or len(set(required)) != len(required):
+        raise ValueError('invalid required Mach-O function contract')
+    if not isinstance(text, str) or '\0' in text or len(text) > 32 * 1024**2:
+        raise ValueError('invalid or oversized nm text')
+    found = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.endswith(':'):
+            continue
+        row = re.fullmatch(r'(?:[0-9a-fA-F]+\s+)?([A-Za-z?])\s+(\S+)', line)
+        if not row:
+            if any('_' + name in line for name in required):
+                raise ValueError('malformed required nm row')
+            continue
+        kind, raw = row.groups()
+        name = raw[1:] if raw.startswith('_') else raw
+        if name not in required:
+            if raw.lstrip('_').split('@', 1)[0] in required:
+                raise ValueError('wrong required Mach-O symbol spelling')
+            continue
+        correct_type = kind in ('T', 't') if role == 'defined-code' else kind == 'U'
+        if raw != '_' + name or name in found or not correct_type:
+            raise ValueError('duplicate or wrong-type required Mach-O function: ' + name)
+        found.add(name)
+    if found != set(required):
+        raise ValueError('missing required Mach-O functions')
+    return sorted(found)
+
+
+def apple_sent_abi(package, *, lipo=None, nm=None):
+    slices = {'ios-arm64': {'arm64'}, 'ios-arm64_x86_64-simulator': {'arm64', 'x86_64'},
+              'tvos-arm64_arm64e': {'arm64', 'arm64e'},
+              'tvos-arm64_x86_64-simulator': {'arm64', 'x86_64'},
+              'macos-arm64_x86_64': {'arm64', 'x86_64'}}
+    if not package.is_dir():
+        raise ValueError('expected a staged Apple package directory')
+    package = package.resolve(strict=True)
+    for tool in (lipo, nm):
+        if tool is not None and not tool.is_absolute():
+            raise ValueError('explicit Apple inspection tools must be absolute paths')
+    lipo_command = (str(lipo),) if lipo is not None else ('xcrun', 'lipo')
+    nm_command = (str(nm),) if nm is not None else ('xcrun', 'nm')
+    with tempfile.TemporaryDirectory(prefix='.sent-request-abi-', dir=package.parent) as temporary:
+        for library, functions in (('Libavformat', SENT_FFMPEG_FUNCTIONS), ('Libmpv', SENT_MPV_FUNCTIONS)):
+            xc = package / 'artifacts' / (library + '-GPL.xcframework')
+            if not xc.is_dir():
+                raise ValueError('missing sent-request XCFramework')
+            if {p.name for p in xc.iterdir() if p.is_dir()} != set(slices):
+                raise ValueError('wrong exact sent-request Apple slice set')
+            for slice_name, expected in slices.items():
+                framework = xc / slice_name / (library + '.framework')
+                binary = framework / library
+                if not framework.is_dir() or not binary.is_file():
+                    raise ValueError('missing staged Apple archive')
+                archs = run(*lipo_command, '-archs', str(binary)).split()
+                if len(archs) != len(expected) or set(archs) != expected:
+                    raise ValueError('wrong exact staged Apple architecture set')
+                for arch in sorted(expected):
+                    thin = Path(temporary) / (library + '-' + slice_name + '-' + arch + '.a')
+                    if len(expected) == 1:
+                        shutil.copyfile(binary, thin)
+                    else:
+                        run(*lipo_command, str(binary), '-thin', arch, '-output', str(thin))
+                    required_macho_functions(run(*nm_command, '-gU', str(thin)), functions, 'defined-code')
+                    if library == 'Libmpv':
+                        required_macho_functions(run(*nm_command, '-gu', str(thin)),
+                                                SENT_FFMPEG_FUNCTIONS, 'undefined-import')
+    print('PASS apple-sent-abi')
+
+
 def android(out, upstream, sdk, *, readelf=None):
-    inspection = None
+    explicit_reader = readelf is not None
+    if explicit_reader and not readelf.is_absolute():
+        raise ValueError('explicit inspection reader must be an absolute path')
     if readelf is None:
-        # The original hosted producer toolchain remains unchanged.
         readelf = sdk / 'ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf'
-    else:
-        if not readelf.is_absolute():
-            raise ValueError('explicit inspection reader must be an absolute path')
-        requested_reader = readelf
-        resolved_reader = readelf.resolve(strict=True)
-        if not resolved_reader.is_file():
-            raise ValueError('explicit inspection reader is not a regular executable file')
-        # Keep the llvm-readelf invocation name: LLVM's llvm-readobj symlink target
-        # selects a different output style when invoked directly by its real basename.
-        version = run(str(readelf), '--version').strip()
-        if not version or len(version) > 4096:
-            raise ValueError('unexpected inspection reader version output')
-        inspection = {'mode': 'explicit-read-only-inspector',
-                      'requestedReader': str(requested_reader), 'resolvedReader': str(resolved_reader),
-                      'readerSHA256': digest(resolved_reader), 'readerVersion': version,
-                      'validatorSHA256': digest(Path(__file__))}
+    readelf = readelf.absolute()
+    reader = reader_identity(readelf, 'explicit-read-only-inspector' if explicit_reader else 'hosted-ndk-reader')
+    inspection = reader if explicit_reader else None
     aar = out / 'libmpv-release-candidate.aar'
     machines = {'arm64-v8a': ('ELF64', 'AArch64'), 'armeabi-v7a': ('ELF32', 'ARM'),
                 'x86_64': ('ELF64', 'Advanced Micro Devices X86-64')}
@@ -90,7 +224,7 @@ def android(out, upstream, sdk, *, readelf=None):
             for line in source_header.splitlines() if '}, /* EM' in line]
     if len(keys) != 8 or any(len(key) != 32 for key in keys):
         raise ValueError('unexpected reviewed distrust table')
-    records = []
+    records, sent_records = [], []
     with zipfile.ZipFile(aar) as archive, tempfile.TemporaryDirectory(dir=out) as temporary:
         names = archive.namelist()
         if len(names) != len(set(names)):
@@ -125,13 +259,26 @@ def android(out, upstream, sdk, *, readelf=None):
                         raise ValueError(f'expected TLS/GPL configuration missing: {name}')
                     if any(key not in data for key in keys):
                         raise ValueError(f'distrust-key constants missing: {name}')
+                library = name.split('/')[-1]
+                if library in ('libavformat.so', 'libmpv.so'):
+                    role = 'defined-provider' if library == 'libavformat.so' else 'undefined-import'
+                    dynamic = run(str(readelf), '--dyn-syms', '--wide', str(target))
+                    symbols = required_elf_functions(dynamic, SENT_FFMPEG_FUNCTIONS, role)
+                    sent_records.append({'abi': abi, 'library': library, 'role': role,
+                                         'binarySHA256': hashlib.sha256(data).hexdigest(),
+                                         'dynsymTextSHA256': hashlib.sha256(dynamic.encode('utf-8')).hexdigest(),
+                                         'symbols': symbols})
                 records.append({'entry': name, 'sha256': hashlib.sha256(data).hexdigest(),
                                 'bytes': len(data), 'elfIdentityChecked': True,
                                 'loadAlignments': [int(row[-1], 16) for row in loads],
                                 'page16KiBChecked': elf_class == 'ELF64'})
+    if (str(readelf.resolve(strict=True)) != reader['resolvedReader'] or
+            digest(Path(reader['resolvedReader'])) != reader['readerSHA256']):
+        raise ValueError('selected inspection reader changed during ABI inspection')
     evidence = {
         'aarSHA256': digest(aar), 'libraries': records, 'runtimeSecurityTested': False,
-        'appAndSeamBindingChanged': False, 'promotionEligible': False}
+        'appAndSeamBindingChanged': False, 'promotionEligible': False,
+        'sentRequestABI': {'schema': 1, 'reader': reader, 'libraries': sent_records}}
     if inspection is not None:
         # This describes only the inspection host/tool, never the original producer's NDK.
         evidence['inspection'] = inspection
@@ -141,11 +288,12 @@ def android(out, upstream, sdk, *, readelf=None):
 # Exact source-evidence profile for FUTURE successful native candidates. This
 # carries source bytes, including new/untracked patch outputs, rather than
 # substituting tracked diffs for a complete corresponding-source snapshot.
-CURRENT_SOURCE_PROFILE = 'original-http-response-observation-v1'
+CURRENT_SOURCE_PROFILE = 'original-http-sent-request-evidence-v1'
 CURRENT_RECIPE_PATHS = {
     'scripts/assemble-mpvkit-dvfel.sh', 'scripts/build-mpvkit-dvfel.sh',
     'scripts/ffmpeg-response-witness.patch', 'scripts/ffmpeg-response-generation.patch',
     'scripts/mpv-completed-response-observation.patch',
+    'scripts/ffmpeg-sent-request-evidence.patch', 'scripts/mpv-sent-request-evidence.patch',
     'scripts/mpv-coreaudio-hotplug-lifecycle.patch', 'scripts/mpv-http-seek-interrupt.patch',
     'scripts/mpv-moltenvk-resize.patch', 'scripts/mpv-original-http-reference-recipe.patch',
     'scripts/mpv-original-http-cancel-lifetime.patch', 'scripts/mpv-original-local-file-witness.patch',
@@ -170,10 +318,11 @@ CURRENT_NATIVE_PINS = {'mpv': '8c67647b50059406c5c0444903597281b81516cf',
 CURRENT_CANCEL_FILES = {
     'misc/thread_tools.c': '151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9',
     'misc/thread_tools.h': '62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f',
-    'stream/stream_lavf.c': 'c99a1956acc13ae3cc36972ec6d8fc8576e4699223c3bfb1db8fb3d171e58819',
-    'stream/reference_source.h': '9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577',
+    'stream/stream_lavf.c': '174cdaa923dad4b97926ac9f80ba8cabbba8be9e850824fb6939e317cd9c8f29',
+    'stream/reference_source.h': 'd48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e',
+                     'stream/vortx_http_request.h': '81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765',
 }
-CURRENT_RESPONSE_FILES = {'libavformat/http.c': '3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa'}
+CURRENT_RESPONSE_FILES = {'libavformat/http.c': '24bef1033a0e938734c39978f5c95c60da3439c1e74b005b26d085db6dafb6fe'}
 CURRENT_SOURCE_ROOTS = {'android': {'_native-publisher': 'fcf6745703dc1265bca88f12fee8fc355ddf251e',
              'dav1d': '54706fc6bc0cdecab7e9593974a4039cc038fca7',
              'ffmpeg': '946fcce07b6dcd0331c8cc609192aeff5e1924f8',
@@ -192,6 +341,8 @@ CURRENT_SOURCE_ROOTS = {'android': {'_native-publisher': 'fcf6745703dc1265bca88f
            'libplacebo-master-4c426e46': '4c426e466814536def653cb23f1d1c287ea7a7f5'}}
 CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/include/download-libunibreak.sh': '34ce1ee52187a287ff7da6e18efd7368e5671ac77cc7da5c5a8027a3c63a0418',
                                    'buildscripts/include/download-lua.sh': 'bdfb58aa6fc85ec4dabd095bf11c760482fbbff86b94abbe835044ea49f06f93',
+                                   'buildscripts/patches/ffmpeg/0004-sent-request-evidence.patch': '085b66cb5623ed8087481d3217b65da587b2970cd345a45896e7e87823dec9c9',
+                                   'buildscripts/patches/mpv/0011-sent-request-evidence.patch': 'e3840084725be1f4948fb90c6fec87c35d55665f8310854713ebff496e1358bf',
                                    'buildscripts/patches/ffmpeg/0003-response-generation.patch': 'ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098',
                                    'buildscripts/patches/mpv/0010-completed-response-observation.patch': 'c038924be4c9b0ef187e1e9336d201b866dfa6f13457817c6e8c2d484e882e8e',
                                    'buildscripts/patches/ffmpeg/0002-response-witness.patch': '6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b',
@@ -206,7 +357,8 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
                                    'buildscripts/patches/mpv/0008-original-http-reference-recipe.patch': '7d4eaa5236fa8b1b7fb2bd1500ff71aac48fa79fca9e790dfab0dee6d3f0023e',
                                    'buildscripts/patches/mpv/0009-original-http-cancel-lifetime.patch': '778b58c05129e397ed2f90408718f6b3a3feca84492485657d89e784bbee5722'},
              'dav1d': {},
-             'ffmpeg': {'libavformat/tls_mbedtls_vortx_distrust.h': '376bd507b67b3b912443bda657465204b808518ea353d161e23e47e9b64c0bf4'},
+             'ffmpeg': {'libavformat/vortx_http_request.h': '81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765',
+                        'libavformat/tls_mbedtls_vortx_distrust.h': '376bd507b67b3b912443bda657465204b808518ea353d161e23e47e9b64c0bf4'},
              'fontconfig': {},
              'freetype': {},
              'fribidi': {},
@@ -217,10 +369,13 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
              'mbedtls': {},
              'mpv': {'player/owned_subtitle.c': '875d9f0192cd5f45acca2654765bdc667df5d12dd6eabf9aef5caec5cdec821d',
                      'player/owned_subtitle.h': '2e9e64d92938e41c14c3397c9fbe7d064c2fe8aa5d2dcd05db4b9a74f4bad22e',
-                     'stream/reference_source.h': '9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577',
+                     'stream/reference_source.h': 'd48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e',
+                     'stream/vortx_http_request.h': '81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765',
                      'sub/owned_text_slot.h': 'b5f99151efb15ba937f630d1c2589c1e6634a4bebb744a161283cb70b3e250b6'}},
- 'apple': {'FFmpeg-9.0.2-946fcce0': {},
-           '_native-mpvkit': {'Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch': 'ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098',
+ 'apple': {'FFmpeg-9.0.2-946fcce0': {'libavformat/vortx_http_request.h': '81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765'},
+           '_native-mpvkit': {'Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch': '085b66cb5623ed8087481d3217b65da587b2970cd345a45896e7e87823dec9c9',
+                              'Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch': 'e3840084725be1f4948fb90c6fec87c35d55665f8310854713ebff496e1358bf',
+                              'Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch': 'ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098',
                               'Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch': 'c038924be4c9b0ef187e1e9336d201b866dfa6f13457817c6e8c2d484e882e8e',
                               'Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch': '6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b',
                               'Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch': 'c88bd8e3db721953559138dbf3cc4814cff89e71527cf667ed7b6e8c1b3e1e7d',
@@ -236,7 +391,8 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
                               'Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch': '778b58c05129e397ed2f90408718f6b3a3feca84492485657d89e784bbee5722'},
            'libmpv-master-8c67647b': {'player/owned_subtitle.c': '875d9f0192cd5f45acca2654765bdc667df5d12dd6eabf9aef5caec5cdec821d',
                                       'player/owned_subtitle.h': '2e9e64d92938e41c14c3397c9fbe7d064c2fe8aa5d2dcd05db4b9a74f4bad22e',
-                                      'stream/reference_source.h': '9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577',
+                                      'stream/reference_source.h': 'd48bd6dfd4db3cdbb4fbd3549a4d4cf20ef0f68a1b243f652f4e41de8770649e',
+                     'stream/vortx_http_request.h': '81e3c9cd21678cb047812de14a32b7a382bd44e5701e46d58d532b7e89679765',
                                       'sub/owned_text_slot.h': 'b5f99151efb15ba937f630d1c2589c1e6634a4bebb744a161283cb70b3e250b6',
                                       'video/out/vulkan/context_moltenvk.m': '00d2842ddb0dca5070feaf890c0190a0fe62beef9b29ec36e94e329d29a3da5e'},
            'libplacebo-master-4c426e46': {}}}
@@ -493,7 +649,7 @@ def capture_current_source_evidence(lane, out, upstream, roots, legacy, staged):
             raise ValueError('duplicate or malformed recipe hash')
         inputs[source_name(name)] = value
     if set(inputs) != CURRENT_RECIPE_PATHS:
-        raise ValueError('not the exact 29-input response-observation source family')
+        raise ValueError('not the exact 31-input sent-request-evidence source family')
     names = sorted(inputs | {'scripts/native-media-hosted/inputs.sha256': digest(manifest),
                              '.github/workflows/native-media-candidates.yml': None})
     entries = []
@@ -628,5 +784,14 @@ if __name__ == '__main__':
                 readelf=Path(sys.argv[6]) if len(sys.argv) == 7 else None)
     elif sys.argv[1] == 'receipt':
         receipt(sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), int(sys.argv[5]))
+    elif sys.argv[1] == 'apple-sent-abi':
+        if len(sys.argv) < 3 or len(sys.argv[3:]) % 2:
+            raise SystemExit('apple-sent-abi PACKAGE [--lipo /absolute/lipo] [--nm /absolute/nm]')
+        tools = {}
+        for flag, value in zip(sys.argv[3::2], sys.argv[4::2], strict=True):
+            if flag not in ('--lipo', '--nm') or flag in tools:
+                raise SystemExit('invalid or duplicate Apple inspection tool option')
+            tools[flag] = Path(value)
+        apple_sent_abi(Path(sys.argv[2]), lipo=tools.get('--lipo'), nm=tools.get('--nm'))
     else:
         raise SystemExit('unknown evidence mode')
