@@ -395,6 +395,151 @@ class LiveABIFixtureRecoveryContract(unittest.TestCase):
         changed = copy.deepcopy(steps); changed[V.SDK_EARLY_SAVE]["number"] = steps[V.FIXTURE_PREPARE]["number"] + 1
         with self.assertRaises(ValueError): V.sdk_cache_proof(changed, lines)
 
+class RawLogTimestampBOMContract(unittest.TestCase):
+    W, P = ExactStartupRecoveryContract.W, ExactStartupRecoveryContract.P
+    setUp = ExactStartupRecoveryContract.setUp
+    fixture = ExactStartupRecoveryContract.fixture
+    job = ExactStartupRecoveryContract.job
+    extra_logs = ExactStartupRecoveryContract.extra_logs
+    log = staticmethod(ExactStartupRecoveryContract.log)
+    cache_key = staticmethod(ExactStartupRecoveryContract.cache_key)
+
+    @staticmethod
+    def step():
+        return {"started_at": "2026-10-26T00:01:36Z", "completed_at": "2026-10-26T00:01:37Z"}
+
+    def test_multichunk_timestamp_prefix_bom_conserves_every_raw_line_and_body_byte(self):
+        lines = ["\ufeff2026-10-26T00:01:36.1786820Z first chunk",
+                 "2026-10-26T00:01:36.2000000Z ordinary body",
+                 "\ufeff2026-10-26T00:01:36.2581980Z second chunk",
+                 "2026-10-26T00:01:36.3000000Z \ufeffbody stays literal",
+                 "\ufeff2026-10-26T00:01:36.4006630Z third chunk"]
+        original = list(lines); raw = ("\n".join(lines) + "\n").encode("utf-8")
+        result = V.step_log_bodies(lines, self.step())
+        self.assertEqual(result, ["first chunk", "ordinary body", "second chunk", "\ufeffbody stays literal", "third chunk"])
+        self.assertEqual(lines, original)
+        self.assertEqual(("\n".join(lines) + "\n").encode("utf-8"), raw)
+        self.assertEqual(hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8")).digest(), hashlib.sha256(raw).digest())
+
+    def test_internal_double_trailing_bom_and_malformed_raw_timestamps_still_fail(self):
+        valid = "2026-10-26T00:01:36.1786820Z"
+        invalid = ["\ufeff\ufeff" + valid, valid.replace("T", "\ufeff", 1),
+                   valid.replace(":01:", ":\ufeff01:", 1), valid + "\ufeff", "not-a-timestamp",
+                   "\ufeffnot-a-timestamp", "\ufeff"]
+        for stamp in invalid:
+            lines = [stamp + " unchanged body"]
+            original = list(lines)
+            with self.subTest(stamp=stamp), self.assertRaises(ValueError): V.step_log_bodies(lines, self.step())
+            self.assertEqual(lines, original)
+
+    def test_api_step_timestamps_never_use_the_raw_chunk_bom_exception(self):
+        for field in ("started_at", "completed_at"):
+            value = self.step()[field]
+            for invalid in ("\ufeff" + value, "\ufeff\ufeff" + value, value.replace("T", "\ufeff", 1),
+                            value + "\ufeff", "not-a-timestamp"):
+                step = {**self.step(), field: invalid}
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                    V.step_log_bodies([], step)
+
+    def test_full_marker_proofs_allow_timestamp_bom_but_never_normalize_marker_bodies(self):
+        job = self.job(); _, steps = V.successful_recovery_job([job], self.P)
+        lines = self.extra_logs(job)
+        chunked = ["\ufeff" + line if index in (0, 2, 4) else line for index, line in enumerate(lines)]
+        original = list(chunked); receipt = self.fixture(); raw_receipt = V.repair_bytes(receipt)
+        raw_log = ("\n".join(chunked) + "\n").encode("utf-8")
+        V.live_abi_log_proof(receipt, self.P, steps, chunked)
+        V.sdk_cache_proof(steps, chunked)
+        self.assertEqual(chunked, original)
+        self.assertEqual(("\n".join(chunked) + "\n").encode("utf-8"), raw_log)
+        self.assertEqual(V.repair_bytes(receipt), raw_receipt)
+        for index in (0, 1):
+            stamp, _, body = lines[index].partition(" ")
+            for changed_body in ("\ufeff" + body, "\ufeff\ufeff" + body, body.replace("FIXTURE", "FI\ufeffXTURE", 1)):
+                changed = list(chunked); changed[index] = stamp + " " + changed_body
+                before = list(changed)
+                self.assertIn(changed_body, V.step_log_bodies(changed, steps[V.FIXTURE_PREPARE if index == 0 else V.FIXTURE_RESTORE]))
+                with self.subTest(index=index, changed_body=changed_body), self.assertRaises(ValueError):
+                    V.live_abi_log_proof(receipt, self.P, steps, changed)
+                self.assertEqual(changed, before)
+                self.assertEqual(V.repair_bytes(receipt), raw_receipt)
+
+class UntimestampedJSONContinuationContract(unittest.TestCase):
+    W, P = ExactStartupRecoveryContract.W, ExactStartupRecoveryContract.P
+    setUp = ExactStartupRecoveryContract.setUp
+    fixture = ExactStartupRecoveryContract.fixture
+    job = ExactStartupRecoveryContract.job
+    extra_logs = ExactStartupRecoveryContract.extra_logs
+    log = staticmethod(ExactStartupRecoveryContract.log)
+    cache_key = staticmethod(ExactStartupRecoveryContract.cache_key)
+    step = staticmethod(RawLogTimestampBOMContract.step)
+
+    @staticmethod
+    def field_lines():
+        # Actual retained GitHub env-display shape; these are never evidence.
+        return ['  "publish_existing_055": false,', '  "native_only": true,',
+                '  "tvos_test_only": false,', '  "publish_release": false,',
+                '  "apple_only": false,', '  "recovery_source_commit": "' + V.RECOVERY_SOURCE + '"']
+
+    def block(self, step, name="DISPATCH_INPUTS_JSON"):
+        return [self.log(step, "  " + name + ": {")] + self.field_lines() + ["}"]
+
+    def test_two_approved_blocks_are_non_evidence_without_inherited_time_or_byte_changes(self):
+        lines = ["2026-10-26T00:01:35Z   RECOVERY_INPUTS_JSON: {"] + self.field_lines() + ["}"] + [
+            "2026-10-26T00:01:36.1Z actual marker",
+            "\ufeff2026-10-26T00:01:36.2Z   DISPATCH_INPUTS_JSON: {"] + self.field_lines() + ["}"] + [
+            "2026-10-26T00:01:36.3Z after block"]
+        original = list(lines); raw = ("\n".join(lines) + "\n").encode("utf-8")
+        self.assertEqual(V.step_log_bodies(lines, self.step()),
+                         ["actual marker", "  DISPATCH_INPUTS_JSON: {", "after block"])
+        self.assertEqual(lines, original)
+        self.assertEqual(("\n".join(lines) + "\n").encode("utf-8"), raw)
+        self.assertEqual(hashlib.sha256(raw).digest(), hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8")).digest())
+
+    def test_unanchored_unknown_malformed_and_forged_indented_records_fail(self):
+        anchor = "2026-10-26T00:01:36Z   DISPATCH_INPUTS_JSON: {"
+        field = self.field_lines()[1]
+        invalid = [[field], ["2026-10-26T00:01:36Z ordinary body", field],
+                   [anchor, "  VORTX_LIVE_ABI_FIXTURE_PREPARED_SHA256=" + "a" * 64],
+                   [anchor, '  "native_only": false,'], [anchor, '  "unknown": true,'],
+                   [anchor, '  "native_only": "VORTX_LIVE_ABI_FIXTURE_PREPARED_SHA256=forged",'],
+                   [anchor, ' \t"native_only": true,'], [anchor, '\t"native_only": true,'],
+                   [anchor, "  2026-10-26Tbad malformed body"], [anchor, "\ufeff" + field],
+                   [anchor, field.replace("native_only", "native_\ufeffonly")]]
+        for lines in invalid:
+            original = list(lines)
+            with self.subTest(lines=lines), self.assertRaises(ValueError): V.step_log_bodies(lines, self.step())
+            self.assertEqual(lines, original)
+
+    def test_supported_continuations_cannot_supply_any_required_marker_or_runtime_proof(self):
+        job = self.job(); _, steps = V.successful_recovery_job([job], self.P)
+        lines = self.extra_logs(job)
+        healthy = self.block(steps[V.FIXTURE_PREPARE], "RECOVERY_INPUTS_JSON") + lines + self.block(steps[V.FIXTURE_RESTORE])
+        original = list(healthy); receipt = self.fixture(); raw_receipt = V.repair_bytes(receipt)
+        V.live_abi_log_proof(receipt, self.P, steps, healthy)
+        V.sdk_cache_proof(steps, healthy)
+        self.assertEqual(healthy, original)
+        for missing in range(5):
+            observed = self.block(steps[V.FIXTURE_PREPARE]) + [line for index, line in enumerate(lines) if index != missing]
+            before = list(observed)
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                V.live_abi_log_proof(receipt, self.P, steps, observed)
+            self.assertEqual(observed, before)
+            self.assertEqual(V.repair_bytes(receipt), raw_receipt)
+
+    def test_old_no_space_records_stay_non_evidence_but_malformed_timestamp_tokens_fail(self):
+        anchor = "2026-10-26T00:01:36Z   RECOVERY_INPUTS_JSON: {"
+        for record in ("not-a-time body", "} body", " bogus body"):
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                V.step_log_bodies([anchor, record], self.step())
+        for record in ("", "\n", "}", "garbage", "2026-10-26T00:01:36Z", "~/.cargo/git",
+                       "app/Vendor/engine-prelocalize/VortxEngine", "out/native-*.json",
+                       V.FIXTURE_PREPARED_MARKER + "a" * 64):
+            lines = [record]; original = list(lines)
+            self.assertEqual(V.step_log_bodies(lines, self.step()), [])
+            self.assertEqual(lines, original)
+            # A no-space record terminates the JSON continuation context, never transfers it.
+            with self.assertRaises(ValueError): V.step_log_bodies([anchor, record, self.field_lines()[0]], self.step())
+
 
 if __name__ == "__main__":
     unittest.main()

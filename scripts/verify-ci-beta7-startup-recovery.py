@@ -1126,15 +1126,40 @@ def validate_fixture_repair(receipt, pointer):
 
 def step_log_bodies(lines, step):
     parse = lambda value: datetime.fromisoformat(value.replace("Z", "+00:00"))
+    # API-owned step times do not use the raw concatenated-log transport exception.
+    require(all(isinstance(step[key], str) and "\ufeff" not in step[key]
+                for key in ("started_at", "completed_at")), "BOM in API step timestamp")
     start, end = parse(step["started_at"]), parse(step["completed_at"])
     require(end >= start, "negative step duration")
     result = []
+    # GitHub's multiline env display has these exact untimestamped JSON fields.
+    # They are formatting continuations, never timed marker evidence or dispatch receipts.
+    continuation_values = {key: APPLE_INPUTS[key] for key in
+                           ("publish_existing_055", "native_only", "tvos_test_only", "publish_release", "apple_only")}
+    continuation_values["recovery_source_commit"] = RECOVERY_SOURCE
+    continuations = {"  " + json.dumps(key) + ": " + json.dumps(value) + comma
+                     for key, value in continuation_values.items() for comma in ("", ",")}
+    continuation_anchor = False
     for line in lines:
-        stamp, separator, body = line.rstrip("\r\n").partition(" ")
+        raw = line.rstrip("\r\n")
+        if raw.startswith("  "):
+            require(continuation_anchor and raw in continuations,
+                    "unanchored or unsupported untimestamped log continuation")
+            continue  # Deliberately no inherited time and no returned body.
+        stamp, separator, body = raw.partition(" ")
         if separator:
+            # GitHub may concatenate UTF-8 chunks with one BOM at a new timestamp.
+            # Decode only that token prefix; never strip or rewrite the raw line/body.
+            stamp = stamp[1:] if stamp.startswith("\ufeff") else stamp
+            require("\ufeff" not in stamp, "internal or repeated BOM in raw log timestamp")
             when = parse(stamp)
+            continuation_anchor = body in ("  RECOVERY_INPUTS_JSON: {", "  DISPATCH_INPUTS_JSON: {")
             if start <= when < end + timedelta(seconds=1):
                 result.append(body)
+        else:
+            # Preserve existing no-space/empty-line handling (including path lists).
+            # Such records never supply a timed body or anchor further continuations.
+            continuation_anchor = False
     return result
 
 
