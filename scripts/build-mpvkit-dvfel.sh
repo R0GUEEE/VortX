@@ -52,9 +52,10 @@
 # fixes. BuildFFMPEG.beforeBuild now clones the exact n9.0.2 tag and detaches at 946fcce07b6d.
 # The versioned FFmpeg-9.0.2-946fcce0 source/output directory cannot reuse the old 9.0 source cache.
 #
-# WHAT THE REBASE ACTUALLY COST, measured rather than feared. MPVKit ships NO FFmpeg patches at all
-# (Sources/BuildScripts/patch/ contains only libmpv/), so there was nothing to rebase. The entire
-# delta is configure options, and exactly one of them died: `--enable-libshaderc`, removed upstream
+# WHAT THE ORIGINAL REBASE COST. Upstream MPVKit shipped no FFmpeg patches, so that version
+# move initially needed only configure changes. Our later response-witness patch is separate,
+# based on the exact n9.0.2 http.c, and does not activate a remote subtitle reader.
+# Exactly one original configure option died: `--enable-libshaderc`, removed upstream
 # by 062de19095 "configure: remove libshaderc and libglslang support", which release/9.0 contains.
 # The flag appears 7 times in n8.1.2's configure and 0 times in release/9.0's, and FFmpeg's configure
 # dies on unknown options, so `.libshaderc` had to come out of the dependencyLibrary array in
@@ -180,7 +181,7 @@ else
     [ -z "$line" ] && continue
     case "$line" in
       ' M Package.swift'|'M Package.swift'|' M Sources/BuildScripts/XCFrameworkBuild/main.swift'|'M Sources/BuildScripts/XCFrameworkBuild/main.swift'|' M Sources/BuildScripts/XCFrameworkBuild/base.swift'|'M Sources/BuildScripts/XCFrameworkBuild/base.swift'|' M Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch'|'M Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch') ;;
-      '?? .build/'*|'?? dist/'*|'?? Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch'|'?? Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch'|'?? Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch'|'?? Sources/BuildScripts/patch/libmpv/0007-upstream-audio-layout-bounds.patch'|'?? Sources/BuildScripts/patch/libmpv/0008-upstream-gpu-next-seek-reset.patch'|'?? Sources/BuildScripts/patch/libmpv/0009-original-local-file-witness.patch'|'?? Sources/BuildScripts/patch/libmpv/0010-upstream-edition-title-lifetime.patch'|'?? Sources/BuildScripts/patch/libmpv/0011-owned-subtitle-constructor.patch'|'?? Sources/BuildScripts/patch/libmpv/0012-owned-subtitle-publication.patch'|'?? Sources/BuildScripts/patch/libmpv/0013-original-http-reference-recipe.patch'|'?? Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch') ;;
+      '?? .build/'*|'?? dist/'*|'?? Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch'|'?? Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch'|'?? Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch'|'?? Sources/BuildScripts/patch/libmpv/0007-upstream-audio-layout-bounds.patch'|'?? Sources/BuildScripts/patch/libmpv/0008-upstream-gpu-next-seek-reset.patch'|'?? Sources/BuildScripts/patch/libmpv/0009-original-local-file-witness.patch'|'?? Sources/BuildScripts/patch/libmpv/0010-upstream-edition-title-lifetime.patch'|'?? Sources/BuildScripts/patch/libmpv/0011-owned-subtitle-constructor.patch'|'?? Sources/BuildScripts/patch/libmpv/0012-owned-subtitle-publication.patch'|'?? Sources/BuildScripts/patch/libmpv/0013-original-http-reference-recipe.patch'|'?? Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch') ;;
       *) fail "existing MPVKit checkout has unexpected dirty state: $line" ;;
     esac
   done <<< "$STATUS"
@@ -193,6 +194,18 @@ elif git apply --reverse --check "$PATCH" >/dev/null 2>&1; then
   echo "build-mpvkit-dvfel: exact MPVKit patch already applied; reusing it"
 else
   fail "MPVKit patch neither applies cleanly nor matches the already-applied exact patch; inspect $MPVKIT_DIR"
+fi
+
+# Future producer metadata only; keep the exact canonical patch and retry copy bound.
+RESPONSE_PATCH="$REPO/scripts/ffmpeg-response-witness.patch"
+RESPONSE_PATCH_HASH="$(shasum -a 256 "$RESPONSE_PATCH")"
+[ "${RESPONSE_PATCH_HASH%% *}" = "6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b" ] ||
+  fail "FFmpeg response-witness patch differs from the reviewed n9.0.2 delta"
+GENERATED_RESPONSE_PATCH="$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch"
+[ ! -L "$GENERATED_RESPONSE_PATCH" ] || fail "generated response-witness patch must not be a symlink"
+if [ -e "$GENERATED_RESPONSE_PATCH" ]; then
+  cmp -s "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH" ||
+    fail "existing generated response-witness patch differs: $GENERATED_RESPONSE_PATCH"
 fi
 
 if [ "$PREFLIGHT_ONLY" = "1" ]; then
@@ -242,6 +255,11 @@ copy_exact "$REPO/scripts/mpv-original-http-reference-recipe.patch" \
 copy_exact "$REPO/scripts/mpv-original-http-cancel-lifetime.patch" \
   "$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch"
 
+# FFmpeg has its own sorted sequence. This exact metadata producer is independent
+# of the MPV original-request/cancellation patches and enables no HTTP timing reader.
+mkdir -p "$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg"
+copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"
+
 # A prior interrupted experiment installed this retired VortX-only FFmpeg patch as an untracked
 # file. Do not delete or overwrite it implicitly; fail with an actionable path instead.
 OBSOLETE_PATCH="$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0001-no-private-secidentity.patch"
@@ -252,6 +270,14 @@ BUILD_STARTED_MARKER="$(mktemp)"
 trap 'rm -f "$BUILD_STARTED_MARKER"' EXIT
 swift run --build-path ./.build --package-path Sources/BuildScripts \
   build enable-gpl platform=ios,tvos,macos version=0.0.0-dvfel
+
+# Source composition proof, not response identity, binary behavior, or reader acceptance.
+FFMPEG_RESPONSE_SOURCE="$WORK/dist/FFmpeg-9.0.2-946fcce0"
+[ "$(git -C "$FFMPEG_RESPONSE_SOURCE" rev-parse HEAD)" = "946fcce07b6dcd0331c8cc609192aeff5e1924f8" ] ||
+  fail "FFmpeg response-witness source has a different upstream pin"
+printf '%s  %s\n' b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f \
+  "$FFMPEG_RESPONSE_SOURCE/libavformat/http.c" | shasum -a 256 -c - ||
+  fail "FFmpeg response-witness source differs from the reviewed n9.0.2 composition"
 
 # Assembly reads the per-library release ZIP, not slice scratch directories.
 # Refuse to package a stale ZIP after an interrupted or incorrectly cached run.

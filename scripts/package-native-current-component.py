@@ -17,10 +17,11 @@ import zipfile
 
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
-PROFILE = "original-http-cancel-lifetime-v1"
-PROFILE_MANIFEST_SHA256 = "af353a37bb7aeb1a54c5569cd6f87dba818d3bc11ff6e1faf4fdb7e140e4cf15"  # Filled only with the reviewed producer profile.
+PROFILE = "original-http-response-witness-v1"
+PROFILE_MANIFEST_SHA256 = "80e76ffae14893e5204b546768c8e968d314c7ca6878020bb0f93251c198bd5c"  # Filled only with the reviewed producer profile.
 RECIPE_PATHS = frozenset("""
 scripts/assemble-mpvkit-dvfel.sh scripts/build-mpvkit-dvfel.sh
+scripts/ffmpeg-response-witness.patch
 scripts/mpv-coreaudio-hotplug-lifecycle.patch scripts/mpv-http-seek-interrupt.patch
 scripts/mpv-moltenvk-resize.patch scripts/mpv-original-http-cancel-lifetime.patch
 scripts/mpv-original-http-reference-recipe.patch scripts/mpv-original-local-file-witness.patch
@@ -60,6 +61,7 @@ CANCEL = {"misc/thread_tools.c": "151102f6fc8584e119317e3526502bbae492353b1c312a
           "misc/thread_tools.h": "62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f",
           "stream/stream_lavf.c": "e0c69d92332e29a53d3d4458d4afa582919a9456d0fd63f7703cf342064cd16a",
           "stream/reference_source.h": "ce22ce201e6a41899c8c05b98fb9d9912f565090c5ffa0209492118a2a1a07f8"}
+RESPONSE = {"libavformat/http.c": "b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f"}
 GITLINKS = {"3rdparty/Vulkan-Headers": "74d8a6cb930c68ef617b202c3ff3c59d919e086b",
             "3rdparty/fast_float": "97b54ca9e75f5303507699d27c6b4f4efe4641a1",
             "3rdparty/glad": "73db193f853e2ee079bf3ca8a64aa2eaf6459043",
@@ -90,8 +92,14 @@ def untracked(lane, row, recipe):
         prefix = "Sources/BuildScripts/patch/libmpv/" if lane == "apple" else "buildscripts/patches/mpv/"
         result = {prefix + (apple if lane == "apple" else android): recipe["scripts/" + source]
                   for apple, android, source in PATCH_COPIES if lane == "apple" or android is not None}
+        response_path = ("Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch" if lane == "apple"
+                         else "buildscripts/patches/ffmpeg/0002-response-witness.patch")
+        result[response_path] = recipe["scripts/ffmpeg-response-witness.patch"]
         if lane == "android":
             result["buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"] = recipe["scripts/native-media-hosted/android/buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"]
+            for helper in ("download-lua.sh", "download-libunibreak.sh"):
+                name = "buildscripts/include/" + helper
+                result[name] = recipe["scripts/native-media-hosted/android/" + name]
         return result
     if row["commit"] == PINS["mpv"]:
         result = dict(CREATED_MPV)
@@ -99,6 +107,14 @@ def untracked(lane, row, recipe):
             result["video/out/vulkan/context_moltenvk.m"] = "00d2842ddb0dca5070feaf890c0190a0fe62beef9b29ec36e94e329d29a3da5e"
         return result
     return {"libavformat/tls_mbedtls_vortx_distrust.h": "376bd507b67b3b912443bda657465204b808518ea353d161e23e47e9b64c0bf4"} if lane == "android" and row["commit"] == PINS["ffmpeg"] else {}
+
+
+def require_response_source(files):
+    # Verified native tar bytes must correspond to the exact tracked HTTP composition.
+    for name, checksum in RESPONSE.items():
+        row = files.get(name, {})
+        need(row.get("kind") == "file" and row.get("tracked") is True and row.get("sha256") == checksum,
+             "Response-witness afterimage: " + name)
 
 
 def need(ok, message):
@@ -474,9 +490,9 @@ def package(args):
                 checksum, name = line.split("  ")
                 need(name not in recipe, "Duplicate reviewed input")
                 recipe[path(name)] = checksum
-            need(set(recipe) == RECIPE_PATHS and len(recipe) == 26, "Exact 26 reviewed recipe identities")
+            need(set(recipe) == RECIPE_PATHS and len(recipe) == 27, "Exact 27 reviewed recipe identities")
             producer = declared(meta["producerFiles"], "producer")
-            need(set(producer) == {"producer/" + name for name in RECIPE_PATHS | {INPUT_MANIFEST, WORKFLOW}}, "Exact 28 producer files")
+            need(set(producer) == {"producer/" + name for name in RECIPE_PATHS | {INPUT_MANIFEST, WORKFLOW}}, "Exact 29 producer files")
             for name, row in producer.items():
                 need(row == git_blob(args.repo, args.source_commit, name.removeprefix("producer/")) and row["kind"] == "file", "Immutable producer Git blob/mode")
                 relative = name.removeprefix("producer/")
@@ -515,6 +531,8 @@ def package(args):
             for name, checksum in CANCEL.items():
                 row = native.get(mpv["root"] + "/" + name)
                 need(row and row["kind"] == "file" and row["sha256"] == checksum, "Cancellation afterimage: " + name)
+            ffmpeg = next(row for row in meta["sources"] if row["commit"] == PINS["ffmpeg"])
+            require_response_source({row["path"]: row for row in ffmpeg["files"]})
             for key, name, expected_rows in (("producerArchive", "producer-inputs-v2.tar.gz", producer), ("nativeArchive", "native-sources-v2.tar.gz", native)):
                 keys(meta[key], "name sha256 bytes")
                 need(meta[key] == dict(name=name, sha256=inputs[name]["sha256"], bytes=inputs[name]["bytes"]), "V2 archive identity")

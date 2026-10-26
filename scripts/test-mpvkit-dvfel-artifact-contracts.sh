@@ -9,6 +9,7 @@ BUILD="$ROOT/scripts/build-mpvkit-dvfel.sh"
 PATCH="$ROOT/scripts/mpvkit-dvfel.patch"
 REFERENCE_PATCH="$ROOT/scripts/mpv-original-http-reference-recipe.patch"
 CANCEL_PATCH="$ROOT/scripts/mpv-original-http-cancel-lifetime.patch"
+RESPONSE_PATCH="$ROOT/scripts/ffmpeg-response-witness.patch"
 VERIFY="$ROOT/scripts/verify-mpvkit-dvfel-artifacts.sh"
 WORKFLOW="$ROOT/.github/workflows/release-tvos.yml"
 
@@ -17,7 +18,7 @@ fail() {
   exit 1
 }
 
-for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$CANCEL_PATCH" "$VERIFY" "$WORKFLOW"; do
+for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$CANCEL_PATCH" "$RESPONSE_PATCH" "$VERIFY" "$WORKFLOW"; do
   [ -f "$file" ] || fail "missing required source: $file"
 done
 
@@ -57,6 +58,17 @@ grep -Fq 'git rev-parse HEAD' "$PATCH" || fail "SpikeGit must validate an existi
 grep -Fq 'expected exact pin' "$PATCH" || fail "SpikeGit must assert the fresh checkout pin"
 grep -Fq 'git apply --reverse --check' "$PATCH" || fail "SpikeGit must support an exact already-applied patch"
 grep -Fq 'patch neither applies cleanly nor is already applied' "$PATCH" || fail "SpikeGit must fail actionable patch conflicts"
+
+# Future producer source contracts are distinct from current shipping binary gates.
+RESPONSE_HASH="$(shasum -a 256 "$RESPONSE_PATCH")"
+[ "${RESPONSE_HASH%% *}" = "6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b" ] ||
+  fail "FFmpeg response-witness carrier differs from the exact reviewed 946 delta"
+grep -Fq '"$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch"' "$BUILD" ||
+  fail "Apple must put the response witness in the FFmpeg patch sequence"
+grep -Fq 'copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"' "$BUILD" ||
+  fail "Apple must preserve exact response-witness patch-copy semantics"
+grep -Fq 'b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f' "$BUILD" ||
+  fail "Apple must require the exact reviewed HTTP source composition"
 
 # The artifact verifier must inspect content, not only checksums or mtimes.
 grep -Fq 'LIBAVCODEC_VERSION_MAJOR' "$VERIFY" || fail "artifact gate must inspect libavcodec major"
@@ -186,6 +198,27 @@ cp "$SOURCE/$FIXTURE_SWIFT_RECIPE" "$FIXTURE/exact-swift-recipe.patch"
 run_builder "$FIXTURE/retry.log" || fail "exact patched retry failed: $(cat "$FIXTURE/retry.log")"
 grep -Fq 'exact MPVKit patch already applied' "$FIXTURE/retry.log" ||
   fail "exact patched retry did not use the idempotent path"
+
+# The one newly allowed generated FFmpeg path is accepted only byte-for-byte.
+FIXTURE_RESPONSE_PATCH="$SOURCE/Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch"
+mkdir -p "$(dirname "$FIXTURE_RESPONSE_PATCH")"
+cp "$RESPONSE_PATCH" "$FIXTURE_RESPONSE_PATCH"
+run_builder "$FIXTURE/response-retry.log" ||
+  fail "exact generated response-witness copy was rejected: $(cat "$FIXTURE/response-retry.log")"
+printf '%s\n' 'unrelated response-witness edit' >>"$FIXTURE_RESPONSE_PATCH"
+if run_builder "$FIXTURE/response-conflict.log"; then
+  fail "changed generated response-witness copy was accepted"
+fi
+grep -Fq 'existing generated response-witness patch differs' "$FIXTURE/response-conflict.log" ||
+  fail "changed response-witness copy lacked its exact-copy diagnostic"
+rm -f "$FIXTURE_RESPONSE_PATCH"
+ln -s "$RESPONSE_PATCH" "$FIXTURE_RESPONSE_PATCH"
+if run_builder "$FIXTURE/response-symlink.log"; then
+  fail "symlinked generated response-witness copy was accepted"
+fi
+grep -Fq 'generated response-witness patch must not be a symlink' "$FIXTURE/response-symlink.log" ||
+  fail "response-witness symlink rejection lacked its ownership diagnostic"
+rm -f "$FIXTURE_RESPONSE_PATCH"
 
 printf '%s\n' 'let unrelated = true' >>"$SOURCE/Package.swift"
 if run_builder "$FIXTURE/unrelated.log"; then

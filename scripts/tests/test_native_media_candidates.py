@@ -25,10 +25,11 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertNotIn(name, names)
             names.add(name)
             self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), expected)
-        self.assertEqual(len(names), 26)
+        self.assertEqual(len(names), 27)
         self.assertEqual(names, {
             'scripts/assemble-mpvkit-dvfel.sh',
             'scripts/build-mpvkit-dvfel.sh',
+            'scripts/ffmpeg-response-witness.patch',
             'scripts/mpv-coreaudio-hotplug-lifecycle.patch',
             'scripts/mpv-http-seek-interrupt.patch',
             'scripts/mpv-moltenvk-resize.patch',
@@ -123,6 +124,81 @@ class NativeMediaProducer(unittest.TestCase):
                         android.index('cp "$root/scripts/mpv-original-http-cancel-lifetime.patch"'))
         self.assertLess(android.index("0009-original-http-cancel-lifetime.patch"),
                         android.index("bash patch.sh"))
+
+    def test_response_witness_is_the_same_exact_ffmpeg_producer_on_both_lanes(self):
+        relative = "scripts/ffmpeg-response-witness.patch"
+        patch_bytes = (ROOT / relative).read_bytes()
+        self.assertEqual(hashlib.sha256(patch_bytes).hexdigest(),
+                         "6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b")
+        patch_text = patch_bytes.decode()
+        self.assertEqual([line for line in patch_text.splitlines() if line.startswith("--- ")],
+                         ["--- a/libavformat/http.c"])
+        self.assertEqual([line for line in patch_text.splitlines() if line.startswith("+++ ")],
+                         ["+++ b/libavformat/http.c"])
+        # Completed read-only metadata only, not a worker/current-response reader.
+        for option in ("response_etag", "response_location"):
+            self.assertIn('AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY', next(
+                line for line in patch_text.splitlines()
+                if line.startswith('+    { "' + option + '"')))
+        apple = (ROOT / "scripts/build-mpvkit-dvfel.sh").read_text()
+        android = (ROOT / "scripts/native-media-hosted/build.sh").read_text()
+        self.assertIn('RESPONSE_PATCH="$REPO/scripts/ffmpeg-response-witness.patch"', apple)
+        self.assertIn('copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"', apple)
+        self.assertIn('/patch/FFmpeg/0001-response-witness.patch"', apple)
+        self.assertLess(apple.index('copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"'),
+                        apple.index('swift run --build-path'))
+        self.assertLess(apple.index('build enable-gpl platform=ios,tvos,macos'),
+                        apple.index('FFMPEG_RESPONSE_SOURCE='))
+        copy = 'cp "$root/scripts/ffmpeg-response-witness.patch" "$upstream/buildscripts/patches/ffmpeg/0002-response-witness.patch"'
+        self.assertIn(copy, android)
+        self.assertLess(android.index('buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch; do'),
+                        android.index(copy))
+        self.assertLess(android.index(copy), android.index("bash patch.sh"))
+        source_check = android.index("deps/ffmpeg/libavformat/http.c | shasum")
+        self.assertLess(android.index("bash patch.sh"), source_check)
+        self.assertLess(source_check, android.index('for arch in armv7l arm64 x86_64;'))
+        for recipe in (apple, android):
+            self.assertIn("946fcce07b6dcd0331c8cc609192aeff5e1924f8", recipe)
+            self.assertIn("b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f", recipe)
+        # The preexisting lexical patcher remains the dependency sequence authority.
+        patcher = (ROOT / "scripts/native-media-hosted/android/buildscripts/patch.sh").read_text()
+        self.assertIn('PATCHES=(patches/*)', patcher)
+        self.assertIn('patches=("$dep_path"/*)', patcher)
+        self.assertIn('git apply --reverse --check', patcher)
+
+    def test_response_witness_source_evidence_profile_preserves_exact_capture_and_consumer(self):
+        spec = importlib.util.spec_from_file_location(
+            "current_native_response_packager", ROOT / "scripts/package-native-current-component.py")
+        consumer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(consumer)
+        self.assertEqual(MODULE.CURRENT_SOURCE_PROFILE, consumer.PROFILE)
+        self.assertEqual(consumer.PROFILE, "original-http-response-witness-v1")
+        self.assertEqual(MODULE.CURRENT_RECIPE_PATHS, consumer.RECIPE_PATHS)
+        self.assertEqual(len(consumer.RECIPE_PATHS), 27)
+        manifest = ROOT / "scripts/native-media-hosted/inputs.sha256"
+        self.assertEqual(hashlib.sha256(manifest.read_bytes()).hexdigest(), consumer.PROFILE_MANIFEST_SHA256)
+        recipe = dict((name, checksum) for checksum, name in
+                      (line.split("  ", 1) for line in manifest.read_text().splitlines()))
+        self.assertEqual(MODULE.CURRENT_RESPONSE_FILES, consumer.RESPONSE)
+        for lane, groups in MODULE.CURRENT_SOURCE_ROOTS.items():
+            for directory, commit in groups.items():
+                self.assertEqual(consumer.untracked(lane, {"commit": commit}, recipe),
+                                 MODULE.CURRENT_UNTRACKED_FILES[lane][directory])
+        for helper in ("buildscripts/include/download-lua.sh", "buildscripts/include/download-libunibreak.sh"):
+            self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES["android"]["_native-publisher"][helper],
+                             recipe["scripts/native-media-hosted/android/" + helper])
+        # These are synthetic source observations, not native tar/binary or HTTP execution.
+        path, checksum = next(iter(consumer.RESPONSE.items()))
+        valid = {path: {"kind": "file", "tracked": True, "sha256": checksum}}
+        old_sources = ("205a083b57dd105078e3f71a1d0fad1fb6342d023d9fae32a60cbf6227218e74",
+                       "faebc27e86d3bf4375ef9c4461526f58caeaf3a6974d776f1a52159e29cdedd2")
+        for guard in (MODULE.require_current_response_source, consumer.require_response_source):
+            guard(valid)
+            for observed in ({}, {path: dict(valid[path], tracked=False)},
+                             {path: dict(valid[path], kind="symlink")},
+                             *({path: dict(valid[path], sha256=old)} for old in old_sources)):
+                with self.assertRaises(ValueError):
+                    guard(observed)
 
     def test_android_python_closure_is_pinned_and_isolated(self):
         workflow = (ROOT / ".github/workflows/native-media-candidates.yml").read_text()

@@ -134,6 +134,9 @@ PYTHON_TOOLCHAIN
     cp "$root/scripts/mpv-original-http-reference-recipe.patch" "$upstream/buildscripts/patches/mpv/0008-original-http-reference-recipe.patch"
     # Same original-cancel observer lifetime prerequisite as Apple; no reader activation.
     cp "$root/scripts/mpv-original-http-cancel-lifetime.patch" "$upstream/buildscripts/patches/mpv/0009-original-http-cancel-lifetime.patch"
+    # FFmpeg's sorted sequence keeps the existing TLS distrust patch first.
+    # The same source bytes as Apple add optional paired response metadata only.
+    cp "$root/scripts/ffmpeg-response-witness.patch" "$upstream/buildscripts/patches/ffmpeg/0002-response-witness.patch"
     git -C "$upstream" apply --check "$root/scripts/native-media-hosted/android-assembly.patch"
     git -C "$upstream" apply "$root/scripts/native-media-hosted/android-assembly.patch"
     # Use the hosted SDK; bypass upstream download-sdk.sh's moving gas-preprocessor/master fetch.
@@ -160,6 +163,10 @@ PYTHON_TOOLCHAIN
     cd "$upstream/buildscripts"
     bash -e include/download-deps.sh
     bash patch.sh
+    # Require the exact reviewed HTTP afterimage before any native compilation.
+    [[ $(git -C deps/ffmpeg rev-parse HEAD) == 946fcce07b6dcd0331c8cc609192aeff5e1924f8 ]] || exit 1
+    printf '%s  %s\n' b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f \
+        deps/ffmpeg/libavformat/http.c | shasum -a 256 -c -
     # Retain exactly the reviewed native source/patch state before any compiler runs.
     git -C deps/ffmpeg diff --binary > "$out/ffmpeg-applied.patch"
     cp deps/ffmpeg/libavformat/tls_mbedtls_vortx_distrust.h "$out/tls_mbedtls_vortx_distrust.h"
