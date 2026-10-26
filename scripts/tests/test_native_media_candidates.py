@@ -25,11 +25,13 @@ class NativeMediaProducer(unittest.TestCase):
             self.assertNotIn(name, names)
             names.add(name)
             self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), expected)
-        self.assertEqual(len(names), 27)
+        self.assertEqual(len(names), 29)
         self.assertEqual(names, {
             'scripts/assemble-mpvkit-dvfel.sh',
             'scripts/build-mpvkit-dvfel.sh',
             'scripts/ffmpeg-response-witness.patch',
+            'scripts/ffmpeg-response-generation.patch',
+            'scripts/mpv-completed-response-observation.patch',
             'scripts/mpv-coreaudio-hotplug-lifecycle.patch',
             'scripts/mpv-http-seek-interrupt.patch',
             'scripts/mpv-moltenvk-resize.patch',
@@ -96,7 +98,8 @@ class NativeMediaProducer(unittest.TestCase):
                 ("mpv-owned-subtitle-constructor.patch", "0011-owned-subtitle-constructor.patch", "0006-owned-subtitle-constructor.patch"),
                 ("mpv-owned-subtitle-publication.patch", "0012-owned-subtitle-publication.patch", "0007-owned-subtitle-publication.patch"),
                 ("mpv-original-http-reference-recipe.patch", "0013-original-http-reference-recipe.patch", "0008-original-http-reference-recipe.patch"),
-                ("mpv-original-http-cancel-lifetime.patch", "0014-original-http-cancel-lifetime.patch", "0009-original-http-cancel-lifetime.patch")]:
+                ("mpv-original-http-cancel-lifetime.patch", "0014-original-http-cancel-lifetime.patch", "0009-original-http-cancel-lifetime.patch"),
+                ("mpv-completed-response-observation.patch", "0015-completed-response-observation.patch", "0010-completed-response-observation.patch")]:
             self.assertIn('copy_exact "$REPO/scripts/' + source + '"', apple)
             self.assertIn('"$MPVKIT_DIR/Sources/BuildScripts/patch/libmpv/' + apple_number + '"', apple)
             self.assertIn('cp "$root/scripts/' + source + '" "$upstream/buildscripts/patches/mpv/' + android_number + '"', android)
@@ -123,6 +126,12 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertLess(android.index('cp "$root/scripts/mpv-original-http-reference-recipe.patch"'),
                         android.index('cp "$root/scripts/mpv-original-http-cancel-lifetime.patch"'))
         self.assertLess(android.index("0009-original-http-cancel-lifetime.patch"),
+                        android.index("bash patch.sh"))
+        self.assertLess(apple.index('copy_exact "$REPO/scripts/mpv-original-http-cancel-lifetime.patch"'),
+                        apple.index('copy_exact "$REPO/scripts/mpv-completed-response-observation.patch"'))
+        self.assertLess(android.index('cp "$root/scripts/mpv-original-http-cancel-lifetime.patch"'),
+                        android.index('cp "$root/scripts/mpv-completed-response-observation.patch"'))
+        self.assertLess(android.index("0010-completed-response-observation.patch"),
                         android.index("bash patch.sh"))
 
     def test_response_witness_is_the_same_exact_ffmpeg_producer_on_both_lanes(self):
@@ -159,12 +168,57 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertLess(source_check, android.index('for arch in armv7l arm64 x86_64;'))
         for recipe in (apple, android):
             self.assertIn("946fcce07b6dcd0331c8cc609192aeff5e1924f8", recipe)
-            self.assertIn("b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f", recipe)
+            self.assertIn("3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa", recipe)
         # The preexisting lexical patcher remains the dependency sequence authority.
         patcher = (ROOT / "scripts/native-media-hosted/android/buildscripts/patch.sh").read_text()
         self.assertIn('PATCHES=(patches/*)', patcher)
         self.assertIn('patches=("$dep_path"/*)', patcher)
         self.assertIn('git apply --reverse --check', patcher)
+
+    def test_completed_response_observation_preserves_source_and_sequence_fences(self):
+        generation = (ROOT / "scripts/ffmpeg-response-generation.patch").read_bytes()
+        observation = (ROOT / "scripts/mpv-completed-response-observation.patch").read_bytes()
+        self.assertEqual(hashlib.sha256(generation).hexdigest(),
+                         "ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098")
+        self.assertEqual(hashlib.sha256(observation).hexdigest(),
+                         "c038924be4c9b0ef187e1e9336d201b866dfa6f13457817c6e8c2d484e882e8e")
+        generation_text, observation_text = generation.decode(), observation.decode()
+        self.assertEqual([line for line in generation_text.splitlines() if line.startswith("+++ ")],
+                         ["+++ b/libavformat/http.c"])
+        self.assertEqual([line for line in observation_text.splitlines() if line.startswith("+++ ")],
+                         ["+++ b/stream/reference_source.h", "+++ b/stream/stream_lavf.c"])
+        self.assertIn('AV_OPT_TYPE_INT64', next(line for line in generation_text.splitlines()
+                                              if line.startswith('+    { "response_generation"')))
+        self.assertIn('AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY', next(
+            line for line in generation_text.splitlines() if line.startswith('+    { "response_generation"')))
+        self.assertIn('#if HAVE_PTHREADS || HAVE_W32THREADS || HAVE_OS2THREADS', generation_text)
+        self.assertIn('static AVMutex response_generation_lock = AV_MUTEX_INITIALIZER;', generation_text)
+        self.assertIn('last_response_generation < INT64_MAX', generation_text)
+        self.assertIn('s->response_generation = 0;', generation_text)
+        self.assertIn('INITIAL_REQUEST_ONLY', observation_text)
+        for name in ('stream_reference_source_observe_response',
+                     'stream_reference_source_revalidate_observation',
+                     'stream_reference_observation_cancelled',
+                     'stream_reference_observation_release'):
+            self.assertIn(name, observation_text)
+        apple = (ROOT / "scripts/build-mpvkit-dvfel.sh").read_text()
+        android = (ROOT / "scripts/native-media-hosted/build.sh").read_text()
+        self.assertIn('copy_exact "$RESPONSE_GENERATION_PATCH" "$GENERATED_RESPONSE_GENERATION_PATCH"', apple)
+        self.assertIn('/patch/FFmpeg/0002-response-generation.patch"', apple)
+        self.assertLess(apple.index('copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"'),
+                        apple.index('copy_exact "$RESPONSE_GENERATION_PATCH" "$GENERATED_RESPONSE_GENERATION_PATCH"'))
+        self.assertLess(apple.index('copy_exact "$RESPONSE_GENERATION_PATCH" "$GENERATED_RESPONSE_GENERATION_PATCH"'),
+                        apple.index('swift run --build-path'))
+        copy = 'cp "$root/scripts/ffmpeg-response-generation.patch" "$upstream/buildscripts/patches/ffmpeg/0003-response-generation.patch"'
+        self.assertIn(copy, android)
+        self.assertLess(android.index('cp "$root/scripts/ffmpeg-response-witness.patch"'), android.index(copy))
+        self.assertLess(android.index(copy), android.index("bash patch.sh"))
+        for recipe in (apple, android):
+            for afterimage in ("3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa",
+                               "c99a1956acc13ae3cc36972ec6d8fc8576e4699223c3bfb1db8fb3d171e58819",
+                               "9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577"):
+                self.assertIn(afterimage, recipe)
+        # Source contracts only. This does not exercise an HTTP owner or reader.
 
     def test_response_witness_source_evidence_profile_preserves_exact_capture_and_consumer(self):
         spec = importlib.util.spec_from_file_location(
@@ -172,9 +226,9 @@ class NativeMediaProducer(unittest.TestCase):
         consumer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(consumer)
         self.assertEqual(MODULE.CURRENT_SOURCE_PROFILE, consumer.PROFILE)
-        self.assertEqual(consumer.PROFILE, "original-http-response-witness-v1")
+        self.assertEqual(consumer.PROFILE, "original-http-response-observation-v1")
         self.assertEqual(MODULE.CURRENT_RECIPE_PATHS, consumer.RECIPE_PATHS)
-        self.assertEqual(len(consumer.RECIPE_PATHS), 27)
+        self.assertEqual(len(consumer.RECIPE_PATHS), 29)
         manifest = ROOT / "scripts/native-media-hosted/inputs.sha256"
         self.assertEqual(hashlib.sha256(manifest.read_bytes()).hexdigest(), consumer.PROFILE_MANIFEST_SHA256)
         recipe = dict((name, checksum) for checksum, name in
@@ -190,7 +244,8 @@ class NativeMediaProducer(unittest.TestCase):
         # These are synthetic source observations, not native tar/binary or HTTP execution.
         path, checksum = next(iter(consumer.RESPONSE.items()))
         valid = {path: {"kind": "file", "tracked": True, "sha256": checksum}}
-        old_sources = ("205a083b57dd105078e3f71a1d0fad1fb6342d023d9fae32a60cbf6227218e74",
+        old_sources = ("b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f",
+                       "205a083b57dd105078e3f71a1d0fad1fb6342d023d9fae32a60cbf6227218e74",
                        "faebc27e86d3bf4375ef9c4461526f58caeaf3a6974d776f1a52159e29cdedd2")
         for guard in (MODULE.require_current_response_source, consumer.require_response_source):
             guard(valid)

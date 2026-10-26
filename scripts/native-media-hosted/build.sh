@@ -134,9 +134,12 @@ PYTHON_TOOLCHAIN
     cp "$root/scripts/mpv-original-http-reference-recipe.patch" "$upstream/buildscripts/patches/mpv/0008-original-http-reference-recipe.patch"
     # Same original-cancel observer lifetime prerequisite as Apple; no reader activation.
     cp "$root/scripts/mpv-original-http-cancel-lifetime.patch" "$upstream/buildscripts/patches/mpv/0009-original-http-cancel-lifetime.patch"
+    # Owned observation only; INITIAL_REQUEST_ONLY and reader admission remain unchanged.
+    cp "$root/scripts/mpv-completed-response-observation.patch" "$upstream/buildscripts/patches/mpv/0010-completed-response-observation.patch"
     # FFmpeg's sorted sequence keeps the existing TLS distrust patch first.
     # The same source bytes as Apple add optional paired response metadata only.
     cp "$root/scripts/ffmpeg-response-witness.patch" "$upstream/buildscripts/patches/ffmpeg/0002-response-witness.patch"
+    cp "$root/scripts/ffmpeg-response-generation.patch" "$upstream/buildscripts/patches/ffmpeg/0003-response-generation.patch"
     git -C "$upstream" apply --check "$root/scripts/native-media-hosted/android-assembly.patch"
     git -C "$upstream" apply "$root/scripts/native-media-hosted/android-assembly.patch"
     # Use the hosted SDK; bypass upstream download-sdk.sh's moving gas-preprocessor/master fetch.
@@ -165,8 +168,13 @@ PYTHON_TOOLCHAIN
     bash patch.sh
     # Require the exact reviewed HTTP afterimage before any native compilation.
     [[ $(git -C deps/ffmpeg rev-parse HEAD) == 946fcce07b6dcd0331c8cc609192aeff5e1924f8 ]] || exit 1
-    printf '%s  %s\n' b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f \
+    printf '%s  %s\n' 3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa \
         deps/ffmpeg/libavformat/http.c | shasum -a 256 -c -
+    [[ $(git -C deps/mpv rev-parse HEAD) == 8c67647b50059406c5c0444903597281b81516cf ]] || exit 1
+    printf '%s  %s\n' c99a1956acc13ae3cc36972ec6d8fc8576e4699223c3bfb1db8fb3d171e58819 \
+        deps/mpv/stream/stream_lavf.c | shasum -a 256 -c -
+    printf '%s  %s\n' 9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577 \
+        deps/mpv/stream/reference_source.h | shasum -a 256 -c -
     # Retain exactly the reviewed native source/patch state before any compiler runs.
     git -C deps/ffmpeg diff --binary > "$out/ffmpeg-applied.patch"
     cp deps/ffmpeg/libavformat/tls_mbedtls_vortx_distrust.h "$out/tls_mbedtls_vortx_distrust.h"

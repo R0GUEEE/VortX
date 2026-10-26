@@ -17,11 +17,12 @@ import zipfile
 
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
-PROFILE = "original-http-response-witness-v1"
-PROFILE_MANIFEST_SHA256 = "80e76ffae14893e5204b546768c8e968d314c7ca6878020bb0f93251c198bd5c"  # Filled only with the reviewed producer profile.
+PROFILE = "original-http-response-observation-v1"
+PROFILE_MANIFEST_SHA256 = "cd2bee654266b0e0af1876285b23e8e075c7719961793e7946bd8a5138f79598"  # Filled only with the reviewed producer profile.
 RECIPE_PATHS = frozenset("""
 scripts/assemble-mpvkit-dvfel.sh scripts/build-mpvkit-dvfel.sh
-scripts/ffmpeg-response-witness.patch
+scripts/ffmpeg-response-witness.patch scripts/ffmpeg-response-generation.patch
+scripts/mpv-completed-response-observation.patch
 scripts/mpv-coreaudio-hotplug-lifecycle.patch scripts/mpv-http-seek-interrupt.patch
 scripts/mpv-moltenvk-resize.patch scripts/mpv-original-http-cancel-lifetime.patch
 scripts/mpv-original-http-reference-recipe.patch scripts/mpv-original-local-file-witness.patch
@@ -57,11 +58,12 @@ ANDROID_PINS = dict(PINS, mbedtls="068ff080b369adfac81509f9b57b2afabaf82dc5",
                     libass="4a05d8127f525943ebf45fdc6497c9e665947f0d")
 WRAPPER = {"apple": "2103893078c5e339073b11737b86f7f22b9c4491",
            "android": "fcf6745703dc1265bca88f12fee8fc355ddf251e"}
+# Full-file postcomposition hashes retain cancellation plus owned observation.
 CANCEL = {"misc/thread_tools.c": "151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9",
           "misc/thread_tools.h": "62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f",
-          "stream/stream_lavf.c": "e0c69d92332e29a53d3d4458d4afa582919a9456d0fd63f7703cf342064cd16a",
-          "stream/reference_source.h": "ce22ce201e6a41899c8c05b98fb9d9912f565090c5ffa0209492118a2a1a07f8"}
-RESPONSE = {"libavformat/http.c": "b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f"}
+          "stream/stream_lavf.c": "c99a1956acc13ae3cc36972ec6d8fc8576e4699223c3bfb1db8fb3d171e58819",
+          "stream/reference_source.h": "9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577"}
+RESPONSE = {"libavformat/http.c": "3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa"}
 GITLINKS = {"3rdparty/Vulkan-Headers": "74d8a6cb930c68ef617b202c3ff3c59d919e086b",
             "3rdparty/fast_float": "97b54ca9e75f5303507699d27c6b4f4efe4641a1",
             "3rdparty/glad": "73db193f853e2ee079bf3ca8a64aa2eaf6459043",
@@ -84,7 +86,8 @@ PATCH_COPIES = [
     ("0011-owned-subtitle-constructor.patch", "0006-owned-subtitle-constructor.patch", "mpv-owned-subtitle-constructor.patch"),
     ("0012-owned-subtitle-publication.patch", "0007-owned-subtitle-publication.patch", "mpv-owned-subtitle-publication.patch"),
     ("0013-original-http-reference-recipe.patch", "0008-original-http-reference-recipe.patch", "mpv-original-http-reference-recipe.patch"),
-    ("0014-original-http-cancel-lifetime.patch", "0009-original-http-cancel-lifetime.patch", "mpv-original-http-cancel-lifetime.patch")]
+    ("0014-original-http-cancel-lifetime.patch", "0009-original-http-cancel-lifetime.patch", "mpv-original-http-cancel-lifetime.patch"),
+    ("0015-completed-response-observation.patch", "0010-completed-response-observation.patch", "mpv-completed-response-observation.patch")]
 
 
 def untracked(lane, row, recipe):
@@ -95,6 +98,9 @@ def untracked(lane, row, recipe):
         response_path = ("Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch" if lane == "apple"
                          else "buildscripts/patches/ffmpeg/0002-response-witness.patch")
         result[response_path] = recipe["scripts/ffmpeg-response-witness.patch"]
+        generation_path = ("Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch" if lane == "apple"
+                           else "buildscripts/patches/ffmpeg/0003-response-generation.patch")
+        result[generation_path] = recipe["scripts/ffmpeg-response-generation.patch"]
         if lane == "android":
             result["buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"] = recipe["scripts/native-media-hosted/android/buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"]
             for helper in ("download-lua.sh", "download-libunibreak.sh"):
@@ -490,9 +496,9 @@ def package(args):
                 checksum, name = line.split("  ")
                 need(name not in recipe, "Duplicate reviewed input")
                 recipe[path(name)] = checksum
-            need(set(recipe) == RECIPE_PATHS and len(recipe) == 27, "Exact 27 reviewed recipe identities")
+            need(set(recipe) == RECIPE_PATHS and len(recipe) == 29, "Exact 29 reviewed recipe identities")
             producer = declared(meta["producerFiles"], "producer")
-            need(set(producer) == {"producer/" + name for name in RECIPE_PATHS | {INPUT_MANIFEST, WORKFLOW}}, "Exact 29 producer files")
+            need(set(producer) == {"producer/" + name for name in RECIPE_PATHS | {INPUT_MANIFEST, WORKFLOW}}, "Exact 31 producer files")
             for name, row in producer.items():
                 need(row == git_blob(args.repo, args.source_commit, name.removeprefix("producer/")) and row["kind"] == "file", "Immutable producer Git blob/mode")
                 relative = name.removeprefix("producer/")

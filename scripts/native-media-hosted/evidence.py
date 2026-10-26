@@ -141,10 +141,11 @@ def android(out, upstream, sdk, *, readelf=None):
 # Exact source-evidence profile for FUTURE successful native candidates. This
 # carries source bytes, including new/untracked patch outputs, rather than
 # substituting tracked diffs for a complete corresponding-source snapshot.
-CURRENT_SOURCE_PROFILE = 'original-http-response-witness-v1'
+CURRENT_SOURCE_PROFILE = 'original-http-response-observation-v1'
 CURRENT_RECIPE_PATHS = {
     'scripts/assemble-mpvkit-dvfel.sh', 'scripts/build-mpvkit-dvfel.sh',
-    'scripts/ffmpeg-response-witness.patch',
+    'scripts/ffmpeg-response-witness.patch', 'scripts/ffmpeg-response-generation.patch',
+    'scripts/mpv-completed-response-observation.patch',
     'scripts/mpv-coreaudio-hotplug-lifecycle.patch', 'scripts/mpv-http-seek-interrupt.patch',
     'scripts/mpv-moltenvk-resize.patch', 'scripts/mpv-original-http-reference-recipe.patch',
     'scripts/mpv-original-http-cancel-lifetime.patch', 'scripts/mpv-original-local-file-witness.patch',
@@ -165,13 +166,14 @@ CURRENT_RECIPE_PATHS = {
 CURRENT_NATIVE_PINS = {'mpv': '8c67647b50059406c5c0444903597281b81516cf',
                        'ffmpeg': '946fcce07b6dcd0331c8cc609192aeff5e1924f8',
                        'libplacebo': '4c426e466814536def653cb23f1d1c287ea7a7f5'}
+# Full-file postcomposition hashes retain cancellation plus owned observation.
 CURRENT_CANCEL_FILES = {
     'misc/thread_tools.c': '151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9',
     'misc/thread_tools.h': '62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f',
-    'stream/stream_lavf.c': 'e0c69d92332e29a53d3d4458d4afa582919a9456d0fd63f7703cf342064cd16a',
-    'stream/reference_source.h': 'ce22ce201e6a41899c8c05b98fb9d9912f565090c5ffa0209492118a2a1a07f8',
+    'stream/stream_lavf.c': 'c99a1956acc13ae3cc36972ec6d8fc8576e4699223c3bfb1db8fb3d171e58819',
+    'stream/reference_source.h': '9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577',
 }
-CURRENT_RESPONSE_FILES = {'libavformat/http.c': 'b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f'}
+CURRENT_RESPONSE_FILES = {'libavformat/http.c': '3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa'}
 CURRENT_SOURCE_ROOTS = {'android': {'_native-publisher': 'fcf6745703dc1265bca88f12fee8fc355ddf251e',
              'dav1d': '54706fc6bc0cdecab7e9593974a4039cc038fca7',
              'ffmpeg': '946fcce07b6dcd0331c8cc609192aeff5e1924f8',
@@ -190,6 +192,8 @@ CURRENT_SOURCE_ROOTS = {'android': {'_native-publisher': 'fcf6745703dc1265bca88f
            'libplacebo-master-4c426e46': '4c426e466814536def653cb23f1d1c287ea7a7f5'}}
 CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/include/download-libunibreak.sh': '34ce1ee52187a287ff7da6e18efd7368e5671ac77cc7da5c5a8027a3c63a0418',
                                    'buildscripts/include/download-lua.sh': 'bdfb58aa6fc85ec4dabd095bf11c760482fbbff86b94abbe835044ea49f06f93',
+                                   'buildscripts/patches/ffmpeg/0003-response-generation.patch': 'ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098',
+                                   'buildscripts/patches/mpv/0010-completed-response-observation.patch': 'c038924be4c9b0ef187e1e9336d201b866dfa6f13457817c6e8c2d484e882e8e',
                                    'buildscripts/patches/ffmpeg/0002-response-witness.patch': '6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b',
                                    'buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch': 'b36837784dc5b8e80e98c0f606fa7baf6e05031c91b5ab4e90b608a0a2d19714',
                                    'buildscripts/patches/mpv/0001-http-seek-interrupt.patch': '3687df5112f6cdcc22fed61dec6a5e16dcff89d54a7174edcefefbddd3054c92',
@@ -213,10 +217,12 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
              'mbedtls': {},
              'mpv': {'player/owned_subtitle.c': '875d9f0192cd5f45acca2654765bdc667df5d12dd6eabf9aef5caec5cdec821d',
                      'player/owned_subtitle.h': '2e9e64d92938e41c14c3397c9fbe7d064c2fe8aa5d2dcd05db4b9a74f4bad22e',
-                     'stream/reference_source.h': 'ce22ce201e6a41899c8c05b98fb9d9912f565090c5ffa0209492118a2a1a07f8',
+                     'stream/reference_source.h': '9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577',
                      'sub/owned_text_slot.h': 'b5f99151efb15ba937f630d1c2589c1e6634a4bebb744a161283cb70b3e250b6'}},
  'apple': {'FFmpeg-9.0.2-946fcce0': {},
-           '_native-mpvkit': {'Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch': '6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b',
+           '_native-mpvkit': {'Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch': 'ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098',
+                              'Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch': 'c038924be4c9b0ef187e1e9336d201b866dfa6f13457817c6e8c2d484e882e8e',
+                              'Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch': '6a2bf6d0feff31280470ac46e9c56b2e0a4522513959784dcb04aaf196334b9b',
                               'Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch': 'c88bd8e3db721953559138dbf3cc4814cff89e71527cf667ed7b6e8c1b3e1e7d',
                               'Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch': '01079c34bc8dba62af7e6f5a724063d288a96f2c4b5d2fb75b1993f6085a5ec5',
                               'Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch': '3687df5112f6cdcc22fed61dec6a5e16dcff89d54a7174edcefefbddd3054c92',
@@ -230,7 +236,7 @@ CURRENT_UNTRACKED_FILES = {'android': {'_native-publisher': {'buildscripts/inclu
                               'Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch': '778b58c05129e397ed2f90408718f6b3a3feca84492485657d89e784bbee5722'},
            'libmpv-master-8c67647b': {'player/owned_subtitle.c': '875d9f0192cd5f45acca2654765bdc667df5d12dd6eabf9aef5caec5cdec821d',
                                       'player/owned_subtitle.h': '2e9e64d92938e41c14c3397c9fbe7d064c2fe8aa5d2dcd05db4b9a74f4bad22e',
-                                      'stream/reference_source.h': 'ce22ce201e6a41899c8c05b98fb9d9912f565090c5ffa0209492118a2a1a07f8',
+                                      'stream/reference_source.h': '9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577',
                                       'sub/owned_text_slot.h': 'b5f99151efb15ba937f630d1c2589c1e6634a4bebb744a161283cb70b3e250b6',
                                       'video/out/vulkan/context_moltenvk.m': '00d2842ddb0dca5070feaf890c0190a0fe62beef9b29ec36e94e329d29a3da5e'},
            'libplacebo-master-4c426e46': {}}}
@@ -487,7 +493,7 @@ def capture_current_source_evidence(lane, out, upstream, roots, legacy, staged):
             raise ValueError('duplicate or malformed recipe hash')
         inputs[source_name(name)] = value
     if set(inputs) != CURRENT_RECIPE_PATHS:
-        raise ValueError('not the exact 27-input response-witness source family')
+        raise ValueError('not the exact 29-input response-observation source family')
     names = sorted(inputs | {'scripts/native-media-hosted/inputs.sha256': digest(manifest),
                              '.github/workflows/native-media-candidates.yml': None})
     entries = []

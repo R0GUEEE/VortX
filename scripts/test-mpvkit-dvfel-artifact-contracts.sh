@@ -10,6 +10,8 @@ PATCH="$ROOT/scripts/mpvkit-dvfel.patch"
 REFERENCE_PATCH="$ROOT/scripts/mpv-original-http-reference-recipe.patch"
 CANCEL_PATCH="$ROOT/scripts/mpv-original-http-cancel-lifetime.patch"
 RESPONSE_PATCH="$ROOT/scripts/ffmpeg-response-witness.patch"
+GENERATION_PATCH="$ROOT/scripts/ffmpeg-response-generation.patch"
+OBSERVATION_PATCH="$ROOT/scripts/mpv-completed-response-observation.patch"
 VERIFY="$ROOT/scripts/verify-mpvkit-dvfel-artifacts.sh"
 WORKFLOW="$ROOT/.github/workflows/release-tvos.yml"
 
@@ -18,7 +20,7 @@ fail() {
   exit 1
 }
 
-for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$CANCEL_PATCH" "$RESPONSE_PATCH" "$VERIFY" "$WORKFLOW"; do
+for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$CANCEL_PATCH" "$RESPONSE_PATCH" "$GENERATION_PATCH" "$OBSERVATION_PATCH" "$VERIFY" "$WORKFLOW"; do
   [ -f "$file" ] || fail "missing required source: $file"
 done
 
@@ -67,8 +69,18 @@ grep -Fq '"$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0001-response-witness.p
   fail "Apple must put the response witness in the FFmpeg patch sequence"
 grep -Fq 'copy_exact "$RESPONSE_PATCH" "$GENERATED_RESPONSE_PATCH"' "$BUILD" ||
   fail "Apple must preserve exact response-witness patch-copy semantics"
-grep -Fq 'b4261b2728bba10b77e99b43d2ee937a25392f9e53c15785f188566a8f166c1f' "$BUILD" ||
+grep -Fq '3c9becd663989d20b09805aeb99b525252908398e29b172e92e64f1c769831aa' "$BUILD" ||
   fail "Apple must require the exact reviewed HTTP source composition"
+GENERATION_HASH="$(shasum -a 256 "$GENERATION_PATCH")"
+[ "${GENERATION_HASH%% *}" = "ddfb68b5d7ed3779cfa69a75a28e9d4b17bd4f28529cccf26a005e790da03098" ] ||
+  fail "FFmpeg response-generation carrier differs from the reviewed delta"
+OBSERVATION_HASH="$(shasum -a 256 "$OBSERVATION_PATCH")"
+[ "${OBSERVATION_HASH%% *}" = "c038924be4c9b0ef187e1e9336d201b866dfa6f13457817c6e8c2d484e882e8e" ] ||
+  fail "MPV completed-response observation carrier differs from the reviewed delta"
+grep -Fq 'copy_exact "$RESPONSE_GENERATION_PATCH" "$GENERATED_RESPONSE_GENERATION_PATCH"' "$BUILD" ||
+  fail "Apple must preserve exact response-generation patch-copy semantics"
+grep -Fq 'copy_exact "$REPO/scripts/mpv-completed-response-observation.patch"' "$BUILD" ||
+  fail "Apple must install the owned observation after original-cancel lifetime"
 
 # The artifact verifier must inspect content, not only checksums or mtimes.
 grep -Fq 'LIBAVCODEC_VERSION_MAJOR' "$VERIFY" || fail "artifact gate must inspect libavcodec major"
@@ -220,6 +232,36 @@ grep -Fq 'generated response-witness patch must not be a symlink' "$FIXTURE/resp
   fail "response-witness symlink rejection lacked its ownership diagnostic"
 rm -f "$FIXTURE_RESPONSE_PATCH"
 
+# Both new generated paths have the same exact-file and no-symlink retry contract.
+for kind in generation observation; do
+  if [ "$kind" = generation ]; then
+    canonical="$GENERATION_PATCH"
+    generated="$SOURCE/Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch"
+    label="response-generation"
+  else
+    canonical="$OBSERVATION_PATCH"
+    generated="$SOURCE/Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch"
+    label="completed-response observation"
+  fi
+  mkdir -p "$(dirname "$generated")"
+  cp "$canonical" "$generated"
+  run_builder "$FIXTURE/$kind-retry.log" || fail "exact $label retry rejected"
+  printf '%s\n' 'unrelated generated patch edit' >>"$generated"
+  if run_builder "$FIXTURE/$kind-conflict.log"; then
+    fail "changed generated $label patch was accepted"
+  fi
+  grep -Fq "existing generated $label patch differs" "$FIXTURE/$kind-conflict.log" ||
+    fail "changed $label copy lacked its exact-copy diagnostic"
+  rm -f "$generated"
+  ln -s "$canonical" "$generated"
+  if run_builder "$FIXTURE/$kind-symlink.log"; then
+    fail "symlinked generated $label patch was accepted"
+  fi
+  grep -Fq "generated $label patch must not be a symlink" "$FIXTURE/$kind-symlink.log" ||
+    fail "$label symlink rejection lacked its ownership diagnostic"
+  rm -f "$generated"
+done
+
 printf '%s\n' 'let unrelated = true' >>"$SOURCE/Package.swift"
 if run_builder "$FIXTURE/unrelated.log"; then
   fail "unrelated same-file edit was accepted"
@@ -323,6 +365,17 @@ check_native_source misc/thread_tools.c 151102f6fc8584e119317e3526502bbae492353b
 check_native_source misc/thread_tools.h 62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f
 check_native_source stream/stream_lavf.c e0c69d92332e29a53d3d4458d4afa582919a9456d0fd63f7703cf342064cd16a
 check_native_source stream/reference_source.h ce22ce201e6a41899c8c05b98fb9d9912f565090c5ffa0209492118a2a1a07f8
+# Add only the owned observation after the exact cancellation afterimages.
+# This exercises real patch composition; it is not a remote response/reader test.
+OBSERVATION_PRE_TREE="$(native_git write-tree)"
+native_git apply --cached "$OBSERVATION_PATCH"
+[ "$(native_git diff --cached --name-only "$OBSERVATION_PRE_TREE" --)" = "$(printf '%s\n' \
+  stream/reference_source.h stream/stream_lavf.c)" ] ||
+  fail "owned response observation delta changed unexpected source paths"
+check_native_source misc/thread_tools.c 151102f6fc8584e119317e3526502bbae492353b1c312ae4a8f3aecaee8bdab9
+check_native_source misc/thread_tools.h 62c7ea467ef911d9665cc4d7ffe28b2b09ea03f152326964056f62dab24acc7f
+check_native_source stream/stream_lavf.c c99a1956acc13ae3cc36972ec6d8fc8576e4699223c3bfb1db8fb3d171e58819
+check_native_source stream/reference_source.h 9543ad2c923fa5fa43f224843a76a4b30a0232b3bb9da2eea1fdc84a28801577
 [ "$(shasum -a 256 "$NATIVE_REAL_INDEX")" = "$NATIVE_INDEX_BEFORE" ] ||
   fail "native canonical index changed during the isolated carrier contract"
 
