@@ -11369,8 +11369,9 @@ struct PlayerScreen: View {
     #endif
 
     private func refreshTracks() {
-        audioTracks = coordinator.player?.tracks(ofType: "audio") ?? []
-        subtitleTracks = coordinator.player?.tracks(ofType: "sub") ?? []
+        let tracks = coordinator.player?.audioAndSubtitleTracks()
+        audioTracks = tracks?.audio ?? []
+        subtitleTracks = tracks?.subtitles ?? []
         VXProbe.log("subs", "tracks loaded embedded=\(subtitleTracks.count) audio=\(audioTracks.count)")
     }
     private func refreshSoon() {

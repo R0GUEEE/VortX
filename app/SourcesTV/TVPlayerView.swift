@@ -5298,8 +5298,9 @@ struct TVPlayerView: View {
     }
 
     private func refreshTracks() {
-        audioTracks = coordinator.player?.tracks(ofType: "audio") ?? []
-        subtitleTracks = coordinator.player?.tracks(ofType: "sub") ?? []
+        let tracks = coordinator.player?.audioAndSubtitleTracks()
+        audioTracks = tracks?.audio ?? []
+        subtitleTracks = tracks?.subtitles ?? []
     }
     private func refreshTracksSoon() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {

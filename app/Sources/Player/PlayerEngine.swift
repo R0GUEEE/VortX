@@ -157,6 +157,8 @@ protocol PlayerEngine: AnyObject {
 
     // Tracks + subtitles
     func tracks(ofType type: String) -> [MPVTrack]
+    /// Refresh both control inventories together. This does not promise a native atomic snapshot.
+    func audioAndSubtitleTracks() -> (audio: [MPVTrack], subtitles: [MPVTrack])
     func setAudioTrack(_ id: Int)
     func setSubtitleTrack(_ id: Int)
     func addExternalSubtitle(url: String, title: String, lang: String,
@@ -220,6 +222,12 @@ protocol PlayerEngine: AnyObject {
 }
 
 extension PlayerEngine {
+    /// Engines with cached inventories retain their existing per-type behavior. libmpv overrides
+    /// this requirement to avoid walking its native track list twice in one chrome refresh.
+    func audioAndSubtitleTracks() -> (audio: [MPVTrack], subtitles: [MPVTrack]) {
+        (tracks(ofType: "audio"), tracks(ofType: "sub"))
+    }
+
     func seekForResume(to seconds: Double) { seek(to: seconds) }
 
     /// libmpv already receives its resume as an ordinary post-load seek. Only the AVPlayer remux lane needs a

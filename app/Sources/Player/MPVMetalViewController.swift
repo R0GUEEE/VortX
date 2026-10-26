@@ -4299,11 +4299,24 @@ final class MPVMetalViewController: PlatformViewController {
 
     /// Read the current audio/subtitle/video tracks from mpv's `track-list`.
     func tracks(ofType type: String) -> [MPVTrack] {
+        readTracks(matching: { $0 == type })
+    }
+
+    /// One scalar inventory walk for both control lists, without caching between refreshes.
+    /// Native fields can still change during the walk; this is not an atomic mpv snapshot.
+    func audioAndSubtitleTracks() -> (audio: [MPVTrack], subtitles: [MPVTrack]) {
+        let tracks = readTracks(matching: { $0 == "audio" || $0 == "sub" })
+        return (tracks.filter { $0.type == "audio" }, tracks.filter { $0.type == "sub" })
+    }
+
+    private func readTracks(matching matches: (String) -> Bool) -> [MPVTrack] {
         guard mpv != nil else { return [] }
         let count = getInt("track-list/count")
         guard count > 0 else { return [] }
         var result: [MPVTrack] = []
-        for i in 0..<count where (getString("track-list/\(i)/type") ?? "") == type {
+        for i in 0..<count {
+            let type = getString("track-list/\(i)/type") ?? ""
+            guard matches(type) else { continue }
             // We ask mpv for `--show-dependent-tracks=yes` so the DV enhancement-layer track stays
             // observable for the FEL diagnostic. Dependent tracks are not independently decodable and
             // upstream hides them from `track-list` for exactly that reason, so re-hide them here and
