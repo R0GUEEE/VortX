@@ -8219,7 +8219,8 @@ struct iOSSourceList: View {
             url: url,
             isTorrent: stream.isTorrent,
             isUsenet: stream.isUsenet,
-            requestHeaders: stream.requestHeaders
+            requestHeaders: stream.requestHeaders,
+            selectedServerURL: StremioServer.isCustom ? URL(string: StremioServer.base) : nil
         ), ExternalPlayer.canRouteExternally(url, isTorrent: stream.isTorrent) {
             ForEach(externalPlayerTargets) { target in
                 Button("Play in \(target.name)") {

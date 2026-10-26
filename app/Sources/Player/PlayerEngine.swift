@@ -63,11 +63,12 @@ struct PlayerSubtitleAlignmentOwner: Sendable {
 struct SubtitleAlignmentPresentationRequest {
     let id = UUID()
     let url: String
+    let selectsRequestedFile: Bool
     weak var player: (any PlayerEngine)?
     var requestGeneration: UInt64?
 
-    init(player: any PlayerEngine, url: String) {
-        self.player = player; self.url = url
+    init(player: any PlayerEngine, url: String, selectsRequestedFile: Bool = false) {
+        self.player = player; self.url = url; self.selectsRequestedFile = selectsRequestedFile
     }
 }
 
@@ -93,6 +94,43 @@ enum PlayerSubtitleAlignmentResult: Sendable {
             return String(localized: "Stop playback before trying alignment again.")
         case .failed:
             return String(localized: "Subtitle alignment failed. Try selecting the subtitle normally.")
+        }
+    }
+}
+
+/// The normal requested selection may load unchanged when a real alignment cannot be made.
+/// This is distinct from the explicit alignment action, whose failure keeps the previous selection.
+enum PlayerExternalSubtitleSelectionResult: Sendable {
+    case aligned, selectedWithoutAlignment, failed, superseded, needsStop
+
+    var succeeded: Bool {
+        switch self {
+        case .aligned, .selectedWithoutAlignment: return true
+        case .failed, .superseded, .needsStop: return false
+        }
+    }
+    var failureMessage: String? {
+        switch self {
+        case .aligned, .selectedWithoutAlignment: return nil
+        case .failed: return String(localized: "Subtitle failed to load")
+        case .superseded: return nil // A newer user/source/account decision owns the UI.
+        case .needsStop: return PlayerSubtitleAlignmentResult.needsStop.failureMessage
+        }
+    }
+}
+
+/// One shared policy for both Apple chromes and both manual/preferred-language requests.
+/// The normal file is already selected under an exact mount receipt before alignment starts.
+/// A missing/poor reference keeps that selection; a retired owner or uncertain renderer is never success.
+enum PlayerExternalSubtitleSelectionPolicy {
+    enum Action: Sendable, Equatable { case aligned, keepRequestedSelection, superseded, needsStop }
+
+    static func action(after result: PlayerSubtitleAlignmentResult) -> Action {
+        switch result {
+        case .aligned: return .aligned
+        case .unavailable, .unmatched, .failed: return .keepRequestedSelection
+        case .superseded: return .superseded
+        case .needsStop: return .needsStop
         }
     }
 }
@@ -168,6 +206,12 @@ protocol PlayerEngine: AnyObject {
     func alignExternalSubtitle(url: String, title: String, lang: String,
                                owner: PlayerSubtitleAlignmentOwner,
                                completion: @escaping (PlayerSubtitleAlignmentResult) -> Void) -> UInt64?
+    /// Normal requested add-on selection, separate from explicit keep-current alignment.
+    func selectExternalSubtitleAutomatically(url: String, title: String, lang: String,
+        owner: PlayerSubtitleAlignmentOwner?,
+        completion: @escaping (PlayerExternalSubtitleSelectionResult) -> Void) -> UInt64?
+    /// Cancel only the original request issued by this same engine, including normal automatic selection.
+    func cancelAutomaticSubtitleAlignment(ifRequestGeneration request: UInt64)
     /// Whether the currently selected subtitle path can apply `setSubDelay` live. libmpv supports this for
     /// every selected subtitle; AVPlayer supports it only while the VortX external-cue overlay is active.
     var subtitleDelayAvailable: Bool { get }
@@ -241,12 +285,32 @@ extension PlayerEngine {
     /// Unsupported conformers must not accidentally grant automatic-alignment authority with a fixed zero.
     var subtitleAlignmentRevision: UInt64? { nil }
 
+    /// Unsupported engines issue no automatic request; concrete MPV/AVKit conformers retire their own.
+    func cancelAutomaticSubtitleAlignment(ifRequestGeneration request: UInt64) {}
+
     var automaticSubtitleAlignmentAvailable: Bool { false }
     var alignedExternalSubtitle: PlayerAlignedSubtitleSelection? { nil }
     func alignExternalSubtitle(url: String, title: String, lang: String,
                                owner: PlayerSubtitleAlignmentOwner,
                                completion: @escaping (PlayerSubtitleAlignmentResult) -> Void) -> UInt64? {
         completion(.unavailable)
+        return nil
+    }
+
+    /// Normal add-on selection: MPV mounts the exact requested file, then aligns under its receipt.
+    /// AVKit retains its ordinary selection path; this does not advertise alignment capability there.
+    func selectExternalSubtitleAutomatically(url: String, title: String, lang: String,
+        owner: PlayerSubtitleAlignmentOwner?,
+        completion: @escaping (PlayerExternalSubtitleSelectionResult) -> Void
+    ) -> UInt64? {
+        if let mpv = self as? MPVMetalViewController {
+            guard let owner else { completion(.superseded); return nil }
+            return mpv.selectExternalSubtitleAutomatically(url: url, title: title, lang: lang,
+                owner: owner, completion: completion)
+        }
+        addExternalSubtitle(url: url, title: title, lang: lang) {
+            completion($0 ? .selectedWithoutAlignment : .failed)
+        }
         return nil
     }
 

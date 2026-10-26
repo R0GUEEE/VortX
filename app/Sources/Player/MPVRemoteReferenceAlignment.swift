@@ -84,16 +84,37 @@ final class MPVRemoteReferenceCancellation: Sendable {
 /// Typed scalar-only transport for the matched native reference reader. Unsupported old SDKs
 /// return unavailable. No remote resource, headers, options, descriptor or pointer enters Swift.
 enum MPVRemoteReferenceTransport {
+    /// The v2 wire keeps the reference and visible-primary identities separate.
+    /// sid/stream remain the existing caller-facing aliases for the reference
+    /// SID and the actual MPV stream index. Outgoing command flags are packed
+    /// because native commands are capped at MP_CMD_DEF_MAX_ARGS == 11:
+    /// bit 0 = external primary, bit 1 = visible primary.
     struct Capture: Sendable, Equatable {
         let intent: Int64
         let entry: Int64
         let sid: Int64
+        let referenceCommandIndex: Int64
         let stream: Int64
+        let primarySID: Int64
+        let primaryExternal: Bool
+        let primaryVisible: Bool
         let origin: Double
+
+        var referenceSID: Int64 { sid }
+        var referenceStreamIndex: Int64 { stream }
+
         var arguments: [MPVOwnedSubtitleTransport.Argument] {
-            [.integer(intent), .integer(entry), .integer(sid), .integer(stream), .number(origin)]
+            [.integer(intent), .integer(entry), .integer(sid),
+             .integer(referenceCommandIndex), .integer(stream), .integer(primarySID),
+             .integer(Capture.packedPrimaryFlags(external: primaryExternal, visible: primaryVisible)),
+             .number(origin)]
+        }
+
+        fileprivate static func packedPrimaryFlags(external: Bool, visible: Bool) -> Int64 {
+            (external ? 1 : 0) | (visible ? 2 : 0)
         }
     }
+
     struct Receipt: Sendable, Equatable {
         let capture: Capture
         let grant: Int64
@@ -103,42 +124,73 @@ enum MPVRemoteReferenceTransport {
         let demuxEpoch: Int64
         let origin: Double
         let cues: [SubtitleReferenceNativeQuery.Timing]
+
         var prepareArguments: [MPVOwnedSubtitleTransport.Argument] {
-            [.integer(grant), .integer(capture.intent), .integer(capture.entry), .integer(source),
-             .integer(capture.sid), .integer(capture.stream), .number(capture.origin)]
+            [.integer(grant), .integer(capture.intent), .integer(capture.entry),
+             .integer(source), .integer(capture.sid),
+             .integer(capture.referenceCommandIndex), .integer(capture.stream),
+             .integer(capture.primarySID),
+             .integer(Capture.packedPrimaryFlags(external: capture.primaryExternal, visible: capture.primaryVisible)),
+             .number(capture.origin)]
         }
     }
+
     enum Operation: Sendable {
         case read(Capture)
         case prepare(Receipt)
         case commit(Receipt, ticket: Int64)
     }
+
     enum Reply: Sendable {
         case read(Receipt)
         case prepared(grant: Int64, ticket: Int64)
         case committed(grant: Int64, ticket: Int64)
         case rejected, unconfirmed, terminated
     }
+
     private enum Value {
         case integer(Int64), number(Double), flag(Bool), cues([SubtitleReferenceNativeQuery.Timing])
     }
 
+    private static let commonKeys: Set<String> = [
+        "version", "intent-generation", "entry-id", "reference-sid",
+        "reference-command-index", "reference-stream-index", "demux-origin",
+        "primary-sid", "primary-external", "primary-visible"
+    ]
+    private static let activeKeys: Set<String> =
+        commonKeys.union(["grant", "ticket", "source-generation"])
+    private static let readKeys: Set<String> =
+        commonKeys.union([
+            "grant", "source-generation", "response-generation",
+            "source-epoch", "demux-epoch", "origin",
+            "prefix-start-ms", "prefix-end-ms", "cues"
+        ])
+
     static func capability(_ handle: OpaquePointer, expectedEntry: Int64) -> Capture? {
         var node = mpv_node()
-        guard mpv_get_property(handle, "vortx-subtitle-reference-capability", MPV_FORMAT_NODE, &node) >= 0 else { return nil }
+        guard mpv_get_property(handle, "vortx-subtitle-reference-capability", MPV_FORMAT_NODE, &node) >= 0 else {
+            return nil
+        }
         defer { mpv_free_node_contents(&node) }
-        guard let fields = fields(node, count: 7), integer(fields["version"]) == 1,
-              let capture = capture(fields), capture.entry == expectedEntry else { return nil }
+        guard let fields = exactFields(node, names: commonKeys),
+              integer(fields["version"]) == 2,
+              let capture = capture(fields),
+              capture.entry == expectedEntry else { return nil }
         return capture
     }
 
     static func active(_ handle: OpaquePointer, grant: Int64, ticket: Int64) -> Bool {
         var node = mpv_node()
-        guard mpv_get_property(handle, "vortx-subtitle-reference-active", MPV_FORMAT_NODE, &node) >= 0 else { return false }
+        guard mpv_get_property(handle, "vortx-subtitle-reference-active", MPV_FORMAT_NODE, &node) >= 0 else {
+            return false
+        }
         defer { mpv_free_node_contents(&node) }
-        guard let fields = fields(node, count: 10), integer(fields["version"]) == 1,
-              integer(fields["grant"]) == grant, integer(fields["ticket"]) == ticket,
-              positive(fields["source-generation"]) != nil, capture(fields) != nil else { return false }
+        guard let fields = exactFields(node, names: activeKeys),
+              integer(fields["version"]) == 2,
+              integer(fields["grant"]) == grant,
+              integer(fields["ticket"]) == ticket,
+              positive(fields["source-generation"]) != nil,
+              capture(fields) != nil else { return false }
         return true
     }
 
@@ -151,12 +203,14 @@ enum MPVRemoteReferenceTransport {
             }
         case .prepare(let receipt):
             guard let payload else { return -1 }
-            return command("vortx-subtitle-reference-prepare", receipt.prepareArguments + [.string(payload)]) {
+            return command("vortx-subtitle-reference-prepare",
+                           receipt.prepareArguments + [.string(payload)]) {
                 mpv_command_node_async(handle, identifier, $0)
             }
         case .commit(let receipt, let ticket):
             guard ticket > 0 else { return -1 }
-            return command("vortx-subtitle-reference-commit", [.integer(ticket)] + receipt.prepareArguments) {
+            return command("vortx-subtitle-reference-commit",
+                           [.integer(ticket)] + receipt.prepareArguments) {
                 mpv_command_node_async(handle, identifier, $0)
             }
         }
@@ -165,24 +219,35 @@ enum MPVRemoteReferenceTransport {
     static func decode(_ node: mpv_node, operation: Operation) -> Reply {
         switch operation {
         case .read(let expected):
-            guard let fields = fields(node, count: 16), integer(fields["version"]) == 1,
+            guard let fields = exactFields(node, names: readKeys),
+                  integer(fields["version"]) == 2,
                   capture(fields) == expected,
-                  let grant = positive(fields["grant"]), let source = positive(fields["source-generation"]),
+                  let grant = positive(fields["grant"]),
+                  let source = positive(fields["source-generation"]),
                   let response = positive(fields["response-generation"]),
-                  let sourceEpoch = positive(fields["source-epoch"]), let demuxEpoch = positive(fields["demux-epoch"]),
-                  case .some(.number(let origin)) = fields["origin"], origin.isFinite, abs(origin) <= 86_400,
+                  let sourceEpoch = positive(fields["source-epoch"]),
+                  let demuxEpoch = positive(fields["demux-epoch"]),
+                  case .some(.number(let origin)) = fields["origin"],
+                  origin.isFinite, abs(origin) <= 86_400,
                   integer(fields["prefix-start-ms"]) == 0,
                   integer(fields["prefix-end-ms"]) == Int64(SubtitleReferenceNativeQuery.referenceWindowEndMs),
                   case .some(.cues(let cues)) = fields["cues"] else { return .unconfirmed }
-            return .read(.init(capture: expected, grant: grant, source: source, response: response,
-                sourceEpoch: sourceEpoch, demuxEpoch: demuxEpoch, origin: origin, cues: cues))
+            return .read(.init(capture: expected, grant: grant, source: source,
+                response: response, sourceEpoch: sourceEpoch, demuxEpoch: demuxEpoch,
+                origin: origin, cues: cues))
+
         case .prepare(let receipt):
-            guard let fields = fields(node, count: 3), integer(fields["version"]) == 1,
-                  integer(fields["grant"]) == receipt.grant, let ticket = positive(fields["ticket"]) else { return .unconfirmed }
+            guard let fields = exactFields(node, names: ["version", "grant", "ticket"]),
+                  integer(fields["version"]) == 2,
+                  integer(fields["grant"]) == receipt.grant,
+                  let ticket = positive(fields["ticket"]) else { return .unconfirmed }
             return .prepared(grant: receipt.grant, ticket: ticket)
+
         case .commit(let receipt, let ticket):
-            guard let fields = fields(node, count: 4), integer(fields["version"]) == 1,
-                  integer(fields["grant"]) == receipt.grant, integer(fields["ticket"]) == ticket,
+            guard let fields = exactFields(node, names: ["version", "grant", "ticket", "committed"]),
+                  integer(fields["version"]) == 2,
+                  integer(fields["grant"]) == receipt.grant,
+                  integer(fields["ticket"]) == ticket,
                   case .some(.flag(true)) = fields["committed"] else { return .unconfirmed }
             return .committed(grant: receipt.grant, ticket: ticket)
         }
@@ -207,7 +272,9 @@ enum MPVRemoteReferenceTransport {
                 }
             }
         }
-        guard status >= 0, let fields = fields(result, count: 2), integer(fields["version"]) == 1,
+        guard status >= 0,
+              let fields = exactFields(result, names: ["version", "released"]),
+              integer(fields["version"]) == 2,
               case .some(.flag(_)) = fields["released"] else { return false }
         return true // Both exact removal and exact absence certify this grant cannot publish again.
     }
@@ -216,27 +283,49 @@ enum MPVRemoteReferenceTransport {
         struct Cue: Encodable { let startMs: UInt64; let endMs: UInt64; let text: String }
         struct Payload: Encodable { let version = 1; let language: String; let cues: [Cue] }
         guard language.utf8.count <= 255, !language.contains("\0") else { return nil }
-        let body = Payload(language: language, cues: file.cues.map { Cue(startMs: $0.startMs, endMs: $0.endMs, text: $0.text) })
+        let body = Payload(language: language, cues: file.cues.map {
+            Cue(startMs: $0.startMs, endMs: $0.endMs, text: $0.text)
+        })
         guard let data = try? JSONEncoder().encode(body), data.count <= 9 * 1024 * 1024 else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
     private static func capture(_ fields: [String: Value]) -> Capture? {
-        guard let intent = positive(fields["intent-generation"]), let entry = positive(fields["entry-id"]),
-              let sid = positive(fields["sid"]), let stream = integer(fields["ff-index"]), (0..<128).contains(stream),
-              case .some(.number(let origin)) = fields["demux-origin"], origin.isFinite, abs(origin) <= 86_400,
-              case .some(.flag(true)) = fields["primary-visible"] else { return nil }
-        return .init(intent: intent, entry: entry, sid: sid, stream: stream, origin: origin)
+        guard let intent = positive(fields["intent-generation"]),
+              let entry = positive(fields["entry-id"]),
+              let sid = integer(fields["reference-sid"]),
+              (1...Int64(Int32.max)).contains(sid),
+              let referenceCommandIndex = integer(fields["reference-command-index"]),
+              (0..<128).contains(referenceCommandIndex),
+              let stream = integer(fields["reference-stream-index"]),
+              (0..<1024).contains(stream),
+              let primarySID = integer(fields["primary-sid"]),
+              (0...Int64(Int32.max)).contains(primarySID),
+              case .some(.flag(let primaryExternal)) = fields["primary-external"],
+              case .some(.flag(let primaryVisible)) = fields["primary-visible"],
+              primarySID != 0 || !primaryExternal,
+              case .some(.number(let origin)) = fields["demux-origin"],
+              origin.isFinite, abs(origin) <= 86_400 else { return nil }
+        return .init(intent: intent, entry: entry, sid: sid,
+                     referenceCommandIndex: referenceCommandIndex, stream: stream,
+                     primarySID: primarySID, primaryExternal: primaryExternal,
+                     primaryVisible: primaryVisible, origin: origin)
     }
+
     private static func integer(_ value: Value?) -> Int64? {
-        guard case .some(.integer(let value)) = value else { return nil }; return value
+        guard case .some(.integer(let value)) = value else { return nil }
+        return value
     }
+
     private static func positive(_ value: Value?) -> Int64? {
-        guard let value = integer(value), value > 0 else { return nil }; return value
+        guard let value = integer(value), value > 0 else { return nil }
+        return value
     }
+
     private static func fields(_ node: mpv_node, count: Int) -> [String: Value]? {
         guard node.format == MPV_FORMAT_NODE_MAP, let list = node.u.list,
-              Int(list.pointee.num) == count, let keys = list.pointee.keys, let values = list.pointee.values else { return nil }
+              Int(list.pointee.num) == count, let keys = list.pointee.keys,
+              let values = list.pointee.values else { return nil }
         var result: [String: Value] = [:]
         for index in 0..<count {
             guard let key = keys[index] else { return nil }
@@ -244,32 +333,52 @@ enum MPVRemoteReferenceTransport {
             guard result[name] == nil else { return nil }
             let value = values[index]
             switch value.format {
-            case MPV_FORMAT_INT64: result[name] = .integer(value.u.int64)
-            case MPV_FORMAT_DOUBLE: result[name] = .number(value.u.double_)
+            case MPV_FORMAT_INT64:
+                result[name] = .integer(value.u.int64)
+            case MPV_FORMAT_DOUBLE:
+                result[name] = .number(value.u.double_)
             case MPV_FORMAT_FLAG:
                 guard value.u.flag == 0 || value.u.flag == 1 else { return nil }
                 result[name] = .flag(value.u.flag == 1)
             case MPV_FORMAT_NODE_ARRAY:
-                guard name == "cues", let list = value.u.list, (1...1024).contains(Int(list.pointee.num)),
+                guard name == "cues",
+                      let list = value.u.list,
+                      (1...1024).contains(Int(list.pointee.num)),
                       let rows = list.pointee.values else { return nil }
                 var cues: [SubtitleReferenceNativeQuery.Timing] = []
                 var previous: UInt64?
                 for row in 0..<Int(list.pointee.num) {
-                    guard rows[row].format == MPV_FORMAT_NODE_ARRAY, let pair = rows[row].u.list,
-                          pair.pointee.num == 2, let ends = pair.pointee.values,
-                          ends[0].format == MPV_FORMAT_INT64, ends[1].format == MPV_FORMAT_INT64,
-                          ends[0].u.int64 >= 0, ends[0].u.int64 < ends[1].u.int64,
-                          ends[1].u.int64 <= Int64(SubtitleReferenceNativeQuery.referenceWindowEndMs) else { return nil }
-                    let start = UInt64(ends[0].u.int64), end = UInt64(ends[1].u.int64)
+                    guard rows[row].format == MPV_FORMAT_NODE_ARRAY,
+                          let pair = rows[row].u.list,
+                          pair.pointee.num == 2,
+                          let ends = pair.pointee.values,
+                          ends[0].format == MPV_FORMAT_INT64,
+                          ends[1].format == MPV_FORMAT_INT64,
+                          ends[0].u.int64 >= 0,
+                          ends[0].u.int64 < ends[1].u.int64,
+                          ends[1].u.int64 <= Int64(SubtitleReferenceNativeQuery.referenceWindowEndMs) else {
+                        return nil
+                    }
+                    let start = UInt64(ends[0].u.int64)
+                    let end = UInt64(ends[1].u.int64)
                     guard previous.map({ start >= $0 }) ?? true else { return nil }
-                    cues.append(.init(startMs: start, endMs: end)); previous = start
+                    cues.append(.init(startMs: start, endMs: end))
+                    previous = start
                 }
                 result[name] = .cues(cues)
-            default: return nil
+            default:
+                return nil
             }
         }
         return result
     }
+
+    private static func exactFields(_ node: mpv_node, names: Set<String>) -> [String: Value]? {
+        guard let fields = fields(node, count: names.count),
+              Set(fields.keys) == names else { return nil }
+        return fields
+    }
+
     private static func command(_ name: String, _ arguments: [MPVOwnedSubtitleTransport.Argument],
                                 _ invoke: (UnsafeMutablePointer<mpv_node>) -> Int32) -> Int32 {
         let arguments = [MPVOwnedSubtitleTransport.Argument.string(name)] + arguments
@@ -282,11 +391,14 @@ enum MPVRemoteReferenceTransport {
         }
         for (index, argument) in arguments.enumerated() {
             switch argument {
-            case .integer(let value): nodes[index].format = MPV_FORMAT_INT64; nodes[index].u.int64 = value
-            case .number(let value): nodes[index].format = MPV_FORMAT_DOUBLE; nodes[index].u.double_ = value
+            case .integer(let value):
+                nodes[index].format = MPV_FORMAT_INT64; nodes[index].u.int64 = value
+            case .number(let value):
+                nodes[index].format = MPV_FORMAT_DOUBLE; nodes[index].u.double_ = value
             case .string(let value):
                 guard !value.contains("\0"), let owned = strdup(value) else { return -1 }
-                strings.append(owned); nodes[index].format = MPV_FORMAT_STRING; nodes[index].u.string = owned
+                strings.append(owned)
+                nodes[index].format = MPV_FORMAT_STRING; nodes[index].u.string = owned
             }
         }
         var list = mpv_node_list(num: Int32(arguments.count), values: nodes, keys: nil)

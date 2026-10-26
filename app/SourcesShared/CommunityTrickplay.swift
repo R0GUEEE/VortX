@@ -1,6 +1,7 @@
 import Foundation
 #if !TRICKPLAY_E2E_POLICY_TESTING
 import CryptoKit
+import ImageIO
 import os
 #if canImport(AppKit)
 import AppKit
@@ -481,6 +482,47 @@ enum TrickplayCommunityPoolParticipation {
     }
 }
 
+/// Download limits are independent of the upload builder: a response must fit before either parsing or
+/// pixel allocation. Keep the largest currently generated Apple sheet (400 * 320 * 180) readable.
+enum TrickplayDownloadBudget {
+    static let metadataBytes = 64 * 1024
+    static let indexBytes = 256 * 1024
+    static let spriteBytes = 3 * 1024 * 1024
+    static let spritePixels = 400 * 320 * 180
+
+    static func permitsSprite(width: Int, height: Int, frameCount: Int, cols: Int,
+                              tileW: Int, tileH: Int) -> Bool {
+        guard width > 0, height > 0, frameCount > 0, cols > 0, tileW > 0, tileH > 0 else { return false }
+        let (pixels, pixelOverflow) = width.multipliedReportingOverflow(by: height)
+        guard !pixelOverflow, pixels <= spritePixels else { return false }
+        let rows = frameCount / cols + (frameCount % cols == 0 ? 0 : 1)
+        let (gridWidth, widthOverflow) = cols.multipliedReportingOverflow(by: tileW)
+        let (gridHeight, heightOverflow) = rows.multipliedReportingOverflow(by: tileH)
+        // A partial final row and bounded padding are valid; never invent or rescale declared coverage.
+        return !widthOverflow && !heightOverflow && width >= gridWidth && height >= gridHeight
+    }
+}
+
+/// The actual streaming request accumulator. An absent length is -1; a dishonest length never grants more
+/// capacity. The first overflow byte is observed but never retained. Kept Foundation-only for focused tests.
+struct TrickplayDownloadBody {
+    let maximumBytes: Int
+    private(set) var data = Data()
+
+    init?(maximumBytes: Int, expectedContentLength: Int64) {
+        guard maximumBytes > 0, expectedContentLength >= -1,
+              expectedContentLength <= Int64(maximumBytes) else { return nil }
+        self.maximumBytes = maximumBytes
+        data.reserveCapacity(min(maximumBytes, 64 * 1024))
+    }
+
+    mutating func append(_ byte: UInt8) -> Bool {
+        guard data.count < maximumBytes else { return false }
+        data.append(byte)
+        return true
+    }
+}
+
 #if !TRICKPLAY_E2E_POLICY_TESTING
 
 /// Community trickplay: scrub-preview thumbnails SHARED across users, like Netflix / Plex storyboards.
@@ -779,19 +821,41 @@ enum CommunityTrickplay {
         return url
     }
 
-    private static func request(_ request: URLRequest) async -> FetchStatus {
+    private static func request(_ request: URLRequest, maximumBytes: Int,
+                                until deadline: ContinuousClock.Instant) async -> FetchStatus {
         guard !Task.isCancelled else { return .cancelled }
+        // The request owns its session so an early length/stream/deadline rejection cancels the transfer,
+        // including when no AsyncBytes iteration has begun. No oversized body enters URLSession's data API.
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForResource = request.timeoutInterval
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            return Task.isCancelled ? .cancelled : .response(data: data, statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0)
+            let (bytes, response) = try await session.bytes(for: request)
+            guard !Task.isCancelled else { return .cancelled }
+            guard ContinuousClock.now < deadline, let http = response as? HTTPURLResponse else { return .unavailable }
+            guard http.statusCode == 200 else { return .response(data: Data(), statusCode: http.statusCode) }
+            guard var body = TrickplayDownloadBody(maximumBytes: maximumBytes,
+                                                   expectedContentLength: http.expectedContentLength) else { return .unavailable }
+            for try await byte in bytes {
+                if (body.data.count & 4095) == 0 {
+                    guard !Task.isCancelled else { return .cancelled }
+                    guard ContinuousClock.now < deadline else { return .unavailable }
+                }
+                guard body.append(byte) else { return .unavailable }
+            }
+            guard !Task.isCancelled else { return .cancelled }
+            guard ContinuousClock.now < deadline else { return .unavailable }
+            return .response(data: body.data, statusCode: http.statusCode)
         } catch {
             return Task.isCancelled ? .cancelled : .unavailable
         }
     }
 
-    private static func race(_ request: URLRequest, until deadline: ContinuousClock.Instant) async -> FetchStatus {
+    private static func race(_ request: URLRequest, maximumBytes: Int,
+                             until deadline: ContinuousClock.Instant) async -> FetchStatus {
         await withTaskGroup(of: FetchStatus.self) { group in
-            group.addTask { await self.request(request) }
+            group.addTask { await self.request(request, maximumBytes: maximumBytes, until: deadline) }
             group.addTask { (try? await Task.sleep(until: deadline, clock: ContinuousClock())) == nil ? .cancelled : .unavailable }
             let result = await group.next() ?? .cancelled; group.cancelAll(); return result
         }
@@ -802,7 +866,7 @@ enum CommunityTrickplay {
         var request = URLRequest(url: url, timeoutInterval: 3)
         request.setValue("application/json", forHTTPHeaderField: "accept")
         VortXEdgeAuth.sign(&request)
-        return await race(request, until: deadline)
+        return await race(request, maximumBytes: TrickplayDownloadBudget.metadataBytes, until: deadline)
     }
 
     private static func fetchAssets(spriteURL: URL, vttURL: URL?) async -> AssetStageResult {
@@ -810,9 +874,11 @@ enum CommunityTrickplay {
         return await withTaskGroup(of: AssetEvent.self) { group in
             var sprite: FetchStatus?
             var vtt: FetchStatus?
-            group.addTask { .sprite(await request(URLRequest(url: spriteURL, timeoutInterval: 5))) }
+            group.addTask { .sprite(await request(URLRequest(url: spriteURL, timeoutInterval: 5),
+                                                  maximumBytes: TrickplayDownloadBudget.spriteBytes, until: deadline)) }
             if let vttURL {
-                group.addTask { .vtt(await request(URLRequest(url: vttURL, timeoutInterval: 5))) }
+                group.addTask { .vtt(await request(URLRequest(url: vttURL, timeoutInterval: 5),
+                                                  maximumBytes: TrickplayDownloadBudget.indexBytes, until: deadline)) }
             }
             group.addTask { (try? await Task.sleep(until: deadline, clock: ContinuousClock())) == nil ? .cancelled : .deadline }
             while let event = await group.next() {
@@ -876,10 +942,28 @@ enum CommunityTrickplay {
         }
         guard isEnabled else { return .unavailable(.metadataUnavailable) }
         guard case .response(let spriteData, 200) = sprite,
-              let image = ScrubImage(data: spriteData), let cg = image.cgImageForCrop else {
-            return .unavailable(.spriteUnavailable)
+              let source = CGImageSourceCreateWithData(spriteData as CFData,
+                  [kCGImageSourceShouldCache: false] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+              let width = properties[kCGImagePropertyPixelWidth as String] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight as String] as? Int,
+              TrickplayDownloadBudget.permitsSprite(width: width, height: height,
+                  frameCount: meta.frame_count, cols: meta.cols, tileW: meta.tile_w, tileH: meta.tile_h),
+              !Task.isCancelled,
+              let cg = CGImageSourceCreateImageAtIndex(source, 0,
+                  [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
+              cg.width == width, cg.height == height else {
+            return Task.isCancelled ? .cancelled : .unavailable(.spriteUnavailable)
         }
-
+        // Eager ImageIO materialization above stays on fetch's executor. Scrubbing only crops a prepared
+        // image; a tiny compressed response cannot defer an unbounded full-sheet decode to the UI thread.
+        guard !Task.isCancelled else { return .cancelled }
+        guard isEnabled else { return .unavailable(.metadataUnavailable) }
+        #if canImport(AppKit)
+        let image = ScrubImage(cgImage: cg, size: NSSize(width: CGFloat(width), height: CGFloat(height)))
+        #else
+        let image = ScrubImage(cgImage: cg)
+        #endif
         let cues: [TrickplayTimelineCue]?
         if vttURL != nil {
             guard let advertisedVTT, case .response(let vttData, 200) = advertisedVTT,
