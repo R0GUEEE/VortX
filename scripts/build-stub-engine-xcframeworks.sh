@@ -92,12 +92,12 @@ SDK_SPECS=(
     "iphonesimulator|ios-arm64_x86_64-simulator|arm64-apple-ios16.0-simulator,x86_64-apple-ios16.0-simulator"
     "appletvos|tvos-arm64|arm64-apple-tvos18.0"
     "appletvsimulator|tvos-arm64_x86_64-simulator|arm64-apple-tvos18.0-simulator,x86_64-apple-tvos18.0-simulator"
-    "macosx|macos-arm64|arm64-apple-macos14.0"
     # INTEL PORT (this fork): the Mac target now builds a UNIVERSAL (arm64 + x86_64) app, so the
-    # stand-in must offer an x86_64 slice too. A separate one-arch LibraryIdentifier (rather than a
-    # single fat macos-arm64_x86_64 slice) keeps the existing arm64 lane's slice name and behavior
-    # byte-identical while letting Xcode pick the x86_64 slice for Intel builds.
-    "macosx|macos-x86_64|x86_64-apple-macos14.0"
+    # stand-in must carry an x86_64 slice too. It has to be ONE fat macos-arm64_x86_64 slice, not two
+    # one-arch entries: XcodeGen/xcodebuild reject a framework where "both 'macos-arm64' and
+    # 'macos-x86_64' represent two equivalent library definitions". build_static_lib lipos the
+    # per-triple objects into that single archive, exactly like the real framework's slice.
+    "macosx|macos-arm64_x86_64|arm64-apple-macos14.0,x86_64-apple-macos14.0"
 )
 
 # ---------------------------------------------------------------- Stub sources ----------------------
@@ -299,7 +299,7 @@ generate_stub_framework() {
             ios-arm64_x86_64-simulator) platform="ios"; variant_keys="<key>SupportedPlatformVariant</key><string>simulator</string>" ;;
             tvos-arm64) platform="tvos" ;;
             tvos-arm64_x86_64-simulator) platform="tvos"; variant_keys="<key>SupportedPlatformVariant</key><string>simulator</string>" ;;
-            macos-arm64|macos-x86_64) platform="macos" ;;
+            macos-arm64|macos-arm64_x86_64) platform="macos" ;;
             *) echo "error: unknown slice $slice_name" >&2; exit 1 ;;
         esac
         # Derive the advertised architectures from this slice's triples. The previous
