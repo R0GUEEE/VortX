@@ -123,6 +123,38 @@ fail() {
   exit 1
 }
 
+# The authenticated release trees are build inputs. HarfBuzz's GPU-header helper
+# already handles a denied source copy by comparing it with the generated output.
+# Keep source modes/timestamps and the strict before/after verifier unchanged.
+run_with_subtitle_sources_readonly() (
+  set -euo pipefail
+  [ "$#" -ge 2 ] || { echo 'subtitle readonly: work and absolute command required' >&2; exit 1; }
+  subtitle_work="$1"
+  shift
+  [ -d "$subtitle_work" ] && [ ! -L "$subtitle_work" ] &&
+    [ "$(cd "$subtitle_work" && pwd -P)" = "$subtitle_work" ] || exit 1
+  case "$1" in /*) ;; *) echo 'subtitle readonly: absolute executable required' >&2; exit 1 ;; esac
+  [ -f "$1" ] && [ -x "$1" ] || exit 1
+  for subtitle_source in \
+    "$subtitle_work/dist/libunibreak-8.0-9c4fad6e" \
+    "$subtitle_work/dist/libfribidi-1.0.17-6949dcde" \
+    "$subtitle_work/dist/libharfbuzz-15.0.0-968536e9"; do
+    [ -d "$subtitle_source" ] && [ ! -L "$subtitle_source" ] &&
+      [ "$(cd "$subtitle_source" && pwd -P)" = "$subtitle_source" ] || exit 1
+  done
+  subtitle_policy='(version 1)
+(allow default)
+(deny file-write*
+  (subpath (param "SRC_UNIBREAK"))
+  (subpath (param "SRC_FRIBIDI"))
+  (subpath (param "SRC_HARFBUZZ")))'
+  PYTHONDONTWRITEBYTECODE=1 /usr/bin/sandbox-exec \
+    -D "SRC_UNIBREAK=$subtitle_work/dist/libunibreak-8.0-9c4fad6e" \
+    -D "SRC_FRIBIDI=$subtitle_work/dist/libfribidi-1.0.17-6949dcde" \
+    -D "SRC_HARFBUZZ=$subtitle_work/dist/libharfbuzz-15.0.0-968536e9" \
+    -p "$subtitle_policy" "$@"
+)
+
 mkdir -p "$DEST_ROOT"
 
 matches_exact_patch_tree() {
@@ -486,7 +518,7 @@ OBSOLETE_PATCH="$MPVKIT_DIR/Sources/BuildScripts/patch/FFmpeg/0001-no-private-se
 # GPL variant: VortX consumes the MPVKit-GPL product (libsmbclient + -Dgpl=true).
 BUILD_STARTED_MARKER="$(mktemp)"
 trap 'rm -f "$BUILD_STARTED_MARKER"' EXIT
-swift run --jobs 1 --build-path ./.build --package-path Sources/BuildScripts \
+run_with_subtitle_sources_readonly "$(cd "$WORK" && pwd -P)" /usr/bin/env swift run --jobs 1 --build-path ./.build --package-path Sources/BuildScripts \
   build enable-gpl platform=ios,tvos,macos version=0.0.0-dvfel
 
 # Post-build source composition gate before artifact/package acceptance. The native

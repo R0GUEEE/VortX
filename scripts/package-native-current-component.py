@@ -23,7 +23,7 @@ import zipfile
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
 PROFILE = "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-subtitles-candidate"
-PROFILE_MANIFEST_SHA256 = "d93644e08690fa14830abc970ef09e92ff2779cf8ca1369ce5f3e295690969e0"
+PROFILE_MANIFEST_SHA256 = "d2ad74accc550e420e5caa3250a966058d86f282ac8cca91d319c313837f0e11"
 NATIVE_UPGRADES_PROFILE = "native-upgrades-openssl410-crypto-subtitles-v5"
 SHADERC_WRAPPER_VERSION = "2026.1.0"
 SHADERC_REMOTE_URL = "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip"

@@ -4,8 +4,11 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import plistlib
 import stat
+import subprocess
+import sys
 from contextlib import redirect_stdout
 from copy import deepcopy
 from pathlib import Path
@@ -25,6 +28,82 @@ ACQUIRE_SPEC.loader.exec_module(ACQUIRE)
 
 
 class NativeMediaProducer(unittest.TestCase):
+    def test_apple_subtitle_readonly_copyback_policy(self):
+        apple = (ROOT / 'scripts/build-mpvkit-dvfel.sh').read_text()
+        signature = 'run_with_subtitle_sources_readonly() (\n'
+        self.assertEqual(apple.count(signature), 1)
+        function = signature + apple.split(signature, 1)[1].split('\n)\n', 1)[0] + '\n)\n'
+        self.assertNotIn('(deny network', function)
+        self.assertEqual(function.count('(subpath (param '), 3)
+        call = 'run_with_subtitle_sources_readonly "$(cd "$WORK" && pwd -P)" /usr/bin/env swift run --jobs 1'
+        self.assertEqual(apple.count(call), 1)
+        self.assertLess(apple.index('\nprepare_subtitle_sources\n'), apple.index(call))
+        self.assertIn('"$SUBTITLE_SOURCE_HELPER" verify "$WORK"', apple)
+        if sys.platform != 'darwin' or not Path('/usr/bin/sandbox-exec').is_file():
+            self.skipTest('actual source-write sandbox regression requires macOS')
+        names = ('libunibreak-8.0-9c4fad6e', 'libfribidi-1.0.17-6949dcde',
+                 'libharfbuzz-15.0.0-968536e9')
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary).resolve() / 'work with spaces'
+            work.mkdir()
+            originals = {}
+            for name in names:
+                source = work / 'dist' / name
+                source.mkdir(parents=True)
+                header = source / 'shader.hh'
+                header.write_bytes(b'known shader body\n')
+                header.chmod(0o644)
+                os.utime(header, ns=(1700000000123456789, 1700000000123456789))
+                value = header.stat()
+                originals[header] = (header.read_bytes(), value.st_mtime_ns,
+                                     stat.S_IMODE(value.st_mode))
+            script = work / 'copyback_fixture.py'
+            script.write_text('''import os, shutil, sys
+from pathlib import Path
+work, mode = Path(sys.argv[1]), sys.argv[2]
+names = ('libunibreak-8.0-9c4fad6e', 'libfribidi-1.0.17-6949dcde', 'libharfbuzz-15.0.0-968536e9')
+for name in names:
+    source = work / 'dist' / name / 'shader.hh'
+    output = work / 'outputs' / name / 'shader.hh'
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b'known shader body\\n' if mode == 'match' else b'changed shader body\\n')
+    try:
+        shutil.copyfile(output, source)
+    except OSError:
+        # Same fallback as pinned HarfBuzz gen-gpu-shader-artifacts.py.
+        if output.read_text() != source.read_text():
+            sys.exit('source shader is out of date')
+    else:
+        sys.exit('source copy unexpectedly succeeded')
+    try:
+        os.utime(source, None)
+    except OSError:
+        pass
+    else:
+        sys.exit('source metadata write unexpectedly succeeded')
+    print('protected ' + name)
+''')
+
+            def invoke(mode):
+                return subprocess.run(
+                    ['/bin/bash', '-c', function + '\nrun_with_subtitle_sources_readonly "$@"',
+                     'readonly-fixture', str(work), sys.executable, str(script), str(work), mode],
+                    cwd=work, capture_output=True, text=True, timeout=30)
+
+            matched = invoke('match')
+            self.assertEqual(matched.returncode, 0, matched.stdout + matched.stderr)
+            for name in names:
+                self.assertIn('protected ' + name, matched.stdout)
+                self.assertEqual((work / 'outputs' / name / 'shader.hh').read_bytes(),
+                                 b'known shader body\n')
+            mismatched = invoke('mismatch')
+            self.assertNotEqual(mismatched.returncode, 0)
+            self.assertIn('source shader is out of date', mismatched.stderr)
+            for header, original in originals.items():
+                value = header.stat()
+                self.assertEqual((header.read_bytes(), value.st_mtime_ns,
+                                  stat.S_IMODE(value.st_mode)), original)
+
     def test_all_recipe_inputs_match(self):
         lines = (ROOT / "scripts/native-media-hosted/inputs.sha256").read_text().splitlines()
         names = set()
