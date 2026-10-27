@@ -123,10 +123,17 @@ jobs:
             ls "$fw"
           done
           # The x86_64 macOS slice is the whole point of this fork: fail loudly if it is absent.
-          test -d app/Vendor/StremioXCore.xcframework/macos-x86_64 || { echo '::error::StremioXCore has no macos-x86_64 slice'; exit 1; }
-          test -d app/Vendor/VortxEngine.xcframework/macos-x86_64  || { echo '::error::VortxEngine has no macos-x86_64 slice'; exit 1; }
-          lipo -archs app/Vendor/StremioXCore.xcframework/macos-x86_64/libstremiox_core.a
-          lipo -archs app/Vendor/VortxEngine.xcframework/macos-x86_64/libvortx_ffi.a
+          # It must live in ONE fat macos-arm64_x86_64 slice -- two one-arch macOS slices are an
+          # "equivalent library definitions" error at build time, not a valid framework.
+          for spec in "StremioXCore:libstremiox_core.a" "VortxEngine:libvortx_ffi.a"; do
+            name="${spec%%:*}"; lib="${spec##*:}"
+            slice="app/Vendor/$name.xcframework/macos-arm64_x86_64"
+            test -d "$slice" || { echo "::error::$name has no (universal) macos slice"; exit 1; }
+            archs="$(lipo -archs "$slice/$lib")"
+            echo "$name macOS slice archs: $archs"
+            case "$archs" in *arm64*) ;; *) echo "::error::$name macOS slice has no arm64"; exit 1 ;; esac
+            case "$archs" in *x86_64*) ;; *) echo "::error::$name macOS slice has no x86_64"; exit 1 ;; esac
+          done
 
       - name: Generate the Xcode project
         run: cd app && xcodegen generate
