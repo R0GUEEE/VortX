@@ -7,8 +7,8 @@
 # LittleCMS lcms2.20rc1 is a source-built prerelease candidate, not a stable shipping claim.
 # dav1d 1.5.4 is also source-built; Shaderc alone moves to its paired 2026.1.0 wrapper.
 # OpenSSL 4.1.0 is source-built; its two targets are actual local artifacts.
-# Everything else (libass, libdovi, MoltenVK, uavs3d, bluray, luajit, unibreak, freetype, fribidi,
-# harfbuzz) is UNCHANGED from
+# Subtitle candidate sources replace the three retained remote libass transitive wrappers.
+# Everything else (libass, libdovi, MoltenVK, uavs3d, bluray, luajit, freetype) is UNCHANGED from
 # the 0.41.0-n8.1.2 pin and stays an upstream remote binaryTarget with its existing checksum. That
 # keeps the remaining wrappers unchanged while the selected source candidate is evaluated.
 #
@@ -20,7 +20,7 @@ PKG="${2:?usage: assemble-mpvkit-dvfel.sh <mpvkit-build-dir> <dest-package-dir>}
 # Read from the per-library ZIPS, not dist/release/xcframework: each library's createXCFramework()
 # wipes that directory before it writes, so only the LAST library built (libmpv) still has an
 # unpacked .xcframework there. The zips are produced per library before the next wipe, so they are
-# the only place all eighteen survive together.
+# the only place all twenty-one survive together.
 REL="$SRC/dist/release"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -59,16 +59,19 @@ nettle:nettle
 hogweed:hogweed
 gnutls:gnutls
 Libsmbclient:Libsmbclient
+Libunibreak:Libunibreak
+Libfribidi:Libfribidi
+Libharfbuzz:Libharfbuzz
 MAP
 
-# Rewrite the eighteen rebuilt binaryTargets from url+checksum to a local path.
+# Rewrite the twenty-one rebuilt binaryTargets from url+checksum to a local path.
 python3 - "$SRC/Package.swift" "$PKG/Package.swift" <<'PY'
 import re, sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
 local = ["Libmpv-GPL","Libavcodec-GPL","Libavdevice-GPL","Libavfilter-GPL","Libavformat-GPL",
          "Libavutil-GPL","Libswresample-GPL","Libswscale-GPL","Libplacebo","lcms2","Libdav1d","Libssl","Libcrypto",
-         "gmp","nettle","hogweed","gnutls","Libsmbclient"]
+         "gmp","nettle","hogweed","gnutls","Libsmbclient","Libunibreak","Libfribidi","Libharfbuzz"]
 for name in local:
     pat = re.compile(r'\.binaryTarget\(\s*name:\s*"%s",\s*url:\s*"[^"]*",\s*checksum:\s*"[^"]*"\s*\)'
                      % re.escape(name))

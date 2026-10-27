@@ -74,7 +74,7 @@ grep -Fq 'patch neither applies cleanly nor is already applied' "$PATCH" || fail
 # The next fixed dependency profile retains the shipping verifier and requires
 # a source-built dav1d framework plus the two pinned Shaderc input bodies/receipt.
 grep -Fq 'native-upgrades-dav1d154-shaderc20261-hb150-v2' "$BUILD" || fail "next candidate profile missing"
-grep -Fq 'for library in Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient; do' "$BUILD" || fail "combined candidate must require all eighteen fresh ZIPs"
+grep -Fq 'for library in Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient Libunibreak Libfribidi Libharfbuzz; do' "$BUILD" || fail "combined candidate must require all twenty-one fresh ZIPs"
 grep -Fq 'apple-shaderc-inputs "$WORK"' "$BUILD" || fail "Shaderc inputs must be compared before acceptance"
 grep -Fq 'private class BuildDav1d: BaseBuild' "$PATCH" || fail "dav1d must use exact source build route"
 grep -Fq 'static let dav1dPinnedSHA = "54706fc6bc0cdecab7e9593974a4039cc038fca7"' "$PATCH" || fail "dav1d source pin differs"
@@ -88,7 +88,7 @@ grep -Fq 'dav1d_version_api' "$VERIFY" || fail "dav1d identity gate missing actu
 
 # The combined crypto profile is opt-in and keeps the helper/source closure explicit. The default
 # shipping branch and historical candidate profiles must continue to parse without these inputs.
-grep -Fq 'native-upgrades-openssl410-crypto-v4' "$BUILD" || fail "combined source profile missing"
+grep -Fq 'native-upgrades-openssl410-crypto-subtitles-v5' "$BUILD" || fail "combined source profile missing"
 grep -Fq 'native-upgrades-openssl410-crypto-v4' "$VERIFY" || fail "combined verifier profile missing"
 grep -Fq 'native-upgrades-crypto-chain-v1' "$BUILD" || fail "subordinate crypto capture profile missing"
 grep -Fq 'crypto-release-sources.py' "$BUILD" || fail "release source helper invocation missing"
@@ -98,6 +98,49 @@ grep -Fq '041dd13e48e1821f5d7bf049bb8eb097d3772d6ea867c15a3b7646779a3c015d' "$VE
 grep -Fq 'swift run --jobs 1 --build-path' "$BUILD" || fail "SwiftPM jobs-one guard missing"
 grep -Fq 'apple-crypto-source-gmp.tar.xz' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted crypto source output missing"
 grep -Fq 'apple-crypto-chain.json' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted crypto receipt output missing"
+
+# Subtitle source successor is opt-in and keeps the current crypto/TLS/headroom contract. These
+# checks bind the three source classes and fixed helper/body boundaries without asserting unbuilt
+# ZIP contents or inventing numeric header values.
+grep -Fq 'native-upgrades-openssl410-crypto-subtitles-v5' "$BUILD" || fail "subtitle candidate profile missing"
+grep -Fq 'native-upgrades-openssl410-crypto-subtitles-v5' "$VERIFY" || fail "subtitle verifier profile missing"
+grep -Fq 'subtitle-release-sources.py' "$BUILD" || fail "subtitle release source helper invocation missing"
+grep -Fq 'subtitle-release-sources.py' "$VERIFY" || fail "subtitle verifier helper invocation missing"
+grep -Fq 'apple-subtitle-builds' "$BUILD" || fail "subtitle build receipt producer invocation missing"
+grep -Fq 'apple-subtitle-receipt' "$BUILD" || fail "subtitle build receipt validation invocation missing"
+grep -Fq 'dist/subtitle-builds/vortx-subtitle-builds.json' "$BUILD" || fail "subtitle build receipt output path differs"
+grep -Fq 'apple-subtitle-receipt' "$VERIFY" || fail "subtitle build receipt verifier invocation missing"
+grep -Fq 'dist/subtitle-builds/vortx-subtitle-builds.json' "$VERIFY" || fail "subtitle build receipt path differs"
+grep -Fq 'f18c516b0694ecbc601680782b4d0fba22265854cbd82e4a9e7516d9bb905154' "$BUILD" || fail "subtitle helper hash binding missing"
+grep -Fq 'f18c516b0694ecbc601680782b4d0fba22265854cbd82e4a9e7516d9bb905154' "$VERIFY" || fail "subtitle verifier helper hash binding missing"
+grep -Fq '9c4fad6e517338a098373acc9f35579ae2c325e6446666fb9ac2666ba15ceba4' "$BUILD" || fail "Unibreak archive digest missing"
+grep -Fq '1088508' "$BUILD" || fail "Unibreak archive size binding missing"
+grep -Fq '6949dcde27d41cebad1fd741fcafc36d55a1020d2d872d4a6eb3914caabbada2' "$BUILD" || fail "FriBidi archive digest missing"
+grep -Fq '968536e9abd782f07f7954044c0c4020199fcdd39b41d221ec42d2a3be4a44df' "$BUILD" || fail "HarfBuzz archive digest missing"
+grep -Fq '33554432' "$BUILD" || fail "HarfBuzz archive cap missing"
+grep -Fq '1203284' "$BUILD" || fail "FriBidi archive size missing"
+grep -Fq '20396372' "$BUILD" || fail "HarfBuzz archive size missing"
+grep -Fq 'SUBTITLE_SOURCE_HELPER" capture' "$BUILD" || fail "subtitle source capture missing"
+grep -Fq 'SUBTITLE_SOURCE_HELPER" verify-capture' "$BUILD" || fail "subtitle capture revalidation missing"
+grep -Fq 'Libunibreak:Libunibreak' "$ROOT/scripts/assemble-mpvkit-dvfel.sh" || fail "Unibreak local assembly mapping missing"
+grep -Fq 'Libfribidi:Libfribidi' "$ROOT/scripts/assemble-mpvkit-dvfel.sh" || fail "FriBidi local assembly mapping missing"
+grep -Fq 'Libharfbuzz:Libharfbuzz' "$ROOT/scripts/assemble-mpvkit-dvfel.sh" || fail "HarfBuzz local assembly mapping missing"
+grep -Fq 'Libunibreak Libfribidi Libharfbuzz' "$VERIFY" || fail "subtitle local target set missing"
+grep -Fq 'UNIBREAK_VERSION' "$VERIFY" || fail "Unibreak version macro gate missing"
+grep -Fq 'set_linebreaks_utf8' "$VERIFY" || fail "Unibreak public symbol gate missing"
+grep -Fq 'set_wordbreaks_utf8' "$VERIFY" || fail "Unibreak word-break symbol gate missing"
+grep -Fq 'FRIBIDI_MAJOR_VERSION' "$VERIFY" || fail "FriBidi version macro gate missing"
+grep -Fq 'fribidi_version_info' "$VERIFY" || fail "FriBidi public symbol gate missing"
+grep -Fq 'HB_VERSION_MAJOR' "$VERIFY" || fail "HarfBuzz version macro gate missing"
+grep -Fq 'hb_version_string' "$VERIFY" || fail "HarfBuzz public symbol gate missing"
+grep -Fq 'private class BuildUnibreak: PinnedSubtitleReleaseBuild' "$PATCH" || fail "Unibreak source builder class missing"
+grep -Fq 'private class BuildFribidi: PinnedSubtitleReleaseBuild' "$PATCH" || fail "FriBidi source builder class missing"
+grep -Fq 'private class BuildHarfbuzz: PinnedSubtitleReleaseBuild' "$PATCH" || fail "HarfBuzz source builder class missing"
+grep -Fq 'apple-subtitle-source-unibreak.tar.gz' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted Unibreak source output missing"
+grep -Fq 'apple-subtitle-source-fribidi.tar.xz' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted FriBidi source output missing"
+grep -Fq 'apple-subtitle-source-harfbuzz.tar.xz' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted HarfBuzz source output missing"
+grep -Fq 'apple-subtitle-builds.json' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted subtitle build receipt output missing"
+grep -Fq 'dist/subtitle-builds/vortx-subtitle-builds.json' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted subtitle build receipt input path differs"
 
 # OpenSSL latest-stable candidate is an exact source build with an explicit Apple target configuration.
 grep -Fq 'private class BuildOpenSSL: BaseBuild' "$PATCH" || fail "OpenSSL must use source route"

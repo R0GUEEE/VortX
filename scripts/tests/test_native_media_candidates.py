@@ -447,7 +447,7 @@ class NativeMediaProducer(unittest.TestCase):
         consumer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(consumer)
         self.assertEqual(MODULE.CURRENT_SOURCE_PROFILE, consumer.PROFILE)
-        self.assertEqual(consumer.PROFILE, "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-candidate")
+        self.assertEqual(consumer.PROFILE, "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-subtitles-candidate")
         self.assertEqual(MODULE.CURRENT_RECIPE_PATHS, consumer.RECIPE_PATHS)
         self.assertEqual(len(consumer.RECIPE_PATHS), 36)
         manifest = ROOT / "scripts/native-media-hosted/inputs.sha256"
@@ -568,8 +568,9 @@ class NativeMediaProducer(unittest.TestCase):
                     guard(valid, other)
 
         # The dependency candidate retains seven strict Apple Git roots, adds
-        # three independently authenticated archive-backed source roots, and
-        # carries the fixed Shaderc/OpenSSL/crypto receipt families. Synthetic
+        # six independently authenticated archive-backed source roots, and
+        # carries the fixed Shaderc/OpenSSL/crypto/subtitle receipt families.
+        # Synthetic
         # bytes below test policy only; fixed production pins are asserted before
         # substitutions.
         expected_apple_roots = {
@@ -582,7 +583,7 @@ class NativeMediaProducer(unittest.TestCase):
             'openssl-4.1.0-2f4e3a5f': '2f4e3a5fec05394068cfa7379890ab552483a8a6'}
         self.assertEqual(MODULE.CURRENT_SOURCE_ROOTS['apple'], expected_apple_roots)
         self.assertEqual(len(MODULE.CURRENT_SOURCE_ROOTS['apple']), 7)
-        self.assertEqual(len(consumer.OUTPUTS['apple']), 13)
+        self.assertEqual(len(consumer.OUTPUTS['apple']), 19)
         self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES['apple']['libdav1d-1.5.4-54706fc6'], {})
         self.assertEqual(MODULE.CURRENT_UNTRACKED_FILES['apple']['openssl-4.1.0-2f4e3a5f'], {})
         self.assertEqual(MODULE.CURRENT_SOURCE_ROOTS['android']['harfbuzz'],
@@ -593,9 +594,10 @@ class NativeMediaProducer(unittest.TestCase):
                          MODULE.CURRENT_SOURCE_ROOTS['android'].values())
         libraries = ('Libmpv', 'Libavcodec', 'Libavdevice', 'Libavfilter', 'Libavformat',
                      'Libavutil', 'Libswresample', 'Libswscale', 'Libplacebo', 'lcms2', 'Libdav1d',
-                     'Libssl', 'Libcrypto', 'gmp', 'nettle', 'hogweed', 'gnutls', 'Libsmbclient')
+                     'Libssl', 'Libcrypto', 'gmp', 'nettle', 'hogweed', 'gnutls', 'Libsmbclient',
+                     'Libunibreak', 'Libfribidi', 'Libharfbuzz')
         self.assertEqual(tuple(consumer.LIBRARIES), libraries)
-        self.assertEqual(consumer.NATIVE_UPGRADES_PROFILE, 'native-upgrades-openssl410-crypto-v4')
+        self.assertEqual(consumer.NATIVE_UPGRADES_PROFILE, 'native-upgrades-openssl410-crypto-subtitles-v5')
         self.assertEqual(consumer.CRYPTO_CHAIN_PROFILE, 'native-upgrades-crypto-chain-v1')
         self.assertEqual(consumer.CRYPTO_SOURCE_PROFILE,
                          'gmp630-nettle400-gnutls3813-release-sources-v1')
@@ -604,6 +606,39 @@ class NativeMediaProducer(unittest.TestCase):
         self.assertEqual(len(consumer.CRYPTO_MATRIX), 9)
         self.assertEqual(tuple(row[0] for row in consumer.CRYPTO_LIBRARIES),
                          ('gmp', 'nettle', 'hogweed', 'gnutls', 'Libsmbclient'))
+        self.assertEqual(consumer.SUBTITLE_SOURCE_PROFILE,
+                         'unibreak800-fribidi1017-harfbuzz1500-release-sources-v2-pax-ns')
+        self.assertEqual(
+            consumer.SUBTITLE_INSTALLED_HELPERS['Sources/BuildScripts/subtitle-release-sources.py'],
+            'f18c516b0694ecbc601680782b4d0fba22265854cbd82e4a9e7516d9bb905154')
+        self.assertEqual(tuple(row['id'] for row in consumer.SUBTITLE_SOURCE_OUTPUTS),
+                         ('libunibreak', 'libfribidi', 'libharfbuzz'))
+        self.assertEqual(tuple(row['version'] for row in consumer.SUBTITLE_SOURCE_OUTPUTS),
+                         ('8.0', '1.0.17', '15.0.0'))
+        self.assertEqual(tuple(row['sha256'] for row in consumer.SUBTITLE_SOURCE_OUTPUTS),
+                         ('9c4fad6e517338a098373acc9f35579ae2c325e6446666fb9ac2666ba15ceba4',
+                          '6949dcde27d41cebad1fd741fcafc36d55a1020d2d872d4a6eb3914caabbada2',
+                          '968536e9abd782f07f7954044c0c4020199fcdd39b41d221ec42d2a3be4a44df'))
+        self.assertEqual(tuple(row['entryPoint'] for row in consumer.SUBTITLE_SOURCE_OUTPUTS),
+                         ('configure', 'meson.build', 'meson.build'))
+        self.assertEqual(tuple(row[0] for row in consumer.SUBTITLE_MATRIX),
+                         tuple(row[0] for row in consumer.CRYPTO_MATRIX))
+        self.assertEqual(consumer.SUBTITLE_VERSIONS,
+                         {'libunibreak': '8.0', 'libfribidi': '1.0.17',
+                          'libharfbuzz': '15.0.0'})
+        self.assertEqual(consumer.SUBTITLE_SELECTORS,
+                         {'libunibreak': '8.0-9c4fad6e',
+                          'libfribidi': '1.0.17-6949dcde',
+                          'libharfbuzz': '15.0.0-968536e9'})
+        self.assertEqual(consumer.SUBTITLE_ROUTES,
+                         {'libunibreak': 'release-autoconf',
+                          'libfribidi': 'release-meson',
+                          'libharfbuzz': 'release-meson'})
+        self.assertEqual(tuple(consumer.SUBTITLE_MAKE_ARGUMENTS),
+                         ('-j1', 'AUTOCONF=/usr/bin/false', 'AUTOHEADER=/usr/bin/false',
+                          'AUTOMAKE=/usr/bin/false', 'ACLOCAL=/usr/bin/false'))
+        self.assertEqual(7 + len(consumer.CRYPTO_SOURCE_OUTPUTS) +
+                         len(consumer.SUBTITLE_SOURCE_OUTPUTS), 13)
         self.assertEqual(set(consumer.OUTPUTS['apple']), {
             'apple-candidate.tar.gz', 'apple-original-library-zips.tar',
             'apple-artifact-gate.txt', 'apple-shaderc-original-all.zip',
@@ -611,7 +646,10 @@ class NativeMediaProducer(unittest.TestCase):
             'apple-openssl-builds.json', 'apple-crypto-source-gmp.tar.xz',
             'apple-crypto-source-nettle.tar.gz', 'apple-crypto-source-gnutls.tar.xz',
             'apple-crypto-release-sources.tar', 'apple-crypto-release-sources.json',
-            'apple-crypto-chain.json'})
+            'apple-crypto-chain.json', 'apple-subtitle-source-unibreak.tar.gz',
+            'apple-subtitle-source-fribidi.tar.xz', 'apple-subtitle-source-harfbuzz.tar.xz',
+            'apple-subtitle-release-sources.tar', 'apple-subtitle-release-sources.json',
+            'apple-subtitle-builds.json'})
         self.assertEqual(tuple(consumer.OPENSSL_ENV_KEYS[-3:]),
                          ('MAKEFLAGS', 'CMAKE_BUILD_PARALLEL_LEVEL', 'CARGO_BUILD_JOBS'))
         self.assertEqual(consumer.OPENSSL_SOURCE_SHA,
@@ -795,7 +833,10 @@ class NativeMediaProducer(unittest.TestCase):
                  'PASS apple-openssl-receipt',
                  'PASS apple-shaderc-receipt',
                  'PASS ' + consumer.CRYPTO_SOURCE_PROFILE + ' verify',
-                 'PASS crypto-chain archive/public-symbol correspondence; native SMB/runtime gates OPEN',
+                     'PASS crypto-chain archive/public-symbol correspondence; native SMB/runtime gates OPEN',
+                     'PASS ' + consumer.SUBTITLE_SOURCE_PROFILE + ' verify',
+                     'PASS subtitle-profile ' + consumer.SUBTITLE_SOURCE_PROFILE,
+                     'PASS apple-subtitle-receipt',
                  'PASS apple-sent-abi', 'PASS apple-reference-abi']
 
         def synthetic_tar(files, compressed, links=None):
@@ -862,6 +903,124 @@ class NativeMediaProducer(unittest.TestCase):
                     'capture': capture_stream.getvalue()}
 
         crypto_sources = crypto_source_fixture()
+
+        def subtitle_source_fixture():
+            """Tiny release archives exercise subtitle raw-body/capture binding."""
+            definitions = (
+                ('libunibreak', '8.0', 'libunibreak-8.0', 'libunibreak-8.0.tar.gz',
+                 'gz', 'libunibreak-8.0-9c4fad6e', 'configure',
+                 'https://fixture.invalid/libunibreak-8.0.tar.gz', 0o755,
+                 1789445730.0),
+                ('libfribidi', '1.0.17', 'fribidi-1.0.17', 'fribidi-1.0.17.tar.xz',
+                 'xz', 'libfribidi-1.0.17-6949dcde', 'meson.build',
+                 'https://fixture.invalid/fribidi-1.0.17.tar.xz', 0o644,
+                 1789883576.0),
+                ('libharfbuzz', '15.0.0', 'harfbuzz-15.0.0', 'harfbuzz-15.0.0.tar.xz',
+                 'xz', 'libharfbuzz-15.0.0-968536e9', 'meson.build',
+                 'https://fixture.invalid/harfbuzz-15.0.0.tar.xz', 0o644,
+                 1792687043.4438004))
+            pins, verified, bodies = [], [], {}
+            for identifier, version, archive_root, filename, compression, source_root, entry_point, url, mode, mtime in definitions:
+                source_body = ('#!/bin/sh\n# inert subtitle source-policy fixture: ' +
+                               identifier + '\n').encode()
+                encoded = io.BytesIO()
+                with tarfile.open(fileobj=encoded, mode='w:' + compression,
+                                  format=tarfile.PAX_FORMAT) as source:
+                    root = tarfile.TarInfo(archive_root + '/')
+                    root.type, root.mode, root.mtime = tarfile.DIRTYPE, 0o755, mtime
+                    if mtime % 1:
+                        # Preserve the authenticated decimal from the real
+                        # HarfBuzz PAX member. Formatting the binary float can
+                        # round the nanosecond identity by one or more units.
+                        root.pax_headers['mtime'] = (
+                            '1792687043.4438004' if identifier == 'libharfbuzz'
+                            else format(mtime, '.9f').rstrip('0').rstrip('.'))
+                    source.addfile(root)
+                    entry = tarfile.TarInfo(archive_root + '/' + entry_point)
+                    entry.mode, entry.mtime, entry.size = mode, mtime, len(source_body)
+                    if mtime % 1:
+                        entry.pax_headers['mtime'] = (
+                            '1792687043.4438004' if identifier == 'libharfbuzz'
+                            else format(mtime, '.9f').rstrip('0').rstrip('.'))
+                    source.addfile(entry, io.BytesIO(source_body))
+                body = encoded.getvalue()
+                pin = {'id': identifier, 'version': version, 'archiveRoot': archive_root,
+                       'filename': filename, 'compression': compression, 'bytes': len(body),
+                       'maximumBytes': 8 * 1024 * 1024 if identifier != 'libharfbuzz' else 32 * 1024 * 1024,
+                       'entryPoint': entry_point, 'sha256': hashlib.sha256(body).hexdigest(),
+                       'sourceRoot': source_root, 'url': url,
+                       'output': 'apple-subtitle-source-' + identifier.removeprefix('lib') +
+                       ('.tar.gz' if compression == 'gz' else '.tar.xz')}
+                rows = consumer.crypto_index_archive(pin, body, True)
+                if identifier == 'libharfbuzz':
+                    expected_ns = 1792687043443800400
+                    self.assertEqual(next(row['mtimeNs'] for row in rows if row['path'] == ''),
+                                     expected_ns)
+                    self.assertEqual(next(row['mtimeNs'] for row in rows
+                                          if row['path'] == entry_point), expected_ns)
+                pins.append(pin)
+                verified.append((pin, body, rows))
+                bodies[pin['output']] = body
+            expected = {
+                'schema': 2, 'profile': consumer.SUBTITLE_SOURCE_PROFILE,
+                'identityBasis': 'fixed-sha256-from-upstream-release-metadata-or-maintained-android-pin',
+                'upstreamSignatureVerified': False, 'roots': []}
+            for pin, body, rows in verified:
+                expected['roots'].append({
+                    'id': pin['id'], 'version': pin['version'], 'url': pin['url'],
+                    'archive': 'archives/' + pin['filename'],
+                    'archiveRoot': pin['archiveRoot'], 'archiveBytes': len(body),
+                    'archiveSHA256': pin['sha256'],
+                    'sourceRoot': 'dist/' + pin['sourceRoot'],
+                    'membersSHA256': hashlib.sha256(consumer.crypto_canonical(rows)).hexdigest(),
+                    'members': rows})
+            receipt = consumer.crypto_canonical(expected)
+            capture_stream = io.BytesIO()
+            with tarfile.open(fileobj=capture_stream, mode='w', format=tarfile.PAX_FORMAT) as capture:
+                for pin, _, _ in verified:
+                    root_name = pin['archiveRoot']
+                    root = tarfile.TarInfo(root_name)
+                    root.type, root.mode = tarfile.DIRTYPE, 0o755
+                    mtime = next(item[-1] for item in definitions if item[0] == pin['id'])
+                    root.mtime = mtime
+                    if mtime % 1:
+                        root.pax_headers['mtime'] = (
+                            '1792687043.4438004' if pin['id'] == 'libharfbuzz'
+                            else format(mtime, '.9f').rstrip('0').rstrip('.'))
+                    capture.addfile(root)
+                    entry_name = pin['entryPoint']
+                    body = ('#!/bin/sh\n# inert subtitle source-policy fixture: ' +
+                            pin['id'] + '\n').encode()
+                    entry = tarfile.TarInfo(root_name + '/' + entry_name)
+                    entry.mode = 0o755 if entry_name == 'configure' else 0o644
+                    entry.mtime, entry.size = mtime, len(body)
+                    if mtime % 1:
+                        entry.pax_headers['mtime'] = (
+                            '1792687043.4438004' if pin['id'] == 'libharfbuzz'
+                            else format(mtime, '.9f').rstrip('0').rstrip('.'))
+                    capture.addfile(entry, io.BytesIO(body))
+            return {'pins': tuple(pins), 'bodies': bodies, 'receipt': receipt,
+                    'capture': capture_stream.getvalue()}
+
+        subtitle_sources = subtitle_source_fixture()
+        # The HarfBuzz fixture above deliberately carries a fractional PAX mtime;
+        # a decimal with more than nine fractional digits is a malformed source
+        # body and must fail before receipt construction.
+        bad_pax = io.BytesIO()
+        with tarfile.open(fileobj=bad_pax, mode='w:xz', format=tarfile.PAX_FORMAT) as source:
+            root = tarfile.TarInfo('harfbuzz-15.0.0/')
+            root.type, root.mode, root.mtime = tarfile.DIRTYPE, 0o755, 1.0
+            root.pax_headers['mtime'] = '1.1234567890'
+            source.addfile(root)
+            entry = tarfile.TarInfo('harfbuzz-15.0.0/meson.build')
+            entry.mode, entry.mtime, entry.size = 0o644, 1.0, 1
+            entry.pax_headers['mtime'] = '1.1234567890'
+            source.addfile(entry, io.BytesIO(b'x'))
+        bad_body = bad_pax.getvalue()
+        bad_pin = deepcopy(next(pin for pin in subtitle_sources['pins'] if pin['id'] == 'libharfbuzz'))
+        bad_pin['bytes'], bad_pin['sha256'] = len(bad_body), hashlib.sha256(bad_body).hexdigest()
+        with self.assertRaises(ValueError):
+            consumer.crypto_index_archive(bad_pin, bad_body, True)
 
         def shaderc_receipt_fixture():
             rows = []
@@ -999,10 +1158,120 @@ class NativeMediaProducer(unittest.TestCase):
 
         crypto_zip_bodies, crypto_thin_bodies, crypto_smb_headers, crypto_smb_pins = crypto_library_fixture()
 
+        subtitle_library_specs = (
+            ('Libunibreak', 'libunibreak', 'libunibreak.a', 'Libunibreak',
+             'include/unibreakbase.h', 'lib/pkgconfig/libunibreak.pc',
+             b'#define UNIBREAK_VERSION   0x0800   /**< Version of the libunibreak */\n'
+             b'extern const int unibreak_version;\n'),
+            ('Libfribidi', 'libfribidi', 'libfribidi.a', 'Libfribidi',
+             'include/fribidi/fribidi-config.h', 'lib/pkgconfig/fribidi.pc',
+             b'#define FRIBIDI_VERSION "1.0.17"\n'
+             b'#define FRIBIDI_MAJOR_VERSION 1\n#define FRIBIDI_MINOR_VERSION 0\n'
+             b'#define FRIBIDI_MICRO_VERSION 17\nvoid fribidi_version_info(void);\n'),
+            ('Libharfbuzz', 'libharfbuzz', 'libharfbuzz.a', 'Libharfbuzz',
+             'include/harfbuzz/hb-version.h', 'lib/pkgconfig/harfbuzz.pc',
+             b'#define HB_VERSION_STRING "15.0.0"\n'
+             b'#define HB_VERSION_MAJOR 15\n#define HB_VERSION_MINOR 0\n'
+             b'#define HB_VERSION_MICRO 0\nvoid hb_version_string(void);\n'))
+        self.assertEqual(tuple(consumer.SUBTITLE_LIBRARIES),
+                         tuple(spec[:4] for spec in subtitle_library_specs))
+
+        subtitle_slice_arches = {}
+        for platform, arch, slice_name in consumer.SUBTITLE_MATRIX:
+            subtitle_slice_arches.setdefault(slice_name, set()).add(arch)
+
+        def subtitle_zip_entry(archive, name, payload, mode=stat.S_IFREG | 0o644,
+                               target=None):
+            info = zipfile.ZipInfo(name)
+            info.create_system = 3
+            info.external_attr = mode << 16
+            archive.writestr(info, (target.encode() if target is not None else payload))
+
+        def subtitle_library_fixture():
+            bodies, thin_bodies = {}, {}
+            for target, directory, archive_name, binary_name, header_path, pc_path, header_body in subtitle_library_specs:
+                members = {}
+                metadata = {'CFBundlePackageType': 'XFWK',
+                            'XCFrameworkFormatVersion': '1.0', 'AvailableLibraries': []}
+                for slice_name in sorted(subtitle_slice_arches):
+                    arches = sorted(subtitle_slice_arches[slice_name])
+                    platform_name = ('macos' if slice_name.startswith('macos-') else
+                                     'tvos' if slice_name.startswith('tvos-') else 'ios')
+                    declaration = {'LibraryIdentifier': slice_name,
+                                   'LibraryPath': binary_name + '.framework',
+                                   'SupportedArchitectures': arches,
+                                   'SupportedPlatform': platform_name}
+                    if slice_name.endswith('-simulator'):
+                        declaration['SupportedPlatformVariant'] = 'simulator'
+                    metadata['AvailableLibraries'].append(declaration)
+                    framework = (target + '.xcframework/' + slice_name + '/' +
+                                 binary_name + '.framework')
+                    parts = []
+                    for arch in arches:
+                        thin = ('!<arch>\nfixture-' + target + '-' + slice_name + '-' + arch).encode()
+                        thin_bodies[(target, slice_name, arch)] = thin
+                        parts.append((arch, thin))
+                    packaged = parts[0][1] if len(parts) == 1 else synthetic_fat(parts)
+                    if slice_name.startswith('macos-'):
+                        members[framework + '/Versions/A/' + binary_name] = packaged
+                        members[framework + '/Versions/A/Resources/Info.plist'] = b'fixture framework info\n'
+                        members[framework + '/Versions/Current'] = ('symlink', 'A')
+                        members[framework + '/' + binary_name] = ('symlink', 'Versions/Current/' + binary_name)
+                        members[framework + '/Resources'] = ('symlink', 'Versions/Current/Resources')
+                    else:
+                        members[framework + '/' + binary_name] = packaged
+                    members[framework + '/Headers/' + header_path.removeprefix('include/')] = header_body
+                members[target + '.xcframework/Info.plist'] = plistlib.dumps(
+                    metadata, fmt=plistlib.FMT_XML, sort_keys=True)
+                output = io.BytesIO()
+                with zipfile.ZipFile(output, 'w') as archive:
+                    for name, value in members.items():
+                        if isinstance(value, tuple):
+                            subtitle_zip_entry(archive, name, b'', stat.S_IFLNK | 0o777, value[1])
+                        else:
+                            subtitle_zip_entry(archive, name, value)
+                bodies[target] = output.getvalue()
+            return bodies, thin_bodies
+
+        subtitle_zip_bodies, subtitle_thin_bodies = subtitle_library_fixture()
+        self.assertEqual(len(subtitle_zip_bodies), 3)
+        self.assertEqual(len(subtitle_thin_bodies), 27)
+        self.assertTrue(all(body.startswith(b'!<arch>\n')
+                            for body in subtitle_thin_bodies.values()))
+
         def crypto_inline(path, body):
             return {'path': path, 'bytes': len(body),
                     'sha256': hashlib.sha256(body).hexdigest(),
                     'bodyBase64': base64.b64encode(body).decode('ascii')}
+
+        def subtitle_equal_fake_value(value):
+            """Keep the record wrapper/hash coherent while retaining a false body."""
+            build = value['rows'][0]['builds']['libunibreak']
+            header = 'include/unibreakbase.h'
+            fake_body = (b'#define UNIBREAK_VERSION   0x0800   /**< Version of the libunibreak */\n'
+                         b'extern const int unibreak_version;\n'
+                         b'/* forged but internally coherent subtitle header */\n')
+            record_row = build['record']
+            record = json.loads(base64.b64decode(record_row['bodyBase64']))
+            record['installedIdentity'][header] = {
+                'bytes': len(fake_body), 'sha256': hashlib.sha256(fake_body).hexdigest(),
+                'bodyBase64': base64.b64encode(fake_body).decode('ascii')}
+            record_body = json.dumps(record, indent=2, sort_keys=True).encode() + b'\n'
+            build['record'] = crypto_inline(record_row['path'], record_body)
+
+        def subtitle_zip_with_header(body, header_body, header_suffix='unibreakbase.h'):
+            """Rewrite one ZIP member so archive-byte tampering remains well formed."""
+            rewritten = io.BytesIO()
+            with zipfile.ZipFile(io.BytesIO(body)) as incoming, zipfile.ZipFile(
+                    rewritten, 'w') as outgoing:
+                for info in incoming.infolist():
+                    payload = incoming.read(info)
+                    if info.filename.endswith('/Headers/' + header_suffix):
+                        payload = header_body
+                    clone = zipfile.ZipInfo(info.filename)
+                    clone.create_system, clone.external_attr = info.create_system, info.external_attr
+                    outgoing.writestr(clone, payload)
+            return rewritten.getvalue()
 
         def crypto_text(text):
             body = text.encode('utf-8')
@@ -1053,6 +1322,20 @@ class NativeMediaProducer(unittest.TestCase):
                     return consumer.crypto_source_outputs(archive)
 
         crypto_archive_source_rows = crypto_archive_sources()
+
+        def subtitle_archive_sources():
+            source = io.BytesIO()
+            with zipfile.ZipFile(source, 'w') as archive:
+                for output, body in subtitle_sources['bodies'].items():
+                    archive.writestr(output, body)
+                archive.writestr('apple-subtitle-release-sources.json', subtitle_sources['receipt'])
+                archive.writestr('apple-subtitle-release-sources.tar', subtitle_sources['capture'])
+            source.seek(0)
+            with zipfile.ZipFile(source) as archive:
+                with patch.object(consumer, 'SUBTITLE_SOURCE_OUTPUTS', subtitle_sources['pins']):
+                    return consumer.subtitle_source_outputs(archive)
+
+        subtitle_archive_source_rows = subtitle_archive_sources()
 
         def crypto_chain_receipt_for(package_body):
             """Construct a complete raw-byte-bound schema-2 fixture receipt."""
@@ -1263,7 +1546,216 @@ class NativeMediaProducer(unittest.TestCase):
                 'openGates': list(consumer.CRYPTO_OPEN_GATES)}
             return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
 
+        def subtitle_builds_receipt_for():
+            """Construct a complete source-build BOM from inert, byte-bound rows."""
+            work = Path('/fixture/work')
+            build_rows = {}
+
+            def build_environment(library, platform, arch, build):
+                sdk_root = crypto_tool_rows['platforms'][platform]['sdkRoot']
+                _, target, minimum, _, _, _, _ = consumer.subtitle_platform(platform, arch)
+                prefix = '-arch ' + arch + ' -isysroot '
+                suffix = ' -target ' + target + ' ' + minimum
+                fork = ' -DHAVE_FORK=0' if platform in ('tvos', 'tvsimulator') else ''
+                cflags = prefix + sdk_root + suffix + fork
+                pkg_roots = [str(work / 'dist' / name / platform / 'thin' / arch /
+                                 'lib/pkgconfig')
+                             for name in consumer.OPENSSL_PKG_LIBRARIES]
+                pkg_roots.append(str(build / 'vortx-sdk-pkgconfig'))
+                return {
+                    'LC_CTYPE': 'C', 'MAKEFLAGS': '-j1',
+                    'CMAKE_BUILD_PARALLEL_LEVEL': '1', 'CARGO_BUILD_JOBS': '1',
+                    'CC': '/usr/bin/clang', 'CXX': '/usr/bin/clang++',
+                    'CURRENT_ARCH': arch, 'CFLAGS': cflags, 'CPPFLAGS': cflags,
+                    'CXXFLAGS': cflags, 'ASMFLAGS': cflags,
+                    'LDFLAGS': '-lc++ ' + prefix + sdk_root + suffix,
+                    'PKG_CONFIG_LIBDIR': ':'.join(pkg_roots),
+                    'PKG_CONFIG_PATH': '', 'PATH': consumer.OPENSSL_DEFAULT_PATH}
+
+            def record_template(library, platform, arch):
+                build = work / 'dist' / library / platform / 'scratch' / arch
+                prefix = work / 'dist' / library / platform / 'thin' / arch
+                _, _, _, host, _, _, _ = consumer.subtitle_platform(platform, arch)
+                arguments = (['--host=' + host, '--with-pic', '--enable-static',
+                              '--disable-shared']
+                             if library == 'libunibreak'
+                             else list(consumer.SUBTITLE_ARGUMENTS[library]))
+                return {
+                    'schema': 1, 'library': library,
+                    'selector': consumer.SUBTITLE_SELECTORS[library],
+                    'route': consumer.SUBTITLE_ROUTES[library],
+                    'platform': platform, 'arch': arch,
+                    'sourceDirectory': str(work / 'dist' /
+                                           (library + '-' + consumer.SUBTITLE_SELECTORS[library])),
+                    'buildDirectory': str(build), 'prefix': str(prefix),
+                    'arguments': arguments,
+                    'environment': build_environment(library, platform, arch, build),
+                    'makeArguments': (list(consumer.SUBTITLE_MAKE_ARGUMENTS)
+                                      if library == 'libunibreak' else []),
+                    'compiled': True, 'installed': True}
+
+            def generated_body(library, name, platform, arch, expected, prefix):
+                """Build bounded inert files that satisfy the fixed policy checks."""
+                if library == 'libunibreak':
+                    if name == 'Makefile':
+                        environment = expected['environment']
+                        return (('CC = ' + environment['CC'] + '\n' +
+                                 'CFLAGS = ' + environment['CFLAGS'] + '\n' +
+                                 'CPPFLAGS = ' + environment['CPPFLAGS'] + '\n' +
+                                 'LDFLAGS = ' + environment['LDFLAGS'] + '\n' +
+                                 'PACKAGE_VERSION = 8.0\n' +
+                                 'prefix = ' + str(prefix) + '\n').encode())
+                    if name in ('config.status', 'config.log'):
+                        return ('inert configure trace\n' +
+                                '\n'.join(expected['arguments']) + '\n').encode()
+                    raise AssertionError('unknown libunibreak generated file ' + name)
+
+                environment = expected['environment']
+                subsystem = {'ios': 'ios', 'isimulator': 'ios-simulator',
+                             'tvos': 'tvos', 'tvsimulator': 'tvos-simulator',
+                             'macos': 'macos'}[platform]
+                cpu = 'x86_64' if arch == 'x86_64' else 'arm64'
+                cpu_family = 'x86_64' if arch == 'x86_64' else 'aarch64'
+                if name == 'crossFile.meson':
+                    cflags = ', '.join("'" + item + "'"
+                                       for item in environment['CFLAGS'].split(' '))
+                    ldflags = ', '.join("'" + item + "'"
+                                        for item in environment['LDFLAGS'].split(' '))
+                    return ("""[binaries]
+c = '/usr/bin/clang'
+cpp = '/usr/bin/clang++'
+objc = '/usr/bin/clang'
+objcpp = '/usr/bin/clang++'
+ar = '/usr/bin/ar'
+strip = '/usr/bin/strip'
+pkg-config = 'pkg-config'
+
+[properties]
+has_function_printf = true
+has_function_hfkerhisadf = false
+
+[host_machine]
+system = 'darwin'
+subsystem = '{subsystem}'
+kernel = 'xnu'
+cpu_family = '{cpu_family}'
+cpu = '{cpu}'
+endian = 'little'
+
+[built-in options]
+default_library = 'static'
+buildtype = 'release'
+prefix = '{prefix}'
+c_args = [{cflags}]
+cpp_args = [{cflags}]
+objc_args = [{cflags}]
+objcpp_args = [{cflags}]
+c_link_args = [{ldflags}]
+cpp_link_args = [{ldflags}]
+objc_link_args = [{ldflags}]
+objcpp_link_args = [{ldflags}]
+""".format(subsystem=subsystem, cpu_family=cpu_family, cpu=cpu,
+           prefix=prefix, cflags=cflags, ldflags=ldflags)).encode()
+                if name == 'build.ninja':
+                    return b'ninja_required_version = 1.10\n'
+                if name == 'compile_commands.json':
+                    command = ' '.join(('clang', environment['CFLAGS'], '-c', 'fixture.c'))
+                    extra_command = ' '.join(('clang', environment['CFLAGS'],
+                                              '-c', 'fixture-extra.c'))
+                    arguments = (['clang'] + environment['CFLAGS'].split() +
+                                 ['-c', 'fixture-extra.c'])
+                    return json.dumps([
+                        {'directory': str(prefix), 'command': command,
+                         'file': 'fixture.c'},
+                        {'directory': str(prefix), 'command': extra_command,
+                         'arguments': arguments,
+                         'file': 'fixture-extra.c'}]).encode()
+                if name == 'meson-info/intro-buildoptions.json':
+                    options = [{'name': 'default_library', 'value': 'static'},
+                               {'name': 'buildtype', 'value': 'release'},
+                               {'name': 'prefix', 'value': str(prefix)}]
+                    for argument in consumer.SUBTITLE_ARGUMENTS[library]:
+                        if argument == '--wrap-mode=nodownload':
+                            option, value = 'wrap_mode', 'nodownload'
+                        else:
+                            option, raw = argument.removeprefix('-D').split('=', 1)
+                            value = {'true': True, 'false': False}.get(raw, raw)
+                        options.append({'name': option, 'value': value})
+                    return json.dumps(options, sort_keys=True).encode()
+                if name == 'meson-info/intro-dependencies.json':
+                    return b'[{"name":"c"}]'
+                raise AssertionError('unknown subtitle generated file ' + name)
+
+            def installed_body(library, relative, platform, arch, prefix):
+                for target, _, _, _, header_path, pc_path, header in subtitle_library_specs:
+                    if library == target.lower():
+                        if relative == header_path:
+                            return header
+                        if relative == pc_path:
+                            package_name = target.removeprefix('Lib')
+                            return (('prefix=' + prefix + '\n' +
+                                     'exec_prefix=${prefix}\nlibdir=${prefix}/lib\n'
+                                     'includedir=${prefix}/include\nName: ' + package_name +
+                                     '\nVersion: ' + consumer.SUBTITLE_VERSIONS[library] +
+                                     '\nLibs: -L${libdir} -l' + package_name.lower() +
+                                     '\nCflags: -I${includedir}\n').encode())
+                raise AssertionError('unknown subtitle installed identity ' + library + '/' + relative)
+
+            def build_value(library, platform, arch):
+                expected = record_template(library, platform, arch)
+                scratch = Path(expected['buildDirectory'])
+                prefix = Path(expected['prefix'])
+                generated = {name: generated_body(library, name, platform, arch,
+                                                   expected, prefix)
+                             for name in consumer.SUBTITLE_GENERATED[library]}
+                installed = {name: installed_body(library, name, platform, arch, str(prefix))
+                             for name in consumer.SUBTITLE_INSTALLED[library]}
+                record = dict(expected)
+                record['generatedConfiguration'] = {
+                    name: {'bytes': len(body),
+                           'sha256': hashlib.sha256(body).hexdigest(),
+                           'bodyBase64': base64.b64encode(body).decode('ascii')}
+                    for name, body in generated.items()}
+                record['installedIdentity'] = {
+                    name: {'bytes': len(body),
+                           'sha256': hashlib.sha256(body).hexdigest(),
+                           'bodyBase64': base64.b64encode(body).decode('ascii')}
+                    for name, body in installed.items()}
+                record['compiled'], record['installed'] = True, True
+                record_body = json.dumps(record, indent=2, sort_keys=True).encode() + b'\n'
+                return {
+                    'record': crypto_inline(
+                        (scratch / 'vortx-subtitle-build.json').relative_to(work).as_posix(),
+                        record_body)}
+
+            for platform, arch, slice_name in consumer.SUBTITLE_MATRIX:
+                identity = (platform, arch, slice_name)
+                build_rows[identity] = {
+                    library: build_value(library, platform, arch)
+                    for library in ('libunibreak', 'libfribidi', 'libharfbuzz')}
+
+            receipt_rows = []
+            for platform, arch, slice_name in consumer.SUBTITLE_MATRIX:
+                receipt_rows.append({'platform': platform, 'arch': arch, 'slice': slice_name,
+                                     'builds': build_rows[(platform, arch, slice_name)]})
+            source_receipt = subtitle_archive_source_rows['capture']['receipt']
+            value = {
+                'schemaVersion': 1,
+                'profile': consumer.NATIVE_UPGRADES_PROFILE,
+                'sourceProfile': consumer.SUBTITLE_SOURCE_PROFILE,
+                'versions': dict(consumer.SUBTITLE_VERSIONS),
+                'selectors': dict(consumer.SUBTITLE_SELECTORS),
+                'releaseSourceBoundary': {
+                    'path': 'dist/subtitle-sources/receipt.json',
+                    'bytes': source_receipt['bytes'], 'sha256': source_receipt['sha256']},
+                'rows': receipt_rows,
+                'retainedLibassCompatibility': 'HOLD',
+                'runtimeSecurityTested': False,
+                'promotionEligible': False}
+            return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode(), value
+
         openssl_members, openssl_outputs = {}, {}
+        subtitle_build_body, subtitle_build_value = subtitle_builds_receipt_for()
         openssl_header = b'#define OPENSSL_VERSION_NUMBER 0x40100000L\n'
         slice_arches = {}
         for platform, arch, _, slice_name in consumer.OPENSSL_MATRIX:
@@ -1398,8 +1890,20 @@ class NativeMediaProducer(unittest.TestCase):
                               missing_crypto=False, old_openssl_version=False,
                               wrong_openssl_source=False, forged_openssl=False,
                               include_openssl_receipt=True, include_crypto_outputs=True,
-                              include_crypto_chain=True, tamper_crypto_source=False):
+                              include_crypto_chain=True, tamper_crypto_source=False,
+                              include_subtitle_outputs=True, include_subtitle_builds=True,
+                              tamper_subtitle_source=False, subtitle_equal_fake=False,
+                              subtitle_wrong_root=False, subtitle_extra_options=False,
+                              subtitle_header_mismatch=False, subtitle_open_link=False,
+                              subtitle_shaping_gate=False):
             originals, candidate, candidate_links, package = {}, {}, {}, []
+            subtitle_zip_variants = dict(subtitle_zip_bodies)
+            if subtitle_header_mismatch:
+                target = 'Libunibreak'
+                subtitle_zip_variants[target] = subtitle_zip_with_header(
+                    subtitle_zip_variants[target],
+                    b'#define UNIBREAK_VERSION   0x0700   /**< Version of the libunibreak */\n'
+                    b'extern const int unibreak_version;\n')
             for base, target in targets.items():
                 if base in ('Libssl', 'Libcrypto'):
                     body = openssl_zip(base)
@@ -1416,6 +1920,13 @@ class NativeMediaProducer(unittest.TestCase):
                     continue
                 if base in crypto_zip_bodies:
                     originals[base + '.xcframework.zip'] = crypto_zip_bodies[base]
+                    package.append('.binaryTarget(\n            name: "%s",\n'
+                                   '            path: "artifacts/%s.xcframework"\n        )\n' %
+                                   (target, target))
+                    continue
+                if base in subtitle_zip_variants:
+                    if include_subtitle_outputs:
+                        originals[base + '.xcframework.zip'] = subtitle_zip_variants[base]
                     package.append('.binaryTarget(\n            name: "%s",\n'
                                    '            path: "artifacts/%s.xcframework"\n        )\n' %
                                    (target, target))
@@ -1441,6 +1952,21 @@ class NativeMediaProducer(unittest.TestCase):
                                    '            path: "artifacts/%s.xcframework"\n        )\n' %
                                    (target, target))
             for base, body in crypto_zip_bodies.items():
+                target = targets[base]
+                with zipfile.ZipFile(io.BytesIO(body)) as library:
+                    root = base + '.xcframework/'
+                    for info in library.infolist():
+                        if info.is_dir():
+                            continue
+                        name = info.filename
+                        package_name = ('MPVKit-DVFEL/artifacts/' + target +
+                                       '.xcframework/' + name.removeprefix(root))
+                        mode = info.external_attr >> 16
+                        if stat.S_ISLNK(mode):
+                            candidate_links[package_name] = library.read(info).decode('utf-8')
+                        else:
+                            candidate[package_name] = library.read(info)
+            for base, body in subtitle_zip_variants.items():
                 target = targets[base]
                 with zipfile.ZipFile(io.BytesIO(body)) as library:
                     root = base + '.xcframework/'
@@ -1485,19 +2011,55 @@ class NativeMediaProducer(unittest.TestCase):
                     if include_crypto_chain:
                         archive.writestr('apple-crypto-chain.json',
                                          crypto_chain_receipt_for(package_body))
+                if include_subtitle_outputs:
+                    for output, body in subtitle_sources['bodies'].items():
+                        if tamper_subtitle_source and output == 'apple-subtitle-source-unibreak.tar.gz':
+                            body = b'tampered subtitle source body'
+                        archive.writestr(output, body)
+                    archive.writestr('apple-subtitle-release-sources.json', subtitle_sources['receipt'])
+                    archive.writestr('apple-subtitle-release-sources.tar', subtitle_sources['capture'])
+                    if include_subtitle_builds:
+                        subtitle_value = deepcopy(subtitle_build_value)
+                        if subtitle_equal_fake:
+                            subtitle_equal_fake_value(subtitle_value)
+                        if subtitle_wrong_root:
+                            record_row = subtitle_value['rows'][0]['builds']['libunibreak']['record']
+                            record = json.loads(base64.b64decode(record_row['bodyBase64']))
+                            record['sourceDirectory'] = '/fixture/work/dist/foreign-source'
+                            record_body = json.dumps(record, indent=2, sort_keys=True).encode() + b'\n'
+                            subtitle_value['rows'][0]['builds']['libunibreak']['record'] = crypto_inline(
+                                record_row['path'], record_body)
+                        if subtitle_extra_options:
+                            record = json.loads(base64.b64decode(
+                                subtitle_value['rows'][0]['builds']['libunibreak']['record']['bodyBase64']))
+                            record['arguments'].append('--fixture-unapproved-option')
+                            record_body = json.dumps(record, indent=2, sort_keys=True).encode() + b'\n'
+                            subtitle_value['rows'][0]['builds']['libunibreak']['record'] = crypto_inline(
+                                'dist/libunibreak/ios/scratch/arm64/vortx-subtitle-build.json', record_body)
+                        if subtitle_open_link:
+                            subtitle_value['retainedLibassCompatibility'] = 'OPEN'
+                        if subtitle_shaping_gate:
+                            subtitle_value['runtimeSecurityTested'] = True
+                        archive.writestr('apple-subtitle-builds.json',
+                                         json.dumps(subtitle_value, indent=2, sort_keys=True).encode() + b'\n')
             result.seek(0)
             return result
 
         captured = {'source-0/Package.swift': source_package.encode()}
         crypto_pins = crypto_sources['pins']
 
-        def check_apple(archive, *, validate_sources=True):
+        def check_apple(archive, *, validate_sources=True, validate_subtitle_sources=True):
             with patch.object(consumer, 'CRYPTO_SOURCE_OUTPUTS', crypto_pins), \
                     patch.object(consumer, 'CRYPTO_SMB_HEADERS', crypto_smb_headers), \
-                    patch.object(consumer, 'CRYPTO_SMB_PINS', crypto_smb_pins):
+                    patch.object(consumer, 'CRYPTO_SMB_PINS', crypto_smb_pins), \
+                    patch.object(consumer, 'SUBTITLE_SOURCE_OUTPUTS', subtitle_sources['pins']):
                 archive_sources = (consumer.crypto_source_outputs(archive)
                                    if validate_sources else {'profile': consumer.CRYPTO_SOURCE_PROFILE})
-                consumer.apple(archive, {}, captured, recipe, archive_sources)
+                subtitle_sources_for_archive = (consumer.subtitle_source_outputs(archive)
+                                                if validate_subtitle_sources else
+                                                {'profile': consumer.SUBTITLE_SOURCE_PROFILE})
+                consumer.apple(archive, {}, captured, recipe, archive_sources,
+                               subtitle_sources_for_archive)
 
         with candidate_archive() as fixture, zipfile.ZipFile(fixture) as archive:
             check_apple(archive)
@@ -1524,6 +2086,22 @@ class NativeMediaProducer(unittest.TestCase):
                 with candidate_archive(**change) as fixture, zipfile.ZipFile(fixture) as archive:
                     with self.assertRaisesRegex(ValueError, rejection):
                         check_apple(archive, validate_sources=change.get('include_crypto_outputs', True))
+
+        for change in (
+                {'include_subtitle_outputs': False},
+                {'include_subtitle_builds': False},
+                {'tamper_subtitle_source': True},
+                {'subtitle_equal_fake': True},
+                {'subtitle_wrong_root': True},
+                {'subtitle_extra_options': True},
+                {'subtitle_header_mismatch': True},
+                {'subtitle_open_link': True},
+                {'subtitle_shaping_gate': True}):
+            with self.subTest(dependency_candidate=change):
+                with candidate_archive(**change) as fixture, zipfile.ZipFile(fixture) as archive:
+                    with self.assertRaises(ValueError):
+                        check_apple(archive, validate_subtitle_sources=
+                                    change.get('include_subtitle_outputs', True))
 
         # Equal self-reported fake hashes do not establish correspondence: the
         # offline consumer must still bind every row to retained ZIP bytes.
@@ -1575,6 +2153,208 @@ class NativeMediaProducer(unittest.TestCase):
                                              fixture_all_rows)
         with self.assertRaises(ValueError):
             consumer.shaderc_remote_target(source_package.replace(fixture_specs[1][2], '0' * 64))
+
+        consumer.subtitle_builds_receipt(subtitle_build_body, subtitle_zip_bodies,
+                                         subtitle_archive_source_rows)
+
+        def subtitle_body_with_record_mutation(mutate):
+            value = deepcopy(subtitle_build_value)
+            row = value['rows'][0]['builds']['libunibreak']
+            record = json.loads(base64.b64decode(row['record']['bodyBase64']))
+            before = deepcopy(record)
+            mutate(record)
+            self.assertNotEqual(record, before, 'negative subtitle record mutation is a no-op')
+            body = json.dumps(record, indent=2, sort_keys=True).encode() + b'\n'
+            row['record'] = crypto_inline(
+                'dist/libunibreak/ios/scratch/arm64/vortx-subtitle-build.json', body)
+            return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
+
+        def subtitle_body_with_generated_mutation(library, name, mutate):
+            value = deepcopy(subtitle_build_value)
+            row = value['rows'][0]['builds'][library]
+            record = json.loads(base64.b64decode(row['record']['bodyBase64']))
+            generated = json.loads(base64.b64decode(
+                record['generatedConfiguration'][name]['bodyBase64']))
+            before = deepcopy(generated)
+            mutate(generated)
+            self.assertNotEqual(generated, before,
+                                'negative subtitle generated-body mutation is a no-op')
+            generated_body = json.dumps(generated, sort_keys=True).encode()
+            record['generatedConfiguration'][name] = {
+                'bytes': len(generated_body),
+                'sha256': hashlib.sha256(generated_body).hexdigest(),
+                'bodyBase64': base64.b64encode(generated_body).decode('ascii')}
+            record_body = json.dumps(record, indent=2, sort_keys=True).encode() + b'\n'
+            row['record'] = crypto_inline(row['record']['path'], record_body)
+            return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
+
+        def subtitle_body_with_generated_text_mutation(library, name, mutate):
+            value = deepcopy(subtitle_build_value)
+            row = value['rows'][0]['builds'][library]
+            record = json.loads(base64.b64decode(row['record']['bodyBase64']))
+            generated = record['generatedConfiguration'][name]
+            old_body = base64.b64decode(generated['bodyBase64'])
+            new_body = mutate(old_body)
+            self.assertNotEqual(new_body, old_body,
+                                'negative subtitle generated-text mutation is a no-op')
+            generated.update(bytes=len(new_body),
+                             sha256=hashlib.sha256(new_body).hexdigest(),
+                             bodyBase64=base64.b64encode(new_body).decode('ascii'))
+            record_body = json.dumps(record, indent=2, sort_keys=True).encode() + b'\n'
+            row['record'] = crypto_inline(row['record']['path'], record_body)
+            return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
+
+        def subtitle_body_with_installed_mutation(
+                mutate, library='libunibreak', header='include/unibreakbase.h'):
+            value = deepcopy(subtitle_build_value)
+            row = value['rows'][0]['builds'][library]
+            record = json.loads(base64.b64decode(row['record']['bodyBase64']))
+            installed = record['installedIdentity'][header]
+            old_body = base64.b64decode(installed['bodyBase64'])
+            new_body = mutate(old_body)
+            self.assertNotEqual(new_body, old_body,
+                                'negative subtitle installed-body mutation is a no-op')
+            installed.update(bytes=len(new_body),
+                             sha256=hashlib.sha256(new_body).hexdigest(),
+                             bodyBase64=base64.b64encode(new_body).decode('ascii'))
+            record_body = json.dumps(record, indent=2, sort_keys=True).encode() + b'\n'
+            row['record'] = crypto_inline(row['record']['path'], record_body)
+            return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
+
+        def subtitle_body_with_all_installed_mutation(library, header, mutate):
+            value = deepcopy(subtitle_build_value)
+            for row in value['rows']:
+                build = row['builds'][library]
+                record = json.loads(base64.b64decode(build['record']['bodyBase64']))
+                installed = record['installedIdentity'][header]
+                old_body = base64.b64decode(installed['bodyBase64'])
+                new_body = mutate(old_body)
+                self.assertNotEqual(new_body, old_body,
+                                    'negative subtitle installed-body mutation is a no-op')
+                installed.update(bytes=len(new_body),
+                                 sha256=hashlib.sha256(new_body).hexdigest(),
+                                 bodyBase64=base64.b64encode(new_body).decode('ascii'))
+                record_body = json.dumps(record, indent=2, sort_keys=True).encode() + b'\n'
+                build['record'] = crypto_inline(build['record']['path'], record_body)
+            return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
+
+        subtitle_negative = (
+            ('equal-fake-installed-header', subtitle_equal_fake_value, subtitle_build_body),
+            ('wrong-source-root', lambda value: value.update(sourceDirectory='/fixture/work/dist/foreign-source'),
+             subtitle_body_with_record_mutation),
+            ('extra-option', lambda value: value['arguments'].append('--fixture-unapproved-option'),
+             subtitle_body_with_record_mutation))
+        for name, mutate, builder in subtitle_negative:
+            with self.subTest(receipt='subtitle', mutation=name):
+                if builder is subtitle_build_body:
+                    observed = deepcopy(subtitle_build_value)
+                    before = deepcopy(observed)
+                    mutate(observed)
+                    self.assertNotEqual(observed, before, 'negative subtitle receipt mutation is a no-op')
+                    observed_body = (json.dumps(observed, indent=2, sort_keys=True) + '\n').encode()
+                else:
+                    observed_body = builder(mutate)
+                with self.assertRaises(ValueError):
+                    consumer.subtitle_builds_receipt(observed_body, subtitle_zip_bodies,
+                                                     subtitle_archive_source_rows)
+
+        generated_negative = (
+            ('wrong-effective-prefix', 'meson-info/intro-buildoptions.json',
+             lambda rows: next(
+                 row for row in rows if row['name'] == 'prefix'
+             ).update(value='/fixture/work/dist/foreign-prefix')),
+            ('second-command-target', 'compile_commands.json',
+             lambda rows: rows[1]['arguments'].__setitem__(
+                 rows[1]['arguments'].index('-target') + 1,
+                 'arm64-apple-ios99.0')),
+            ('second-command-sdk', 'compile_commands.json',
+             lambda rows: rows[1]['arguments'].__setitem__(
+                 rows[1]['arguments'].index('-isysroot') + 1,
+                 '/fixture/Xcode/Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS.sdk')),
+            ('second-command-minimum', 'compile_commands.json',
+             lambda rows: rows[1]['arguments'].__setitem__(
+                 rows[1]['arguments'].index('-mios-version-min=15.0'),
+                 '-mios-version-min=16.0')),
+            ('second-command-spelling-target', 'compile_commands.json',
+             lambda rows: rows[1].update(
+                 command=rows[1]['command'] + ' --target=arm64-apple-ios99.0')),
+            ('second-arguments-spelling-target', 'compile_commands.json',
+             lambda rows: rows[1]['arguments'].append('--target=arm64-apple-ios99.0')),
+            ('second-command-spelling-sysroot', 'compile_commands.json',
+             lambda rows: rows[1].update(
+                 command=rows[1]['command'] +
+                 ' --sysroot=/fixture/Platforms/Other.platform/SDKs/Other.sdk')),
+            ('second-arguments-spelling-sysroot', 'compile_commands.json',
+             lambda rows: rows[1]['arguments'].append(
+                 '--sysroot=/fixture/Platforms/Other.platform/SDKs/Other.sdk')))
+        for name, generated_name, mutate in generated_negative:
+            with self.subTest(receipt='subtitle', mutation=name):
+                observed_body = subtitle_body_with_generated_mutation(
+                    'libfribidi', generated_name, mutate)
+                with self.assertRaises(ValueError):
+                    consumer.subtitle_builds_receipt(observed_body, subtitle_zip_bodies,
+                                                     subtitle_archive_source_rows)
+
+        makefile_negative = (
+            ('wrong-makefile-cc', lambda body: body.replace(
+                b'CC = /usr/bin/clang\n', b'CC = /usr/bin/not-clang\n', 1)),
+            ('wrong-makefile-cflags', lambda body: body.replace(
+                b'CFLAGS = ', b'CFLAGS = -Dforged ', 1)),
+            ('modified-makefile-cflags', lambda body:
+             body + b'CFLAGS += --target=arm64-apple-ios99.0\n'),
+            ('duplicate-makefile-version', lambda body:
+             body + b'PACKAGE_VERSION = 7.0\n'),
+            ('duplicate-makefile-prefix', lambda body:
+             body + b'prefix = /fixture/work/dist/foreign-prefix\n'))
+        for name, mutate in makefile_negative:
+            with self.subTest(receipt='subtitle', mutation=name):
+                observed_body = subtitle_body_with_generated_text_mutation(
+                    'libunibreak', 'Makefile', mutate)
+                with self.assertRaises(ValueError):
+                    consumer.subtitle_builds_receipt(observed_body, subtitle_zip_bodies,
+                                                     subtitle_archive_source_rows)
+
+        duplicate_header = subtitle_body_with_installed_mutation(
+            lambda body: body + b'#define UNIBREAK_VERSION 0x0700\n')
+        with self.assertRaises(ValueError):
+            consumer.subtitle_builds_receipt(duplicate_header, subtitle_zip_bodies,
+                                             subtitle_archive_source_rows)
+
+        duplicate_hb = b'#define HB_VERSION_MAJOR (14)\n'
+        duplicate_hb_body = subtitle_body_with_all_installed_mutation(
+            'libharfbuzz', 'include/harfbuzz/hb-version.h',
+            lambda body: body + duplicate_hb)
+        duplicate_hb_zips = dict(subtitle_zip_bodies)
+        duplicate_hb_zips['Libharfbuzz'] = subtitle_zip_with_header(
+            duplicate_hb_zips['Libharfbuzz'],
+            next(spec[-1] for spec in subtitle_library_specs
+                 if spec[0] == 'Libharfbuzz') + duplicate_hb,
+            'harfbuzz/hb-version.h')
+        with self.assertRaises(ValueError):
+            consumer.subtitle_builds_receipt(duplicate_hb_body, duplicate_hb_zips,
+                                             subtitle_archive_source_rows)
+
+        observed = deepcopy(subtitle_build_value)
+        observed['retainedLibassCompatibility'] = 'OPEN'
+        with self.assertRaises(ValueError):
+            consumer.subtitle_builds_receipt(
+                (json.dumps(observed, indent=2, sort_keys=True) + '\n').encode(),
+                subtitle_zip_bodies, subtitle_archive_source_rows)
+        observed = deepcopy(subtitle_build_value)
+        observed['runtimeSecurityTested'] = True
+        with self.assertRaises(ValueError):
+            consumer.subtitle_builds_receipt(
+                (json.dumps(observed, indent=2, sort_keys=True) + '\n').encode(),
+                subtitle_zip_bodies, subtitle_archive_source_rows)
+
+        changed_subtitle_zips = dict(subtitle_zip_bodies)
+        changed_subtitle_zips['Libunibreak'] = subtitle_zip_with_header(
+            changed_subtitle_zips['Libunibreak'],
+            b'#define UNIBREAK_VERSION   0x0700   /**< Version of the libunibreak */\n'
+            b'extern const int unibreak_version;\n')
+        with self.assertRaises(ValueError):
+            consumer.subtitle_builds_receipt(subtitle_build_body, changed_subtitle_zips,
+                                             subtitle_archive_source_rows)
 
         valid_openssl = openssl_receipt_fixture()
         consumer.openssl_receipt(valid_openssl, recipe['scripts/native-media-hosted/evidence.py'])

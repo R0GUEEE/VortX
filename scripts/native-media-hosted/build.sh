@@ -63,7 +63,7 @@ if [[ $lane == apple ]]; then
         bash scripts/build-mpvkit-dvfel.sh
     # Existing builder already runs these; explicit retained log identifies candidate acceptance only.
     bash scripts/verify-mpvkit-dvfel-artifacts.sh "$out/MPVKit-DVFEL" \
-        --dependency-profile native-upgrades-openssl410-crypto-v4 \
+        --dependency-profile native-upgrades-openssl410-crypto-subtitles-v5 \
         --shaderc-inputs "$upstream/dist/libshaderc-2026.1.0" \
         --openssl-builds "$upstream/dist/openssl/vortx-openssl-builds.json" \
         --crypto-work "$upstream" > "$out/apple-artifact-gate.txt" 2>&1
@@ -74,7 +74,8 @@ if [[ $lane == apple ]]; then
         Libmpv.xcframework.zip Libavcodec.xcframework.zip Libavdevice.xcframework.zip \
         Libavfilter.xcframework.zip Libavformat.xcframework.zip Libavutil.xcframework.zip \
         Libswresample.xcframework.zip Libswscale.xcframework.zip Libplacebo.xcframework.zip lcms2.xcframework.zip Libdav1d.xcframework.zip Libssl.xcframework.zip Libcrypto.xcframework.zip \
-        gmp.xcframework.zip nettle.xcframework.zip hogweed.xcframework.zip gnutls.xcframework.zip Libsmbclient.xcframework.zip
+        gmp.xcframework.zip nettle.xcframework.zip hogweed.xcframework.zip gnutls.xcframework.zip Libsmbclient.xcframework.zip \
+        Libunibreak.xcframework.zip Libfribidi.xcframework.zip Libharfbuzz.xcframework.zip
     # Retain exact original published Shaderc inputs and the tool-bound comparison receipt.
     shaderc_inputs="$upstream/dist/libshaderc-2026.1.0"
     cp "$shaderc_inputs/libshaderc.zip" "$out/apple-shaderc-original-all.zip"
@@ -92,6 +93,17 @@ if [[ $lane == apple ]]; then
     cp "$crypto_capture/crypto-release-sources.tar" "$out/apple-crypto-release-sources.tar"
     cp "$crypto_capture/crypto-release-sources.json" "$out/apple-crypto-release-sources.json"
     cp "$crypto_chain" "$out/apple-crypto-chain.json"
+    subtitle_capture="$upstream/dist/subtitle-capture"
+    subtitle_builds="$upstream/dist/subtitle-builds/vortx-subtitle-builds.json"
+    [ -d "$subtitle_capture/archives" ] && [ -f "$subtitle_capture/subtitle-release-sources.tar" ] &&
+        [ -f "$subtitle_capture/subtitle-release-sources.json" ] || exit 1
+    [ -f "$subtitle_builds" ] || exit 1
+    cp "$subtitle_capture/archives/libunibreak-8.0.tar.gz" "$out/apple-subtitle-source-unibreak.tar.gz"
+    cp "$subtitle_capture/archives/fribidi-1.0.17.tar.xz" "$out/apple-subtitle-source-fribidi.tar.xz"
+    cp "$subtitle_capture/archives/harfbuzz-15.0.0.tar.xz" "$out/apple-subtitle-source-harfbuzz.tar.xz"
+    cp "$subtitle_capture/subtitle-release-sources.tar" "$out/apple-subtitle-release-sources.tar"
+    cp "$subtitle_capture/subtitle-release-sources.json" "$out/apple-subtitle-release-sources.json"
+    cp "$subtitle_builds" "$out/apple-subtitle-builds.json"
 else
     # Downstream make/meson generators invoke python3 from PATH. Verify that SAME isolated
     # interpreter and its complete pinned third-party closure before downloading/building.

@@ -149,11 +149,11 @@ matches_exact_patch_tree() {
     fi
   done < <(git -C "$MPVKIT_DIR" ls-tree -r --name-only HEAD)
 
-  # The crypto helpers are deliberately untracked carrier files. If either appears in the
+  # The native source helpers are deliberately untracked carrier files. If one appears in the
   # candidate checkout, the exact approved patch must also create a regular, byte-identical file
   # in the temporary patched tree. This closes the dirty-check gap without admitting arbitrary
   # untracked files or JSON receipts.
-  for helper in Sources/BuildScripts/crypto-release-sources.py Sources/BuildScripts/crypto-chain-gate.py; do
+  for helper in Sources/BuildScripts/crypto-release-sources.py Sources/BuildScripts/crypto-chain-gate.py Sources/BuildScripts/subtitle-release-sources.py; do
     if [ -e "$MPVKIT_DIR/$helper" ] || [ -e "$temporary/$helper" ]; then
       if [ ! -f "$MPVKIT_DIR/$helper" ] || [ -L "$MPVKIT_DIR/$helper" ] ||
          [ ! -f "$temporary/$helper" ] || [ -L "$temporary/$helper" ] ||
@@ -210,6 +210,44 @@ PY
   "$python_bin" "$helper" verify "$WORK"
 }
 
+# The subtitle candidate consumes only these fixed release bodies. The download directory is
+# deliberately fresh and outside every Git source root; no caller-supplied URL, archive, hash or
+# cache is accepted. This function runs before SwiftPM so source selectors and receipts cannot
+# drift after the native build begins.
+prepare_subtitle_sources() {
+  local helper="$MPVKIT_DIR/Sources/BuildScripts/subtitle-release-sources.py"
+  local stage="$WORK/dist/subtitle-source-download"
+  [ -f "$helper" ] && [ ! -L "$helper" ] || fail "subtitle source helper is missing or linked"
+  [ ! -e "$stage" ] && [ ! -L "$stage" ] || fail "subtitle source staging directory must be fresh"
+  mkdir -p "$stage"
+  local python_bin="$(command -v python3)"
+  [ -x "$python_bin" ] || fail "supported python3 executable is required"
+  "$python_bin" - <<'PY'
+import sys
+import zipfile
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10 or newer is required for strict archive handling")
+if not hasattr(zipfile, "ZipFile"):
+    raise SystemExit("strict archive reader is unavailable")
+PY
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --retry 3 --max-time 600 --max-filesize 8388608 --output "$stage/libunibreak-8.0.tar.gz" \
+    https://github.com/adah1972/libunibreak/releases/download/libunibreak_8_0/libunibreak-8.0.tar.gz
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --retry 3 --max-time 600 --max-filesize 8388608 --output "$stage/fribidi-1.0.17.tar.xz" \
+    https://github.com/fribidi/fribidi/releases/download/v1.0.17/fribidi-1.0.17.tar.xz
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --retry 3 --max-time 600 --max-filesize 33554432 --output "$stage/harfbuzz-15.0.0.tar.xz" \
+    https://github.com/harfbuzz/harfbuzz/releases/download/15.0.0/harfbuzz-15.0.0.tar.xz
+  [ "$(wc -c <"$stage/libunibreak-8.0.tar.gz" | tr -d ' ')" = 1088508 ] || fail "libunibreak release size differs"
+  [ "$(wc -c <"$stage/fribidi-1.0.17.tar.xz" | tr -d ' ')" = 1203284 ] || fail "FriBidi release size differs"
+  [ "$(wc -c <"$stage/harfbuzz-15.0.0.tar.xz" | tr -d ' ')" = 20396372 ] || fail "HarfBuzz release size differs"
+  printf '%s  %s\n' \
+    9c4fad6e517338a098373acc9f35579ae2c325e6446666fb9ac2666ba15ceba4 "$stage/libunibreak-8.0.tar.gz" \
+    6949dcde27d41cebad1fd741fcafc36d55a1020d2d872d4a6eb3914caabbada2 "$stage/fribidi-1.0.17.tar.xz" \
+    968536e9abd782f07f7954044c0c4020199fcdd39b41d221ec42d2a3be4a44df "$stage/harfbuzz-15.0.0.tar.xz" | shasum -a 256 -c - ||
+    fail "subtitle release body digest differs"
+  "$python_bin" "$helper" prepare "$WORK" "$stage"
+  "$python_bin" "$helper" verify "$WORK"
+}
+
 if [ ! -e "$MPVKIT_DIR" ]; then
   mkdir -p "$(dirname "$MPVKIT_DIR")"
   git clone --no-checkout "$MPVKIT_SOURCE_URL" "$MPVKIT_DIR" ||
@@ -239,10 +277,10 @@ else
     [ -z "$line" ] && continue
     case "$line" in
       '?? Sources/BuildScripts/patch/FFmpeg/0005-finite-reference-reader.patch'|'?? Sources/BuildScripts/patch/libmpv/0019-finite-reference-reader.patch') ;;
-      '?? Sources/BuildScripts/crypto-release-sources.py'|'?? Sources/BuildScripts/crypto-chain-gate.py')
+      '?? Sources/BuildScripts/crypto-release-sources.py'|'?? Sources/BuildScripts/crypto-chain-gate.py'|'?? Sources/BuildScripts/subtitle-release-sources.py')
         helper_path="${line#?? }"
         [ -f "$MPVKIT_DIR/$helper_path" ] && [ ! -L "$MPVKIT_DIR/$helper_path" ] ||
-          fail "crypto helper must be a regular file: $MPVKIT_DIR/$helper_path" ;;
+          fail "native source helper must be a regular file: $MPVKIT_DIR/$helper_path" ;;
       ' M Package.swift'|'M Package.swift'|' M Sources/BuildScripts/XCFrameworkBuild/main.swift'|'M Sources/BuildScripts/XCFrameworkBuild/main.swift'|' M Sources/BuildScripts/XCFrameworkBuild/base.swift'|'M Sources/BuildScripts/XCFrameworkBuild/base.swift'|' M Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch'|'M Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch') ;;
       '?? .build/'*|'?? dist/'*|'?? Sources/BuildScripts/patch/libmpv/0004-moltenvk-context-check-events-resize.patch'|'?? Sources/BuildScripts/patch/libmpv/0005-coreaudio-hotplug-lifecycle.patch'|'?? Sources/BuildScripts/patch/libmpv/0006-http-seek-interrupt.patch'|'?? Sources/BuildScripts/patch/libmpv/0007-upstream-audio-layout-bounds.patch'|'?? Sources/BuildScripts/patch/libmpv/0008-upstream-gpu-next-seek-reset.patch'|'?? Sources/BuildScripts/patch/libmpv/0009-original-local-file-witness.patch'|'?? Sources/BuildScripts/patch/libmpv/0010-upstream-edition-title-lifetime.patch'|'?? Sources/BuildScripts/patch/libmpv/0011-owned-subtitle-constructor.patch'|'?? Sources/BuildScripts/patch/libmpv/0012-owned-subtitle-publication.patch'|'?? Sources/BuildScripts/patch/libmpv/0013-original-http-reference-recipe.patch'|'?? Sources/BuildScripts/patch/libmpv/0014-original-http-cancel-lifetime.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0001-response-witness.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0002-response-generation.patch'|'?? Sources/BuildScripts/patch/libmpv/0015-completed-response-observation.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0003-sent-request-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0016-sent-request-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0017-bounded-prefix-request.patch'|'?? Sources/BuildScripts/patch/FFmpeg/0004-original-transport-evidence.patch'|'?? Sources/BuildScripts/patch/libmpv/0018-original-transport-evidence.patch') ;;
       *) fail "existing MPVKit checkout has unexpected dirty state: $line" ;;
@@ -366,14 +404,20 @@ CRYPTO_SOURCE_HELPER="$MPVKIT_DIR/Sources/BuildScripts/crypto-release-sources.py
 CRYPTO_GATE_HELPER="$MPVKIT_DIR/Sources/BuildScripts/crypto-chain-gate.py"
 CRYPTO_SOURCE_HELPER_SHA256="3c310499d446eed72eb16521b27c16f718f23e7ab1472dec1fad79cc40ed1537"
 CRYPTO_GATE_HELPER_SHA256="041dd13e48e1821f5d7bf049bb8eb097d3772d6ea867c15a3b7646779a3c015d"
+SUBTITLE_SOURCE_HELPER="$MPVKIT_DIR/Sources/BuildScripts/subtitle-release-sources.py"
+SUBTITLE_SOURCE_HELPER_SHA256="f18c516b0694ecbc601680782b4d0fba22265854cbd82e4a9e7516d9bb905154"
 [ -f "$CRYPTO_SOURCE_HELPER" ] && [ ! -L "$CRYPTO_SOURCE_HELPER" ] || fail "crypto release-source helper missing"
 [ -f "$CRYPTO_GATE_HELPER" ] && [ ! -L "$CRYPTO_GATE_HELPER" ] || fail "crypto chain gate helper missing"
+[ -f "$SUBTITLE_SOURCE_HELPER" ] && [ ! -L "$SUBTITLE_SOURCE_HELPER" ] || fail "subtitle release-source helper missing"
 [ "$(shasum -a 256 "$CRYPTO_SOURCE_HELPER" | awk '{print $1}')" = "$CRYPTO_SOURCE_HELPER_SHA256" ] ||
   fail "crypto release-source helper hash is not the resealed parent pin"
 [ "$(shasum -a 256 "$CRYPTO_GATE_HELPER" | awk '{print $1}')" = "$CRYPTO_GATE_HELPER_SHA256" ] ||
   fail "crypto chain gate helper hash is not the resealed parent pin"
+[ "$(shasum -a 256 "$SUBTITLE_SOURCE_HELPER" | awk '{print $1}')" = "$SUBTITLE_SOURCE_HELPER_SHA256" ] ||
+  fail "subtitle release-source helper hash is not the frozen packet pin"
 
 prepare_crypto_sources
+prepare_subtitle_sources
 
 # Install our mpv-side patch alongside MPVKit's own libmpv patches. SpikeGit.applyPatches (added by
 # mpvkit-dvfel.patch) applies that directory in sorted order, so the 0004 prefix guarantees it runs
@@ -513,12 +557,12 @@ done
 cmp -s "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_sparse.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_reference_sparse.h" || fail "private sparse headers disagree"
 
 # Assembly reads the per-library release ZIP, not slice scratch directories. Historical
-# native-upgrades-dav1d154-shaderc20261-hb150-v2 and native-upgrades-openssl410-v3 verifier
-# profiles remain readable; this caller selects only the combined v4 candidate below.
+# native-upgrades-dav1d154-shaderc20261-hb150-v2, native-upgrades-openssl410-v3 and the
+# crypto-v4 verifier profiles remain readable; this caller selects the combined subtitle v5 below.
 # Refuse to package a stale ZIP after an interrupted or incorrectly cached run.
 # Libmpv must be fresh too: a rebuilt FFmpeg archive alone cannot carry the
 # CoreAudio lifetime fix. Never silently repackage the old vulnerable player.
-for library in Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient; do
+for library in Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient Libunibreak Libfribidi Libharfbuzz; do
   library_zip="$WORK/dist/release/$library.xcframework.zip"
   [ -f "$library_zip" ] || {
     echo "missing rebuilt artifact: $library_zip" >&2
@@ -542,16 +586,24 @@ trap 'rm -rf "$STAGED_DEST"' EXIT
 CRYPTO_CAPTURE="$WORK/dist/crypto-capture"
 [ ! -e "$CRYPTO_CAPTURE" ] && [ ! -L "$CRYPTO_CAPTURE" ] || fail "crypto capture path must be fresh"
 "$(command -v python3)" "$CRYPTO_SOURCE_HELPER" capture "$WORK" "$CRYPTO_CAPTURE"
+"$(command -v python3)" "$SUBTITLE_SOURCE_HELPER" verify "$WORK"
+SUBTITLE_CAPTURE="$WORK/dist/subtitle-capture"
+[ ! -e "$SUBTITLE_CAPTURE" ] && [ ! -L "$SUBTITLE_CAPTURE" ] || fail "subtitle capture path must be fresh"
+"$(command -v python3)" "$SUBTITLE_SOURCE_HELPER" capture "$WORK" "$SUBTITLE_CAPTURE"
+"$(command -v python3)" "$SUBTITLE_SOURCE_HELPER" verify-capture "$SUBTITLE_CAPTURE"
 
 # Compare the two pinned original Shaderc inputs once with the trusted Apple toolchain.
 python3 "$HERE/native-media-hosted/evidence.py" apple-shaderc-inputs "$WORK"
 python3 "$HERE/native-media-hosted/evidence.py" apple-openssl-builds "$WORK"
+python3 "$HERE/native-media-hosted/evidence.py" apple-subtitle-builds "$WORK"
+python3 "$HERE/native-media-hosted/evidence.py" apple-subtitle-receipt \
+  "$WORK/dist/subtitle-builds/vortx-subtitle-builds.json"
 "$HERE/assemble-mpvkit-dvfel.sh" "$WORK" "$STAGED_DEST"
 "$(command -v python3)" "$CRYPTO_SOURCE_HELPER" verify "$WORK"
 "$(command -v python3)" "$CRYPTO_GATE_HELPER" capture "$WORK" "$STAGED_DEST" \
   --dependency-profile native-upgrades-crypto-chain-v1
 "$HERE/verify-mpvkit-dvfel-artifacts.sh" "$STAGED_DEST" \
-  --dependency-profile native-upgrades-openssl410-crypto-v4 \
+  --dependency-profile native-upgrades-openssl410-crypto-subtitles-v5 \
   --shaderc-inputs "$WORK/dist/libshaderc-2026.1.0" \
   --openssl-builds "$WORK/dist/openssl/vortx-openssl-builds.json" \
   --crypto-work "$WORK"

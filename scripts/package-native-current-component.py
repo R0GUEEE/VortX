@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import shlex
 import stat
 import subprocess
 import tarfile
@@ -21,9 +22,9 @@ import zipfile
 
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
-PROFILE = "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-candidate"
-PROFILE_MANIFEST_SHA256 = "36394b6782d0ae0b14275b51dd15e03c22745a0d1cfad51ed7cab06fb37b93d1"
-NATIVE_UPGRADES_PROFILE = "native-upgrades-openssl410-crypto-v4"
+PROFILE = "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-subtitles-candidate"
+PROFILE_MANIFEST_SHA256 = "86767d925f69c56f6e440843439e2c330d183ca97b8b0f5c7ec3a57bb93c75a9"
+NATIVE_UPGRADES_PROFILE = "native-upgrades-openssl410-crypto-subtitles-v5"
 SHADERC_WRAPPER_VERSION = "2026.1.0"
 SHADERC_REMOTE_URL = "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip"
 SHADERC_SOURCE_SPECS = (
@@ -121,7 +122,12 @@ OUTPUTS = {"apple": {"apple-candidate.tar.gz", "apple-original-library-zips.tar"
                       "apple-shaderc-inputs.json", "apple-openssl-builds.json",
                       "apple-crypto-source-gmp.tar.xz", "apple-crypto-source-nettle.tar.gz",
                       "apple-crypto-source-gnutls.tar.xz", "apple-crypto-release-sources.tar",
-                      "apple-crypto-release-sources.json", "apple-crypto-chain.json"},
+                      "apple-crypto-release-sources.json", "apple-crypto-chain.json",
+                      "apple-subtitle-source-unibreak.tar.gz",
+                      "apple-subtitle-source-fribidi.tar.xz",
+                      "apple-subtitle-source-harfbuzz.tar.xz",
+                      "apple-subtitle-release-sources.tar",
+                      "apple-subtitle-release-sources.json", "apple-subtitle-builds.json"},
            "android": {"libmpv-release-candidate.aar", "android-artifact-evidence.json",
                        "android-corresponding-sources.tar.gz", "android-build-configs.tar.gz"}}
 PINS = {"mpv": "8c67647b50059406c5c0444903597281b81516cf",
@@ -198,9 +204,10 @@ GITLINKS = {"3rdparty/Vulkan-Headers": "74d8a6cb930c68ef617b202c3ff3c59d919e086b
             "3rdparty/jinja": "15206881c006c79667fe5154fe80c01c65410679",
             "3rdparty/markupsafe": "297fc8e356e6836a62087949245d09a28e9f1b13",
             "demos/3rdparty/nuklear": "242f35efa067a46c595645eeda7b1771ea1f83b1"}
-LIBRARIES = "Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient".split()
+LIBRARIES = "Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient Libunibreak Libfribidi Libharfbuzz".split()
 UNSUFFIXED_LIBRARIES = frozenset(("Libplacebo", "lcms2", "Libdav1d", "Libssl", "Libcrypto",
-                                  "gmp", "nettle", "hogweed", "gnutls", "Libsmbclient"))
+                                  "gmp", "nettle", "hogweed", "gnutls", "Libsmbclient",
+                                  "Libunibreak", "Libfribidi", "Libharfbuzz"))
 
 CRYPTO_SOURCE_PROFILE = "gmp630-nettle400-gnutls3813-release-sources-v1"
 CRYPTO_CHAIN_PROFILE = "native-upgrades-crypto-chain-v1"
@@ -233,6 +240,7 @@ CRYPTO_MAX_MEMBER = 64 * MIB
 CRYPTO_MAX_RECEIPT = 64 * MIB
 CRYPTO_MAX_PATH = 4096
 CRYPTO_MAX_MTIME = 4102444800
+CRYPTO_MAX_MTIME_NS = CRYPTO_MAX_MTIME * 1000000000
 CRYPTO_MAX_INLINE_RAW = 16 * MIB
 CRYPTO_MAX_READER_JSON = 32 * MIB
 CRYPTO_MAX_METADATA_JSON = 8 * MIB
@@ -350,6 +358,94 @@ CRYPTO_SMB_HEADERS = {
     "libsmbclient.h": (125287, "9e0fd2184591f449c79b6bc5b5468443920523ea943440534df04294b940ce1c"),
     "samba/version.h": (421, "d601401634a789612aab95d50295c69713af8fb4ac5addf39dffcc402e978554"),
 }
+
+SUBTITLE_SOURCE_PROFILE = "unibreak800-fribidi1017-harfbuzz1500-release-sources-v2-pax-ns"
+SUBTITLE_SOURCE_OUTPUTS = (
+    {"id": "libunibreak", "version": "8.0", "archiveRoot": "libunibreak-8.0",
+     "filename": "libunibreak-8.0.tar.gz", "compression": "gz", "bytes": None,
+     "maximumBytes": 8 * MIB, "entryPoint": "configure",
+     "sha256": "9c4fad6e517338a098373acc9f35579ae2c325e6446666fb9ac2666ba15ceba4",
+     "sourceRoot": "libunibreak-8.0-9c4fad6e",
+     "url": ("https://github.com/adah1972/libunibreak/releases/download/"
+             "libunibreak_8_0/libunibreak-8.0.tar.gz"),
+     "output": "apple-subtitle-source-unibreak.tar.gz"},
+    {"id": "libfribidi", "version": "1.0.17", "archiveRoot": "fribidi-1.0.17",
+     "filename": "fribidi-1.0.17.tar.xz", "compression": "xz", "bytes": 1203284,
+     "maximumBytes": 8 * MIB, "entryPoint": "meson.build",
+     "sha256": "6949dcde27d41cebad1fd741fcafc36d55a1020d2d872d4a6eb3914caabbada2",
+     "sourceRoot": "libfribidi-1.0.17-6949dcde",
+     "url": "https://github.com/fribidi/fribidi/releases/download/v1.0.17/fribidi-1.0.17.tar.xz",
+     "output": "apple-subtitle-source-fribidi.tar.xz"},
+    {"id": "libharfbuzz", "version": "15.0.0", "archiveRoot": "harfbuzz-15.0.0",
+     "filename": "harfbuzz-15.0.0.tar.xz", "compression": "xz", "bytes": 20396372,
+     "maximumBytes": 32 * MIB, "entryPoint": "meson.build",
+     "sha256": "968536e9abd782f07f7954044c0c4020199fcdd39b41d221ec42d2a3be4a44df",
+     "sourceRoot": "libharfbuzz-15.0.0-968536e9",
+     "url": "https://github.com/harfbuzz/harfbuzz/releases/download/15.0.0/harfbuzz-15.0.0.tar.xz",
+     "output": "apple-subtitle-source-harfbuzz.tar.xz"},
+)
+SUBTITLE_CAPTURE_TAR_OUTPUT = "apple-subtitle-release-sources.tar"
+SUBTITLE_CAPTURE_RECEIPT_OUTPUT = "apple-subtitle-release-sources.json"
+SUBTITLE_BUILD_OUTPUT = "apple-subtitle-builds.json"
+SUBTITLE_INSTALLED_HELPERS = {
+    "Sources/BuildScripts/subtitle-release-sources.py":
+        "f18c516b0694ecbc601680782b4d0fba22265854cbd82e4a9e7516d9bb905154",
+}
+SUBTITLE_MATRIX = CRYPTO_MATRIX
+SUBTITLE_VERSIONS = {"libunibreak": "8.0", "libfribidi": "1.0.17",
+                     "libharfbuzz": "15.0.0"}
+SUBTITLE_SELECTORS = {"libunibreak": "8.0-9c4fad6e",
+                      "libfribidi": "1.0.17-6949dcde",
+                      "libharfbuzz": "15.0.0-968536e9"}
+SUBTITLE_ROUTES = {"libunibreak": "release-autoconf",
+                   "libfribidi": "release-meson", "libharfbuzz": "release-meson"}
+SUBTITLE_ARGUMENTS = {
+    "libunibreak": None,
+    "libfribidi": ("--wrap-mode=nodownload", "-Dtests=false", "-Ddocs=false",
+                    "-Dbin=false", "-Ddeprecated=true"),
+    "libharfbuzz": ("--wrap-mode=nodownload", "-Dauto_features=disabled",
+                     "-Dtests=disabled", "-Ddocs=disabled", "-Dutilities=disabled",
+                     "-Dintrospection=disabled", "-Dfreetype=disabled",
+                     "-Dcoretext=disabled", "-Dglib=disabled", "-Dgobject=disabled",
+                     "-Dcairo=disabled", "-Dchafa=disabled", "-Dpng=disabled",
+                     "-Dzlib=disabled", "-Dicu=disabled", "-Dgraphite2=disabled",
+                     "-Dfontations=disabled", "-Dharfrust=disabled", "-Dkbts=disabled",
+                     "-Dwasm=disabled", "-Dgpu_demo=disabled", "-Dbenchmark=disabled",
+                     "-Draster=disabled", "-Dvector=disabled", "-Dgpu=disabled",
+                     "-Dsubset=disabled"),
+}
+SUBTITLE_MAKE_ARGUMENTS = ("-j1", "AUTOCONF=/usr/bin/false",
+                           "AUTOHEADER=/usr/bin/false", "AUTOMAKE=/usr/bin/false",
+                           "ACLOCAL=/usr/bin/false")
+SUBTITLE_GENERATED = {
+    "libunibreak": ("Makefile", "config.status", "config.log"),
+    "libfribidi": ("crossFile.meson", "build.ninja", "compile_commands.json",
+                    "meson-info/intro-buildoptions.json",
+                    "meson-info/intro-dependencies.json"),
+    "libharfbuzz": ("crossFile.meson", "build.ninja", "compile_commands.json",
+                     "meson-info/intro-buildoptions.json",
+                     "meson-info/intro-dependencies.json"),
+}
+SUBTITLE_INSTALLED = {
+    "libunibreak": ("include/unibreakbase.h", "lib/pkgconfig/libunibreak.pc"),
+    "libfribidi": ("include/fribidi/fribidi-config.h", "lib/pkgconfig/fribidi.pc"),
+    "libharfbuzz": ("include/harfbuzz/hb-version.h", "lib/pkgconfig/harfbuzz.pc"),
+}
+SUBTITLE_TARGETS = {"libunibreak": "Libunibreak", "libfribidi": "Libfribidi",
+                    "libharfbuzz": "Libharfbuzz"}
+SUBTITLE_LIBRARIES = (
+    ("Libunibreak", "libunibreak", "libunibreak.a", "Libunibreak"),
+    ("Libfribidi", "libfribidi", "libfribidi.a", "Libfribidi"),
+    ("Libharfbuzz", "libharfbuzz", "libharfbuzz.a", "Libharfbuzz"),
+)
+SUBTITLE_HEADERS = {"libunibreak": "unibreakbase.h",
+                    "libfribidi": "fribidi/fribidi-config.h",
+                    "libharfbuzz": "harfbuzz/hb-version.h"}
+SUBTITLE_MAX_RECORD = 16 * MIB
+SUBTITLE_MAX_BODY = 8 * MIB
+SUBTITLE_MAX_RECORD_BODIES = 8 * MIB
+SUBTITLE_MAX_INLINE_RAW = 32 * MIB
+SUBTITLE_MAX_RECEIPT = 64 * MIB
 CREATED_MPV = {"player/owned_subtitle.c": READER_MPV["player/owned_subtitle.c"],
                "player/owned_subtitle.h": READER_MPV["player/owned_subtitle.h"],
                "player/reference_owned.inc": READER_MPV["player/reference_owned.inc"],
@@ -408,6 +504,7 @@ def untracked(lane, row, recipe):
         result[reader_path] = recipe["scripts/ffmpeg-finite-reference-reader.patch"]
         if lane == "apple":
             result.update(CRYPTO_INSTALLED_HELPERS)
+            result.update(SUBTITLE_INSTALLED_HELPERS)
         if lane == "android":
             result["buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"] = recipe["scripts/native-media-hosted/android/buildscripts/patches/ffmpeg/0001-emudhra-spki-distrust.patch"]
             for helper in ("download-lua.sh", "download-libunibreak.sh"):
@@ -728,6 +825,32 @@ def crypto_mtime(value):
     return value
 
 
+def crypto_archive_mtime_ns(member):
+    """Recover exact archive nanoseconds without trusting TarInfo's float view."""
+    need(type(member.pax_headers) is dict,
+         "Subtitle source PAX metadata must be a dictionary")
+    if "mtime" in member.pax_headers:
+        raw = member.pax_headers["mtime"]
+        need(type(raw) is str and len(raw) <= 32 and
+             re.fullmatch(r"[0-9]{1,10}(?:\.[0-9]{1,9})?", raw) is not None,
+             "Subtitle source PAX mtime must be bounded decimal text")
+        seconds, separator, fraction = raw.partition(".")
+        value = int(seconds) * 1000000000
+        if separator:
+            value += int(fraction.ljust(9, "0"))
+    else:
+        need(type(member.mtime) is int,
+             "Subtitle source float-only mtime is not admitted")
+        value = member.mtime * 1000000000
+    need(type(value) is int and 0 <= value <= CRYPTO_MAX_MTIME_NS,
+         "Subtitle source mtimeNs must be bounded integral nanoseconds")
+    return value
+
+
+def crypto_member_mtime(member, nanoseconds):
+    return crypto_archive_mtime_ns(member) if nanoseconds else crypto_mtime(member.mtime)
+
+
 def crypto_tar_stream(blob, compression):
     raw = io.BytesIO(blob)
     if compression == "xz":
@@ -741,7 +864,7 @@ def crypto_tar_stream(blob, compression):
     return tarfile.open(fileobj=BoundedReader(decoded, CRYPTO_MAX_UNCOMPRESSED), mode="r|")
 
 
-def crypto_file_row(member, stream):
+def crypto_file_row(member, stream, nanoseconds=False):
     need(0 <= member.size <= CRYPTO_MAX_MEMBER, "Crypto source member exceeds its bound")
     hasher, count = hashlib.sha256(), 0
     while True:
@@ -753,16 +876,19 @@ def crypto_file_row(member, stream):
         hasher.update(block)
     need(count == member.size, "Truncated crypto source member")
     return {"kind": "file", "mode": 0o755 if member.mode & 0o111 else 0o644,
-            "mtime": crypto_mtime(member.mtime), "bytes": count,
-            "sha256": hasher.hexdigest()}
+            ("mtimeNs" if nanoseconds else "mtime"):
+                crypto_member_mtime(member, nanoseconds),
+            "bytes": count, "sha256": hasher.hexdigest()}
 
 
-def crypto_finish_index(entries):
+def crypto_finish_index(entries, nanoseconds=False):
+    time_key = "mtimeNs" if nanoseconds else "mtime"
     for name in list(entries):
         parts = name.split("/") if name else []
         for end in range(1, len(parts)):
             parent = "/".join(parts[:end])
-            row = entries.setdefault(parent, {"kind": "directory", "mode": 0o755, "mtime": 0})
+            row = entries.setdefault(parent, {"kind": "directory", "mode": 0o755,
+                                               time_key: 0})
             need(row["kind"] == "directory", "Crypto source non-directory member has children")
             need(len(entries) <= CRYPTO_MAX_MEMBERS, "Crypto source archive has too many paths")
     folded = {}
@@ -794,12 +920,15 @@ def crypto_finish_index(entries):
     return [{"path": name, **entries[name]} for name in sorted(entries)]
 
 
-def crypto_index_archive(pin, blob):
-    need(len(blob) <= CRYPTO_MAX_ARCHIVE and
+def crypto_index_archive(pin, blob, nanoseconds=False):
+    maximum_archive = min(CRYPTO_MAX_UNCOMPRESSED,
+                          pin.get("maximumBytes", CRYPTO_MAX_ARCHIVE))
+    need(len(blob) <= maximum_archive and
          (pin["bytes"] is None or len(blob) == pin["bytes"]) and
          sha(blob) == pin["sha256"],
          "Crypto release source body differs from its fixed pin")
-    entries = {"": {"kind": "directory", "mode": 0o755, "mtime": 0}}
+    time_key = "mtimeNs" if nanoseconds else "mtime"
+    entries = {"": {"kind": "directory", "mode": 0o755, time_key: 0}}
     seen, total = set(), 0
     with crypto_tar_stream(blob, pin["compression"]) as archive:
         for member in archive:
@@ -814,35 +943,42 @@ def crypto_index_archive(pin, blob):
                  "Sparse crypto source members are not admitted")
             if not separator:
                 need(member.isdir(), "Crypto source archive root is not a directory")
-                entries[""]["mtime"] = crypto_mtime(member.mtime)
+                entries[""][time_key] = crypto_member_mtime(member, nanoseconds)
                 continue
             if member.isdir():
-                row = {"kind": "directory", "mode": 0o755, "mtime": crypto_mtime(member.mtime)}
+                row = {"kind": "directory", "mode": 0o755,
+                       time_key: crypto_member_mtime(member, nanoseconds)}
             elif member.isreg():
                 total += member.size
                 need(total <= CRYPTO_MAX_UNCOMPRESSED, "Crypto source member total exceeds its bound")
                 body = archive.extractfile(member)
                 need(body is not None, "Missing crypto source member body")
                 with body:
-                    row = crypto_file_row(member, body)
+                    row = crypto_file_row(member, body, nanoseconds)
             elif member.issym():
                 crypto_link_path(name.split("/")[:-1], member.linkname)
                 body = member.linkname.encode("utf-8")
                 row = {"kind": "symlink", "mode": 0o777, "bytes": len(body),
-                       "mtime": crypto_mtime(member.mtime), "sha256": sha(body),
+                       time_key: crypto_member_mtime(member, nanoseconds), "sha256": sha(body),
                        "target": member.linkname}
             else:
                 need(False, "Crypto source hardlinks and special members are not admitted")
             need(name not in entries, "Duplicate crypto source member")
             entries[name] = row
-    rows = crypto_finish_index(entries)
-    configure = next((row for row in rows if row["path"] == "configure"), None)
-    need(configure is not None and configure["kind"] == "file" and configure["mode"] == 0o755,
-         "Crypto release archive lacks an executable configure")
+    rows = crypto_finish_index(entries, nanoseconds)
+    entry_point = pin.get("entryPoint", "configure")
+    entry = next((row for row in rows if row["path"] == entry_point), None)
+    need(entry is not None and entry["kind"] == "file" and
+         (entry_point != "configure" or entry["mode"] == 0o755),
+         "Release archive lacks its fixed regular build entry point")
     return rows
 
 
-def crypto_expected_receipt(verified):
+def crypto_expected_receipt(verified, profile=None,
+                            identity_basis="fixed-sha256-corroborated-by-package-maintainer-metadata",
+                            schema=1):
+    if profile is None:
+        profile = CRYPTO_SOURCE_PROFILE
     roots = []
     for pin, blob, rows in verified:
         roots.append({"id": pin["id"], "version": pin["version"], "url": pin["url"],
@@ -851,8 +987,8 @@ def crypto_expected_receipt(verified):
                       "archiveSHA256": pin["sha256"],
                       "sourceRoot": "dist/" + pin["sourceRoot"],
                       "membersSHA256": sha(crypto_canonical(rows)), "members": rows})
-    return {"schema": 1, "profile": CRYPTO_SOURCE_PROFILE,
-            "identityBasis": "fixed-sha256-corroborated-by-package-maintainer-metadata",
+    return {"schema": schema, "profile": profile,
+            "identityBasis": identity_basis,
             "upstreamSignatureVerified": False, "roots": roots}
 
 
@@ -868,7 +1004,10 @@ def crypto_load(data):
                       parse_constant=lambda _: need(False, "Nonfinite crypto JSON"))
 
 
-def crypto_capture_correspondence(blob, expected):
+def crypto_capture_correspondence(blob, expected, member_limit=None,
+                                  nanoseconds=False):
+    if member_limit is None:
+        member_limit = CRYPTO_MAX_MEMBERS * len(CRYPTO_SOURCE_OUTPUTS)
     need(0 < len(blob) <= CRYPTO_MAX_UNCOMPRESSED,
          "Captured crypto source tar exceeds its bound")
     observed, folded, count = set(), set(), 0
@@ -876,27 +1015,28 @@ def crypto_capture_correspondence(blob, expected):
         for member in archive:
             name = crypto_member_path(member.name)
             count += 1
-            need(count <= CRYPTO_MAX_MEMBERS * len(CRYPTO_SOURCE_OUTPUTS) and
+            need(count <= member_limit and
                  name not in observed and name.casefold() not in folded and name in expected,
                  "Captured crypto source tar has an extra or duplicate member")
             observed.add(name)
             folded.add(name.casefold())
             wanted = expected[name]
+            time_key = "mtimeNs" if nanoseconds else "mtime"
             if member.isdir():
                 actual = {"kind": "directory", "mode": member.mode,
-                          "mtime": crypto_mtime(member.mtime)}
+                          time_key: crypto_member_mtime(member, nanoseconds)}
             elif (member.isreg() and member.mode in (0o644, 0o755)
                   and not getattr(member, "sparse", None)
                   and not any("sparse" in key.casefold() for key in member.pax_headers)):
                 body = archive.extractfile(member)
                 need(body is not None, "Captured crypto source member has no body")
                 with body:
-                    actual = crypto_file_row(member, body)
+                    actual = crypto_file_row(member, body, nanoseconds)
             elif member.issym():
                 crypto_link_path(name.split("/")[:-1], member.linkname)
                 body = member.linkname.encode("utf-8")
                 actual = {"kind": "symlink", "mode": 0o777, "bytes": len(body),
-                          "mtime": crypto_mtime(member.mtime), "sha256": sha(body),
+                          time_key: crypto_member_mtime(member, nanoseconds), "sha256": sha(body),
                           "target": member.linkname}
             else:
                 need(False, "Captured crypto source tar has an unsupported member")
@@ -905,16 +1045,32 @@ def crypto_capture_correspondence(blob, expected):
     need(observed == set(expected), "Captured crypto source tar omitted release members")
 
 
-def crypto_source_outputs(archive):
+def crypto_source_outputs(archive, *, pins=None, profile=None,
+                          capture_tar=None, capture_receipt=None,
+                          capture_tar_logical="crypto-release-sources.tar",
+                          capture_receipt_logical="crypto-release-sources.json",
+                          identity_basis="fixed-sha256-corroborated-by-package-maintainer-metadata",
+                          receipt_schema=1, nanoseconds=False):
+    if pins is None:
+        pins = CRYPTO_SOURCE_OUTPUTS
+    if profile is None:
+        profile = CRYPTO_SOURCE_PROFILE
+    if capture_tar is None:
+        capture_tar = CRYPTO_CAPTURE_TAR_OUTPUT
+    if capture_receipt is None:
+        capture_receipt = CRYPTO_CAPTURE_RECEIPT_OUTPUT
     verified, output_rows = [], []
-    for pin in CRYPTO_SOURCE_OUTPUTS:
-        body = read(archive, pin["output"], CRYPTO_MAX_ARCHIVE)
-        rows = crypto_index_archive(pin, body)
+    for pin in pins:
+        maximum = min(CRYPTO_MAX_UNCOMPRESSED,
+                      pin.get("maximumBytes", CRYPTO_MAX_ARCHIVE))
+        body = read(archive, pin["output"], maximum)
+        rows = crypto_index_archive(pin, body, nanoseconds)
         verified.append((pin, body, rows))
         output_rows.append({"logicalPath": "archives/" + pin["filename"],
                             "name": pin["output"], "bytes": len(body), "sha256": sha(body)})
-    expected_receipt = crypto_expected_receipt(verified)
-    receipt_body = read(archive, CRYPTO_CAPTURE_RECEIPT_OUTPUT, CRYPTO_MAX_RECEIPT)
+    expected_receipt = crypto_expected_receipt(
+        verified, profile, identity_basis, receipt_schema)
+    receipt_body = read(archive, capture_receipt, CRYPTO_MAX_RECEIPT)
     need(exact_equal(crypto_load(receipt_body), expected_receipt) and
          receipt_body == crypto_canonical(expected_receipt),
          "Captured crypto source receipt differs from raw source bodies")
@@ -924,21 +1080,33 @@ def crypto_source_outputs(archive):
             name = pin["archiveRoot"] + (("/" + row["path"]) if row["path"] else "")
             need(name not in expected_members, "Overlapping captured crypto source roots")
             expected_members[name] = {key: value for key, value in row.items() if key != "path"}
-    capture_body = read(archive, CRYPTO_CAPTURE_TAR_OUTPUT, CRYPTO_MAX_UNCOMPRESSED)
-    crypto_capture_correspondence(capture_body, expected_members)
+    capture_body = read(archive, capture_tar, CRYPTO_MAX_UNCOMPRESSED)
+    crypto_capture_correspondence(
+        capture_body, expected_members, CRYPTO_MAX_MEMBERS * len(pins), nanoseconds)
     roots = []
     for root, output_row in zip(expected_receipt["roots"], output_rows, strict=True):
         roots.append({"id": root["id"], "version": root["version"],
                       "archiveRoot": root["archiveRoot"], "sourceRoot": root["sourceRoot"],
                       "archive": output_row, "membersSHA256": root["membersSHA256"]})
-    return {"profile": CRYPTO_SOURCE_PROFILE, "roots": roots,
+    return {"profile": profile, "roots": roots,
             "capture": {
-                "tar": {"logicalPath": "crypto-release-sources.tar",
-                        "name": CRYPTO_CAPTURE_TAR_OUTPUT, "bytes": len(capture_body),
+                "tar": {"logicalPath": capture_tar_logical,
+                        "name": capture_tar, "bytes": len(capture_body),
                         "sha256": sha(capture_body)},
-                "receipt": {"logicalPath": "crypto-release-sources.json",
-                            "name": CRYPTO_CAPTURE_RECEIPT_OUTPUT, "bytes": len(receipt_body),
+                "receipt": {"logicalPath": capture_receipt_logical,
+                            "name": capture_receipt, "bytes": len(receipt_body),
                             "sha256": sha(receipt_body)}}}
+
+
+def subtitle_source_outputs(archive):
+    return crypto_source_outputs(
+        archive, pins=SUBTITLE_SOURCE_OUTPUTS, profile=SUBTITLE_SOURCE_PROFILE,
+        capture_tar=SUBTITLE_CAPTURE_TAR_OUTPUT,
+        capture_receipt=SUBTITLE_CAPTURE_RECEIPT_OUTPUT,
+        capture_tar_logical="subtitle-release-sources.tar",
+        capture_receipt_logical="subtitle-release-sources.json",
+        identity_basis="fixed-sha256-from-upstream-release-metadata-or-maintained-android-pin",
+        receipt_schema=2, nanoseconds=True)
 
 
 def declared(rows, root, native=False):
@@ -1830,15 +1998,17 @@ def crypto_zip_file(catalog, target, name, limit=512 * MIB):
     return data
 
 
-def crypto_zip_catalog(zip_bodies):
-    expected_targets = {row[0] for row in CRYPTO_LIBRARIES}
+def crypto_zip_catalog(zip_bodies, libraries=None):
+    if libraries is None:
+        libraries = CRYPTO_LIBRARIES
+    expected_targets = {row[0] for row in libraries}
     need(set(zip_bodies) == expected_targets, "Retained crypto ZIP body set")
     expected_slices = {slice_name for _, _, slice_name in CRYPTO_MATRIX}
     expected_arches = {slice_name: sorted({arch for _, arch, candidate in CRYPTO_MATRIX
                                           if candidate == slice_name})
                        for slice_name in expected_slices}
     catalog = {}
-    for target, _, _, binary_name in CRYPTO_LIBRARIES:
+    for target, _, _, binary_name in libraries:
         body = zip_bodies[target]
         with io.BytesIO(body) as stream, zip_open(stream, 100000) as archive:
             rows = zip_index(archive, count=100000, total=4 * 1024**3)
@@ -2217,7 +2387,530 @@ def crypto_chain_receipt(body, zip_bodies, archive_sources,
     return value
 
 
-def apple(archive, native, captured, recipe, archive_sources):
+def subtitle_inline(row, label, budget, maximum=SUBTITLE_MAX_BODY):
+    keys(row, "bytes sha256 bodyBase64")
+    count, encoded = row["bytes"], row["bodyBase64"]
+    need(type(count) is int and 0 < count <= maximum and
+         isinstance(encoded, str) and
+         len(encoded) <= ((maximum + 2) // 3) * 4,
+         "Subtitle inline-body bound: " + label)
+    digest(row["sha256"])
+    try:
+        body = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error) as error:
+        raise ValueError("Subtitle inline body is not canonical base64: " + label) from error
+    need(base64.b64encode(body).decode("ascii") == encoded and
+         len(body) == count and sha(body) == row["sha256"],
+         "Subtitle inline raw-body identity: " + label)
+    budget[0] += len(body)
+    need(budget[0] <= SUBTITLE_MAX_INLINE_RAW,
+         "Subtitle aggregate raw-body cap")
+    return body
+
+
+def subtitle_text(body, label):
+    text = body.decode("utf-8", errors="strict")
+    need(text and "\x00" not in text, "Subtitle bounded text: " + label)
+    return text
+
+
+def subtitle_platform(platform, arch):
+    sdk_stem = {"ios": "iPhoneOS", "isimulator": "iPhoneSimulator",
+                "tvos": "AppleTVOS", "tvsimulator": "AppleTVSimulator",
+                "macos": "MacOSX"}[platform]
+    cpu = "x86_64" if arch == "x86_64" else "arm64"
+    target = {"ios": cpu + "-apple-ios15.0",
+              "isimulator": cpu + "-apple-ios15.0-simulator",
+              "tvos": cpu + "-apple-tvos15.0",
+              "tvsimulator": cpu + "-apple-tvos15.0-simulator",
+              "macos": cpu + "-apple-macos12.0"}[platform]
+    minimum = {"ios": "-mios-version-min=15.0",
+               "isimulator": "-mios-simulator-version-min=15.0",
+               "tvos": "-mtvos-version-min=15.0",
+               "tvsimulator": "-mtvos-simulator-version-min=15.0",
+               "macos": "-mmacosx-version-min=12.0"}[platform]
+    host = cpu + "-" + {"ios": "ios", "isimulator": "ios",
+                         "tvos": "tvos", "tvsimulator": "tvos",
+                         "macos": "apple"}[platform] + "-darwin"
+    subsystem = {"ios": "ios", "isimulator": "ios-simulator",
+                 "tvos": "tvos", "tvsimulator": "tvos-simulator",
+                 "macos": "macos"}[platform]
+    cpu_family = "x86_64" if arch == "x86_64" else "aarch64"
+    return sdk_stem, target, minimum, host, subsystem, cpu_family, cpu
+
+
+def subtitle_environment(value, work, library, platform, arch):
+    expected_keys = {"LC_CTYPE", "MAKEFLAGS", "CMAKE_BUILD_PARALLEL_LEVEL",
+                     "CARGO_BUILD_JOBS", "CC", "CXX", "CURRENT_ARCH", "CFLAGS",
+                     "CPPFLAGS", "CXXFLAGS", "ASMFLAGS", "LDFLAGS",
+                     "PKG_CONFIG_LIBDIR", "PKG_CONFIG_PATH", "PATH"}
+    need(type(value) is dict and set(value) == expected_keys and
+         all(isinstance(item, str) and len(item) <= 65536 and "\x00" not in item
+             for item in value.values()),
+         "Subtitle environment keys/text differ from BaseBuild")
+    sdk_stem, target, minimum, _, _, _, _ = subtitle_platform(platform, arch)
+    prefix = "-arch " + arch + " -isysroot "
+    suffix = " -target " + target + " " + minimum
+    fork = " -DHAVE_FORK=0" if platform in ("tvos", "tvsimulator") else ""
+    cflags = value["CFLAGS"]
+    need(cflags.startswith(prefix) and cflags.endswith(suffix + fork),
+         "Subtitle C flags differ from fixed platform policy")
+    sdk_root = cflags[len(prefix):len(cflags) - len(suffix + fork)]
+    sdk_pattern = (r".*/" + re.escape(sdk_stem) +
+                   r"\.platform/Developer/SDKs/" + re.escape(sdk_stem) +
+                   r"(?:[0-9]{1,3}(?:\.[0-9]{1,3}){0,3})?\.sdk")
+    need(sdk_root.startswith("/") and "\x00" not in sdk_root and
+         ".." not in Path(sdk_root).parts and
+         re.fullmatch(sdk_pattern, sdk_root) is not None,
+         "Subtitle SDK root differs from fixed platform")
+    build = work / "dist" / library / platform / "scratch" / arch
+    pkg_roots = [str(work / "dist" / name / platform / "thin" / arch /
+                     "lib/pkgconfig") for name in OPENSSL_PKG_LIBRARIES]
+    pkg_roots.append(str(build / "vortx-sdk-pkgconfig"))
+    expected = {"LC_CTYPE": "C", "MAKEFLAGS": "-j1",
+                "CMAKE_BUILD_PARALLEL_LEVEL": "1", "CARGO_BUILD_JOBS": "1",
+                "CC": "/usr/bin/clang", "CXX": "/usr/bin/clang++",
+                "CURRENT_ARCH": arch, "CFLAGS": cflags, "CPPFLAGS": cflags,
+                "CXXFLAGS": cflags, "ASMFLAGS": cflags,
+                "LDFLAGS": "-lc++ " + prefix + sdk_root + suffix,
+                "PKG_CONFIG_LIBDIR": ":".join(pkg_roots), "PKG_CONFIG_PATH": "",
+                "PATH": OPENSSL_DEFAULT_PATH}
+    need(exact_equal(value, expected),
+         "Subtitle environment differs from exact BaseBuild output")
+    return sdk_root, cflags, expected["LDFLAGS"]
+
+
+def subtitle_meson_cross(body, work, library, platform, arch,
+                         sdk_root, cflags, ldflags):
+    text = subtitle_text(body, "Meson cross file")
+    tools = {}
+    for name in ("ar", "strip"):
+        matches = re.findall(r"^" + name + r" = '([^']+)'$", text, re.M)
+        need(len(matches) == 1 and matches[0].startswith("/") and
+             ".." not in Path(matches[0]).parts and "\x00" not in matches[0] and
+             Path(matches[0]).name == name and len(matches[0]) <= 4096,
+             "Subtitle Meson cross-file SDK tool: " + name)
+        tools[name] = matches[0]
+    _, _, _, _, subsystem, cpu_family, cpu = subtitle_platform(platform, arch)
+    quoted_c = ", ".join("'" + item + "'" for item in cflags.split(" "))
+    quoted_ld = ", ".join("'" + item + "'" for item in ldflags.split(" "))
+    expected = """[binaries]
+c = '/usr/bin/clang'
+cpp = '/usr/bin/clang++'
+objc = '/usr/bin/clang'
+objcpp = '/usr/bin/clang++'
+ar = '{ar}'
+strip = '{strip}'
+pkg-config = 'pkg-config'
+
+[properties]
+has_function_printf = true
+has_function_hfkerhisadf = false
+
+[host_machine]
+system = 'darwin'
+subsystem = '{subsystem}'
+kernel = 'xnu'
+cpu_family = '{cpu_family}'
+cpu = '{cpu}'
+endian = 'little'
+
+[built-in options]
+default_library = 'static'
+buildtype = 'release'
+prefix = '{prefix}'
+c_args = [{cflags}]
+cpp_args = [{cflags}]
+objc_args = [{cflags}]
+objcpp_args = [{cflags}]
+c_link_args = [{ldflags}]
+cpp_link_args = [{ldflags}]
+objc_link_args = [{ldflags}]
+objcpp_link_args = [{ldflags}]""".format(
+        ar=tools["ar"], strip=tools["strip"], subsystem=subsystem,
+        cpu_family=cpu_family, cpu=cpu,
+        prefix=work / "dist" / library / platform / "thin" / arch,
+        cflags=quoted_c, ldflags=quoted_ld)
+    need(text.rstrip("\n") == expected,
+         "Subtitle Meson cross file differs from BaseBuild")
+
+
+def subtitle_build_options(body, library, prefix):
+    value = crypto_load(body)
+    need(type(value) is list and len(value) <= 10000,
+         "Subtitle Meson build-option set is unbounded")
+    options = {}
+    for row in value:
+        need(type(row) is dict and isinstance(row.get("name"), str) and
+             row["name"] not in options,
+             "Subtitle Meson build-option row is malformed or duplicate")
+        options[row["name"]] = row.get("value")
+    expected = {"default_library": "static", "buildtype": "release",
+                "prefix": str(prefix)}
+    for argument in SUBTITLE_ARGUMENTS[library]:
+        if argument == "--wrap-mode=nodownload":
+            expected["wrap_mode"] = "nodownload"
+        else:
+            name, raw = argument.removeprefix("-D").split("=", 1)
+            expected[name] = {"true": True, "false": False}.get(raw, raw)
+    need(all(name in options and exact_equal(options[name], item)
+             for name, item in expected.items()),
+         "Subtitle Meson effective options differ from fixed arguments")
+
+
+def subtitle_dependencies(body):
+    value = crypto_load(body)
+    need(type(value) is list and len(value) <= 10000,
+         "Subtitle Meson dependency set is unbounded")
+    text = json.dumps(value, sort_keys=True, separators=(",", ":")).casefold()
+    forbidden = ("freetype", "glib", "gobject", "cairo", "chafa", "libpng",
+                 "zlib", "icu", "graphite2", "fontations", "harfrust", "kbts",
+                 "wrapdb")
+    need(not any(re.search(r"(?<![a-z0-9_])" + re.escape(name) +
+                           r"(?![a-z0-9_])", text) for name in forbidden),
+         "Subtitle Meson dependency closure admits a disabled integration")
+
+
+def subtitle_compile_command(row, arch, sdk_root, target, minimum):
+    need(type(row) is dict and 0 < len(row) <= 16 and
+         all(isinstance(name, str) and name and len(name) <= 128 for name in row),
+         "Subtitle compile-command row is malformed or unbounded")
+    payloads = []
+    if "arguments" in row:
+        arguments = row["arguments"]
+        need(type(arguments) is list and 0 < len(arguments) <= 16384 and
+             all(isinstance(item, str) and item and len(item) <= 65536 and
+                 "\x00" not in item for item in arguments) and
+             sum(len(item) for item in arguments) <= 1024 * 1024,
+             "Subtitle compile-command arguments are malformed or unbounded")
+        payloads.append(arguments)
+    if "command" in row:
+        command = row["command"]
+        need(isinstance(command, str) and command and len(command) <= 1024 * 1024 and
+             "\x00" not in command,
+             "Subtitle compile-command text is malformed or unbounded")
+        try:
+            arguments = shlex.split(command, posix=True)
+        except ValueError as error:
+            raise ValueError("Subtitle compile-command text is not shell-tokenizable") from error
+        need(arguments and len(arguments) <= 16384 and
+             all(item and len(item) <= 65536 for item in arguments),
+             "Subtitle compile-command token set is malformed or unbounded")
+        payloads.append(arguments)
+    need(payloads, "Subtitle compile-command row has no command payload")
+    for arguments in payloads:
+        alternate = [item for item in arguments
+                     if ((item.startswith("-target") and item != "-target")
+                         or item.startswith("--target")
+                         or (item.startswith("-isysroot") and item != "-isysroot")
+                         or item.startswith("--sysroot"))]
+        need(not alternate,
+             "Subtitle compile-command has an alternate target/sysroot spelling")
+
+        def values(flag):
+            indexes = [index for index, item in enumerate(arguments) if item == flag]
+            need(all(index + 1 < len(arguments) for index in indexes),
+                 "Subtitle compile-command has an unterminated target flag")
+            return [arguments[index + 1] for index in indexes]
+
+        deployment = [item for item in arguments if re.fullmatch(
+            r"-(?:mios|mios-simulator|mtvos|mtvos-simulator|mmacosx)-version-min=.*",
+            item)]
+        arch_values = values("-arch")
+        sdk_values = values("-isysroot")
+        target_values = values("-target")
+        need(arch_values and all(item == arch for item in arch_values) and
+             sdk_values and all(item == sdk_root for item in sdk_values) and
+             target_values and all(item == target for item in target_values) and
+             deployment and all(item == minimum for item in deployment),
+             "Subtitle compile-command target flags differ from fixed policy")
+
+
+def subtitle_pc(body, library, prefix):
+    text = subtitle_text(body, "pkg-config metadata")
+    variables, fields = {}, {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line and (":" not in line or line.index("=") < line.index(":")):
+            name, item = line.split("=", 1)
+            target = variables
+        elif ":" in line:
+            name, item = line.split(":", 1)
+            target = fields
+        else:
+            need(False, "Subtitle pkg-config metadata has an unclassified line")
+        name, item = name.strip(), item.strip()
+        need(name and name not in target and "\x00" not in item,
+             "Subtitle pkg-config metadata has a duplicate field")
+        target[name] = item
+    need(variables.get("prefix") == str(prefix) and
+         fields.get("Version") == SUBTITLE_VERSIONS[library],
+         "Subtitle pkg-config prefix/version differs from fixed build")
+    need(not fields.get("Requires", "") and not fields.get("Requires.private", ""),
+         "Subtitle pkg-config unexpectedly admits another package dependency")
+    expected_lib = {"libunibreak": "-lunibreak", "libfribidi": "-lfribidi",
+                    "libharfbuzz": "-lharfbuzz"}[library]
+    need(expected_lib in fields.get("Libs", "").split(),
+         "Subtitle pkg-config library identity differs")
+
+
+def subtitle_header(body, library):
+    text = subtitle_text(body, "installed version header")
+    if library == "libunibreak":
+        definitions = re.findall(r"^[ \t]*#[ \t]*define[ \t]+UNIBREAK_VERSION\b[^\r\n]*$",
+                                 text, re.M)
+        versions = re.findall(
+            r"^[ \t]*#[ \t]*define[ \t]+UNIBREAK_VERSION[ \t]+"
+            r"(0[xX][0-9a-fA-F]+)[ \t]*"
+            r"(?:/\*(?:[^*\r\n]|\*(?!/)){0,4096}\*/[ \t]*)?$", text, re.M)
+        symbols = re.findall(r"^\s*extern\s+const\s+int\s+unibreak_version\s*;\s*$",
+                             text, re.M)
+        need(len(definitions) == 1 and versions == ["0x0800"] and len(symbols) == 1,
+             "Unibreak installed header version")
+    elif library == "libfribidi":
+        expected = {"FRIBIDI_MAJOR_VERSION": "1", "FRIBIDI_MINOR_VERSION": "0",
+                    "FRIBIDI_MICRO_VERSION": "17"}
+        for name, version in expected.items():
+            definitions = re.findall(r"^[ \t]*#[ \t]*define[ \t]+" +
+                                     re.escape(name) + r"\b[^\r\n]*$", text, re.M)
+            values = re.findall(r"^[ \t]*#[ \t]*define[ \t]+" + re.escape(name) +
+                                r"[ \t]+([0-9]+)[ \t]*$",
+                                text, re.M)
+            need(len(definitions) == 1 and values == [version],
+                 "FriBidi installed header version: " + name)
+        definitions = re.findall(
+            r"^[ \t]*#[ \t]*define[ \t]+FRIBIDI_VERSION\b[^\r\n]*$", text, re.M)
+        strings = re.findall(
+            r'^[ \t]*#[ \t]*define[ \t]+FRIBIDI_VERSION[ \t]+"([^"]+)"[ \t]*$',
+                             text, re.M)
+        need(len(definitions) == 1 and strings == ["1.0.17"],
+             "FriBidi installed header string version")
+    elif library == "libharfbuzz":
+        expected = {"HB_VERSION_MAJOR": "15", "HB_VERSION_MINOR": "0",
+                    "HB_VERSION_MICRO": "0"}
+        for name, version in expected.items():
+            definitions = re.findall(r"^[ \t]*#[ \t]*define[ \t]+" +
+                                     re.escape(name) + r"\b[^\r\n]*$", text, re.M)
+            values = re.findall(r"^[ \t]*#[ \t]*define[ \t]+" + re.escape(name) +
+                                r"[ \t]+([0-9]+)[ \t]*$",
+                                text, re.M)
+            need(len(definitions) == 1 and values == [version],
+                 "HarfBuzz installed header version: " + name)
+        definitions = re.findall(
+            r"^[ \t]*#[ \t]*define[ \t]+HB_VERSION_STRING\b[^\r\n]*$", text, re.M)
+        strings = re.findall(
+            r'^[ \t]*#[ \t]*define[ \t]+HB_VERSION_STRING[ \t]+"([^"]+)"[ \t]*$',
+                             text, re.M)
+        need(len(definitions) == 1 and strings == ["15.0.0"],
+             "HarfBuzz installed header string version")
+
+
+def subtitle_record_contract(record, work, library, platform, arch, budget):
+    expected_keys = {"schema", "library", "selector", "route", "platform", "arch",
+                     "sourceDirectory", "buildDirectory", "prefix", "arguments",
+                     "environment", "makeArguments", "generatedConfiguration",
+                     "installedIdentity", "compiled", "installed"}
+    need(type(record) is dict and set(record) == expected_keys,
+         "Subtitle build record keys differ from Swift producer")
+    source = work / "dist" / (library + "-" + SUBTITLE_SELECTORS[library])
+    build = work / "dist" / library / platform / "scratch" / arch
+    prefix = work / "dist" / library / platform / "thin" / arch
+    _, _, _, host, _, _, _ = subtitle_platform(platform, arch)
+    arguments = (("--host=" + host, "--with-pic", "--enable-static", "--disable-shared")
+                 if library == "libunibreak" else SUBTITLE_ARGUMENTS[library])
+    fixed = {"schema": 1, "library": library,
+             "selector": SUBTITLE_SELECTORS[library],
+             "route": SUBTITLE_ROUTES[library], "platform": platform, "arch": arch,
+             "sourceDirectory": str(source), "buildDirectory": str(build),
+             "prefix": str(prefix), "arguments": list(arguments),
+             "makeArguments": (list(SUBTITLE_MAKE_ARGUMENTS)
+                               if library == "libunibreak" else []),
+             "compiled": True, "installed": True}
+    need(all(exact_equal(record[name], item) for name, item in fixed.items()),
+         "Subtitle build record identity/options differ from fixed policy")
+    sdk_root, cflags, ldflags = subtitle_environment(
+        record["environment"], work, library, platform, arch)
+    generated_names = set(SUBTITLE_GENERATED[library])
+    if library == "libunibreak" and "config.h" in record["generatedConfiguration"]:
+        generated_names.add("config.h")
+    need(type(record["generatedConfiguration"]) is dict and
+         set(record["generatedConfiguration"]) == generated_names and
+         type(record["installedIdentity"]) is dict and
+         set(record["installedIdentity"]) == set(SUBTITLE_INSTALLED[library]),
+         "Subtitle generated/installed file set differs")
+    before = budget[0]
+    generated = {name: subtitle_inline(record["generatedConfiguration"][name],
+                                        library + "/" + name, budget)
+                 for name in sorted(generated_names)}
+    installed = {name: subtitle_inline(record["installedIdentity"][name],
+                                        library + "/" + name, budget)
+                 for name in SUBTITLE_INSTALLED[library]}
+    need(budget[0] - before <= SUBTITLE_MAX_RECORD_BODIES,
+         "Subtitle per-record nested raw-body cap")
+    if library == "libunibreak":
+        makefile = subtitle_text(generated["Makefile"], "libunibreak Makefile")
+        logs = (subtitle_text(generated["config.status"], "libunibreak config.status") +
+                "\n" + subtitle_text(generated["config.log"], "libunibreak config.log"))
+        assignments = {"CC": record["environment"]["CC"], "CFLAGS": cflags,
+                       "CPPFLAGS": cflags, "LDFLAGS": ldflags,
+                       "PACKAGE_VERSION": "8.0", "prefix": str(prefix)}
+        for name, expected in assignments.items():
+            modifier_lines = re.findall(
+                r"^[ \t]*(?:(?:override|export|private|unexport)[ \t]+)+" +
+                re.escape(name) + r"\b[^\r\n]*$", makefile, re.M)
+            assignment_lines = re.findall(
+                r"^[ \t]*" + re.escape(name) +
+                r"[ \t]*(?:::=|::=|:=|\+=|\?=|!=|=)[^\r\n]*$",
+                makefile, re.M)
+            values = re.findall(r"^[ \t]*" + re.escape(name) +
+                                r"[ \t]*=[ \t]*([^\r\n]*?)[ \t]*$",
+                                makefile, re.M)
+            need(not modifier_lines and len(assignment_lines) == 1 and
+                 values == [expected],
+                 "Libunibreak generated Makefile assignment differs: " + name)
+        need(all(argument in logs for argument in arguments),
+             "Libunibreak generated configuration differs from fixed release options")
+        if "config.h" in generated:
+            subtitle_text(generated["config.h"], "libunibreak config.h")
+    else:
+        subtitle_meson_cross(generated["crossFile.meson"], work, library, platform,
+                             arch, sdk_root, cflags, ldflags)
+        ninja = subtitle_text(generated["build.ninja"], library + " build.ninja")
+        need("ninja_required_version" in ninja and
+             re.search(r"(?i)(?:^|[\s=])(curl|wget)(?:\s|$)|git\s+clone|wrapdb",
+                       ninja) is None,
+             "Subtitle Ninja file lacks identity or admits a fetch route")
+        commands = crypto_load(generated["compile_commands.json"])
+        need(type(commands) is list and 0 < len(commands) <= 100000,
+             "Subtitle compile-command set is empty or unbounded")
+        _, target, minimum, _, _, _, _ = subtitle_platform(platform, arch)
+        for command in commands:
+            subtitle_compile_command(command, arch, sdk_root, target, minimum)
+        subtitle_build_options(
+            generated["meson-info/intro-buildoptions.json"], library, prefix)
+        subtitle_dependencies(generated["meson-info/intro-dependencies.json"])
+    header_name, pc_name = SUBTITLE_INSTALLED[library]
+    subtitle_header(installed[header_name], library)
+    subtitle_pc(installed[pc_name], library, prefix)
+    return installed
+
+
+def subtitle_record_body(row, expected_path, budget):
+    keys(row, "path bytes sha256 bodyBase64")
+    need(row["path"] == expected_path and path(row["path"]) == expected_path,
+         "Subtitle BOM build-record path")
+    inline = {name: row[name] for name in ("bytes", "sha256", "bodyBase64")}
+    return subtitle_inline(inline, "build record " + expected_path, budget,
+                           SUBTITLE_MAX_RECORD)
+
+
+def subtitle_builds_receipt(body, zip_bodies, subtitle_archive_sources):
+    """Independently bind the 27 raw build records to source and retained ZIP bytes."""
+    need(isinstance(body, bytes) and 0 < len(body) <= SUBTITLE_MAX_RECEIPT,
+         "Subtitle BOM raw-byte bound")
+    value = crypto_load(body)
+    keys(value, "schemaVersion profile sourceProfile versions selectors "
+                "releaseSourceBoundary rows retainedLibassCompatibility "
+                "runtimeSecurityTested promotionEligible")
+    fixed = {"schemaVersion": 1, "profile": NATIVE_UPGRADES_PROFILE,
+             "sourceProfile": SUBTITLE_SOURCE_PROFILE,
+             "versions": SUBTITLE_VERSIONS, "selectors": SUBTITLE_SELECTORS,
+             "retainedLibassCompatibility": "HOLD",
+             "runtimeSecurityTested": False, "promotionEligible": False}
+    need(all(exact_equal(value[name], item) for name, item in fixed.items()),
+         "Subtitle BOM identity/open-gate state")
+    rows = value["rows"]
+    need(type(rows) is list and len(rows) == len(SUBTITLE_MATRIX),
+         "Subtitle BOM exact nine-row matrix")
+
+    budget, records = [0], {}
+    observed = []
+    for row, identity in zip(rows, SUBTITLE_MATRIX, strict=True):
+        keys(row, "platform arch slice builds")
+        platform, arch, slice_name = identity
+        need(exact_equal({name: row[name] for name in ("platform", "arch", "slice")},
+                         {"platform": platform, "arch": arch, "slice": slice_name}),
+             "Subtitle BOM matrix order/identity")
+        builds = row["builds"]
+        need(type(builds) is dict and set(builds) == set(SUBTITLE_VERSIONS),
+             "Subtitle BOM build family")
+        for library in SUBTITLE_VERSIONS:
+            build = builds[library]
+            keys(build, "record")
+            expected_path = ("dist/" + library + "/" + platform + "/scratch/" +
+                             arch + "/vortx-subtitle-build.json")
+            record_body = subtitle_record_body(build["record"], expected_path, budget)
+            records[(platform, arch, library)] = crypto_load(record_body)
+        observed.append(identity)
+    need(observed == list(SUBTITLE_MATRIX), "Subtitle BOM matrix coverage")
+
+    first = records[(SUBTITLE_MATRIX[0][0], SUBTITLE_MATRIX[0][1], "libunibreak")]
+    source_name = first.get("sourceDirectory") if type(first) is dict else None
+    need(isinstance(source_name, str) and source_name.startswith("/") and
+         "\x00" not in source_name and ".." not in Path(source_name).parts,
+         "Subtitle BOM absolute WORK identity")
+    source = Path(source_name)
+    need(source.parent.name == "dist" and
+         source.name == "libunibreak-" + SUBTITLE_SELECTORS["libunibreak"],
+         "Subtitle BOM source root layout")
+    work = source.parent.parent
+
+    keys(subtitle_archive_sources, "profile roots capture")
+    need(subtitle_archive_sources["profile"] == SUBTITLE_SOURCE_PROFILE,
+         "Subtitle archive-source profile")
+    capture = subtitle_archive_sources["capture"]
+    keys(capture, "tar receipt")
+    source_receipt = capture["receipt"]
+    keys(source_receipt, "logicalPath name bytes sha256")
+    need(source_receipt["logicalPath"] == "subtitle-release-sources.json" and
+         source_receipt["name"] == SUBTITLE_CAPTURE_RECEIPT_OUTPUT and
+         type(source_receipt["bytes"]) is int and
+         0 < source_receipt["bytes"] <= CRYPTO_MAX_RECEIPT,
+         "Subtitle source receipt metadata")
+    digest(source_receipt["sha256"])
+    expected_boundary = {"path": "dist/subtitle-sources/receipt.json",
+                         "bytes": source_receipt["bytes"],
+                         "sha256": source_receipt["sha256"]}
+    keys(value["releaseSourceBoundary"], "path bytes sha256")
+    need(exact_equal(value["releaseSourceBoundary"], expected_boundary),
+         "Subtitle BOM/source-helper raw receipt correspondence")
+
+    catalog = crypto_zip_catalog(zip_bodies, SUBTITLE_LIBRARIES)
+    library_map = {target: binary_name
+                   for target, _, _, binary_name in SUBTITLE_LIBRARIES}
+    for platform, arch, slice_name in SUBTITLE_MATRIX:
+        for library in SUBTITLE_VERSIONS:
+            installed = subtitle_record_contract(
+                records[(platform, arch, library)], work, library, platform, arch, budget)
+            target = SUBTITLE_TARGETS[library]
+            binary_name = library_map[target]
+            framework = ("artifacts/" + target + ".xcframework/" + slice_name +
+                         "/" + binary_name + ".framework/")
+            # BaseBuild keeps Headers shallow on every platform; only the macOS
+            # binary/resources are moved under Versions/A and resolved by the
+            # existing bounded framework-layout validator below.
+            header_path = framework + "Headers/" + SUBTITLE_HEADERS[library]
+            zip_row, archive_name = crypto_zip_row(catalog, target, header_path)
+            header_name = SUBTITLE_INSTALLED[library][0]
+            recorded = records[(platform, arch, library)]["installedIdentity"][header_name]
+            need(recorded["bytes"] == zip_row["bytes"] and
+                 recorded["sha256"] == zip_row["sha256"] and
+                 installed[header_name] ==
+                 crypto_zip_file(catalog, target, archive_name, SUBTITLE_MAX_BODY),
+                 "Subtitle installed header/raw ZIP correspondence")
+            crypto_framework_layout(target, binary_name, slice_name, catalog)
+    need(budget[0] <= SUBTITLE_MAX_INLINE_RAW,
+         "Subtitle aggregate raw-body cap")
+    canonical = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    need(body == canonical and len(canonical) <= SUBTITLE_MAX_RECEIPT,
+         "Subtitle canonical final BOM bytes")
+    return value
+
+
+def apple(archive, native, captured, recipe, archive_sources,
+          subtitle_archive_sources):
     gate = read(archive, "apple-artifact-gate.txt", MIB).decode("utf-8")
     need("TLS VERIFY PASSED: 5 Apple slices and 9 architectures use SecureTransport" in gate.splitlines() and
          "MPVKit-DVFEL ARTIFACT VERIFY PASSED: FFmpeg 9.0.2 (libavcodec/libavformat 63.1.102), dovi_split, and Apple TLS gates" in gate.splitlines() and
@@ -2227,6 +2920,9 @@ def apple(archive, native, captured, recipe, archive_sources):
          "PASS apple-shaderc-receipt" in gate.splitlines() and
          "PASS " + CRYPTO_SOURCE_PROFILE + " verify" in gate.splitlines() and
          "PASS crypto-chain archive/public-symbol correspondence; native SMB/runtime gates OPEN" in gate.splitlines() and
+         "PASS " + SUBTITLE_SOURCE_PROFILE + " verify" in gate.splitlines() and
+         "PASS subtitle-profile " + SUBTITLE_SOURCE_PROFILE in gate.splitlines() and
+         "PASS apple-subtitle-receipt" in gate.splitlines() and
          "PASS apple-sent-abi" in gate.splitlines() and "PASS apple-reference-abi" in gate.splitlines() and
          "FAILED" not in gate, "Apple original, sent-request and finite-reader artifact gates")
     need("apple-shaderc-original-all.zip" in archive.namelist() and
@@ -2238,6 +2934,11 @@ def apple(archive, native, captured, recipe, archive_sources):
              {pin["output"] for pin in CRYPTO_SOURCE_OUTPUTS} |
              {CRYPTO_CAPTURE_TAR_OUTPUT, CRYPTO_CAPTURE_RECEIPT_OUTPUT, CRYPTO_CHAIN_OUTPUT}),
          "Missing crypto source/artifact receipt output")
+    need(all(name in archive.namelist() for name in
+             {pin["output"] for pin in SUBTITLE_SOURCE_OUTPUTS} |
+             {SUBTITLE_CAPTURE_TAR_OUTPUT, SUBTITLE_CAPTURE_RECEIPT_OUTPUT,
+              SUBTITLE_BUILD_OUTPUT}),
+         "Missing subtitle source/build receipt output")
     shaderc_sources = []
     retained_all_body = None
     for output_name, (source_name, expected_bytes, expected_sha256) in zip(
@@ -2256,12 +2957,14 @@ def apple(archive, native, captured, recipe, archive_sources):
                      recipe["scripts/native-media-hosted/evidence.py"], retained_all_rows)
     openssl_bom = load(read(archive, "apple-openssl-builds.json"))
     openssl_receipt(openssl_bom, recipe["scripts/native-media-hosted/evidence.py"])
+    subtitle_bom_body = read(archive, SUBTITLE_BUILD_OUTPUT, SUBTITLE_MAX_RECEIPT)
     candidate, actual = tar_index(archive, "apple-candidate.tar.gz", file_limit=512 * MIB, total=4 * 1024**3, capture=("MPVKit-DVFEL/Package.swift",), allow_dirs=True)
     zips, _ = tar_index(archive, "apple-original-library-zips.tar", compressed=False, file_limit=512 * MIB, total=4 * 1024**3, allow_dirs=True)
     need(set(zips) == {name + ".xcframework.zip" for name in LIBRARIES} and all(row["kind"] == "file" for row in zips.values()), "Apple original ZIP set")
     expected = {}
     openssl_zip_bodies = {}
     crypto_zip_bodies = {}
+    subtitle_zip_bodies = {}
     # Read each original ZIP through its authenticated tar member, without filesystem extraction.
     with archive.open("apple-original-library-zips.tar") as stream, tarfile.open(fileobj=stream, mode="r|") as libraries:
         for member in libraries:
@@ -2275,6 +2978,8 @@ def apple(archive, native, captured, recipe, archive_sources):
                 openssl_zip_bodies[base] = body
             if base in ("gmp", "nettle", "hogweed", "gnutls", "Libsmbclient"):
                 crypto_zip_bodies[base] = body
+            if base in ("Libunibreak", "Libfribidi", "Libharfbuzz"):
+                subtitle_zip_bodies[base] = body
             target = base if base in UNSUFFIXED_LIBRARIES else base + "-GPL"
             for name, row in rows.items():
                 need(name.startswith(base + ".xcframework/"), "Apple library root")
@@ -2285,6 +2990,8 @@ def apple(archive, native, captured, recipe, archive_sources):
         crypto_zip_bodies, archive_sources,
         candidate["MPVKit-DVFEL/Package.swift"],
         actual["MPVKit-DVFEL/Package.swift"])
+    subtitle_builds_receipt(
+        subtitle_bom_body, subtitle_zip_bodies, subtitle_archive_sources)
     for name, row in native.items():
         if any(name.startswith("source-0/Sources/" + value + "/") for value in ("_MPVKit", "_MPVKit-GPL", "_FFmpeg", "_FFmpeg-GPL")):
             expected["MPVKit-DVFEL/" + name.removeprefix("source-0/")] = row
@@ -2332,7 +3039,7 @@ def package(args):
             need(set(inputs) == expected and type(manifest) is dict and set(manifest) == expected - {"artifact-sha256.json", "build.log"}, "Exact original artifact membership/coverage")
             need(all(digest(value) == inputs[name]["sha256"] for name, value in manifest.items()), "Original manifest content")
             meta = load(read(archive, "source-format-v2.json"))
-            keys(meta, "schema sourceProfile lane appSourceCommit runId attempt workflowRef recipeManifestSHA256 legacyReceiptSHA256 producerArchive nativeArchive producerFiles sources archiveSources outputs")
+            keys(meta, "schema sourceProfile lane appSourceCommit runId attempt workflowRef recipeManifestSHA256 legacyReceiptSHA256 producerArchive nativeArchive producerFiles sources archiveSources subtitleArchiveSources outputs")
             need(type(meta["schema"]) is int and meta["schema"] == 2 and meta["sourceProfile"] == PROFILE and
                  all(meta[key] == receipt[key] for key in ("lane", "appSourceCommit", "runId", "attempt", "workflowRef")) and
                  meta["legacyReceiptSHA256"] == manifest["result.json"], "Exact v2 metadata identity")
@@ -2388,6 +3095,11 @@ def package(args):
             expected_archive_sources = crypto_source_outputs(archive) if args.lane == "apple" else None
             need(exact_equal(meta["archiveSources"], expected_archive_sources),
                  "Archive-backed source metadata/raw-body/capture correspondence")
+            expected_subtitle_archive_sources = (subtitle_source_outputs(archive)
+                                                 if args.lane == "apple" else None)
+            need(exact_equal(meta["subtitleArchiveSources"],
+                             expected_subtitle_archive_sources),
+                 "Subtitle archive-backed source metadata/raw-body/capture correspondence")
             for key, name, expected_rows in (("producerArchive", "producer-inputs-v2.tar.gz", producer), ("nativeArchive", "native-sources-v2.tar.gz", native)):
                 keys(meta[key], "name sha256 bytes")
                 need(meta[key] == dict(name=name, sha256=inputs[name]["sha256"], bytes=inputs[name]["bytes"]), "V2 archive identity")
@@ -2400,7 +3112,8 @@ def package(args):
                 need(row["name"] in OUTPUTS[args.lane] and row["name"] not in bound and row == dict(name=row["name"], sha256=inputs[row["name"]]["sha256"], bytes=inputs[row["name"]]["bytes"]), "Same-byte lane output binding")
                 bound[row["name"]] = row
             android(archive, inputs, recipe) if args.lane == "android" else apple(
-                archive, native, captured, recipe, expected_archive_sources)
+                archive, native, captured, recipe, expected_archive_sources,
+                expected_subtitle_archive_sources)
             out = args.out.absolute()
             need(out.parent.is_dir() and out.parent.resolve() == out.parent and not out.exists() and not out.is_symlink(), "Fresh real output parent")
             out.mkdir(mode=0o700, exist_ok=False)
@@ -2443,10 +3156,10 @@ def package(args):
                           "originalZIP": outputs["original-ci.zip"], "toolSHA256": sha(tool), "gitEntrypoint": git_tool, "sourceKitContent": content,
                           "sourceKitExcludedBinaryCarriers": {name: {key: inputs[name][key] for key in ("bytes", "sha256")} for name in sorted(excluded)},
                           "outputs": outputs, "nativeRebuilt": False, "independentBinaryInspection": False,
-                          "sourceCaptureScope": ("seven strict Git roots plus three independently reindexed archive-backed crypto release roots"
+                          "sourceCaptureScope": ("seven strict Git roots plus six independently reindexed archive-backed crypto and subtitle release roots"
                                                  if args.lane == "apple" else
                                                  "cached/nonignored native files and recursive Gitlinks; Android original full deps/config archives also retained"),
-                          "archiveSourceRootCount": 3 if args.lane == "apple" else 0,
+                          "archiveSourceRootCount": 6 if args.lane == "apple" else 0,
                           "unresolvedExternalSourceObligations": True,
                           "externalCIauthenticationRequired": True,
                           "originalCIReclassified": False,
