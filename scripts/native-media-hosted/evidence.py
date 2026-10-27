@@ -1482,7 +1482,8 @@ def _openssl_environment(value, platform, arch, sdk_root, source_directory, buil
     }[platform]
     common = '-arch ' + arch + ' -isysroot ' + sdk_root + ' -target ' + target + ' ' + minimum_flag
     cflags = common + (' -DHAVE_FORK=0' if platform in ('tvos', 'tvsimulator') else '')
-    if not (value['CFLAGS'] == value['CPPFLAGS'] == value['CXXFLAGS'] == value['ASMFLAGS'] == cflags
+    if not (value['CFLAGS'] == value['CXXFLAGS'] == cflags + ' -O3'
+            and value['CPPFLAGS'] == value['ASMFLAGS'] == cflags
             and value['LDFLAGS'] == '-lc++ ' + common):
         raise ValueError('OpenSSL compiler/linker flags differ from the fixed platform policy')
     source = Path(source_directory)

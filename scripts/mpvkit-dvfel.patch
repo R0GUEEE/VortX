@@ -325,7 +325,7 @@ diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScr
  }
  
  private class BuildUchardet: ZipBaseBuild {
-@@ -778,79 +885,972 @@
+@@ -778,79 +885,975 @@
  }
  
  
@@ -628,6 +628,9 @@ diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScr
 +                          userInfo: [NSLocalizedDescriptionKey: "Fresh OpenSSL build evidence directory required"])
 +        }
 +        var environ = environment(platform: platform, arch: arch)
++        let shippingFlags = cFlags(platform: platform, arch: arch).joined(separator: " ") + " -O3"
++        environ["CFLAGS"] = shippingFlags
++        environ["CXXFLAGS"] = shippingFlags
 +        environ["AR"] = platform.xcrunFind(tool: "ar").trimmingCharacters(in: .whitespacesAndNewlines)
 +        environ["RANLIB"] = platform.xcrunFind(tool: "ranlib").trimmingCharacters(in: .whitespacesAndNewlines)
 +        environ["ARFLAGS"] = "qc"
@@ -1319,7 +1322,7 @@ diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScr
      override func buildALL() throws {
          try super.buildALL()
  
-@@ -861,10 +1861,33 @@
+@@ -861,10 +1864,33 @@
      }
  }
  
@@ -1354,7 +1357,7 @@ diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScr
  }
  
  private class BuildUavs3d: ZipBaseBuild {
-@@ -879,10 +1902,55 @@
+@@ -879,10 +1905,55 @@
      }
  }
  

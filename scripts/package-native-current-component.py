@@ -23,7 +23,7 @@ import zipfile
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
 PROFILE = "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-subtitles-bluray150-candidate"
-PROFILE_MANIFEST_SHA256 = "3099d70b71283323fb8cfa283dd6fc9dcd9c77dbc3ebc0588164682fcb5511f7"
+PROFILE_MANIFEST_SHA256 = "6120ac816e69db14b5a8e91a33b83f680e36ea6e654e1618c905a22913638c7c"
 NATIVE_UPGRADES_PROFILE = "native-upgrades-openssl410-crypto-subtitles-bluray150-v6"
 SHADERC_WRAPPER_VERSION = "2026.1.0"
 SHADERC_REMOTE_URL = "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip"
@@ -1518,7 +1518,8 @@ def openssl_environment(value, platform, arch, sdk_root, source_directory, build
                     "macos": "-mmacosx-version-min=" + minimum}[platform]
     common = "-arch " + arch + " -isysroot " + sdk_root + " -target " + target + " " + minimum_flag
     cflags = common + (" -DHAVE_FORK=0" if platform in ("tvos", "tvsimulator") else "")
-    need(value["CFLAGS"] == value["CPPFLAGS"] == value["CXXFLAGS"] == value["ASMFLAGS"] == cflags and
+    need(value["CFLAGS"] == value["CXXFLAGS"] == cflags + " -O3" and
+         value["CPPFLAGS"] == value["ASMFLAGS"] == cflags and
          value["LDFLAGS"] == "-lc++ " + common,
          "OpenSSL compiler/linker flags differ from the fixed platform policy")
     source = Path(source_directory)

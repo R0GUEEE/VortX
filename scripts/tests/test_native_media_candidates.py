@@ -2232,7 +2232,8 @@ objcpp_link_args = [{ldflags}]
                               for library in consumer.OPENSSL_PKG_LIBRARIES]
                 pkg_config.append(build_directory + '/vortx-sdk-pkgconfig')
                 env = {'CC': '/usr/bin/clang', 'CXX': '/usr/bin/clang++',
-                       'CFLAGS': cflags, 'CPPFLAGS': cflags, 'CXXFLAGS': cflags,
+                       'CFLAGS': cflags + ' -O3', 'CPPFLAGS': cflags,
+                       'CXXFLAGS': cflags + ' -O3',
                        'ASMFLAGS': cflags, 'LDFLAGS': '-lc++ ' + common_flags,
                        'PKG_CONFIG_LIBDIR': ':'.join(pkg_config),
                        'PKG_CONFIG_PATH': '', 'PATH': consumer.OPENSSL_DEFAULT_PATH,
@@ -2299,7 +2300,8 @@ objcpp_link_args = [{ldflags}]
                               include_shaderc_receipt=True, missing_ssl=False,
                               missing_crypto=False, old_openssl_version=False,
                               wrong_openssl_source=False, forged_openssl=False,
-                              include_openssl_receipt=True, include_crypto_outputs=True,
+                              include_openssl_receipt=True, openssl_receipt_override=None,
+                              include_crypto_outputs=True,
                               include_crypto_chain=True, tamper_crypto_source=False,
                               include_subtitle_outputs=True, include_subtitle_builds=True,
                               tamper_subtitle_source=False, subtitle_equal_fake=False,
@@ -2417,10 +2419,12 @@ objcpp_link_args = [{ldflags}]
                     archive.writestr('apple-shaderc-inputs.json',
                                      json.dumps(shaderc_receipt_fixture()).encode())
                 if include_openssl_receipt:
-                    archive.writestr('apple-openssl-builds.json', json.dumps(
+                    openssl_value = (openssl_receipt_override if openssl_receipt_override is not None else
                         openssl_receipt_fixture(old_version=old_openssl_version,
                                                 wrong_source=wrong_openssl_source,
-                                                forge=forged_openssl)).encode())
+                                                forge=forged_openssl))
+                    archive.writestr('apple-openssl-builds.json',
+                                     (json.dumps(openssl_value, indent=2, sort_keys=True) + '\n').encode())
                 if include_crypto_outputs:
                     for output, body in crypto_sources['bodies'].items():
                         if tamper_crypto_source and output == 'apple-crypto-source-gmp.tar.xz':
@@ -3054,6 +3058,7 @@ objcpp_link_args = [{ldflags}]
 
         valid_openssl = openssl_receipt_fixture()
         consumer.openssl_receipt(valid_openssl, recipe['scripts/native-media-hosted/evidence.py'])
+        MODULE._openssl_receipt_shape(valid_openssl, recipe['scripts/native-media-hosted/evidence.py'])
         versioned_sdk = deepcopy(valid_openssl)
         versioned_row = versioned_sdk['matrix'][0]
         old_sdk = versioned_row['sdkRoot']
@@ -3068,6 +3073,58 @@ objcpp_link_args = [{ldflags}]
                 # with the SDK-bound environment in this positive case.
                 versioned_row['effectiveConfiguration'][key] = [updated]
         consumer.openssl_receipt(versioned_sdk, recipe['scripts/native-media-hosted/evidence.py'])
+        MODULE._openssl_receipt_shape(versioned_sdk, recipe['scripts/native-media-hosted/evidence.py'])
+
+        def openssl_flag_mutation(value, key, transform, *, effective_only=False):
+            row = value['matrix'][0]
+            if effective_only:
+                row['effectiveConfiguration'][key] = [transform(row['environment'][key])]
+            else:
+                row['environment'][key] = transform(row['environment'][key])
+                if key in row['effectiveConfiguration']:
+                    row['effectiveConfiguration'][key] = [row['environment'][key]]
+
+        # Freshly serialize every mutation and rebuild the enclosing ZIP, rather
+        # than breaking a body digest. Except for the explicit config-mismatch
+        # cases, environment and configdata flags stay mutually consistent; both
+        # readers must reject the compiler policy itself, and the complete Apple
+        # package path must reach that same rejection with coherent ZIP hashes.
+        optimization_cases = (
+            ('missing-C', 'CFLAGS', lambda flags: flags.removesuffix(' -O3'), False),
+            ('missing-CXX', 'CXXFLAGS', lambda flags: flags.removesuffix(' -O3'), False),
+            ('duplicate-C', 'CFLAGS', lambda flags: flags + ' -O3', False),
+            ('duplicate-CXX', 'CXXFLAGS', lambda flags: flags + ' -O3', False),
+            ('wrong-O2-C', 'CFLAGS', lambda flags: flags.removesuffix(' -O3') + ' -O2', False),
+            ('wrong-O2-CXX', 'CXXFLAGS', lambda flags: flags.removesuffix(' -O3') + ' -O2', False),
+            ('nontrailing-C', 'CFLAGS', lambda flags: '-O3 ' + flags.removesuffix(' -O3'), False),
+            ('nontrailing-CXX', 'CXXFLAGS', lambda flags: '-O3 ' + flags.removesuffix(' -O3'), False),
+            ('CPP-smuggling', 'CPPFLAGS', lambda flags: flags + ' -O3', False),
+            ('ASM-smuggling', 'ASMFLAGS', lambda flags: flags + ' -O3', False),
+            ('effective-C-mismatch', 'CFLAGS', lambda flags: flags.removesuffix(' -O3'), True),
+            ('effective-CXX-mismatch', 'CXXFLAGS', lambda flags: flags.removesuffix(' -O3'), True),
+        )
+        valid_openssl_body = (json.dumps(valid_openssl, indent=2, sort_keys=True) + '\n').encode()
+        for label, key, transform, effective_only in optimization_cases:
+            observed = deepcopy(valid_openssl)
+            openssl_flag_mutation(observed, key, transform, effective_only=effective_only)
+            body = (json.dumps(observed, indent=2, sort_keys=True) + '\n').encode()
+            body_sha256 = hashlib.sha256(body).hexdigest()
+            self.assertNotEqual(body_sha256, hashlib.sha256(valid_openssl_body).hexdigest(), label)
+            rejection = ('OpenSSL effective make flags differ from the fixed environment'
+                         if effective_only else
+                         'OpenSSL compiler/linker flags differ from the fixed platform policy')
+            for reader_name, reader in (('producer', MODULE._openssl_receipt_shape),
+                                        ('consumer', consumer.openssl_receipt)):
+                with self.subTest(openssl_optimization=label, reader=reader_name):
+                    with self.assertRaisesRegex(ValueError, rejection):
+                        reader(json.loads(body), recipe['scripts/native-media-hosted/evidence.py'])
+            with self.subTest(openssl_optimization=label, reader='apple-package'):
+                with candidate_archive(openssl_receipt_override=observed) as fixture, \
+                        zipfile.ZipFile(fixture) as archive:
+                    self.assertEqual(hashlib.sha256(archive.read('apple-openssl-builds.json')).hexdigest(),
+                                     body_sha256)
+                    with self.assertRaisesRegex(ValueError, rejection):
+                        check_apple(archive)
         for index, sdk_mutation in enumerate((
                 lambda row: row.update(sdkRoot=row['sdkRoot'].replace('iPhoneOS.sdk', 'AppleTVOS.sdk')),
                 lambda row: row.update(sdkRoot=row['sdkRoot'].replace('iPhoneOS.sdk', 'iPhoneOS26.a.sdk')),

@@ -30,6 +30,60 @@ fail() {
   exit 1
 }
 
+# This mode exercises profile dispatch without a native build, compiler, SDK,
+# receipt import or package fixture. A nonexistent TMPDIR also proves retirement
+# precedes temporary-file creation, as well as package and receipt path checks.
+retired_profile_contracts() (
+  fixture="$(mktemp -d)"
+  trap 'rm -rf "$fixture"' EXIT
+  for version in v3 v4 v5; do
+    case "$version" in
+      v3) profile=native-upgrades-openssl410-v3 ;;
+      v4) profile=native-upgrades-openssl410-crypto-v4 ;;
+      v5) profile=native-upgrades-openssl410-crypto-subtitles-v5 ;;
+    esac
+    for form in compact complete; do
+      args=("$fixture/missing-package" --dependency-profile "$profile")
+      if [ "$form" = complete ]; then
+        args+=(--shaderc-inputs "$fixture/missing-shaderc" --openssl-builds "$fixture/missing-openssl.json")
+        if [ "$version" != v3 ]; then args+=(--crypto-work "$fixture/missing-crypto"); fi
+      fi
+      if TMPDIR="$fixture/missing-temp-root" /bin/bash "$VERIFY" "${args[@]}" >"$fixture/$version-$form.log" 2>&1; then
+        fail "$version/$form historical prototype was accepted"
+      fi
+      expected="MPVKit-DVFEL ARTIFACT VERIFY FAILED: historical $version prototype requires its frozen historical verifier; select the explicit bluray150 v6 profile for the four-source candidate"
+      [ "$(cat "$fixture/$version-$form.log")" = "$expected" ] ||
+        fail "$version/$form did not retire before artifact, receipt and temporary-file checks"
+    done
+  done
+  # Retiring prototypes must not intercept the default, v1/v2, or active v6 API.
+  for profile in shipping libplacebo-7.387.0-lcms2.20rc1-source-v1 native-upgrades-dav1d154-shaderc20261-hb150-v2 native-upgrades-openssl410-crypto-subtitles-bluray150-v6; do
+    args=("$fixture/missing-package")
+    if [ "$profile" != shipping ]; then args+=(--dependency-profile "$profile"); fi
+    if [ "$profile" = native-upgrades-dav1d154-shaderc20261-hb150-v2 ] ||
+       [ "$profile" = native-upgrades-openssl410-crypto-subtitles-bluray150-v6 ]; then
+      args+=(--shaderc-inputs "$fixture/missing-shaderc")
+    fi
+    if [ "$profile" = native-upgrades-openssl410-crypto-subtitles-bluray150-v6 ]; then
+      args+=(--openssl-builds "$fixture/missing-openssl.json" --crypto-work "$fixture/missing-crypto")
+    fi
+    if /bin/bash "$VERIFY" "${args[@]}" >"$fixture/current.log" 2>&1; then
+      fail "$profile accepted a missing package"
+    fi
+    [ "$(cat "$fixture/current.log")" = "MPVKit-DVFEL ARTIFACT VERIFY FAILED: missing package manifest: $fixture/missing-package/Package.swift" ] ||
+      fail "$profile did not retain its current package dispatch"
+  done
+)
+
+if [ "${1:-}" = --retired-profiles-only ]; then
+  [ "$#" -eq 1 ] || fail "usage: test-mpvkit-dvfel-artifact-contracts.sh [--retired-profiles-only]"
+  retired_profile_contracts
+  echo "PASS: retired v3/v4/v5 reject before artifact checks; shipping/v1/v2/v6 dispatch retained"
+  exit 0
+fi
+[ "$#" -eq 0 ] || fail "usage: test-mpvkit-dvfel-artifact-contracts.sh [--retired-profiles-only]"
+retired_profile_contracts
+
 for file in "$BUILD" "$PATCH" "$REFERENCE_PATCH" "$CANCEL_PATCH" "$RESPONSE_PATCH" "$GENERATION_PATCH" "$OBSERVATION_PATCH" "$SENT_FFMPEG_PATCH" "$SENT_MPV_PATCH" "$PREFIX_PATCH" "$TRANSPORT_FFMPEG_PATCH" "$TRANSPORT_MPV_PATCH" "$READER_FFMPEG_PATCH" "$READER_MPV_PATCH" "$CONSTRUCTOR_PATCH" "$PUBLICATION_PATCH" "$EDITION_PATCH" "$VERIFY" "$WORKFLOW"; do
   [ -f "$file" ] || fail "missing required source: $file"
 done
@@ -73,7 +127,7 @@ grep -Fq 'patch neither applies cleanly nor is already applied' "$PATCH" || fail
 
 # The next fixed dependency profile retains the shipping verifier and requires
 # a source-built dav1d framework plus the two pinned Shaderc input bodies/receipt.
-grep -Fq 'native-upgrades-dav1d154-shaderc20261-hb150-v2' "$BUILD" || fail "next candidate profile missing"
+grep -Fq 'native-upgrades-dav1d154-shaderc20261-hb150-v2' "$VERIFY" || fail "v2 verifier profile missing"
 grep -Fq 'for library in Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient Libunibreak Libfribidi Libharfbuzz Libbluray; do' "$BUILD" || fail "combined candidate must require all twenty-two fresh ZIPs"
 grep -Fq 'apple-shaderc-inputs "$WORK"' "$BUILD" || fail "Shaderc inputs must be compared before acceptance"
 grep -Fq 'private class BuildDav1d: BaseBuild' "$PATCH" || fail "dav1d must use exact source build route"
@@ -87,7 +141,7 @@ grep -Fq 'apple-shaderc-receipt "$SHADERC_INPUTS"' "$VERIFY" || fail "candidate 
 grep -Fq 'dav1d_version_api' "$VERIFY" || fail "dav1d identity gate missing actual code check"
 
 # The combined crypto profile is opt-in and keeps the helper/source closure explicit. The default
-# shipping branch and historical candidate profiles must continue to parse without these inputs.
+# shipping branch and v1/v2 candidate APIs retain their existing inputs.
 grep -Fq 'native-upgrades-openssl410-crypto-subtitles-bluray150-v6' "$BUILD" || fail "combined source profile missing"
 grep -Fq 'native-upgrades-openssl410-crypto-v4' "$VERIFY" || fail "combined verifier profile missing"
 grep -Fq 'native-upgrades-crypto-chain-v1' "$BUILD" || fail "subordinate crypto capture profile missing"
@@ -144,7 +198,9 @@ grep -Fq 'apple-subtitle-source-harfbuzz.tar.xz' "$ROOT/scripts/native-media-hos
 grep -Fq 'apple-subtitle-builds.json' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted subtitle build receipt output missing"
 grep -Fq 'dist/subtitle-builds/vortx-subtitle-builds.json' "$ROOT/scripts/native-media-hosted/build.sh" || fail "hosted subtitle build receipt input path differs"
 
-# v6 is a new schema; the unshipped v5 prototype must not be reinterpreted.
+# v6 is a new schema; unshipped v3/v4/v5 prototypes must not be reinterpreted.
+grep -Fq 'historical v3 prototype requires its frozen historical verifier' "$VERIFY" || fail "v3 must fail with its historical API scope"
+grep -Fq 'historical v4 prototype requires its frozen historical verifier' "$VERIFY" || fail "v4 must fail with its historical API scope"
 grep -Fq 'historical v5 prototype requires its frozen historical verifier' "$VERIFY" || fail "v5 must fail with its historical API scope"
 grep -Fq 'subtitle-sources-v3' "$BUILD" || fail "caller must bind the four-member state path"
 grep -Fq 'extend-bluray "$WORK" "$stage"' "$BUILD" || fail "fixed legacy-three extension path missing"
@@ -163,6 +219,9 @@ grep -Fq 'apple-bluray-source.tar.xz' "$ROOT/scripts/native-media-hosted/build.s
 grep -Fq 'private class BuildOpenSSL: BaseBuild' "$PATCH" || fail "OpenSSL must use source route"
 grep -Fq 'static let opensslPinnedSHA = "2f4e3a5fec05394068cfa7379890ab552483a8a6"' "$PATCH" || fail "OpenSSL source pin differs"
 grep -Fq 'vortx-openssl-target.conf' "$PATCH" || fail "OpenSSL target configuration missing"
+grep -Fq '+        let shippingFlags = cFlags(platform: platform, arch: arch).joined(separator: " ") + " -O3"' "$PATCH" || fail "OpenSSL must restore the upstream release optimization explicitly"
+grep -Fq '+        environ["CFLAGS"] = shippingFlags' "$PATCH" || fail "OpenSSL C flags must include release optimization"
+grep -Fq '+        environ["CXXFLAGS"] = shippingFlags' "$PATCH" || fail "OpenSSL C++ flags must include release optimization"
 grep -Fq '"build_sw"' "$PATCH" || fail "OpenSSL software build phase missing"
 grep -Fq '"install_sw"' "$PATCH" || fail "OpenSSL software install phase missing"
 grep -Fq 'arguments: ["-j1", "build_sw"]' "$PATCH" || fail "new OpenSSL build must use jobs one"

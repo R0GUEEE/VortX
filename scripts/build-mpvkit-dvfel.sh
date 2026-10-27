@@ -619,9 +619,10 @@ for sparse_header in "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_sparse
 done
 cmp -s "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_sparse.h" "$MPV_OBSERVATION_SOURCE/stream/vortx_reference_sparse.h" || fail "private sparse headers disagree"
 
-# Assembly reads the per-library release ZIP, not slice scratch directories. Historical
-# native-upgrades-dav1d154-shaderc20261-hb150-v2, native-upgrades-openssl410-v3 and the
-# crypto-v4 verifier profiles remain readable; v5 is an unshipped historical API.
+# Assembly reads the per-library release ZIP, not slice scratch directories. Default
+# shipping and v1/v2 verifier APIs retain their contracts. The unshipped v3/v4/v5
+# cuts remain archival-readable through their own frozen historical verifiers;
+# the current verifier explicitly retires those profiles.
 # This caller selects the explicit four-source bluray v6 contract below.
 # Refuse to package a stale ZIP after an interrupted or incorrectly cached run.
 # Libmpv must be fresh too: a rebuilt FFmpeg archive alone cannot carry the

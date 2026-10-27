@@ -9,8 +9,6 @@ set -euo pipefail
 PKG="${1:?usage: verify-mpvkit-dvfel-artifacts.sh <MPVKit-DVFEL-package-dir>}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACTS="$PKG/artifacts"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
 
 fail() {
   echo "MPVKit-DVFEL ARTIFACT VERIFY FAILED: $*" >&2
@@ -19,7 +17,16 @@ fail() {
 
 # The default contract stays compatible with the currently selected shipping package.
 # A candidate must select this exact dependency profile; unknown arguments fail closed.
-# v5 was an unshipped three-source prototype. Its receipt/body schema is not v6.
+# The unshipped v3/v4/v5 prototypes retain their frozen historical readers. They
+# must fail before package checks or temporary files can dispatch a current reader.
+if [ "${2:-}" = --dependency-profile ] &&
+   [ "${3:-}" = native-upgrades-openssl410-v3 ]; then
+  fail "historical v3 prototype requires its frozen historical verifier; select the explicit bluray150 v6 profile for the four-source candidate"
+fi
+if [ "${2:-}" = --dependency-profile ] &&
+   [ "${3:-}" = native-upgrades-openssl410-crypto-v4 ]; then
+  fail "historical v4 prototype requires its frozen historical verifier; select the explicit bluray150 v6 profile for the four-source candidate"
+fi
 if [ "${2:-}" = --dependency-profile ] &&
    [ "${3:-}" = native-upgrades-openssl410-crypto-subtitles-v5 ]; then
   fail "historical v5 prototype requires its frozen historical verifier; select the explicit bluray150 v6 profile for the four-source candidate"
@@ -58,6 +65,9 @@ elif [ "$#" -eq 9 ] && [ "$2" = --dependency-profile ] &&
 elif [ "$#" -ne 1 ]; then
   fail "usage: verify-mpvkit-dvfel-artifacts.sh PACKAGE [--dependency-profile FIXED_PROFILE [--shaderc-inputs DIRECTORY] [--openssl-builds FILE] [--crypto-work WORK]]"
 fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 
 [ -f "$PKG/Package.swift" ] || fail "missing package manifest: $PKG/Package.swift"
 [ -d "$ARTIFACTS" ] || fail "missing artifact directory: $ARTIFACTS"
