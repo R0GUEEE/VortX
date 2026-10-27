@@ -150,7 +150,9 @@ jobs:
           APP="app/build/ci-mac-universal/Build/Products/Release/VortX.app"
           test -d "$APP" || { echo '::error::no VortX.app produced'; exit 1; }
           BIN="$APP/Contents/MacOS/VortX"
-          file "$BIN" | grep -q 'Mach-O 64-bit executable' || { echo '::error::app executable is not a 64-bit Mach-O'; exit 1; }
+          # `file` reports a universal binary as "Mach-O universal binary with N architectures", so
+          # only the Mach-O family is asserted here; the per-arch check is lipo's job below.
+          file "$BIN" | grep -q 'Mach-O' || { echo '::error::app executable is not Mach-O'; exit 1; }
           ARCHS_FOUND="$(lipo -archs "$BIN")"
           echo "app executable archs: $ARCHS_FOUND"
           for want in $BUILD_ARCHS; do
