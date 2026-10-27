@@ -40,7 +40,7 @@ jobs:
       - name: Verify reviewed recipes
         run: |
           set -euo pipefail
-          printf '%s  %s\n' 3e602f2500e149a0f5c40138af2288c0842fe4c872bf1a1ad16b8bc45cafc1c0 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
+          printf '%s  %s\n' 7e4df080afe654dc89a8c6e74c58c44643d76723f8496cca8a51da19784167e7 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
           shasum -a 256 -c scripts/native-media-hosted/inputs.sha256
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -86,7 +86,7 @@ jobs:
       - name: Verify reviewed recipes
         run: |
           set -euo pipefail
-          printf '%s  %s\n' 3e602f2500e149a0f5c40138af2288c0842fe4c872bf1a1ad16b8bc45cafc1c0 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
+          printf '%s  %s\n' 7e4df080afe654dc89a8c6e74c58c44643d76723f8496cca8a51da19784167e7 scripts/native-media-hosted/inputs.sha256 | shasum -a 256 -c -
           shasum -a 256 -c scripts/native-media-hosted/inputs.sha256
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

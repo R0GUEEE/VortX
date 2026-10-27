@@ -2087,8 +2087,9 @@ def _subtitle_pc(body, library, prefix):
     if variables.get('prefix') != str(prefix) or fields.get('Version') != SUBTITLE_VERSIONS[library]:
         raise ValueError('subtitle pkg-config prefix/version differs from the fixed build')
     if library == 'libbluray':
-        required = re.sub(r'\s+>=\s+[0-9]+(?:\.[0-9]+){0,3}', '', fields.get('Requires.private', ''))
-        if (fields.get('Requires', '') or sorted(required.replace(',', ' ').split()) != ['freetype2', 'libxml-2.0']
+        # Meson exposes static-library dependencies publicly; require that exact closure.
+        if (re.fullmatch(r'freetype2,[ \t]+libxml-2\.0[ \t]+>=[ \t]+2\.6', fields.get('Requires', '')) is None
+                or 'Requires.private' in fields
                 or any(item in text for item in ('-ludfread', '/opt/homebrew', '/usr/local/', 'fontconfig'))):
             raise ValueError('libbluray pkg-config dependency closure differs')
     elif fields.get('Requires', '') or fields.get('Requires.private', ''):

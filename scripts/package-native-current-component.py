@@ -23,7 +23,7 @@ import zipfile
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
 PROFILE = "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-subtitles-bluray150-candidate"
-PROFILE_MANIFEST_SHA256 = "3e602f2500e149a0f5c40138af2288c0842fe4c872bf1a1ad16b8bc45cafc1c0"
+PROFILE_MANIFEST_SHA256 = "7e4df080afe654dc89a8c6e74c58c44643d76723f8496cca8a51da19784167e7"
 NATIVE_UPGRADES_PROFILE = "native-upgrades-openssl410-crypto-subtitles-bluray150-v6"
 SHADERC_WRAPPER_VERSION = "2026.1.0"
 SHADERC_REMOTE_URL = "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip"
@@ -2800,8 +2800,9 @@ def subtitle_pc(body, library, prefix):
          fields.get("Version") == SUBTITLE_VERSIONS[library],
          "Subtitle pkg-config prefix/version differs from fixed build")
     if library == 'libbluray':
-        required = re.sub(r'\s+>=\s+[0-9]+(?:\.[0-9]+){0,3}', '', fields.get('Requires.private', ''))
-        need(not fields.get('Requires', '') and sorted(required.replace(',', ' ').split()) == ['freetype2', 'libxml-2.0']
+        # Meson exposes static-library dependencies publicly; require that exact closure.
+        need(re.fullmatch(r'freetype2,[ \t]+libxml-2\.0[ \t]+>=[ \t]+2\.6', fields.get('Requires', '')) is not None
+             and 'Requires.private' not in fields
              and not any(item in text for item in ('-ludfread', '/opt/homebrew', '/usr/local/', 'fontconfig')),
              'Libbluray pkg-config dependency closure differs')
     else:

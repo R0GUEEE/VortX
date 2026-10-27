@@ -2039,14 +2039,14 @@ objcpp_link_args = [{ldflags}]
                             return header
                         if relative == pc_path:
                             package_name = target.removeprefix('Lib')
-                            private = ('Requires.private: freetype2 libxml-2.0\n'
+                            requires = ('Requires: freetype2, libxml-2.0 >=  2.6\n'
                                        if library == 'libbluray' else '')
                             return (('prefix=' + prefix + '\n' +
                                      'exec_prefix=${prefix}\nlibdir=${prefix}/lib\n'
                                      'includedir=${prefix}/include\nName: ' + package_name +
                                      '\nVersion: ' + consumer.SUBTITLE_VERSIONS[library] +
                                      '\nLibs: -L${libdir} -l' + package_name.lower() +
-                                     '\nCflags: -I${includedir}\n' + private).encode())
+                                     '\nCflags: -I${includedir}\n' + requires).encode())
                 raise AssertionError('unknown subtitle installed identity ' + library + '/' + relative)
 
             def build_value(library, platform, arch):
@@ -2721,6 +2721,52 @@ objcpp_link_args = [{ldflags}]
                 row['builds']['libbluray']['record']['bodyBase64']))
             MODULE._subtitle_record_contract(bluray_record, Path('/fixture/work'), 'libbluray',
                                              row['platform'], row['arch'], [0])
+
+        # Real Meson static layout, including its public dependency/version spelling.
+        real_pc_prefix = Path('/fixture/work/dist/libbluray/macos/thin/arm64')
+        real_static_pc = (
+            'prefix=' + str(real_pc_prefix) + '\n'
+            'includedir=${prefix}/include\nlibdir=${prefix}/lib\n\n'
+            'Name: libbluray\nDescription: library supporting Blu-ray playback\n'
+            'Version: 1.5.0\nRequires: freetype2, libxml-2.0 >=  2.6\n'
+            'Libs: -L${libdir} -lbluray -framework CoreFoundation -framework DiskArbitration\n'
+            'Cflags: -I${includedir}\n').encode()
+        MODULE._subtitle_pc(real_static_pc, 'libbluray', real_pc_prefix)
+        consumer.subtitle_pc(real_static_pc, 'libbluray', real_pc_prefix)
+        public_requires = b'Requires: freetype2, libxml-2.0 >=  2.6\n'
+        for name, replacement in (
+                ('private-only', b'Requires.private: freetype2 libxml-2.0 >= 2.6\n'),
+                ('split-public-private', b'Requires: freetype2\nRequires.private: libxml-2.0 >= 2.6\n'),
+                ('private-extra', public_requires + b'Requires.private: host-package\n'),
+                ('private-empty', public_requires + b'Requires.private:\n'),
+                ('duplicate-field', public_requires + public_requires),
+                ('duplicate-package', b'Requires: freetype2, freetype2, libxml-2.0 >= 2.6\n'),
+                ('missing-freetype', b'Requires: libxml-2.0 >= 2.6\n'),
+                ('missing-xml', b'Requires: freetype2\n'),
+                ('missing-xml-version', b'Requires: freetype2, libxml-2.0\n'),
+                ('wrong-xml-version', b'Requires: freetype2, libxml-2.0 >= 2.7\n'),
+                ('wrong-xml-operator', b'Requires: freetype2, libxml-2.0 <= 2.6\n'),
+                ('extra-dependency', public_requires.rstrip(b'\n') + b', libudfread\n'),
+                ('host-dependency', public_requires.rstrip(b'\n') + b', host-package\n'),
+                ('host-path', public_requires.rstrip(b'\n') + b', /opt/homebrew/lib/pkgconfig/host.pc\n')):
+            with self.subTest(bluray_static_pc=name):
+                changed = real_static_pc.replace(public_requires, replacement)
+                self.assertNotEqual(changed, real_static_pc)
+                with self.assertRaises(ValueError):
+                    MODULE._subtitle_pc(changed, 'libbluray', real_pc_prefix)
+                with self.assertRaises(ValueError):
+                    consumer.subtitle_pc(changed, 'libbluray', real_pc_prefix)
+                # Rehash both installed bytes and their containing real-shape record.
+                body = subtitle_body_with_installed_mutation(
+                    lambda old, replacement=replacement: old.replace(public_requires, replacement),
+                    library='libbluray', header='lib/pkgconfig/libbluray.pc')
+                record = json.loads(base64.b64decode(
+                    json.loads(body)['rows'][0]['builds']['libbluray']['record']['bodyBase64']))
+                with self.assertRaises(ValueError):
+                    consumer.subtitle_builds_receipt(body, subtitle_zip_bodies, subtitle_archive_source_rows)
+                with self.assertRaises(ValueError):
+                    MODULE._subtitle_record_contract(record, Path('/fixture/work'), 'libbluray',
+                                                     'ios', 'arm64', [0])
 
         def change_bluray_compile_role(rows, key, replacement):
             row = rows[0]
