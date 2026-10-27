@@ -1503,7 +1503,7 @@ diff --git a/Sources/BuildScripts/XCFrameworkBuild/base.swift b/Sources/BuildScr
 index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883c423d9de 100644
 --- a/Sources/BuildScripts/XCFrameworkBuild/base.swift
 +++ b/Sources/BuildScripts/XCFrameworkBuild/base.swift
-@@ -90,6 +90,124 @@
+@@ -90,6 +90,130 @@
      }
  }
  
@@ -1568,6 +1568,10 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883
 +
 +    static func prepare(sdkRoot: URL, buildRoot: URL) throws -> URL {
 +        guard sdkRoot.isFileURL, buildRoot.isFileURL else { throw fail("Target SDK metadata requires file URLs") }
++        let selectedSDK = sdkRoot.standardizedFileURL
++        guard selectedSDK.pathExtension == "sdk",
++              selectedSDK.path.rangeOfCharacter(from: .controlCharacters) == nil,
++              !selectedSDK.path.contains("$") else { throw fail("Metadata requires a representable selected SDK path") }
 +        let sdk = sdkRoot.resolvingSymlinksInPath().standardizedFileURL
 +        guard sdk.pathExtension == "sdk", sdk.path.rangeOfCharacter(from: .controlCharacters) == nil,
 +              !sdk.path.contains("$") else { throw fail("Metadata requires the selected target SDK") }
@@ -1577,7 +1581,9 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883
 +        let xmlVersion = try version("LIBXML_DOTTED_VERSION", header: sdkData("usr/include/libxml2/libxml/xmlversion.h", root: sdk, limit: 262144))
 +        try validateStub("usr/lib/libz.tbd", installName: "/usr/lib/libz.1.dylib", root: sdk)
 +        try validateStub("usr/lib/libxml2.tbd", installName: "/usr/lib/libxml2.2.dylib", root: sdk)
-+        let include = sdk.appendingPathComponent("usr/include/libxml2").path
++        // Validate SDK inputs through the canonical root, but keep the selected
++        // spelling in compiler metadata so it matches the target CFLAGS sysroot.
++        let include = selectedSDK.appendingPathComponent("usr/include/libxml2").path
 +            .replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
 +        let contents = [
 +            "zlib.pc": "Name: zlib\nDescription: Target Apple SDK zlib\nVersion: \(zlibVersion)\nLibs: -lz\nCflags:\n",
@@ -1628,7 +1634,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883
  class BaseBuild {
      static let defaultPath = "/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
      static var platforms = PlatformType.allCases
-@@ -152,7 +270,13 @@
+@@ -152,7 +276,13 @@
  
      func afterBuild() throws {
          try verifyMinVersions()
@@ -1643,7 +1649,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883
      }
  
      private func verifyMinVersions() throws {
-@@ -228,7 +352,8 @@
+@@ -228,7 +358,8 @@
      func build(platform: PlatformType, arch: ArchType) throws {
          let buildURL = scratch(platform: platform, arch: arch)
          try? FileManager.default.createDirectory(at: buildURL, withIntermediateDirectories: true, attributes: nil)
@@ -1653,7 +1659,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883
          if FileManager.default.fileExists(atPath: (directoryURL + "meson.build").path) {
              if Utility.shell("which meson") == nil {
                  Utility.shell("brew install meson")
-@@ -241,18 +366,18 @@
+@@ -241,18 +372,18 @@
              let crossFile = createMesonCrossFile(platform: platform, arch: arch)
              let meson = Utility.shell("which meson", isOutput: true)!
              try Utility.launch(path: meson, arguments: ["setup", buildURL.path, "--cross-file=\(crossFile.path)"] + arguments(platform: platform, arch: arch), currentDirectoryURL: directoryURL, environment: environ)
@@ -1680,7 +1686,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883
          }
      }
  
-@@ -319,9 +444,12 @@
+@@ -319,9 +450,12 @@
          let cFlags = cFlags(platform: platform, arch: arch).joined(separator: " ")
          let ldFlags = ldFlags(platform: platform, arch: arch).joined(separator: " ")
          let pkgConfigPath = platform.pkgConfigPath(arch: arch)
@@ -1694,7 +1700,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883
              "CC": "/usr/bin/clang",
              "CXX": "/usr/bin/clang++",
              // "SDKROOT": platform.sdk.lowercased(),
-@@ -333,7 +461,9 @@
+@@ -333,7 +467,9 @@
              "CXXFLAGS": cFlags,
              "ASMFLAGS": cFlags,
              "LDFLAGS": ldFlags,
@@ -1705,7 +1711,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883
              "PATH": BaseBuild.defaultPath,
          ]
      }
-@@ -959,6 +1089,9 @@
+@@ -959,6 +1095,9 @@
  
  class ZipBaseBuild : BaseBuild {
  
@@ -1715,7 +1721,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883
      override func beforeBuild() throws {
          // unzip builded static library
          let outputFileName = "\(library.rawValue).zip"
-@@ -972,7 +1105,10 @@
+@@ -972,7 +1111,10 @@
  
          if !FileManager.default.fileExists(atPath: outputFile.path) {
              try! Utility.launch(path: "wget", arguments: ["-O", outputFileName, library.url], currentDirectoryURL: directoryURL)
@@ -1726,7 +1732,7 @@ index 3e56ee0eb0d4b913c54ab7f354b665f69b6e0bfe..5c655691f6c814061369ead3ad6ff883
          }
      }
  
-@@ -1245,14 +1381,13 @@
+@@ -1245,14 +1387,13 @@
      }
  
      func pkgConfigPath(arch: ArchType) -> String {

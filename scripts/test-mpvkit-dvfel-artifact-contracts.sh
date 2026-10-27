@@ -1251,6 +1251,36 @@ func runSDKSystemContract(executable: String, root: URL) throws {
     try requireFixture(transitive.split(whereSeparator: { $0.isWhitespace }).map(String.init) == ["-lfreetype", "-lz"], "real pkg-config did not resolve target freetype to SDK zlib")
     let leaked = try? Utility.launch(path: executable, arguments: ["--exists", "vortx-sdk-host-only"], environment: environment)
     try requireFixture(leaked == nil, "poisoned host metadata leaked after SDK append")
+    // Exercise the production producer with the same versioned-alias shape as Xcode.
+    let selectedSDK = root.appendingPathComponent("selected-version.sdk")
+    let selectedBuild = root.appendingPathComponent("selected-version-build")
+    try manager.createSymbolicLink(at: selectedSDK, withDestinationURL: sdk)
+    try manager.createDirectory(at: selectedBuild, withIntermediateDirectories: false)
+    var selectedEnvironment = BaseBuild().environment(platform: .tvos, arch: .arm64)
+    try SDKSystemMetadata.append(to: &selectedEnvironment, sdkRoot: selectedSDK, buildRoot: selectedBuild)
+    let selectedMetadata = selectedBuild.appendingPathComponent("vortx-sdk-pkgconfig")
+    let selectedXML = try String(contentsOf: selectedMetadata.appendingPathComponent("libxml-2.0.pc"), encoding: .utf8)
+    let selectedZlib = try String(contentsOf: selectedMetadata.appendingPathComponent("zlib.pc"), encoding: .utf8)
+    let selectedFlags = try Utility.launch(path: executable, arguments: ["--cflags", "libxml-2.0"], isOutput: true, environment: selectedEnvironment)
+    let selectedVersion = try Utility.launch(path: executable, arguments: ["--modversion", "libxml-2.0"], isOutput: true, environment: selectedEnvironment)
+    try requireFixture(selectedSDK.resolvingSymlinksInPath().path == sdk.path &&
+        selectedXML == expectedXML.replacingOccurrences(of: sdk.path, with: selectedSDK.path) &&
+        selectedZlib == expected && selectedVersion == "2.9.13" &&
+        selectedFlags.trimmingCharacters(in: .whitespacesAndNewlines) == "-I\(selectedSDK.path)/usr/include/libxml2",
+        "SDK alias metadata lost selected compiler spelling or canonical SDK identity")
+    _ = try SDKSystemMetadata.prepare(sdkRoot: selectedSDK, buildRoot: selectedBuild)
+    // Alias spelling must retain the producer's PC-path safety policy before any write.
+    for (index, name) in ["$selected.sdk", "selected\nversion.sdk"].enumerated() {
+        let unsafeSDK = root.appendingPathComponent(name)
+        let unsafeBuild = root.appendingPathComponent("unsafe-selected-\(index)-build")
+        try manager.createSymbolicLink(at: unsafeSDK, withDestinationURL: sdk)
+        try manager.createDirectory(at: unsafeBuild, withIntermediateDirectories: false)
+        var rejected = false
+        do { _ = try SDKSystemMetadata.prepare(sdkRoot: unsafeSDK, buildRoot: unsafeBuild) }
+        catch let error as NSError where error.domain == "VortX.SDKSystemMetadata" && error.code == 1 { rejected = true }
+        try requireFixture(rejected && !manager.fileExists(atPath: unsafeBuild.appendingPathComponent("vortx-sdk-pkgconfig").path),
+            "Unsafe SDK alias was accepted or wrote metadata before rejection")
+    }
     try "Name: zlib\nDescription: Earlier target zlib\nVersion: 7.7.7\nLibs: -ltarget_zlib\n".write(to: target.appendingPathComponent("zlib.pc"), atomically: true, encoding: .utf8)
     let earlier = try Utility.launch(path: executable, arguments: ["--modversion", "zlib"], isOutput: true, environment: environment)
     try requireFixture(earlier == "7.7.7", "SDK zlib shadowed an earlier target dependency")
