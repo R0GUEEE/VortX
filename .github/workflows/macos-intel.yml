@@ -1,0 +1,226 @@
+name: macOS universal (Intel + Apple silicon) DMG
+
+# FORK-ONLY LANE: builds VortX.app for Intel Macs (and Apple silicon) and packages the drag-to-install
+# .dmg, entirely on public inputs.
+#
+# WHY A SEPARATE WORKFLOW
+#   The upstream release lane (release-tvos.yml) is arm64-only by construction: it forces ARCHS=arm64
+#   because StremioXCore.xcframework's macOS slice is arm64-only, and that slice is produced from the
+#   PRIVATE stremiox-core/vortx-core sources at a pinned commit with ENGINE_REPO_TOKEN. A fork has
+#   neither the source nor the token.
+#
+# WHAT THIS BUILDS (read this before shipping the artifact)
+#   The two engine frameworks are the repository's own CI-only stand-ins
+#   (scripts/build-stub-engine-xcframeworks.sh, which this fork extends with an x86_64 macOS slice).
+#   That means: the app compiles, links, signs, launches and exercises the full UI/player/server
+#   packaging path, but the Stremio engine is fail-closed absent (no catalogs, no addons, no metadata).
+#   MPVKit (playback) and the bundled Node streaming server ARE real, and both are universal here.
+#   To get a functionally identical Intel build you need the private engine sources; see the
+#   "Real engine" note at the bottom of this file.
+#
+#   Every artifact therefore carries STUB-CI-ONLY.txt inside both vendor frameworks; this workflow
+#   also fails if that marker is missing, so a stub-backed DMG can never be mistaken for a release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      archs:
+        description: 'Space-separated build architectures ("arm64 x86_64" for universal, or "x86_64" for Intel-only)'
+        required: false
+        default: 'arm64 x86_64'
+      runner:
+        description: 'Runner label (macos-26 = arm64 cross-compile, macos-15-intel = native Intel smoke)'
+        required: false
+        default: 'macos-26'
+  push:
+    branches: [intel-macos]
+    paths:
+      - '.github/workflows/macos-intel.yml'
+      - 'app/project.yml'
+      - 'app/scripts/fetch-node-macos.sh'
+      - 'scripts/build-stub-engine-xcframeworks.sh'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-intel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-dmg:
+    name: Build + package macOS DMG
+    runs-on: ${{ inputs.runner || 'macos-26' }}
+    timeout-minutes: 120
+    env:
+      BUILD_ARCHS: ${{ inputs.archs || 'arm64 x86_64' }}
+      XCODEGEN_VERSION: '2.46.0'
+      XCODEGEN_SHA256: '4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806'
+      MPVKIT_ARTIFACTS_SHA256: '737073f587b4d78c0436d3dc08c40bfab72b26e3d3a3ac3eab11a7a3a1c288d1'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Report toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          uname -m
+          echo "requested ARCHS: $BUILD_ARCHS"
+
+      - name: Install pinned XcodeGen
+        run: |
+          set -euo pipefail
+          workdir="$RUNNER_TEMP/xcodegen"
+          mkdir -p "$workdir"
+          url="https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          curl -fsSL --retry 3 -o "$workdir/xcodegen.zip" "$url"
+          printf '%s  %s\n' "$XCODEGEN_SHA256" "$workdir/xcodegen.zip" > "$workdir/xcodegen.sha256"
+          shasum -a 256 -c "$workdir/xcodegen.sha256"
+          unzip -q "$workdir/xcodegen.zip" -d "$workdir"
+          "$workdir/xcodegen/bin/xcodegen" --version
+          echo "$workdir/xcodegen/bin" >> "$GITHUB_PATH"
+
+      # Public, checksum-pinned dependencies, fetched exactly as the upstream lanes fetch them.
+      - name: Fetch server dependencies (NodeMobile, server.js, fonts)
+        run: ./scripts/fetch-server-deps.sh
+
+      - name: Fetch the macOS node runtime (universal arm64 + x86_64)
+        run: |
+          set -euo pipefail
+          ./app/scripts/fetch-node-macos.sh
+          archs="$(lipo -archs app/Resources/node-darwin-arm64)"
+          echo "bundled node archs: $archs"
+          case "$archs" in *arm64*) ;; *) echo '::error::bundled node has no arm64 slice'; exit 1 ;; esac
+          case "$archs" in *x86_64*) ;; *) echo '::error::bundled node has no x86_64 slice'; exit 1 ;; esac
+
+      - name: Fetch MPVKit-DVFEL artifacts (public, sha256-verified)
+        run: |
+          set -euo pipefail
+          DEST="app/Vendor/MPVKit-DVFEL"
+          curl -sfL --retry 3 -o "$RUNNER_TEMP/mpvkit.zip" \
+            "https://github.com/VortXTV/VortX/releases/download/vendor-mpvkit-dvfel-3/mpvkit-dvfel-artifacts-http-seek-20261009.zip"
+          ACTUAL="$(shasum -a 256 "$RUNNER_TEMP/mpvkit.zip" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$MPVKIT_ARTIFACTS_SHA256" ]; then
+            echo "::error::MPVKit artifact checksum mismatch: expected $MPVKIT_ARTIFACTS_SHA256 got $ACTUAL"
+            exit 1
+          fi
+          rm -rf "$DEST/artifacts"
+          unzip -q "$RUNNER_TEMP/mpvkit.zip" -d "$DEST"
+          bash scripts/verify-mpvkit-dvfel-artifacts.sh "$DEST"
+
+      - name: Generate CI-only stub engine xcframeworks (arm64 + x86_64 macOS slices)
+        run: |
+          set -euo pipefail
+          ./scripts/build-stub-engine-xcframeworks.sh
+          for name in StremioXCore VortxEngine; do
+            fw="app/Vendor/$name.xcframework"
+            test -f "$fw/STUB-CI-ONLY.txt" || { echo "::error::$name stub marker missing"; exit 1; }
+            /usr/libexec/PlistBuddy -c 'Print :AvailableLibraries' "$fw/Info.plist" >/dev/null
+            echo "--- $name slices"
+            ls "$fw"
+          done
+          # The x86_64 macOS slice is the whole point of this fork: fail loudly if it is absent.
+          test -d app/Vendor/StremioXCore.xcframework/macos-x86_64 || { echo '::error::StremioXCore has no macos-x86_64 slice'; exit 1; }
+          test -d app/Vendor/VortxEngine.xcframework/macos-x86_64  || { echo '::error::VortxEngine has no macos-x86_64 slice'; exit 1; }
+          lipo -archs app/Vendor/StremioXCore.xcframework/macos-x86_64/libstremiox_core.a
+          lipo -archs app/Vendor/VortxEngine.xcframework/macos-x86_64/libvortx_ffi.a
+
+      - name: Generate the Xcode project
+        run: cd app && xcodegen generate
+
+      - name: Build VortXMac (Release)
+        run: |
+          set -euo pipefail
+          # ARCHS is explicit: without it a macOS Release build uses ARCHS_STANDARD, and the
+          # stub/real engine frameworks decide per-arch which slice links.
+          # shellcheck disable=SC2086
+          xcodebuild -project app/VortX.xcodeproj -scheme VortXMac \
+            -configuration Release -destination 'platform=macOS' \
+            ARCHS="$BUILD_ARCHS" ONLY_ACTIVE_ARCH=NO \
+            -derivedDataPath app/build/ci-mac-universal \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Verify app architecture, engine linkage and bundle identity
+        run: |
+          set -euo pipefail
+          APP="app/build/ci-mac-universal/Build/Products/Release/VortX.app"
+          test -d "$APP" || { echo '::error::no VortX.app produced'; exit 1; }
+          BIN="$APP/Contents/MacOS/VortX"
+          file "$BIN" | grep -q 'Mach-O 64-bit executable' || { echo '::error::app executable is not a 64-bit Mach-O'; exit 1; }
+          ARCHS_FOUND="$(lipo -archs "$BIN")"
+          echo "app executable archs: $ARCHS_FOUND"
+          for want in $BUILD_ARCHS; do
+            case " $ARCHS_FOUND " in *" $want "*) ;; *) echo "::error::app executable is missing the $want slice"; exit 1 ;; esac
+          done
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" = "com.stremiox.mac" ] \
+            || { echo '::error::unexpected CFBundleIdentifier'; exit 1; }
+          NODE_ARCHS="$(lipo -archs "$APP/Contents/Resources/node-darwin-arm64")"
+          echo "bundled node archs: $NODE_ARCHS"
+          case "$NODE_ARCHS" in *x86_64*) ;; *) echo '::error::bundled node lost its x86_64 slice in the .app'; exit 1 ;; esac
+          # The engine symbols must be DEFINED in the executable (link consumed the framework),
+          # never undefined (which would mean a silently missing engine).
+          DEFINED="$(nm -gU "$BIN")"
+          UNDEFINED="$(nm -u "$BIN")"
+          for sym in _stremiox_core_schema_version _vortx_init_runtime; do
+            grep -q "$sym" <<< "$DEFINED" || { echo "::error::engine symbol $sym not linked"; exit 1; }
+            grep -q "$sym" <<< "$UNDEFINED" && { echo "::error::engine symbol $sym is undefined"; exit 1; }
+          done
+          otool -L "$BIN" | grep -E 'node|\.dylib' | head -20 || true
+
+      - name: Ad-hoc sign the app (no identity, matches the upstream DMG recipe)
+        run: |
+          set -euo pipefail
+          APP="app/build/ci-mac-universal/Build/Products/Release/VortX.app"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+          codesign -d --verbose=2 "$APP" 2>&1 | sed -n '1,6p'
+
+      - name: Package and verify the DMG
+        run: |
+          set -euo pipefail
+          APP="app/build/ci-mac-universal/Build/Products/Release/VortX.app"
+          mkdir -p out
+          DMG_STAGE="$(mktemp -d "$RUNNER_TEMP/vortx-dmg-stage.XXXXXX")"
+          mv "$APP" "$DMG_STAGE/"
+          ln -s /Applications "$DMG_STAGE/Applications"
+          bash scripts/package-macos-dmg.sh "$DMG_STAGE" out/VortX-macOS-universal-ci.dmg
+          shasum -a 256 out/VortX-macOS-universal-ci.dmg | tee out/SHA256SUMS.txt
+          ls -lh out/VortX-macOS-universal-ci.dmg
+          echo "DMG_ARGS=$(echo "$BUILD_ARCHS" | tr ' ' '+')" >> "$GITHUB_ENV"
+
+      - name: Record what this artifact is (and is not)
+        run: |
+          set -euo pipefail
+          {
+            echo "### macOS universal DMG (fork Intel lane)"
+            echo
+            echo "- archs: \`$BUILD_ARCHS\` on \`$(uname -m)\` runner"
+            echo "- app: \`com.stremiox.mac\`, ad-hoc signed, not notarized"
+            echo "- engines: **CI stub stand-ins** (\`STUB-CI-ONLY.txt\` inside both xcframeworks) -"
+            echo "  compiles/links/launches, but the Stremio engine is fail-closed absent (no catalogs/addons)."
+            echo "- real universal playback: MPVKit-DVFEL (macos-arm64_x86_64) + bundled Node 20.18.1 (lipo universal)"
+            echo
+            echo '```'
+            cat out/SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VortX-macOS-universal-dmg
+          path: out/VortX-macOS-universal-ci.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+# REAL ENGINE (functional Intel build)
+#   stremiox-core and vortx-core live in private repositories and are checked out at a pinned commit
+#   with a token in the upstream release lane. With read access to them, this lane becomes functional
+#   by replacing the stub step with the two real builders and adding the x86_64 target to each one:
+#     scripts/build-core-xcframework.sh  : add `--target x86_64-apple-darwin` (and use it for the
+#                                          darwin slice) next to aarch64-apple-darwin.
+#     scripts/build-ffi-xcframework.sh   : add a `x86_64-apple-darwin` build_slice + localize() call.
+#   Both scripts currently hard-code `-arch arm64` in their `ld -r` calls; that has to become per-slice.

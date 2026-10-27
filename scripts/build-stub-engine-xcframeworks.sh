@@ -93,6 +93,11 @@ SDK_SPECS=(
     "appletvos|tvos-arm64|arm64-apple-tvos18.0"
     "appletvsimulator|tvos-arm64_x86_64-simulator|arm64-apple-tvos18.0-simulator,x86_64-apple-tvos18.0-simulator"
     "macosx|macos-arm64|arm64-apple-macos14.0"
+    # INTEL PORT (this fork): the Mac target now builds a UNIVERSAL (arm64 + x86_64) app, so the
+    # stand-in must offer an x86_64 slice too. A separate one-arch LibraryIdentifier (rather than a
+    # single fat macos-arm64_x86_64 slice) keeps the existing arm64 lane's slice name and behavior
+    # byte-identical while letting Xcode pick the x86_64 slice for Intel builds.
+    "macosx|macos-x86_64|x86_64-apple-macos14.0"
 )
 
 # ---------------------------------------------------------------- Stub sources ----------------------
@@ -294,10 +299,14 @@ generate_stub_framework() {
             ios-arm64_x86_64-simulator) platform="ios"; variant_keys="<key>SupportedPlatformVariant</key><string>simulator</string>" ;;
             tvos-arm64) platform="tvos" ;;
             tvos-arm64_x86_64-simulator) platform="tvos"; variant_keys="<key>SupportedPlatformVariant</key><string>simulator</string>" ;;
-            macos-arm64) platform="macos" ;;
+            macos-arm64|macos-x86_64) platform="macos" ;;
             *) echo "error: unknown slice $slice_name" >&2; exit 1 ;;
         esac
-        architectures="<string>arm64</string>"
+        # Derive the advertised architectures from this slice's triples. The previous
+        # arm64-unconditional form would have advertised arm64 on the new x86_64-only macOS slice,
+        # which makes Xcode's slice selection lie about the binary it links.
+        architectures=""
+        [[ "$triples" == *arm64* ]] && architectures+="<string>arm64</string>"
         [[ "$triples" == *x86_64* ]] && architectures+="<string>x86_64</string>"
         lib_entries+=("<dict><key>BinaryPath</key><string>$lib_file</string><key>HeadersPath</key><string>Headers</string><key>LibraryIdentifier</key><string>$slice_name</string><key>LibraryPath</key><string>$lib_file</string><key>SupportedArchitectures</key><array>$architectures</array><key>SupportedPlatform</key><string>$platform</string>$variant_keys</dict>")
         log "  slice $slice_name ($(stat -f%z "$slice_dir/$lib_file") bytes)"
