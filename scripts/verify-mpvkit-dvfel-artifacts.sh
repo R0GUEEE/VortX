@@ -19,6 +19,11 @@ fail() {
 
 # The default contract stays compatible with the currently selected shipping package.
 # A candidate must select this exact dependency profile; unknown arguments fail closed.
+# v5 was an unshipped three-source prototype. Its receipt/body schema is not v6.
+if [ "${2:-}" = --dependency-profile ] &&
+   [ "${3:-}" = native-upgrades-openssl410-crypto-subtitles-v5 ]; then
+  fail "historical v5 prototype requires its frozen historical verifier; select the explicit bluray150 v6 profile for the four-source candidate"
+fi
 DEPENDENCY_PROFILE=shipping
 SHADERC_INPUTS=
 OPENSSL_BUILDS=
@@ -41,7 +46,7 @@ elif [ "$#" -eq 7 ] && [ "$2" = --dependency-profile ] &&
   [ -n "$SHADERC_INPUTS" ] && [ -n "$OPENSSL_BUILDS" ] || fail "Dependency input receipts are required"
 elif [ "$#" -eq 9 ] && [ "$2" = --dependency-profile ] &&
      { [ "$3" = native-upgrades-openssl410-crypto-v4 ] ||
-       [ "$3" = native-upgrades-openssl410-crypto-subtitles-v5 ]; } &&
+       [ "$3" = native-upgrades-openssl410-crypto-subtitles-bluray150-v6 ]; } &&
      [ "$4" = --shaderc-inputs ] &&
      [ "$6" = --openssl-builds ] && [ "$8" = --crypto-work ]; then
   DEPENDENCY_PROFILE="$3"
@@ -71,8 +76,8 @@ elif [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-v3 ]; then
   local_targets+=(lcms2 Libdav1d Libssl Libcrypto)
 elif [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-v4 ]; then
   local_targets+=(lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient)
-elif [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-v5 ]; then
-  local_targets+=(lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient Libunibreak Libfribidi Libharfbuzz)
+elif [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-bluray150-v6 ]; then
+  local_targets+=(lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient Libunibreak Libfribidi Libharfbuzz Libbluray)
 fi
 for target in "${local_targets[@]}"; do
   grep -Fq "name: \"$target\"" "$PKG/Package.swift" || fail "manifest is missing local target $target"
@@ -258,7 +263,7 @@ fi
 if [ "$DEPENDENCY_PROFILE" = native-upgrades-dav1d154-shaderc20261-hb150-v2 ] ||
    [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-v3 ] ||
    [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-v4 ] ||
-   [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-v5 ]; then
+   [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-bluray150-v6 ]; then
   # dav1d's public API stays 7.0.0 across releases. Bind exact header bytes, actual
   # defined code, and the release-tag/commit descriptor in every thin archive.
   dav1d_pin=54706fc6bc0cdecab7e9593974a4039cc038fca7
@@ -301,7 +306,7 @@ fi
 
 if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-v3 ] ||
    [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-v4 ] ||
-   [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-v5 ]; then
+   [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-bluray150-v6 ]; then
   for dependency in Libcrypto Libssl; do
     for slice in "${SLICES[@]}"; do
       framework="$ARTIFACTS/$dependency.xcframework/$slice/$dependency.framework"
@@ -338,11 +343,14 @@ if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-v3 ] ||
 fi
 
 if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-v4 ] ||
-   [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-v5 ]; then
+   [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-bluray150-v6 ]; then
   CRYPTO_SOURCE_HELPER="$CRYPTO_WORK/Sources/BuildScripts/crypto-release-sources.py"
   CRYPTO_GATE_HELPER="$CRYPTO_WORK/Sources/BuildScripts/crypto-chain-gate.py"
   CRYPTO_SOURCE_HELPER_SHA256="3c310499d446eed72eb16521b27c16f718f23e7ab1472dec1fad79cc40ed1537"
   CRYPTO_GATE_HELPER_SHA256="041dd13e48e1821f5d7bf049bb8eb097d3772d6ea867c15a3b7646779a3c015d"
+  if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-bluray150-v6 ]; then
+    CRYPTO_GATE_HELPER_SHA256="be5bc18e00b9b1cb4c4c5889b0935b4cd5d1538a98bcfb985ccbfcb208825a9b"
+  fi
   [ -f "$CRYPTO_SOURCE_HELPER" ] && [ ! -L "$CRYPTO_SOURCE_HELPER" ] || fail "crypto source helper is missing"
   [ -f "$CRYPTO_GATE_HELPER" ] && [ ! -L "$CRYPTO_GATE_HELPER" ] || fail "crypto gate helper is missing"
   [ "$(shasum -a 256 "$CRYPTO_SOURCE_HELPER" | awk '{print $1}')" = "$CRYPTO_SOURCE_HELPER_SHA256" ] ||
@@ -356,9 +364,9 @@ if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-v4 ] ||
     --dependency-profile native-upgrades-crypto-chain-v1
 fi
 
-if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-v5 ]; then
+if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-bluray150-v6 ]; then
   SUBTITLE_SOURCE_HELPER="$CRYPTO_WORK/Sources/BuildScripts/subtitle-release-sources.py"
-  SUBTITLE_SOURCE_HELPER_SHA256="f18c516b0694ecbc601680782b4d0fba22265854cbd82e4a9e7516d9bb905154"
+  SUBTITLE_SOURCE_HELPER_SHA256="f082ea41b939e8152a2571636f937e2bb9dcfed57ffd2f1dbe65ed68522800df"
   SUBTITLE_CAPTURE="$CRYPTO_WORK/dist/subtitle-capture"
   SUBTITLE_BUILD_RECEIPT="$CRYPTO_WORK/dist/subtitle-builds/vortx-subtitle-builds.json"
   [ -f "$SUBTITLE_SOURCE_HELPER" ] && [ ! -L "$SUBTITLE_SOURCE_HELPER" ] ||
@@ -370,13 +378,13 @@ if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-v5 ]; t
   [ -f "$SUBTITLE_BUILD_RECEIPT" ] && [ ! -L "$SUBTITLE_BUILD_RECEIPT" ] ||
     fail "subtitle build receipt is missing"
   # The strict producer receipt is the sole source-profile authority. It binds the exact selected
-  # source profile and 27 build records to this WORK; no ambient caller variable can substitute a
+  # source profile and 36 build records to this WORK; no ambient caller variable can substitute a
   # different matrix.
   python3 "$SUBTITLE_SOURCE_HELPER" verify "$CRYPTO_WORK"
   python3 "$SUBTITLE_SOURCE_HELPER" verify-capture "$SUBTITLE_CAPTURE"
   python3 "$REPO/scripts/native-media-hosted/evidence.py" apple-subtitle-receipt "$SUBTITLE_BUILD_RECEIPT"
 
-  for dependency in Libunibreak Libfribidi Libharfbuzz; do
+  for dependency in Libunibreak Libfribidi Libharfbuzz Libbluray; do
     for slice in "${SLICES[@]}"; do
       framework="$ARTIFACTS/$dependency.xcframework/$slice/$dependency.framework"
       binary="$framework/$dependency"
@@ -399,6 +407,11 @@ if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-v5 ]; t
           version_macros=(HB_VERSION_MAJOR HB_VERSION_MINOR HB_VERSION_MICRO)
           symbol_patterns=(hb_version_string)
           ;;
+        Libbluray)
+          header_name=bluray-version.h
+          version_macros=(BLURAY_VERSION_MAJOR BLURAY_VERSION_MINOR BLURAY_VERSION_MICRO BLURAY_VERSION_STRING)
+          symbol_patterns=(bd_get_version bd_open bd_close)
+          ;;
       esac
       found=0
       while IFS= read -r header; do
@@ -406,6 +419,16 @@ if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-v5 ]; t
         for version_macro in "${version_macros[@]}"; do
           grep -Eq "(^|[[:space:]])#define[[:space:]]+${version_macro}([[:space:]]|$)" "$header" || header_ok=0
         done
+        if [ "$dependency" = Libbluray ]; then
+          for macro_value in BLURAY_VERSION_MAJOR:1 BLURAY_VERSION_MINOR:5 BLURAY_VERSION_MICRO:0; do
+            macro="${macro_value%%:*}"
+            value="${macro_value#*:}"
+            [ "$(grep -Ec "^[[:space:]]*#define[[:space:]]+$macro[[:space:]]+$value[[:space:]]*$" "$header")" = 1 ] || header_ok=0
+            [ "$(grep -Ec "^[[:space:]]*#define[[:space:]]+$macro([[:space:]]|$)" "$header")" = 1 ] || header_ok=0
+          done
+          [ "$(grep -Ec '^[[:space:]]*#define[[:space:]]+BLURAY_VERSION_STRING[[:space:]]+"1\.5\.0"[[:space:]]*$' "$header")" = 1 ] || header_ok=0
+          [ "$(grep -Ec '^[[:space:]]*#define[[:space:]]+BLURAY_VERSION_STRING([[:space:]]|$)' "$header")" = 1 ] || header_ok=0
+        fi
         [ "$header_ok" = 1 ] && found=1
       done < <(find "$headers" -type f -name "$header_name" | LC_ALL=C sort)
       [ "$found" = 1 ] || fail "$dependency/$slice lacks the retained official version macros"
@@ -419,6 +442,14 @@ if [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-v5 ]; t
           grep -Eq "(^|[[:space:]])_?$symbol$" <<<"$symbols" ||
             fail "$dependency/$slice [$arch] lacks selected public version/data symbol $symbol"
         done
+        if [ "$dependency" = Libbluray ]; then
+          # Embedded UDF uses hidden visibility; require defined code, not export visibility.
+          embedded_symbols="$("${NM[@]}" -U "$thin" 2>/dev/null)" || fail "cannot inspect bundled UDF/$slice [$arch]"
+          for symbol in udfread_open udfread_close; do
+            grep -Eq "[[:space:]][Tt][[:space:]]+_?$symbol$" <<<"$embedded_symbols" ||
+              fail "Libbluray/$slice [$arch] lacks embedded UDF code $symbol"
+          done
+        fi
       done
     done
   done
@@ -441,9 +472,9 @@ elif [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-v4 ]; then
   echo "PASS openssl-profile openssl-4.1.0-source-v1"
   echo "PASS crypto-profile gmp-6.3.0-nettle-4.0-gnutls-3.8.13-samba-4.15.13-2512-source-v1"
   echo "PASS dependency-profile native-upgrades-openssl410-crypto-v4"
-elif [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-v5 ]; then
+elif [ "$DEPENDENCY_PROFILE" = native-upgrades-openssl410-crypto-subtitles-bluray150-v6 ]; then
   echo "PASS openssl-profile openssl-4.1.0-source-v1"
   echo "PASS crypto-profile gmp-6.3.0-nettle-4.0-gnutls-3.8.13-samba-4.15.13-2512-source-v1"
-  echo "PASS subtitle-profile unibreak800-fribidi1017-harfbuzz1500-release-sources-v2-pax-ns"
-  echo "PASS dependency-profile native-upgrades-openssl410-crypto-subtitles-v5"
+  echo "PASS subtitle-profile unibreak800-fribidi1017-harfbuzz1500-bluray150-release-sources-v3-pax-ns"
+  echo "PASS dependency-profile native-upgrades-openssl410-crypto-subtitles-bluray150-v6"
 fi

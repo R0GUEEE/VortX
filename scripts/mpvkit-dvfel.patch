@@ -22,7 +22,6 @@ index 9d9b0af52ea6978126a5828a474f6eaa85c63225..47fbf53d1a3c0bd3f4c92bb1c695465a
  
          .binaryTarget(
 diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScripts/XCFrameworkBuild/main.swift
-index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af455011e752 100644
 --- a/Sources/BuildScripts/XCFrameworkBuild/main.swift
 +++ b/Sources/BuildScripts/XCFrameworkBuild/main.swift
 @@ -1,4 +1,6 @@
@@ -32,7 +31,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
  
  do {
      let options = try ArgumentOptions.parse(CommandLine.arguments)
-@@ -45,44 +47,85 @@
+@@ -45,48 +47,89 @@
  
  enum Library: String, CaseIterable {
      case libmpv, FFmpeg, libshaderc, vulkan, lcms2, libdovi, openssl, libunibreak, libfreetype, libfribidi, libharfbuzz, libass, libsmbclient, libplacebo, libdav1d, gmp, nettle, gnutls, libuchardet, libbluray, libluajit, libuavs3d
@@ -132,6 +131,11 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
          case .libuchardet:
              return "0.0.8"
          case .libbluray:
+-            return "1.4.0"
++            return "1.5.0-f676408e"
+         case .libluajit:
+             return "2.1.0-fix"
+         case .libuavs3d:
 @@ -101,31 +144,32 @@
          case .FFmpeg:
              return "https://github.com/FFmpeg/FFmpeg"
@@ -175,7 +179,33 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
          case .libdovi:
              return "https://github.com/mpvkit/libdovi-build/releases/download/\(self.version)/libdovi-all.zip"
          case .vulkan:
-@@ -372,6 +416,17 @@
+@@ -135,7 +179,7 @@
+         case .libuchardet:
+             return "https://github.com/mpvkit/libuchardet-build/releases/download/\(self.version)/libuchardet-all.zip"
+         case .libbluray:
+-            return "https://github.com/mpvkit/libbluray-build/releases/download/\(self.version)/libbluray-all.zip"
++            return "https://download.videolan.org/pub/videolan/libbluray/1.5.0/libbluray-1.5.0.tar.xz"
+         case .libluajit:
+             return "https://github.com/mpvkit/libluajit-build/releases/download/\(self.version)/libluajit-all.zip"
+         case .libuavs3d:
+@@ -339,13 +383,9 @@
+                 ),
+             ]
+         case .libbluray:
+-            return [
+-                .target(
+-                    name: "Libbluray",
+-                    url: "https://github.com/mpvkit/libbluray-build/releases/download/\(self.version)/Libbluray.xcframework.zip",
+-                    checksum: "https://github.com/mpvkit/libbluray-build/releases/download/\(self.version)/Libbluray.xcframework.checksum.txt"
+-                ),
+-            ]
++            // Source candidate: the maintained assembler must bind local Libbluray.
++            // There is no released 1.5 wrapper/checksum URL to synthesize.
++            return []
+         case .libluajit:
+             return  [
+                 .target(
+@@ -372,6 +412,17 @@
          super.init(library: .libmpv)
      }
  
@@ -193,7 +223,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
      override func flagsDependencelibrarys() -> [Library] {
          if BaseBuild.options.enableGPL {
              return [.gmp, .libsmbclient]
-@@ -396,6 +451,14 @@
+@@ -396,6 +447,14 @@
              "-Djpeg=disabled",
              "-Dvapoursynth=disabled",
              "-Drubberband=disabled",
@@ -208,7 +238,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
          ]
          if BaseBuild.options.enableGPL {
              array.append("-Dgpl=true")
-@@ -450,7 +513,16 @@
+@@ -450,7 +509,16 @@
      }
  
      override func beforeBuild() throws {
@@ -226,7 +256,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
  
          if Utility.shell("which nasm") == nil {
              Utility.shell("brew install nasm")
-@@ -609,7 +681,18 @@
+@@ -609,7 +677,18 @@
          //        if platform == .isimulator || platform == .tvsimulator {
          //            arguments.append("--assert-level=1")
          //        }
@@ -246,7 +276,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
          if BaseBuild.options.enableGPL {
              dependencyLibrary += [.libsmbclient]
          }
-@@ -681,6 +764,22 @@
+@@ -681,6 +760,22 @@
          "--enable-encoder=aac", "--enable-encoder=alac", "--enable-encoder=flac", "--enable-encoder=pcm*",
          "--enable-encoder=movtext", "--enable-encoder=mpeg4", "--enable-encoder=h264_videotoolbox",
          "--enable-encoder=hevc_videotoolbox", "--enable-encoder=prores", "--enable-encoder=prores_videotoolbox",
@@ -269,7 +299,33 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
          // ./configure --list-protocols
          "--enable-protocols",
          // ./configure --list-demuxers
-@@ -778,33 +877,500 @@
+@@ -759,10 +854,22 @@
+ 
+ 
+ 
+-private class BuildBluray: ZipBaseBuild {
+-    init() {
+-        super.init(library: .libbluray)
++private class BuildBluray: PinnedSubtitleReleaseBuild {
++    init() { super.init(library: .libbluray) }
++    override func flagsDependencelibrarys() -> [Library] { [.libfreetype] }
++    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
++        ["--wrap-mode=nodownload", "--force-fallback-for=libudfread",
++         "-Denable_docs=false", "-Denable_tools=false", "-Denable_devtools=false",
++         "-Denable_examples=false", "-Dbdj_jar=disabled", "-Dembed_udfread=true",
++         "-Dfontconfig=disabled", "-Dfreetype=enabled", "-Dlibxml2=enabled"]
+     }
++    override func build(platform: PlatformType, arch: ArchType) throws {
++        guard [.macos, .ios, .isimulator, .tvos, .tvsimulator].contains(platform) else {
++            throw NSError(domain: "VortXBluraySource", code: 1,
++                          userInfo: [NSLocalizedDescriptionKey: "Libbluray candidate is limited to the reviewed nine-slice matrix"])
++        }
++        try super.build(platform: platform, arch: arch)
++    }
+ }
+ 
+ private class BuildUchardet: ZipBaseBuild {
+@@ -778,79 +885,972 @@
  }
  
  
@@ -281,9 +337,6 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
      init() {
          super.init(library: .libplacebo)
      }
--}
--
--private class BuildOpenSSL: ZipBaseBuild {
 +
 +    override func beforeBuild() throws {
 +        try SpikeGit.clonePinned(url: library.url,
@@ -324,8 +377,9 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        }
 +        return args
 +    }
-+}
-+
+ }
+ 
+-private class BuildOpenSSL: ZipBaseBuild {
 +// SPIKE: shared helpers for cloning a dependency at an exact commit. BaseBuild.beforeBuild
 +// can only clone a tag/branch via `--branch`, which cannot express a SHA.
 +enum SpikeGit {
@@ -520,23 +574,6 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
      init() {
          super.init(library: .openssl)
      }
--}
--
--private class BuildGmp: ZipBaseBuild {
--    init() {
--        super.init(library: .gmp)
--    }
--}
--
--private class BuildNettle: ZipBaseBuild {
--    init() {
--        super.init(library: .nettle)
--    }
--}
--
--private class BuildGnutls: ZipBaseBuild {
--    init() {
--        super.init(library: .gnutls)
 +
 +    override func beforeBuild() throws {
 +        try SpikeGit.clonePinned(url: library.url, sha: Library.opensslPinnedSHA,
@@ -629,8 +666,11 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        let bytes = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .prettyPrinted])
 +        try bytes.write(to: recordURL, options: .withoutOverwriting)
 +    }
-+}
-+
+ }
+ 
+-private class BuildGmp: ZipBaseBuild {
+-    init() {
+-        super.init(library: .gmp)
 +// Release archives are authenticated and prepared by crypto-release-sources.py.
 +// Never route these sources through BaseBuild's autogen/bootstrap heuristics.
 +private class PinnedCryptoReleaseBuild: BaseBuild {
@@ -662,6 +702,10 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +
 +    override func environment(platform: PlatformType, arch: ArchType) -> [String: String] {
 +        var env = super.environment(platform: platform, arch: arch)
++        // Explicit GNU shipping optimization; leave base/Meson and native generators alone.
++        let shippingFlags = cFlags(platform: platform, arch: arch).joined(separator: " ") + " -O2"
++        env["CFLAGS"] = shippingFlags
++        env["CXXFLAGS"] = shippingFlags
 +        env["AR"] = platform.xcrunFind(tool: "ar").trimmingCharacters(in: .whitespacesAndNewlines)
 +        env["RANLIB"] = platform.xcrunFind(tool: "ranlib").trimmingCharacters(in: .whitespacesAndNewlines)
 +        // Build-time generators must run on the build machine, without target SDK flags.
@@ -721,9 +765,12 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +            "generatedConfiguration": generated, "compiled": true, "installed": true]
 +        try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .prettyPrinted])
 +            .write(to: recordURL, options: .withoutOverwriting)
-+    }
-+}
-+
+     }
+ }
+ 
+-private class BuildNettle: ZipBaseBuild {
+-    init() {
+-        super.init(library: .nettle)
 +private class BuildGmp: PinnedCryptoReleaseBuild {
 +    init() { super.init(library: .gmp) }
 +
@@ -731,15 +778,18 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        var env = super.environment(platform: platform, arch: arch)
 +        env["ABI"] = "64"
 +        return env
-+    }
+     }
 +
 +    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
 +        ["--disable-assembly", "--disable-cxx", "--with-pic", "--enable-static",
 +         "--disable-shared", "--disable-fast-install", "--disable-maintainer-mode",
 +         "--host=\(platform.host(arch: arch))"]
 +    }
-+}
-+
+ }
+ 
+-private class BuildGnutls: ZipBaseBuild {
+-    init() {
+-        super.init(library: .gnutls)
 +private class BuildNettle: PinnedCryptoReleaseBuild {
 +    init() { super.init(library: .nettle) }
 +    override func flagsDependencelibrarys() -> [Library] { [.gmp] }
@@ -750,9 +800,9 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +         "--disable-mini-gmp", "--enable-public-key", "--disable-fat", "--enable-pic",
 +         "--enable-static", "--disable-shared", "--disable-dependency-tracking",
 +         "--host=\(platform.host(arch: arch))"]
-+    }
-+}
-+
+     }
+ }
+ 
 +private class BuildGnutls: PinnedCryptoReleaseBuild {
 +    init() { super.init(library: .gnutls) }
 +    override func flagsDependencelibrarys() -> [Library] { [.gmp, .nettle] }
@@ -788,18 +838,20 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +         "--disable-tests", "--disable-tools", "--disable-full-test-suite", "--with-pic", "--enable-static",
 +         "--disable-shared", "--disable-fast-install", "--disable-dependency-tracking",
 +         "--host=\(platform.host(arch: arch))"]
-     }
- }
- 
-@@ -814,9 +1380,123 @@
++    }
++}
++
+ private class BuildASS: ZipBaseBuild {
+     init() {
+         super.init(library: .libass)
      }
  }
  
 -private class BuildUnibreak: ZipBaseBuild {
 -    init() {
 -        super.init(library: .libunibreak)
-+// Replace only BuildUnibreak, BuildFribidi and BuildHarfbuzz. The fixed release
-+// helper is installed at Sources/BuildScripts/subtitle-release-sources.py.
++// The four selected source classes share the existing fixed release policy.
++// Its helper is installed at Sources/BuildScripts/subtitle-release-sources.py.
 +private class PinnedSubtitleReleaseBuild: BaseBuild {
 +    private var workRoot: URL { URL.currentDirectory.deletingLastPathComponent() }
 +
@@ -807,12 +859,13 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        let helper = workRoot.appendingPathComponent("Sources/BuildScripts/subtitle-release-sources.py")
 +        try Utility.launch(path: "python3", arguments: [helper.path, "verify", workRoot.path],
 +                           currentDirectoryURL: URL.currentDirectory)
-+    }
+     }
 +
 +    override func beforeBuild() throws {
 +        try verifySources()
 +        let roots: [Library: String] = [.libunibreak: "libunibreak-8.0-9c4fad6e",
-+            .libfribidi: "libfribidi-1.0.17-6949dcde", .libharfbuzz: "libharfbuzz-15.0.0-968536e9"]
++            .libfribidi: "libfribidi-1.0.17-6949dcde", .libharfbuzz: "libharfbuzz-15.0.0-968536e9",
++            .libbluray: "libbluray-1.5.0-f676408e"]
 +        guard roots[library] == directoryURL.lastPathComponent else {
 +            throw NSError(domain: "VortXSubtitleSources", code: 1,
 +                          userInfo: [NSLocalizedDescriptionKey: "Unapproved subtitle source selector"])
@@ -820,6 +873,16 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +    }
 +
 +    override func generatesPackageManagerFile() -> Bool { false }
++
++    override func environment(platform: PlatformType, arch: ArchType) -> [String: String] {
++        var env = super.environment(platform: platform, arch: arch)
++        if library == .libunibreak {
++            let shippingFlags = cFlags(platform: platform, arch: arch).joined(separator: " ") + " -O2"
++            env["CFLAGS"] = shippingFlags
++            env["CXXFLAGS"] = shippingFlags
++        }
++        return env
++    }
 +
 +    private func identity(_ s: stat) -> String {
 +        "\(s.st_dev)|\(s.st_ino)|\(s.st_mode)|\(s.st_nlink)|\(s.st_size)|" +
@@ -868,7 +931,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        let makeArgs = ["-j1", "AUTOCONF=/usr/bin/false", "AUTOHEADER=/usr/bin/false",
 +                        "AUTOMAKE=/usr/bin/false", "ACLOCAL=/usr/bin/false"]
 +        let route: String
-+        let generated: [String]
++        var generated: [String]
 +        let installed: [String]
 +        if library == .libunibreak {
 +            route = "release-autoconf"
@@ -887,9 +950,14 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +            try super.build(platform: platform, arch: arch)
 +            generated = ["crossFile.meson", "build.ninja", "compile_commands.json",
 +                         "meson-info/intro-buildoptions.json", "meson-info/intro-dependencies.json"]
-+            installed = library == .libfribidi ?
-+                ["include/fribidi/fribidi-config.h", "lib/pkgconfig/fribidi.pc"] :
-+                ["include/harfbuzz/hb-version.h", "lib/pkgconfig/harfbuzz.pc"]
++            if library == .libbluray {
++                generated += ["config.h", "contrib/libudfread/config.h"]
++                installed = ["include/libbluray/bluray-version.h", "lib/pkgconfig/libbluray.pc"]
++            } else {
++                installed = library == .libfribidi ?
++                    ["include/fribidi/fribidi-config.h", "lib/pkgconfig/fribidi.pc"] :
++                    ["include/harfbuzz/hb-version.h", "lib/pkgconfig/harfbuzz.pc"]
++            }
 +        }
 +        try verifySources()
 +        var budget = 0
@@ -908,39 +976,35 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        guard body.count <= 16 * 1024 * 1024 else { throw NSError(domain: "VortXSubtitleSources", code: 8) }
 +        try body.write(to: recordURL, options: .withoutOverwriting)
 +    }
-+}
-+
+ }
+ 
 +private class BuildUnibreak: PinnedSubtitleReleaseBuild {
 +    init() { super.init(library: .libunibreak) }
 +    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
 +        let host = platform.host(arch: arch).replacingOccurrences(of: "arm64-", with: "aarch64-", options: .anchored)
 +        return ["--host=\(host)", "--with-pic", "--enable-static", "--disable-shared"]
-     }
- }
- 
-@@ -826,29 +1506,321 @@
++    }
++}
++
+ private class BuildFreetype: ZipBaseBuild {
+     init() {
+         super.init(library: .libfreetype)
      }
  }
  
 -private class BuildFribidi: ZipBaseBuild {
 -    init() {
 -        super.init(library: .libfribidi)
--    }
--}
--
--private class BuildHarfbuzz: ZipBaseBuild {
--    init() {
--        super.init(library: .libharfbuzz)
--    }
--}
--
 +private class BuildFribidi: PinnedSubtitleReleaseBuild {
 +    init() { super.init(library: .libfribidi) }
 +    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
 +        ["--wrap-mode=nodownload", "-Dtests=false", "-Ddocs=false", "-Dbin=false", "-Ddeprecated=true"]
-+    }
-+}
-+
+     }
+ }
+ 
+-private class BuildHarfbuzz: ZipBaseBuild {
+-    init() {
+-        super.init(library: .libharfbuzz)
 +private class BuildHarfbuzz: PinnedSubtitleReleaseBuild {
 +    init() { super.init(library: .libharfbuzz) }
 +    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
@@ -951,8 +1015,8 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +         "-Dgraphite2=disabled", "-Dfontations=disabled", "-Dharfrust=disabled", "-Dkbts=disabled",
 +         "-Dwasm=disabled", "-Dgpu_demo=disabled", "-Dbenchmark=disabled",
 +         "-Draster=disabled", "-Dvector=disabled", "-Dgpu=disabled", "-Dsubset=disabled"]
-+    }
-+}
+     }
+ }
 +
 +
 +// Metadata correction for one retained binary wrapper, not a Samba upgrade.
@@ -1017,7 +1081,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        exec_prefix=${prefix}
 +        libdir=${prefix}/lib
 +        includedir=${prefix}/include/samba-4.0
-+
+ 
 +        Name: smbclient
 +        Description: A SMB library interface
 +        Version: 0.7.0
@@ -1026,7 +1090,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        Requires.private: gnutls\(glib ? " glib-2.0" : "")
 +        Cflags: -I${includedir}
 +        URL: http://www.samba.org/
-+
+ 
 +        """
 +    }
 +    // Pure policy shared by production IO and the bounded functional fixture.
@@ -1171,15 +1235,12 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        }
 +    }
 +}
- 
++
  private class BuildSmbclient: ZipBaseBuild {
      init() {
          super.init(library: .libsmbclient)
      }
  
--}
--
--private class BuildDav1d: ZipBaseBuild {
 +    // The candidate packages the exact retained wrapper locally alongside
 +    // the rebuilt crypto closure; its remote selector remains unchanged.
 +    override func generatesPackageManagerFile() -> Bool { false }
@@ -1225,13 +1286,14 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        try createXCFramework()
 +        try packageRelease()
 +    }
-+}
-+
+ }
+ 
+-private class BuildDav1d: ZipBaseBuild {
 +private class BuildDav1d: BaseBuild {
      init() {
          super.init(library: .libdav1d)
-+    }
-+
+     }
+ 
 +    override func beforeBuild() throws {
 +        try SpikeGit.clonePinned(url: library.url,
 +                                 sha: Library.dav1dPinnedSHA,
@@ -1252,10 +1314,12 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        // No published MPVKit 1.5.4 wrapper was observed. Local assembly and the
 +        // fixed candidate profile bind the actual source-built framework.
 +        false
-     }
- 
++    }
++
      override func buildALL() throws {
-@@ -861,9 +1833,32 @@
+         try super.buildALL()
+ 
+@@ -861,10 +1861,33 @@
      }
  }
  
@@ -1265,7 +1329,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +private class BuildLittleCms: BaseBuild {
      init() {
          super.init(library: .lcms2)
-+    }
+     }
 +
 +    override func beforeBuild() throws {
 +        try SpikeGit.clonePinned(url: library.url,
@@ -1286,10 +1350,11 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +        // Assembly binds the actual local XCFramework. Never synthesize a remote
 +        // mpvkit/lcms2-build release/checksum for this official-source RC candidate.
 +        false
-     }
++    }
  }
  
-@@ -879,9 +1874,54 @@
+ private class BuildUavs3d: ZipBaseBuild {
+@@ -879,10 +1902,55 @@
      }
  }
  
@@ -1298,7 +1363,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
  private class BuildShaderc: ZipBaseBuild {
      init() throws {
          super.init(library: .libshaderc)
-+    }
+     }
 +
 +    private func validate(_ archive: URL, bytes: UInt64, sha256: String) throws {
 +        let attributes = try FileManager.default.attributesOfItem(atPath: archive.path)
@@ -1341,8 +1406,9 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af45
 +            "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip"])
 +        try validate(xcArchive, bytes: 61246203,
 +                     sha256: "77a3d355993cf53843a394bf58262dab99cdd93f9e6fe31d5ca6e55b03866ce1")
-     }
++    }
  }
+ 
  
 diff --git a/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch b/Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch
 index 8b268af..7a075b0 100644
@@ -2246,7 +2312,6 @@ index 0000000..9191d290ed83a103cd7c95293f5a45a9f828147a
 +    main()
 diff --git a/Sources/BuildScripts/crypto-chain-gate.py b/Sources/BuildScripts/crypto-chain-gate.py
 new file mode 100644
-index 0000000..75a553bff5e32004554eee85fc08981bcb72d121
 --- /dev/null
 +++ b/Sources/BuildScripts/crypto-chain-gate.py
 @@ -0,0 +1,925 @@
@@ -2778,8 +2843,8 @@ index 0000000..75a553bff5e32004554eee85fc08981bcb72d121
 +            ldflags.append('-l' + dependency)
 +    flags = ' '.join(cflags)
 +    environment = {'LC_CTYPE': 'C', 'CC': '/usr/bin/clang', 'CXX': '/usr/bin/clang++',
-+                   'CURRENT_ARCH': arch, 'CFLAGS': flags, 'CPPFLAGS': flags,
-+                   'CXXFLAGS': flags, 'ASMFLAGS': flags, 'LDFLAGS': ' '.join(ldflags),
++                   'CURRENT_ARCH': arch, 'CFLAGS': flags + ' -O2', 'CPPFLAGS': flags,
++                   'CXXFLAGS': flags + ' -O2', 'ASMFLAGS': flags, 'LDFLAGS': ' '.join(ldflags),
 +                   'PKG_CONFIG_LIBDIR': ':'.join(str(dist / name / platform / 'thin' / arch / 'lib/pkgconfig') for name in PKG_LIBRARIES) + ':' + str(scratch / 'vortx-sdk-pkgconfig'),
 +                   'PKG_CONFIG_PATH': '', 'PATH': DEFAULT_PATH,
 +                   'MAKEFLAGS': '-j1', 'CMAKE_BUILD_PARALLEL_LEVEL': '1', 'CARGO_BUILD_JOBS': '1',
@@ -3177,10 +3242,9 @@ index 0000000..75a553bff5e32004554eee85fc08981bcb72d121
 +        raise SystemExit(str(error))
 diff --git a/Sources/BuildScripts/subtitle-release-sources.py b/Sources/BuildScripts/subtitle-release-sources.py
 new file mode 100644
-index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 --- /dev/null
 +++ b/Sources/BuildScripts/subtitle-release-sources.py
-@@ -0,0 +1,656 @@
+@@ -0,0 +1,788 @@
 +#!/usr/bin/env python3
 +"""Fixed release-source input boundary for the proposed Apple subtitle libraries.
 +
@@ -3211,7 +3275,14 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +MAX_PATH = 4096
 +MAX_MTIME = 4102444800
 +MAX_MTIME_NS = MAX_MTIME * 1000000000
-+PROFILE = "unibreak800-fribidi1017-harfbuzz1500-release-sources-v2-pax-ns"
++PROFILE = "unibreak800-fribidi1017-harfbuzz1500-bluray150-release-sources-v3-pax-ns"
++LEGACY_PROFILE = "unibreak800-fribidi1017-harfbuzz1500-release-sources-v2-pax-ns"
++STATE_NAME = "subtitle-sources-v3"
++LEGACY_STATE_NAME = "subtitle-sources"
++LEGACY_RECEIPT_SHA256 = "35c60d79d9d0ab3311c33ea8752490f7e191c1582f50aeedd131f56620fb4215"
++LEGACY_IDENTITY_BASIS = "fixed-sha256-from-upstream-release-metadata-or-maintained-android-pin"
++IDENTITY_BASIS = ("fixed-sha256-from-upstream-release-metadata-maintained-android-pin-"
++                  "or-official-sidecar; fixed-apple-source-transforms")
 +PINS = (
 +    {
 +        "id": "libunibreak", "version": "8.0", "archiveRoot": "libunibreak-8.0",
@@ -3237,11 +3308,41 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +        "sourceRoot": "libharfbuzz-15.0.0-968536e9",
 +        "url": "https://github.com/harfbuzz/harfbuzz/releases/download/15.0.0/harfbuzz-15.0.0.tar.xz",
 +    },
++    {
++        "id": "libbluray", "version": "1.5.0", "archiveRoot": "libbluray-1.5.0",
++        "filename": "libbluray-1.5.0.tar.xz", "compression": "xz", "bytes": 473072,
++        "maximumBytes": 473072, "entryPoint": "meson.build",
++        "sha256": "f676408e91a5d321abf8b8d4dfdae36205c297dab5c54c3ec519639025f474a2",
++        "sourceRoot": "libbluray-1.5.0-f676408e",
++        "url": "https://download.videolan.org/pub/videolan/libbluray/1.5.0/libbluray-1.5.0.tar.xz",
++        "sourceTransformPolicy": "bluray150-retained-apple-mobile-v1",
++    },
 +)
++LEGACY_PINS = PINS[:3]
++BLURAY_PIN = PINS[3]
 +
 +
 +def digest(data):
 +    return hashlib.sha256(data).hexdigest()
++
++
++BLURAY_SOURCE_TRANSFORMS = {'meson.build': {'beforeSHA256': '5f707fc923e4d2b9c845adff896b7c1734ea257e4a5fe77c67ddc856caaf73a0', 'afterSHA256': '97eab258bb691ded280ebeff128c5caf4f1807b3a78f76721bb30034d1c715cd', 'replacements': [{'before': "    extra_dependencies += dependency('appleframeworks',\n        modules: ['CoreFoundation', 'DiskArbitration'])", 'after': "    extra_dependencies += dependency('appleframeworks', modules: ['CoreFoundation'])\n    if cc.get_define('TARGET_OS_OSX', prefix: '#include <TargetConditionals.h>') == '1'\n        extra_dependencies += dependency('appleframeworks', modules: ['DiskArbitration'])\n    endif"}]}, 'src/file/mount_darwin.c': {'beforeSHA256': '055d80dbbe5f4b64837347fce756d9538f6254ddbb7d5608cc26f1bb7caee4df', 'afterSHA256': 'f439c23dd34529ad613909114e6dedd0f339550ba90b3ea243350333ab33c483', 'replacements': [{'before': '#include <DiskArbitration/DADisk.h>', 'after': '#include <TargetConditionals.h>\n#if TARGET_OS_OSX\n#include <DiskArbitration/DADisk.h>\n#endif'}, {'before': '    DASessionRef session = DASessionCreate(kCFAllocatorDefault);', 'after': '#if TARGET_OS_OSX\n    DASessionRef session = DASessionCreate(kCFAllocatorDefault);'}, {'before': '    return result;\n}', 'after': '#endif\n    return result;\n}'}]}, 'src/libbluray/bdj/bdj.c': {'beforeSHA256': '5fbe6d6bde9ac48a89399553d1cd1bcbfd7cffbcbc6f88aa6f010e91f1307e1f', 'afterSHA256': 'a5111e63b6b557820f395cbcd140d070c5181187b07ddf9fe5085fd0f33f78aa', 'replacements': [{'before': '#include <unistd.h>\n#endif', 'after': '#include <unistd.h>\n#include <TargetConditionals.h>\n#endif'}, {'before': 'static char *_java_home_macos()\n{', 'after': 'static char *_java_home_macos()\n{\n#if TARGET_OS_OSX'}, {'before': '    return result;\n}\n#undef MACOS_JAVA_HOME', 'after': '    return result;\n#else\n    // Match the retained Apple wrapper: mobile targets cannot launch java_home.\n    return NULL;\n#endif\n}\n#undef MACOS_JAVA_HOME'}]}}
++
++
++def source_body(pin, name, data):
++    if pin["id"] != "libbluray" or name not in BLURAY_SOURCE_TRANSFORMS:
++        return data
++    policy = BLURAY_SOURCE_TRANSFORMS[name]
++    if digest(data) != policy["beforeSHA256"]:
++        raise ValueError("libbluray source transform preimage differs")
++    for edit in policy["replacements"]:
++        before, after = edit["before"].encode(), edit["after"].encode()
++        if data.count(before) != 1:
++            raise ValueError("libbluray source transform is not an exact unique replacement")
++        data = data.replace(before, after)
++    if digest(data) != policy["afterSHA256"]:
++        raise ValueError("libbluray source transform afterimage differs")
++    return data
 +
 +
 +def canonical(value):
@@ -3507,7 +3608,16 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +                if stream is None:
 +                    raise ValueError("missing source member body")
 +                with stream:
-+                    row = file_row(member, stream)
++                    if pin["id"] == "libbluray" and name in BLURAY_SOURCE_TRANSFORMS:
++                        data = stream.read(MAX_FILE + 1)
++                        if len(data) != member.size or len(data) > MAX_FILE:
++                            raise ValueError("libbluray transform member length differs")
++                        data = source_body(pin, name, data)
++                        row = {"kind": "file", "mode": 0o755 if member.mode & 0o111 else 0o644,
++                               "mtimeNs": archive_mtime_ns(member),
++                               "bytes": len(data), "sha256": digest(data)}
++                    else:
++                        row = file_row(member, stream)
 +            elif member.issym():
 +                link_path(name.split("/")[:-1], member.linkname)
 +                data = member.linkname.encode()
@@ -3518,6 +3628,8 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +                # In particular, do not turn hardlinks into silently independent files.
 +                raise ValueError("hardlinks and special source members require a reviewed successor")
 +            entries[name] = row
++    if pin["id"] == "libbluray" and not set(BLURAY_SOURCE_TRANSFORMS).issubset(entries):
++        raise ValueError("libbluray source is missing a fixed Apple transform input")
 +    rows = finish_index(entries)
 +    entry_point = pin.get("entryPoint", "configure")
 +    entry = next((row for row in rows if row["path"] == entry_point), None)
@@ -3586,6 +3698,9 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +                raise ValueError("missing source member during extraction")
 +            with stream:
 +                data = stream.read(MAX_FILE + 1)
++            if len(data) != member.size or len(data) > MAX_FILE:
++                raise ValueError("source member raw length changed during extraction")
++            data = source_body(pin, name, data)
 +            row = expected[name]
 +            if len(data) != row["bytes"] or digest(data) != row["sha256"]:
 +                raise ValueError("source member differs between validation and extraction")
@@ -3618,16 +3733,35 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +                      "url": pin["url"], "archive": "archives/" + pin["filename"],
 +                      "archiveRoot": pin["archiveRoot"], "archiveBytes": len(blob),
 +                      "archiveSHA256": pin["sha256"], "sourceRoot": "dist/" + pin["sourceRoot"],
++                      "sourceTransformPolicy": pin.get("sourceTransformPolicy", "none"),
 +                      "membersSHA256": digest(canonical(rows)), "members": rows})
-+    return {"schema": 2, "profile": PROFILE,
-+            "identityBasis": "fixed-sha256-from-upstream-release-metadata-or-maintained-android-pin",
++    return {"schema": 3, "profile": PROFILE,
++            "identityBasis": IDENTITY_BASIS,
 +            "upstreamSignatureVerified": False, "roots": roots}
 +
 +
-+def read_inputs(archive_directory):
++def legacy_receipt_for(verified):
++    if [pin["id"] for pin, _, _ in verified] != [pin["id"] for pin in LEGACY_PINS]:
++        raise ValueError("legacy subtitle source tuple is not the exact three-root family")
++    roots = []
++    for pin, blob, rows in verified:
++        roots.append({"id": pin["id"], "version": pin["version"],
++                      "url": pin["url"], "archive": "archives/" + pin["filename"],
++                      "archiveRoot": pin["archiveRoot"], "archiveBytes": len(blob),
++                      "archiveSHA256": pin["sha256"], "sourceRoot": "dist/" + pin["sourceRoot"],
++                      "membersSHA256": digest(canonical(rows)), "members": rows})
++    return {"schema": 2, "profile": LEGACY_PROFILE,
++            "identityBasis": LEGACY_IDENTITY_BASIS,
++            "upstreamSignatureVerified": False, "roots": roots}
++
++
++def read_inputs(archive_directory, pins=PINS):
 +    directory(archive_directory)
++    if {path.name for path in archive_directory.iterdir()} != {
++            pin["filename"] for pin in pins}:
++        raise ValueError("release source archive input set is not exact")
 +    result = []
-+    for pin in PINS:
++    for pin in pins:
 +        blob = read_regular(archive_directory / pin["filename"], min(MAX_ARCHIVE, pin.get("maximumBytes", MAX_ARCHIVE)))
 +        result.append((pin, blob, index_archive(pin, blob)))
 +    return result
@@ -3639,13 +3773,13 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +    if not dist.exists():
 +        dist.mkdir(mode=0o755)
 +    directory(dist)
-+    destinations = [dist / pin["sourceRoot"] for pin in PINS] + [dist / "subtitle-sources"]
++    destinations = [dist / pin["sourceRoot"] for pin in PINS] + [dist / STATE_NAME]
 +    if any(path.exists() or path.is_symlink() for path in destinations):
-+        raise ValueError("crypto source preparation requires fresh exact destinations")
++        raise ValueError("release source preparation requires fresh exact destinations")
 +    verified = read_inputs(inputs)
-+    stage = dist / (".subtitle-sources-stage-" + uuid.uuid4().hex)
++    stage = dist / (".subtitle-sources-v3-stage-" + uuid.uuid4().hex)
 +    stage.mkdir(mode=0o755)
-+    state = stage / "subtitle-sources"
++    state = stage / STATE_NAME
 +    state.mkdir(mode=0o755)
 +    (state / "archives").mkdir(mode=0o755)
 +    for pin, blob, rows in verified:
@@ -3655,7 +3789,7 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +    # No replacement or automatic recovery: an interrupted publication is retained.
 +    for pin in PINS:
 +        os.rename(stage / pin["sourceRoot"], dist / pin["sourceRoot"])
-+    os.rename(state, dist / "subtitle-sources")
++    os.rename(state, dist / STATE_NAME)
 +    stage.rmdir()
 +    verify(work)
 +
@@ -3671,22 +3805,79 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +    return json.loads(data.decode("utf-8"), object_pairs_hook=pairs)
 +
 +
-+def verify(work):
++def verify_state(work, state_name, pins, receipt_builder, receipt_sha256=None):
 +    directory(work)
-+    state = directory(work / "dist" / "subtitle-sources")
++    state = directory(work / "dist" / state_name)
 +    if {path.name for path in state.iterdir()} != {"archives", "receipt.json"}:
-+        raise ValueError("unexpected crypto source state input")
++        raise ValueError("unexpected release source state input")
 +    archive_dir = directory(state / "archives")
-+    if {path.name for path in archive_dir.iterdir()} != {pin["filename"] for pin in PINS}:
-+        raise ValueError("crypto source archive set is not exact")
-+    verified = read_inputs(archive_dir)
-+    observed = strict_json(read_regular(state / "receipt.json", MAX_RECEIPT))
-+    if canonical(observed) != canonical(receipt_for(verified)):
-+        raise ValueError("crypto source receipt differs from actual pinned archive members")
++    verified = read_inputs(archive_dir, pins)
++    receipt_body = read_regular(state / "receipt.json", MAX_RECEIPT)
++    if receipt_sha256 is not None and digest(receipt_body) != receipt_sha256:
++        raise ValueError("legacy release source receipt identity differs")
++    observed = strict_json(receipt_body)
++    expected = canonical(receipt_builder(verified))
++    if receipt_body != expected or canonical(observed) != expected:
++        raise ValueError("release source receipt differs from actual pinned archive members")
 +    for pin, _, rows in verified:
 +        if actual_index(work / "dist" / pin["sourceRoot"]) != rows:
-+            raise ValueError("crypto release source tree changed or contains extra paths")
++            raise ValueError("release source tree changed or contains extra paths")
 +    return verified
++
++
++def verify_legacy(work):
++    return verify_state(work, LEGACY_STATE_NAME, LEGACY_PINS,
++                        legacy_receipt_for, LEGACY_RECEIPT_SHA256)
++
++
++def verify(work):
++    return verify_state(work, STATE_NAME, PINS, receipt_for)
++
++
++def extend_bluray(work, inputs):
++    directory(work)
++    dist = directory(work / "dist")
++    legacy = verify_legacy(work)
++    bluray_root = dist / BLURAY_PIN["sourceRoot"]
++    state_destination = dist / STATE_NAME
++    if (bluray_root.exists() or bluray_root.is_symlink()
++            or state_destination.exists() or state_destination.is_symlink()):
++        raise ValueError("libbluray extension requires fresh exact destinations")
++    bluray = read_inputs(inputs, (BLURAY_PIN,))
++    verified = legacy + bluray
++    stage = dist / (".subtitle-bluray-extension-stage-" + uuid.uuid4().hex)
++    stage.mkdir(mode=0o755)
++    state = stage / STATE_NAME
++    state.mkdir(mode=0o755)
++    (state / "archives").mkdir(mode=0o755)
++    for pin, blob, _ in verified:
++        write_new(state / "archives" / pin["filename"], blob)
++    _, bluray_blob, bluray_rows = bluray[0]
++    staged_root = stage / BLURAY_PIN["sourceRoot"]
++    extract_source(BLURAY_PIN, bluray_blob, staged_root, bluray_rows)
++    receipt_body = canonical(receipt_for(verified))
++    write_new(state / "receipt.json", receipt_body)
++    if (read_inputs(state / "archives") != verified
++            or read_regular(state / "receipt.json", MAX_RECEIPT) != receipt_body
++            or actual_index(staged_root) != bluray_rows
++            or verify_legacy(work) != legacy):
++        raise ValueError("libbluray staged extension differs from its fixed source closure")
++
++    published = []
++    try:
++        os.rename(staged_root, bluray_root)
++        published.append((bluray_root, staged_root))
++        os.rename(state, state_destination)
++        published.append((state_destination, state))
++        if verify_legacy(work) != legacy or verify(work) != verified:
++            raise ValueError("libbluray extension changed after publication")
++    except Exception:
++        for destination, staged in reversed(published):
++            if ((destination.exists() or destination.is_symlink())
++                    and not (staged.exists() or staged.is_symlink())):
++                os.rename(destination, staged)
++        raise
++    stage.rmdir()
 +
 +
 +def tar_add(archive, path, full, row):
@@ -3712,7 +3903,7 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +def capture(work, output):
 +    verified = verify(work)
 +    for protected in [work / "dist" / pin["sourceRoot"] for pin in PINS] + [
-+            work / "dist" / "subtitle-sources"]:
++            work / "dist" / STATE_NAME, work / "dist" / LEGACY_STATE_NAME]:
 +        try:
 +            output.relative_to(protected)
 +        except ValueError:
@@ -3818,6 +4009,9 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +    item.add_argument("local_archives")
 +    item = commands.add_parser("verify")
 +    item.add_argument("work")
++    item = commands.add_parser("extend-bluray")
++    item.add_argument("work")
++    item.add_argument("local_archives")
 +    item = commands.add_parser("capture")
 +    item.add_argument("work")
 +    item.add_argument("output")
@@ -3828,6 +4022,8 @@ index 0000000..7661900598484e9c1b240c233e3f1f9a9d702afe
 +        prepare(checked_path(args.work), checked_path(args.local_archives))
 +    elif args.command == "verify":
 +        verify(checked_path(args.work))
++    elif args.command == "extend-bluray":
++        extend_bluray(checked_path(args.work), checked_path(args.local_archives))
 +    elif args.command == "capture":
 +        capture(checked_path(args.work), checked_path(args.output))
 +    else:

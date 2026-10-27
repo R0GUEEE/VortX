@@ -138,7 +138,8 @@ run_with_subtitle_sources_readonly() (
   for subtitle_source in \
     "$subtitle_work/dist/libunibreak-8.0-9c4fad6e" \
     "$subtitle_work/dist/libfribidi-1.0.17-6949dcde" \
-    "$subtitle_work/dist/libharfbuzz-15.0.0-968536e9"; do
+    "$subtitle_work/dist/libharfbuzz-15.0.0-968536e9" \
+    "$subtitle_work/dist/libbluray-1.5.0-f676408e"; do
     [ -d "$subtitle_source" ] && [ ! -L "$subtitle_source" ] &&
       [ "$(cd "$subtitle_source" && pwd -P)" = "$subtitle_source" ] || exit 1
   done
@@ -147,11 +148,13 @@ run_with_subtitle_sources_readonly() (
 (deny file-write*
   (subpath (param "SRC_UNIBREAK"))
   (subpath (param "SRC_FRIBIDI"))
-  (subpath (param "SRC_HARFBUZZ")))'
+  (subpath (param "SRC_HARFBUZZ"))
+  (subpath (param "SRC_BLURAY")))'
   PYTHONDONTWRITEBYTECODE=1 /usr/bin/sandbox-exec \
     -D "SRC_UNIBREAK=$subtitle_work/dist/libunibreak-8.0-9c4fad6e" \
     -D "SRC_FRIBIDI=$subtitle_work/dist/libfribidi-1.0.17-6949dcde" \
     -D "SRC_HARFBUZZ=$subtitle_work/dist/libharfbuzz-15.0.0-968536e9" \
+    -D "SRC_BLURAY=$subtitle_work/dist/libbluray-1.5.0-f676408e" \
     -p "$subtitle_policy" "$@"
 )
 
@@ -248,10 +251,7 @@ PY
 # drift after the native build begins.
 prepare_subtitle_sources() {
   local helper="$MPVKIT_DIR/Sources/BuildScripts/subtitle-release-sources.py"
-  local stage="$WORK/dist/subtitle-source-download"
   [ -f "$helper" ] && [ ! -L "$helper" ] || fail "subtitle source helper is missing or linked"
-  [ ! -e "$stage" ] && [ ! -L "$stage" ] || fail "subtitle source staging directory must be fresh"
-  mkdir -p "$stage"
   local python_bin="$(command -v python3)"
   [ -x "$python_bin" ] || fail "supported python3 executable is required"
   "$python_bin" - <<'PY'
@@ -262,6 +262,33 @@ if sys.version_info < (3, 10):
 if not hasattr(zipfile, "ZipFile"):
     raise SystemExit("strict archive reader is unavailable")
 PY
+  # v6 never reinterprets or overwrites the legacy schema2/three-source state.
+  # A complete current state is reusable only after the helper's strict recheck.
+  if [ -e "$WORK/dist/subtitle-sources-v3" ] || [ -L "$WORK/dist/subtitle-sources-v3" ]; then
+    "$python_bin" "$helper" verify "$WORK"
+    return
+  fi
+  local source_mode=prepare
+  local stage="$WORK/dist/subtitle-source-download-v3"
+  if [ -e "$WORK/dist/subtitle-sources" ] || [ -L "$WORK/dist/subtitle-sources" ]; then
+    source_mode=extend-bluray
+    stage="$WORK/dist/subtitle-bluray-download"
+  fi
+  [ ! -e "$stage" ] && [ ! -L "$stage" ] || fail "subtitle source staging directory must be fresh"
+  mkdir -p "$stage"
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --retry 3 --max-time 600 --max-filesize 8388608 --output "$stage/libbluray-1.5.0.tar.xz" \
+    https://download.videolan.org/pub/videolan/libbluray/1.5.0/libbluray-1.5.0.tar.xz
+  [ "$(wc -c <"$stage/libbluray-1.5.0.tar.xz" | tr -d ' ')" = 473072 ] || fail "libbluray release size differs"
+  printf '%s  %s\n' \
+    f676408e91a5d321abf8b8d4dfdae36205c297dab5c54c3ec519639025f474a2 "$stage/libbluray-1.5.0.tar.xz" | shasum -a 256 -c - ||
+    fail "libbluray release body digest differs"
+  if [ "$source_mode" = extend-bluray ]; then
+    # The fixed helper requires exact old receipt35c plus all old raw/member/source
+    # identities before publishing only fresh bluray/v3 destinations.
+    "$python_bin" "$helper" extend-bluray "$WORK" "$stage"
+    "$python_bin" "$helper" verify "$WORK"
+    return
+  fi
   curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --retry 3 --max-time 600 --max-filesize 8388608 --output "$stage/libunibreak-8.0.tar.gz" \
     https://github.com/adah1972/libunibreak/releases/download/libunibreak_8_0/libunibreak-8.0.tar.gz
   curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --retry 3 --max-time 600 --max-filesize 8388608 --output "$stage/fribidi-1.0.17.tar.xz" \
@@ -320,6 +347,10 @@ else
   done <<< "$STATUS"
 fi
 
+# Fixed helpers require physical paths; the maintained sibling default contains
+# /../ until checkout creation/identity validation has completed above.
+MPVKIT_DIR="$(cd "$MPVKIT_DIR" && pwd -P)" || fail "cannot resolve validated MPVKit work directory"
+WORK="$MPVKIT_DIR"
 cd "$MPVKIT_DIR"
 if git apply --check "$PATCH" >/dev/null 2>&1; then
   git apply "$PATCH"
@@ -435,9 +466,9 @@ fi
 CRYPTO_SOURCE_HELPER="$MPVKIT_DIR/Sources/BuildScripts/crypto-release-sources.py"
 CRYPTO_GATE_HELPER="$MPVKIT_DIR/Sources/BuildScripts/crypto-chain-gate.py"
 CRYPTO_SOURCE_HELPER_SHA256="3c310499d446eed72eb16521b27c16f718f23e7ab1472dec1fad79cc40ed1537"
-CRYPTO_GATE_HELPER_SHA256="041dd13e48e1821f5d7bf049bb8eb097d3772d6ea867c15a3b7646779a3c015d"
+CRYPTO_GATE_HELPER_SHA256="be5bc18e00b9b1cb4c4c5889b0935b4cd5d1538a98bcfb985ccbfcb208825a9b"
 SUBTITLE_SOURCE_HELPER="$MPVKIT_DIR/Sources/BuildScripts/subtitle-release-sources.py"
-SUBTITLE_SOURCE_HELPER_SHA256="f18c516b0694ecbc601680782b4d0fba22265854cbd82e4a9e7516d9bb905154"
+SUBTITLE_SOURCE_HELPER_SHA256="f082ea41b939e8152a2571636f937e2bb9dcfed57ffd2f1dbe65ed68522800df"
 [ -f "$CRYPTO_SOURCE_HELPER" ] && [ ! -L "$CRYPTO_SOURCE_HELPER" ] || fail "crypto release-source helper missing"
 [ -f "$CRYPTO_GATE_HELPER" ] && [ ! -L "$CRYPTO_GATE_HELPER" ] || fail "crypto chain gate helper missing"
 [ -f "$SUBTITLE_SOURCE_HELPER" ] && [ ! -L "$SUBTITLE_SOURCE_HELPER" ] || fail "subtitle release-source helper missing"
@@ -590,11 +621,12 @@ cmp -s "$FFMPEG_RESPONSE_SOURCE/libavformat/vortx_reference_sparse.h" "$MPV_OBSE
 
 # Assembly reads the per-library release ZIP, not slice scratch directories. Historical
 # native-upgrades-dav1d154-shaderc20261-hb150-v2, native-upgrades-openssl410-v3 and the
-# crypto-v4 verifier profiles remain readable; this caller selects the combined subtitle v5 below.
+# crypto-v4 verifier profiles remain readable; v5 is an unshipped historical API.
+# This caller selects the explicit four-source bluray v6 contract below.
 # Refuse to package a stale ZIP after an interrupted or incorrectly cached run.
 # Libmpv must be fresh too: a rebuilt FFmpeg archive alone cannot carry the
 # CoreAudio lifetime fix. Never silently repackage the old vulnerable player.
-for library in Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient Libunibreak Libfribidi Libharfbuzz; do
+for library in Libmpv Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale Libplacebo lcms2 Libdav1d Libssl Libcrypto gmp nettle hogweed gnutls Libsmbclient Libunibreak Libfribidi Libharfbuzz Libbluray; do
   library_zip="$WORK/dist/release/$library.xcframework.zip"
   [ -f "$library_zip" ] || {
     echo "missing rebuilt artifact: $library_zip" >&2
@@ -635,7 +667,7 @@ python3 "$HERE/native-media-hosted/evidence.py" apple-subtitle-receipt \
 "$(command -v python3)" "$CRYPTO_GATE_HELPER" capture "$WORK" "$STAGED_DEST" \
   --dependency-profile native-upgrades-crypto-chain-v1
 "$HERE/verify-mpvkit-dvfel-artifacts.sh" "$STAGED_DEST" \
-  --dependency-profile native-upgrades-openssl410-crypto-subtitles-v5 \
+  --dependency-profile native-upgrades-openssl410-crypto-subtitles-bluray150-v6 \
   --shaderc-inputs "$WORK/dist/libshaderc-2026.1.0" \
   --openssl-builds "$WORK/dist/openssl/vortx-openssl-builds.json" \
   --crypto-work "$WORK"

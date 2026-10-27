@@ -40,7 +40,7 @@ def save(path, data):
 # The dependency-upgrade receipt is deliberately separate from the existing
 # shipping/source profile.  The coordinator seals the profile and manifest
 # literals after rebasing this recovery-only delta onto the next carrier.
-NATIVE_UPGRADES_PROFILE = 'native-upgrades-openssl410-crypto-subtitles-v5'
+NATIVE_UPGRADES_PROFILE = 'native-upgrades-openssl410-crypto-subtitles-bluray150-v6'
 SHADERC_WRAPPER_VERSION = '2026.1.0'
 SHADERC_SOURCE_SPECS = (
     ('libshaderc.zip', 124322785,
@@ -172,10 +172,10 @@ CRYPTO_INSTALLED_HELPERS = {
     'Sources/BuildScripts/crypto-release-sources.py':
         '3c310499d446eed72eb16521b27c16f718f23e7ab1472dec1fad79cc40ed1537',
     'Sources/BuildScripts/crypto-chain-gate.py':
-        '041dd13e48e1821f5d7bf049bb8eb097d3772d6ea867c15a3b7646779a3c015d',
+        'be5bc18e00b9b1cb4c4c5889b0935b4cd5d1538a98bcfb985ccbfcb208825a9b',
 }
 
-SUBTITLE_SOURCE_PROFILE = 'unibreak800-fribidi1017-harfbuzz1500-release-sources-v2-pax-ns'
+SUBTITLE_SOURCE_PROFILE = 'unibreak800-fribidi1017-harfbuzz1500-bluray150-release-sources-v3-pax-ns'
 SUBTITLE_SOURCE_OUTPUTS = (
     {
         'id': 'libunibreak', 'version': '8.0', 'archiveRoot': 'libunibreak-8.0',
@@ -205,13 +205,23 @@ SUBTITLE_SOURCE_OUTPUTS = (
         'url': 'https://github.com/harfbuzz/harfbuzz/releases/download/15.0.0/harfbuzz-15.0.0.tar.xz',
         'output': 'apple-subtitle-source-harfbuzz.tar.xz',
     },
+    {
+        'id': 'libbluray', 'version': '1.5.0', 'archiveRoot': 'libbluray-1.5.0',
+        'filename': 'libbluray-1.5.0.tar.xz', 'compression': 'xz', 'bytes': 473072,
+        'maximumBytes': 473072, 'entryPoint': 'meson.build',
+        'sha256': 'f676408e91a5d321abf8b8d4dfdae36205c297dab5c54c3ec519639025f474a2',
+        'sourceRoot': 'libbluray-1.5.0-f676408e',
+        'url': 'https://download.videolan.org/pub/videolan/libbluray/1.5.0/libbluray-1.5.0.tar.xz',
+        'sourceTransformPolicy': 'bluray150-retained-apple-mobile-v1',
+        'output': 'apple-bluray-source.tar.xz',
+    },
 )
 SUBTITLE_CAPTURE_TAR_OUTPUT = 'apple-subtitle-release-sources.tar'
 SUBTITLE_CAPTURE_RECEIPT_OUTPUT = 'apple-subtitle-release-sources.json'
 SUBTITLE_BUILD_OUTPUT = 'apple-subtitle-builds.json'
 SUBTITLE_INSTALLED_HELPERS = {
     'Sources/BuildScripts/subtitle-release-sources.py':
-        'f18c516b0694ecbc601680782b4d0fba22265854cbd82e4a9e7516d9bb905154',
+        'f082ea41b939e8152a2571636f937e2bb9dcfed57ffd2f1dbe65ed68522800df',
 }
 SUBTITLE_MATRIX = (
     ('ios', 'arm64', 'ios-arm64'),
@@ -225,14 +235,18 @@ SUBTITLE_MATRIX = (
     ('macos', 'x86_64', 'macos-arm64_x86_64'),
 )
 SUBTITLE_VERSIONS = {'libunibreak': '8.0', 'libfribidi': '1.0.17',
-                     'libharfbuzz': '15.0.0'}
+                     'libharfbuzz': '15.0.0', 'libbluray': '1.5.0'}
 SUBTITLE_SELECTORS = {'libunibreak': '8.0-9c4fad6e',
                       'libfribidi': '1.0.17-6949dcde',
-                      'libharfbuzz': '15.0.0-968536e9'}
+                      'libharfbuzz': '15.0.0-968536e9', 'libbluray': '1.5.0-f676408e'}
 SUBTITLE_ROUTES = {'libunibreak': 'release-autoconf',
                    'libfribidi': 'release-meson',
-                   'libharfbuzz': 'release-meson'}
+                   'libharfbuzz': 'release-meson', 'libbluray': 'release-meson'}
 SUBTITLE_ARGUMENTS = {
+    'libbluray': ('--wrap-mode=nodownload', '--force-fallback-for=libudfread',
+                   '-Denable_docs=false', '-Denable_tools=false', '-Denable_devtools=false',
+                   '-Denable_examples=false', '-Dbdj_jar=disabled', '-Dembed_udfread=true',
+                   '-Dfontconfig=disabled', '-Dfreetype=enabled', '-Dlibxml2=enabled'),
     'libunibreak': None,
     'libfribidi': ('--wrap-mode=nodownload', '-Dtests=false', '-Ddocs=false',
                    '-Dbin=false', '-Ddeprecated=true'),
@@ -251,6 +265,9 @@ SUBTITLE_MAKE_ARGUMENTS = ('-j1', 'AUTOCONF=/usr/bin/false',
                            'AUTOHEADER=/usr/bin/false', 'AUTOMAKE=/usr/bin/false',
                            'ACLOCAL=/usr/bin/false')
 SUBTITLE_GENERATED = {
+    'libbluray': ('crossFile.meson', 'build.ninja', 'compile_commands.json',
+                  'meson-info/intro-buildoptions.json', 'meson-info/intro-dependencies.json',
+                  'config.h', 'contrib/libudfread/config.h'),
     'libunibreak': ('Makefile', 'config.status', 'config.log'),
     'libfribidi': ('crossFile.meson', 'build.ninja', 'compile_commands.json',
                    'meson-info/intro-buildoptions.json',
@@ -260,6 +277,7 @@ SUBTITLE_GENERATED = {
                     'meson-info/intro-dependencies.json'),
 }
 SUBTITLE_INSTALLED = {
+    'libbluray': ('include/libbluray/bluray-version.h', 'lib/pkgconfig/libbluray.pc'),
     'libunibreak': ('include/unibreakbase.h', 'lib/pkgconfig/libunibreak.pc'),
     'libfribidi': ('include/fribidi/fribidi-config.h', 'lib/pkgconfig/fribidi.pc'),
     'libharfbuzz': ('include/harfbuzz/hb-version.h', 'lib/pkgconfig/harfbuzz.pc'),
@@ -269,6 +287,48 @@ SUBTITLE_MAX_BODY = 8 * 1024 * 1024
 SUBTITLE_MAX_RECORD_BODIES = 8 * 1024 * 1024
 SUBTITLE_MAX_INLINE_RAW = 32 * 1024 * 1024
 SUBTITLE_MAX_RECEIPT = 64 * 1024 * 1024
+
+
+BLURAY_SOURCE_TRANSFORMS = {
+    'meson.build': {
+        'beforeSHA256': '5f707fc923e4d2b9c845adff896b7c1734ea257e4a5fe77c67ddc856caaf73a0',
+        'afterSHA256': '97eab258bb691ded280ebeff128c5caf4f1807b3a78f76721bb30034d1c715cd',
+        'replacements': [{'before': "    extra_dependencies += dependency('appleframeworks',\n        modules: ['CoreFoundation', 'DiskArbitration'])",
+                          'after': "    extra_dependencies += dependency('appleframeworks', modules: ['CoreFoundation'])\n    if cc.get_define('TARGET_OS_OSX', prefix: '#include <TargetConditionals.h>') == '1'\n        extra_dependencies += dependency('appleframeworks', modules: ['DiskArbitration'])\n    endif"}]},
+    'src/file/mount_darwin.c': {
+        'beforeSHA256': '055d80dbbe5f4b64837347fce756d9538f6254ddbb7d5608cc26f1bb7caee4df',
+        'afterSHA256': 'f439c23dd34529ad613909114e6dedd0f339550ba90b3ea243350333ab33c483',
+        'replacements': [
+            {'before': '#include <DiskArbitration/DADisk.h>', 'after': '#include <TargetConditionals.h>\n#if TARGET_OS_OSX\n#include <DiskArbitration/DADisk.h>\n#endif'},
+            {'before': '    DASessionRef session = DASessionCreate(kCFAllocatorDefault);', 'after': '#if TARGET_OS_OSX\n    DASessionRef session = DASessionCreate(kCFAllocatorDefault);'},
+            {'before': '    return result;\n}', 'after': '#endif\n    return result;\n}'}]},
+    'src/libbluray/bdj/bdj.c': {
+        'beforeSHA256': '5fbe6d6bde9ac48a89399553d1cd1bcbfd7cffbcbc6f88aa6f010e91f1307e1f',
+        'afterSHA256': 'a5111e63b6b557820f395cbcd140d070c5181187b07ddf9fe5085fd0f33f78aa',
+        'replacements': [
+            {'before': '#include <unistd.h>\n#endif', 'after': '#include <unistd.h>\n#include <TargetConditionals.h>\n#endif'},
+            {'before': 'static char *_java_home_macos()\n{', 'after': 'static char *_java_home_macos()\n{\n#if TARGET_OS_OSX'},
+            {'before': '    return result;\n}\n#undef MACOS_JAVA_HOME', 'after': '    return result;\n#else\n    // Match the retained Apple wrapper: mobile targets cannot launch java_home.\n    return NULL;\n#endif\n}\n#undef MACOS_JAVA_HOME'}]},
+}
+
+
+def _bluray_source_body(pin, name, body):
+    if pin['id'] != 'libbluray' or name not in BLURAY_SOURCE_TRANSFORMS:
+        return body
+    if pin.get('sourceTransformPolicy') != 'bluray150-retained-apple-mobile-v1':
+        raise ValueError('libbluray source transform policy differs')
+    policy = BLURAY_SOURCE_TRANSFORMS[name]
+    if hashlib.sha256(body).hexdigest() != policy['beforeSHA256']:
+        raise ValueError('libbluray source transform preimage differs')
+    for edit in policy['replacements']:
+        before, after = edit['before'].encode(), edit['after'].encode()
+        if body.count(before) != 1:
+            raise ValueError('libbluray source transform anchor is not unique')
+        body = body.replace(before, after)
+    if hashlib.sha256(body).hexdigest() != policy['afterSHA256']:
+        raise ValueError('libbluray source transform afterimage differs')
+    return body
+
 
 
 def _crypto_canonical(value):
@@ -470,7 +530,7 @@ def _crypto_index_archive(pin, blob, nanoseconds=False):
         raise ValueError('crypto release source body differs from its fixed pin')
     time_key = 'mtimeNs' if nanoseconds else 'mtime'
     entries = {'': {'kind': 'directory', 'mode': 0o755, time_key: 0}}
-    seen, total = set(), 0
+    seen, total, transformed = set(), 0, set()
     with _crypto_tar_stream(blob, pin['compression']) as archive:
         for member in archive:
             if len(seen) >= CRYPTO_MAX_MEMBERS:
@@ -500,7 +560,17 @@ def _crypto_index_archive(pin, blob, nanoseconds=False):
                 if stream is None:
                     raise ValueError('missing crypto source member body')
                 with stream:
-                    row = _crypto_file_row(member, stream, nanoseconds)
+                    if pin['id'] == 'libbluray' and name in BLURAY_SOURCE_TRANSFORMS:
+                        raw = stream.read(CRYPTO_MAX_MEMBER + 1)
+                        if len(raw) != member.size or len(raw) > CRYPTO_MAX_MEMBER:
+                            raise ValueError('libbluray raw source member length differs')
+                        data = _bluray_source_body(pin, name, raw)
+                        transformed.add(name)
+                        row = {'kind': 'file', 'mode': 0o755 if member.mode & 0o111 else 0o644,
+                               time_key: _crypto_member_mtime(member, nanoseconds),
+                               'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+                    else:
+                        row = _crypto_file_row(member, stream, nanoseconds)
             elif member.issym():
                 _crypto_link_path(name.split('/')[:-1], member.linkname)
                 body = member.linkname.encode('utf-8')
@@ -512,6 +582,8 @@ def _crypto_index_archive(pin, blob, nanoseconds=False):
             if name in entries:
                 raise ValueError('duplicate crypto source member')
             entries[name] = row
+    if pin['id'] == 'libbluray' and transformed != set(BLURAY_SOURCE_TRANSFORMS):
+        raise ValueError('libbluray fixed source transform members are incomplete')
     rows = _crypto_finish_index(entries, nanoseconds)
     entry_point = pin.get('entryPoint', 'configure')
     entry = next((row for row in rows if row['path'] == entry_point), None)
@@ -535,6 +607,7 @@ def _crypto_expected_receipt(verified, profile=None,
             'sourceRoot': 'dist/' + pin['sourceRoot'],
             'membersSHA256': hashlib.sha256(_crypto_canonical(rows)).hexdigest(),
             'members': rows,
+            **({'sourceTransformPolicy': pin.get('sourceTransformPolicy', 'none')} if schema == 3 else {}),
         })
     return {'schema': schema, 'profile': profile,
             'identityBasis': identity_basis,
@@ -676,7 +749,8 @@ def crypto_source_outputs(output, *, pins=None, profile=None,
         roots.append({'id': root['id'], 'version': root['version'],
                       'archiveRoot': root['archiveRoot'], 'sourceRoot': root['sourceRoot'],
                       'archive': output_rows[len(roots)],
-                      'membersSHA256': root['membersSHA256']})
+                      'membersSHA256': root['membersSHA256'],
+                      **({'sourceTransformPolicy': root['sourceTransformPolicy']} if receipt_schema == 3 else {})})
     return {'profile': profile, 'roots': roots,
             'capture': {'tar': capture_row, 'receipt': receipt_row}}
 
@@ -688,8 +762,8 @@ def subtitle_source_outputs(output):
         capture_receipt=SUBTITLE_CAPTURE_RECEIPT_OUTPUT,
         capture_tar_logical='subtitle-release-sources.tar',
         capture_receipt_logical='subtitle-release-sources.json',
-        identity_basis='fixed-sha256-from-upstream-release-metadata-or-maintained-android-pin',
-        receipt_schema=2, nanoseconds=True)
+        identity_basis='fixed-sha256-from-upstream-release-metadata-maintained-android-pin-or-official-sidecar; fixed-apple-source-transforms',
+        receipt_schema=3, nanoseconds=True)
 
 
 def _shaderc_regular(path, label):
@@ -1740,10 +1814,18 @@ def _subtitle_environment(value, work, library, platform, arch):
     prefix = '-arch ' + arch + ' -isysroot '
     suffix = ' -target ' + target + ' ' + minimum
     fork = ' -DHAVE_FORK=0' if platform in ('tvos', 'tvsimulator') else ''
+    freetype = work / 'dist/libfreetype' / platform / 'thin' / arch
+    dependency_cflags = ' -I' + str(freetype / 'include') if library == 'libbluray' else ''
     cflags = value['CFLAGS']
-    if not cflags.startswith(prefix) or not cflags.endswith(suffix + fork):
+    optimization = ' -O2' if library == 'libunibreak' else ''
+    if optimization:
+        if (not cflags.endswith(optimization)
+                or [item for item in cflags.split() if item.startswith('-O')] != ['-O2']):
+            raise ValueError('Unibreak shipping CFLAGS require exactly one trailing -O2')
+        cflags = cflags[:-len(optimization)]
+    if not cflags.startswith(prefix) or not cflags.endswith(suffix + fork + dependency_cflags):
         raise ValueError('subtitle C flags differ from the fixed platform policy')
-    sdk_root = cflags[len(prefix):len(cflags) - len(suffix + fork)]
+    sdk_root = cflags[len(prefix):len(cflags) - len(suffix + fork + dependency_cflags)]
     sdk_pattern = (r'.*/' + re.escape(sdk_stem) +
                    r'\.platform/Developer/SDKs/' + re.escape(sdk_stem) +
                    r'(?:[0-9]{1,3}(?:\.[0-9]{1,3}){0,3})?\.sdk')
@@ -1757,9 +1839,10 @@ def _subtitle_environment(value, work, library, platform, arch):
     expected = {
         'LC_CTYPE': 'C', 'MAKEFLAGS': '-j1', 'CMAKE_BUILD_PARALLEL_LEVEL': '1',
         'CARGO_BUILD_JOBS': '1', 'CC': '/usr/bin/clang', 'CXX': '/usr/bin/clang++',
-        'CURRENT_ARCH': arch, 'CFLAGS': cflags, 'CPPFLAGS': cflags,
-        'CXXFLAGS': cflags, 'ASMFLAGS': cflags,
-        'LDFLAGS': '-lc++ ' + prefix + sdk_root + suffix,
+        'CURRENT_ARCH': arch, 'CFLAGS': cflags + optimization, 'CPPFLAGS': cflags,
+        'CXXFLAGS': cflags + optimization, 'ASMFLAGS': cflags,
+        'LDFLAGS': '-lc++ ' + prefix + sdk_root + suffix +
+                   ((' -L' + str(freetype / 'lib') + ' -lfreetype') if library == 'libbluray' else ''),
         'PKG_CONFIG_LIBDIR': ':'.join(pkg_roots), 'PKG_CONFIG_PATH': '',
         'PATH': OPENSSL_DEFAULT_PATH,
     }
@@ -1836,6 +1919,9 @@ def _subtitle_build_options(body, library, prefix):
     for argument in SUBTITLE_ARGUMENTS[library]:
         if argument == '--wrap-mode=nodownload':
             expected['wrap_mode'] = 'nodownload'
+            continue
+        if argument == '--force-fallback-for=libudfread':
+            expected['force_fallback_for'] = ['libudfread']
             continue
         name, raw = argument.removeprefix('-D').split('=', 1)
         expected[name] = {'true': True, 'false': False}.get(raw, raw)
@@ -1999,17 +2085,26 @@ def _subtitle_pc(body, library, prefix):
         target[name] = item
     if variables.get('prefix') != str(prefix) or fields.get('Version') != SUBTITLE_VERSIONS[library]:
         raise ValueError('subtitle pkg-config prefix/version differs from the fixed build')
-    if fields.get('Requires', '') or fields.get('Requires.private', ''):
+    if library == 'libbluray':
+        required = re.sub(r'\s+>=\s+[0-9]+(?:\.[0-9]+){0,3}', '', fields.get('Requires.private', ''))
+        if (fields.get('Requires', '') or sorted(required.replace(',', ' ').split()) != ['freetype2', 'libxml-2.0']
+                or any(item in text for item in ('-ludfread', '/opt/homebrew', '/usr/local/', 'fontconfig'))):
+            raise ValueError('libbluray pkg-config dependency closure differs')
+    elif fields.get('Requires', '') or fields.get('Requires.private', ''):
         raise ValueError('subtitle pkg-config unexpectedly admits another package dependency')
     expected_lib = {'libunibreak': '-lunibreak', 'libfribidi': '-lfribidi',
-                    'libharfbuzz': '-lharfbuzz'}[library]
+                    'libharfbuzz': '-lharfbuzz', 'libbluray': '-lbluray'}[library]
     if expected_lib not in fields.get('Libs', '').split():
         raise ValueError('subtitle pkg-config library identity differs')
 
 
 def _subtitle_header(body, library):
     text = _subtitle_text(body, 'installed version header')
-    if library == 'libunibreak':
+    if library == 'libbluray':
+        for name, value in (('BLURAY_VERSION_MAJOR', '1'), ('BLURAY_VERSION_MINOR', '5'), ('BLURAY_VERSION_MICRO', '0')):
+            _bluray_define(text, name, value)
+        _bluray_define(text, 'BLURAY_VERSION_STRING', '1.5.0', True)
+    elif library == 'libunibreak':
         definitions = re.findall(r'^[ \t]*#[ \t]*define[ \t]+UNIBREAK_VERSION\b[^\r\n]*$',
                                  text, re.M)
         versions = re.findall(
@@ -2055,6 +2150,166 @@ def _subtitle_header(body, library):
                              text, re.M)
         if len(definitions) != 1 or strings != ['15.0.0']:
             raise ValueError('HarfBuzz installed header string version differs')
+
+
+def _bluray_fields(body, label):
+    variables, fields = {}, {}
+    for raw in _subtitle_text(body, label).splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if '=' in line and (':' not in line or line.index('=') < line.index(':')):
+            name, value = line.split('=', 1)
+            target = variables
+        elif ':' in line:
+            name, value = line.split(':', 1)
+            target = fields
+        else:
+            raise ValueError('libbluray dependency metadata has an unknown line')
+        name, value = name.strip(), value.strip()
+        if not name or name in target:
+            raise ValueError('libbluray dependency metadata has duplicate fields')
+        target[name] = value
+    return variables, fields
+
+
+def _bluray_define(text, name, expected, quoted=False):
+    lines = re.findall(r'^[ \t]*#[ \t]*define[ \t]+' + re.escape(name) + r'\b[^\r\n]*$', text, re.M)
+    undefs = re.findall(r'^[ \t]*#[ \t]*undef[ \t]+' + re.escape(name) + r'\b[^\r\n]*$', text, re.M)
+    value = ('"' + re.escape(expected) + '"') if quoted else re.escape(expected)
+    if undefs or len(lines) != 1 or re.fullmatch(r'[ \t]*#[ \t]*define[ \t]+' + re.escape(name) + r'[ \t]+' + value + r'[ \t]*', lines[0]) is None:
+        raise ValueError('libbluray configured macro differs: ' + name)
+
+
+def _bluray_config(generated):
+    config = _subtitle_text(generated['config.h'], 'libbluray config.h')
+    _bluray_define(config, 'VERSION', '1.5.0', True)
+    for name in ('HAVE_FT2', 'HAVE_LIBXML2', 'HAVE_LIBUDFREAD'):
+        _bluray_define(config, name, '1')
+    if re.search(r'^[ \t]*#[ \t]*define[ \t]+HAVE_FONTCONFIG\b', config, re.M):
+        raise ValueError('libbluray configured fontconfig despite disabled policy')
+    _bluray_define(_subtitle_text(generated['contrib/libudfread/config.h'], 'embedded UDF config'), 'HAVE_UDFREAD_VERSION_H', '1')
+
+
+def _bluray_dependencies(body, work, platform, arch, sdk_root):
+    value = _crypto_strict_json(body)
+    if type(value) is not list or len(value) > 10000:
+        raise ValueError('libbluray dependency set is unbounded')
+    rows, frameworks = {}, set()
+    allowed = {'freetype2', 'libxml-2.0', 'libudfread', 'threads', 'appleframeworks'}
+    ft = str(work / 'dist/libfreetype' / platform / 'thin' / arch)
+    for row in value:
+        if (type(row) is not dict or not isinstance(row.get('name'), str) or row['name'] not in allowed
+                or (row['name'] in rows and row['name'] != 'appleframeworks')):
+            raise ValueError('libbluray dependency name is unknown or duplicate')
+        name = row['name']
+        rows[name] = row
+        for key in ('compile_args', 'link_args'):
+            if type(row.get(key)) is not list or any(not isinstance(item, str) or len(item) > 65536 or '\x00' in item for item in row[key]):
+                raise ValueError('libbluray dependency arguments are malformed')
+        all_args = row['compile_args'] + row['link_args']
+        if any('/opt/homebrew' in item or '/usr/local/' in item or 'wrapdb' in item.casefold() for item in all_args):
+            raise ValueError('libbluray admits a host/fetch dependency')
+        if name == 'freetype2':
+            if ('-I' + ft + '/include/freetype2' not in row['compile_args']
+                    or not ({'-lfreetype', ft + '/lib/libfreetype.a'} & set(row['link_args']))
+                    or row['compile_args'] != ['-I' + ft + '/include/freetype2']
+                    or set(row['link_args']) - {'-L' + ft + '/lib', '-lfreetype', ft + '/lib/libfreetype.a',
+                                                '-lz', sdk_root + '/usr/lib/libz.tbd', sdk_root + '/usr/lib/libz.1.tbd'}):
+                raise ValueError('libbluray Freetype dependency is not the retained target provider')
+        elif name == 'libxml-2.0':
+            if ('-I' + sdk_root + '/usr/include/libxml2' not in row['compile_args']
+                    or row['compile_args'] != ['-I' + sdk_root + '/usr/include/libxml2']
+                    or not row['link_args']
+                    or set(row['link_args']) - {'-lxml2', sdk_root + '/usr/lib/libxml2.tbd', sdk_root + '/usr/lib/libxml2.2.tbd'}):
+                raise ValueError('libbluray XML dependency is not the selected SDK provider')
+        elif name == 'libudfread':
+            if (row.get('type') != 'internal' or row.get('version') != '1.2.0'
+                    or any(item.startswith('-L') or item == '-ludfread' for item in row['link_args'])):
+                raise ValueError('libbluray admits external/wrong-version UDF')
+        elif name == 'threads':
+            if any(item != '-pthread' for item in all_args):
+                raise ValueError('libbluray thread dependency admits foreign flags')
+        elif name == 'appleframeworks':
+            args = row['link_args']
+            admitted = {'CoreFoundation', 'DiskArbitration'} if platform == 'macos' else {'CoreFoundation'}
+            if (row['compile_args'] or not args or len(args) % 2
+                    or any(args[index] != '-framework' or args[index + 1] not in admitted
+                           for index in range(0, len(args), 2))):
+                raise ValueError('libbluray Apple framework selection differs')
+            selected = set(args[1::2])
+            if len(selected) != len(args) // 2 or selected & frameworks:
+                raise ValueError('libbluray Apple framework dependency is duplicated')
+            frameworks.update(selected)
+    if not {'freetype2', 'libxml-2.0'} <= set(rows):
+        raise ValueError('libbluray enabled dependencies are missing')
+
+
+def _bluray_dependency_paths(work, platform, arch, sdk_root):
+    ft = 'dist/libfreetype/' + platform + '/thin/' + arch
+    metadata = 'dist/libbluray/' + platform + '/scratch/' + arch + '/vortx-sdk-pkgconfig/'
+    return {
+        'freetypeArchive': ft + '/lib/libfreetype.a',
+        'freetypePC': ft + '/lib/pkgconfig/freetype2.pc',
+        'freetypeHeader': ft + '/include/freetype2/freetype/freetype.h',
+        'sdkLibxmlPC': metadata + 'libxml-2.0.pc',
+        'sdkLibxmlHeader': sdk_root + '/usr/include/libxml2/libxml/xmlversion.h',
+        'sdkLibxmlStub': sdk_root + '/usr/lib/libxml2.tbd',
+        'sdkZlibPC': metadata + 'zlib.pc',
+        'sdkZlibHeader': sdk_root + '/usr/include/zlib.h',
+        'sdkZlibStub': sdk_root + '/usr/lib/libz.tbd',
+    }
+
+
+def _bluray_dependency_inputs(value, work, platform, arch, sdk_root, budget):
+    expected = _bluray_dependency_paths(work, platform, arch, sdk_root)
+    if type(value) is not dict or set(value) != set(expected):
+        raise ValueError('libbluray dependency input family differs')
+    decoded, before = {}, budget[0]
+    for name, relative in expected.items():
+        row = value[name]
+        fields = {'path', 'bytes', 'sha256'} | (set() if name == 'freetypeArchive' else {'bodyBase64'})
+        if (type(row) is not dict or set(row) != fields or row['path'] != relative
+                or type(row['bytes']) is not int or not 0 < row['bytes'] <= (512 * 1024 * 1024 if name == 'freetypeArchive' else 4 * 1024 * 1024)
+                or not isinstance(row['sha256'], str) or re.fullmatch(r'[0-9a-f]{64}', row['sha256']) is None):
+            raise ValueError('libbluray dependency input row differs: ' + name)
+        if name != 'freetypeArchive':
+            decoded[name] = _subtitle_inline({key: row[key] for key in ('bytes', 'sha256', 'bodyBase64')}, 'bluray dependency ' + name, budget, 4 * 1024 * 1024)
+    if budget[0] - before > 8 * 1024 * 1024:
+        raise ValueError('libbluray dependency raw-body family exceeds cap')
+    ft = str(work / 'dist/libfreetype' / platform / 'thin' / arch)
+    variables, fields = _bluray_fields(decoded['freetypePC'], 'retained Freetype pc')
+    if (variables != {'prefix': ft, 'includedir': '${prefix}/include', 'libdir': '${prefix}/lib'}
+            or fields.get('Requires') != 'zlib' or fields.get('Requires.private', '')
+            or fields.get('Libs') != '-L${libdir} -lfreetype'
+            or fields.get('Cflags') != '-I${includedir}/freetype2'
+            or re.fullmatch(r'[0-9]{1,3}(?:\.[0-9]{1,3}){1,3}', fields.get('Version', '')) is None):
+        raise ValueError('libbluray retained Freetype pkg-config identity differs')
+    ft_header = _subtitle_text(decoded['freetypeHeader'], 'retained Freetype header')
+    for macro in ('FREETYPE_MAJOR', 'FREETYPE_MINOR', 'FREETYPE_PATCH'):
+        if len(re.findall(r'^[ \t]*#[ \t]*define[ \t]+' + macro + r'[ \t]+[0-9]{1,3}[ \t]*$', ft_header, re.M)) != 1:
+            raise ValueError('libbluray retained Freetype header lacks bounded version macros')
+    for kind, macro, include, install_name in (
+            ('Libxml', 'LIBXML_DOTTED_VERSION', 'usr/include/libxml2', '/usr/lib/libxml2.2.dylib'),
+            ('Zlib', 'ZLIB_VERSION', '', '/usr/lib/libz.1.dylib')):
+        header = _subtitle_text(decoded['sdk' + kind + 'Header'], 'SDK version header')
+        definitions = re.findall(r'^[ \t]*#[ \t]*define[ \t]+' + macro + r'\b[^\r\n]*$', header, re.M)
+        versions = re.findall(r'^[ \t]*#[ \t]*define[ \t]+' + macro + r'[ \t]+"([0-9]{1,3}(?:\.[0-9]{1,3}){1,3})"[ \t]*$', header, re.M)
+        if len(definitions) != 1 or len(versions) != 1:
+            raise ValueError('libbluray selected SDK version header differs')
+        if kind == 'Libxml':
+            include_path = (sdk_root + '/' + include).replace('\\', '\\\\').replace('"', '\\"')
+            expected_pc = 'Name: libxml-2.0\nDescription: Target Apple SDK libxml2\nVersion: ' + versions[0] + '\nLibs: -lxml2\nCflags: -I"' + include_path + '"\n'
+        else:
+            expected_pc = 'Name: zlib\nDescription: Target Apple SDK zlib\nVersion: ' + versions[0] + '\nLibs: -lz\nCflags:\n'
+        if decoded['sdk' + kind + 'PC'] != expected_pc.encode():
+            raise ValueError('libbluray selected SDK pkg-config bytes differ')
+        stub = _subtitle_text(decoded['sdk' + kind + 'Stub'], 'SDK linker stub')
+        escaped = re.escape(install_name)
+        if not stub.startswith('--- !tapi-tbd') or len(re.findall(r'(?m)^install-name:[ \t]+(?:' + escaped + r"|'"+ escaped + r"'|\"" + escaped + r'\")[ \t]*$', stub)) != 1:
+            raise ValueError('libbluray selected SDK linker identity differs')
+    return decoded
+
 
 
 def _subtitle_record_contract(record, work, library, platform, arch, budget):
@@ -2103,7 +2358,7 @@ def _subtitle_record_contract(record, work, library, platform, arch, budget):
         logs = (_subtitle_text(generated['config.status'], 'libunibreak config.status') + '\n' +
                 _subtitle_text(generated['config.log'], 'libunibreak config.log'))
         assignments = {
-            'CC': record['environment']['CC'], 'CFLAGS': cflags,
+            'CC': record['environment']['CC'], 'CFLAGS': record['environment']['CFLAGS'],
             'CPPFLAGS': cflags, 'LDFLAGS': ldflags,
             'PACKAGE_VERSION': '8.0', 'prefix': str(prefix),
         }
@@ -2142,7 +2397,27 @@ def _subtitle_record_contract(record, work, library, platform, arch, budget):
                 _subtitle_compile_command(command, arch, sdk_root, target, minimum)
         _subtitle_build_options(generated['meson-info/intro-buildoptions.json'],
                                 library, prefix)
-        _subtitle_dependencies(generated['meson-info/intro-dependencies.json'])
+        if library == 'libbluray':
+            _bluray_config(generated)
+            _bluray_dependencies(generated['meson-info/intro-dependencies.json'], work, platform, arch, sdk_root)
+            source = str(work / 'dist/libbluray-1.5.0-f676408e') + '/'
+            udf = False
+            for command in commands:
+                if (command.get('directory') != str(build) or not isinstance(command.get('file'), str)
+                        or not isinstance(command.get('output'), str)):
+                    raise ValueError('libbluray compile directory/source identity differs')
+                name = os.path.normpath(os.path.join(str(build), command['file']))
+                if not name.startswith(source) or not name.endswith('.c'):
+                    raise ValueError('libbluray compile source escapes its admitted archive')
+                if not os.path.normpath(os.path.join(str(build), command['output'])).startswith(str(build) + '/'):
+                    raise ValueError('libbluray compile output escapes its admitted build')
+                _subtitle_compile_command(command, arch, sdk_root, target, minimum,
+                                          (command['file'], command['output'], False))
+                udf |= '/contrib/libudfread/src/' in name
+            if not udf:
+                raise ValueError('libbluray compile evidence lacks embedded UDF sources')
+        else:
+            _subtitle_dependencies(generated['meson-info/intro-dependencies.json'])
     header_name, pc_name = SUBTITLE_INSTALLED[library]
     _subtitle_header(installed[header_name], library)
     _subtitle_pc(installed[pc_name], library, prefix)
@@ -2150,7 +2425,7 @@ def _subtitle_record_contract(record, work, library, platform, arch, budget):
 
 
 def _subtitle_release_boundary(work):
-    state = work / 'dist' / 'subtitle-sources'
+    state = work / 'dist' / 'subtitle-sources-v3'
     archive_directory = state / 'archives'
     if (state.is_symlink() or not state.is_dir() or state.resolve() != state.absolute()
             or archive_directory.is_symlink() or not archive_directory.is_dir()
@@ -2165,13 +2440,13 @@ def _subtitle_release_boundary(work):
         verified.append((pin, body, _crypto_index_archive(pin, body, True)))
     expected = _crypto_expected_receipt(
         verified, SUBTITLE_SOURCE_PROFILE,
-        'fixed-sha256-from-upstream-release-metadata-or-maintained-android-pin', 2)
+        'fixed-sha256-from-upstream-release-metadata-maintained-android-pin-or-official-sidecar; fixed-apple-source-transforms', 3)
     receipt_path = state / 'receipt.json'
     body = _crypto_read_regular(receipt_path, CRYPTO_MAX_RECEIPT)
     if (not _crypto_exact_equal(_crypto_strict_json(body), expected)
             or body != _crypto_canonical(expected)):
         raise ValueError('subtitle helper receipt differs from retained raw archives')
-    return {'path': 'dist/subtitle-sources/receipt.json', 'bytes': len(body),
+    return {'path': 'dist/subtitle-sources-v3/receipt.json', 'bytes': len(body),
             'sha256': hashlib.sha256(body).hexdigest()}
 
 
@@ -2189,15 +2464,37 @@ def _subtitle_record_row(work, library, platform, arch, budget):
             'bodyBase64': base64.b64encode(body).decode('ascii')}
 
 
+def _bluray_observe_inputs(work, platform, arch, budget):
+    record_path = work / 'dist/libbluray' / platform / 'scratch' / arch / 'vortx-subtitle-build.json'
+    record = _subtitle_json(_crypto_read_regular(record_path, SUBTITLE_MAX_RECORD), 'bluray dependency record')
+    sdk_root, _, _ = _subtitle_environment(record['environment'], work, 'libbluray', platform, arch)
+    result = {}
+    for name, relative in _bluray_dependency_paths(work, platform, arch, sdk_root).items():
+        path = Path(relative) if relative.startswith('/') else work / relative
+        if name.startswith('sdk') and name not in ('sdkLibxmlPC', 'sdkZlibPC'):
+            sdk = Path(sdk_root).resolve()
+            path = path.resolve()
+            if sdk not in path.parents:
+                raise ValueError('libbluray SDK dependency escaped the selected SDK')
+        body = _crypto_read_regular(path, 512 * 1024 * 1024 if name == 'freetypeArchive' else 4 * 1024 * 1024)
+        result[name] = {'path': relative, 'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
+        if name != 'freetypeArchive':
+            result[name]['bodyBase64'] = base64.b64encode(body).decode('ascii')
+    _bluray_dependency_inputs(result, work, platform, arch, sdk_root, budget)
+    return result
+
+
 def _subtitle_receipt_shape(value, body, work):
     expected_keys = {'schemaVersion', 'profile', 'sourceProfile', 'versions', 'selectors',
                      'releaseSourceBoundary', 'rows', 'retainedLibassCompatibility',
+                     'retainedBlurayCompatibility', 'retainedFreetypeAuthentication',
                      'runtimeSecurityTested', 'promotionEligible'}
     if type(value) is not dict or set(value) != expected_keys:
         raise ValueError('subtitle BOM keys differ from schema 1')
     fixed = {'schemaVersion': 1, 'profile': NATIVE_UPGRADES_PROFILE,
              'sourceProfile': SUBTITLE_SOURCE_PROFILE, 'versions': SUBTITLE_VERSIONS,
              'selectors': SUBTITLE_SELECTORS, 'retainedLibassCompatibility': 'HOLD',
+             'retainedBlurayCompatibility': 'HOLD', 'retainedFreetypeAuthentication': 'HOLD',
              'runtimeSecurityTested': False, 'promotionEligible': False}
     if any(not _crypto_exact_equal(value[name], item) for name, item in fixed.items()):
         raise ValueError('subtitle BOM identity or open-gate status differs')
@@ -2221,7 +2518,7 @@ def _subtitle_receipt_shape(value, body, work):
             raise ValueError('subtitle BOM build family differs')
         for library in SUBTITLE_VERSIONS:
             build = builds[library]
-            if type(build) is not dict or set(build) != {'record'}:
+            if type(build) is not dict or set(build) != ({'record', 'dependencyInputs'} if library == 'libbluray' else {'record'}):
                 raise ValueError('subtitle BOM build row differs')
             record_row = build['record']
             if (type(record_row) is not dict
@@ -2238,8 +2535,11 @@ def _subtitle_receipt_shape(value, body, work):
                 {name: record_row[name]
                  for name in ('bytes', 'sha256', 'bodyBase64')},
                 'BOM build record', budget, SUBTITLE_MAX_RECORD)
-            _subtitle_record_contract(_subtitle_json(record_body, 'BOM build record'),
-                                      work, library, platform, arch, budget)
+            record = _subtitle_json(record_body, 'BOM build record')
+            _subtitle_record_contract(record, work, library, platform, arch, budget)
+            if library == 'libbluray':
+                sdk_root, _, _ = _subtitle_environment(record['environment'], work, library, platform, arch)
+                _bluray_dependency_inputs(build['dependencyInputs'], work, platform, arch, sdk_root, budget)
         observed.append(identity)
     if observed != list(SUBTITLE_MATRIX):
         raise ValueError('subtitle BOM matrix coverage differs')
@@ -2250,7 +2550,7 @@ def _subtitle_receipt_shape(value, body, work):
 
 
 def apple_subtitle_builds(work):
-    """Capture all 27 authenticated subtitle build records and their raw bodies."""
+    """Capture all 36 authenticated subtitle/bluray build records and raw bodies."""
     work = work.absolute()
     if work.is_symlink() or not work.is_dir() or work.resolve() != work:
         raise ValueError('subtitle WORK must be a real absolute directory')
@@ -2262,6 +2562,8 @@ def apple_subtitle_builds(work):
         for library in SUBTITLE_VERSIONS:
             builds[library] = {'record': _subtitle_record_row(
                 work, library, platform, arch, budget)}
+            if library == 'libbluray':
+                builds[library]['dependencyInputs'] = _bluray_observe_inputs(work, platform, arch, budget)
         rows.append({'platform': platform, 'arch': arch, 'slice': slice_name,
                      'builds': builds})
     destination_root = work / 'dist' / 'subtitle-builds'
@@ -2273,6 +2575,7 @@ def apple_subtitle_builds(work):
                'versions': SUBTITLE_VERSIONS, 'selectors': SUBTITLE_SELECTORS,
                'releaseSourceBoundary': release_boundary, 'rows': rows,
                'retainedLibassCompatibility': 'HOLD',
+               'retainedBlurayCompatibility': 'HOLD', 'retainedFreetypeAuthentication': 'HOLD',
                'runtimeSecurityTested': False, 'promotionEligible': False}
     encoded = (json.dumps(receipt, indent=2, sort_keys=True) + '\n').encode('utf-8')
     if len(encoded) > SUBTITLE_MAX_RECEIPT:
@@ -2302,6 +2605,9 @@ def apple_subtitle_receipt(receipt_path):
             expected = rows[(platform, arch)]['builds'][library]['record']
             if not _crypto_exact_equal(observed, expected):
                 raise ValueError('subtitle build record changed after BOM capture')
+            if library == 'libbluray' and not _crypto_exact_equal(
+                    _bluray_observe_inputs(work, platform, arch, budget), rows[(platform, arch)]['builds'][library]['dependencyInputs']):
+                raise ValueError('libbluray dependency inputs changed after BOM capture')
     print('PASS subtitle-profile ' + SUBTITLE_SOURCE_PROFILE)
     print('PASS apple-subtitle-receipt')
 
@@ -2661,7 +2967,7 @@ def android(out, upstream, sdk, *, readelf=None):
 # Exact source-evidence profile for FUTURE successful native candidates. This
 # carries source bytes, including new/untracked patch outputs, rather than
 # substituting tracked diffs for a complete corresponding-source snapshot.
-CURRENT_SOURCE_PROFILE = 'original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-subtitles-candidate'
+CURRENT_SOURCE_PROFILE = 'original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-subtitles-bluray150-candidate'
 CURRENT_RECIPE_PATHS = {
     'scripts/assemble-mpvkit-dvfel.sh', 'scripts/build-mpvkit-dvfel.sh',
     'scripts/ffmpeg-response-witness.patch', 'scripts/ffmpeg-response-generation.patch',
@@ -3254,7 +3560,7 @@ def capture_current_source_evidence(lane, out, upstream, roots, legacy, staged):
                          'apple-crypto-chain.json',
                          'apple-subtitle-source-unibreak.tar.gz',
                          'apple-subtitle-source-fribidi.tar.xz',
-                         'apple-subtitle-source-harfbuzz.tar.xz',
+                         'apple-subtitle-source-harfbuzz.tar.xz', 'apple-bluray-source.tar.xz',
                          'apple-subtitle-release-sources.tar',
                          'apple-subtitle-release-sources.json',
                          'apple-subtitle-builds.json'],
