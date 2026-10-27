@@ -325,7 +325,7 @@ diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScr
  }
  
  private class BuildUchardet: ZipBaseBuild {
-@@ -778,79 +885,975 @@
+@@ -778,79 +885,978 @@
  }
  
  
@@ -627,6 +627,9 @@ diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScr
 +            throw NSError(domain: "VortXOpenSSL", code: 1,
 +                          userInfo: [NSLocalizedDescriptionKey: "Fresh OpenSSL build evidence directory required"])
 +        }
++        // configdata.pm generates its apps header even for out-of-tree no-apps builds.
++        try FileManager.default.createDirectory(at: buildURL.appendingPathComponent("apps/include", isDirectory: true),
++                                                withIntermediateDirectories: true)
 +        var environ = environment(platform: platform, arch: arch)
 +        let shippingFlags = cFlags(platform: platform, arch: arch).joined(separator: " ") + " -O3"
 +        environ["CFLAGS"] = shippingFlags
@@ -1322,7 +1325,7 @@ diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScr
      override func buildALL() throws {
          try super.buildALL()
  
-@@ -861,10 +1864,33 @@
+@@ -861,10 +1867,33 @@
      }
  }
  
@@ -1357,7 +1360,7 @@ diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScr
  }
  
  private class BuildUavs3d: ZipBaseBuild {
-@@ -879,10 +1905,55 @@
+@@ -879,10 +1908,55 @@
      }
  }
  
