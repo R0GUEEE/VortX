@@ -23,7 +23,7 @@ import zipfile
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
 PROFILE = "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-subtitles-candidate"
-PROFILE_MANIFEST_SHA256 = "43fb50bcd3f2333c7fabf3c5cdf9031190449a7f69ecb413d5c3ba91cda8e6cc"
+PROFILE_MANIFEST_SHA256 = "d93644e08690fa14830abc970ef09e92ff2779cf8ca1369ce5f3e295690969e0"
 NATIVE_UPGRADES_PROFILE = "native-upgrades-openssl410-crypto-subtitles-v5"
 SHADERC_WRAPPER_VERSION = "2026.1.0"
 SHADERC_REMOTE_URL = "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip"
@@ -2572,7 +2572,7 @@ def subtitle_dependencies(body):
          "Subtitle Meson dependency closure admits a disabled integration")
 
 
-def subtitle_compile_command(row, arch, sdk_root, target, minimum):
+def subtitle_compile_command(row, arch, sdk_root, target, minimum, fribidi_role=None):
     need(type(row) is dict and 0 < len(row) <= 16 and
          all(isinstance(name, str) and name and len(name) <= 128 for name in row),
          "Subtitle compile-command row is malformed or unbounded")
@@ -2620,11 +2620,72 @@ def subtitle_compile_command(row, arch, sdk_root, target, minimum):
         arch_values = values("-arch")
         sdk_values = values("-isysroot")
         target_values = values("-target")
+        if fribidi_role is not None:
+            source, output, native = fribidi_role
+            need(arguments[0] == ("cc" if native else "/usr/bin/clang") and
+                 not any((item.startswith("-o") and item != "-o") or
+                         item.startswith("--output") or item.startswith("@") or item == "--"
+                         for item in arguments) and
+                 values("-c") == [source] and values("-o") == [output] and
+                 [item for item in arguments
+                  if not item.startswith("-") and item.endswith(".c")] == [source],
+                 "FriBidi compile-command compiler/source/output differs from its fixed role")
+            if native:
+                toggles = [item for item in arguments if re.match(
+                    r"^-[DU](?:HAVE_CONFIG_H|HAVE_STRINGIZE|DONT_HAVE_FRIBIDI_CONFIG_H)(?:=|$)", item)]
+                need(not arch_values and not sdk_values and not target_values and not deployment and
+                     not any(item.startswith("-arch") for item in arguments) and
+                     not any(item in ("-D", "-U") or
+                             (item.startswith(("-D", "-U")) and any(char.isspace() for char in item))
+                             for item in arguments) and
+                     not any(item.startswith(("-Wp,", "-Xpreprocessor", "-Xclang"))
+                             for item in arguments) and
+                     sorted(toggles) == sorted([
+                         "-UHAVE_CONFIG_H", "-DHAVE_STRINGIZE", "-DDONT_HAVE_FRIBIDI_CONFIG_H"]),
+                     "FriBidi native generator has shipping target flags or changed configuration defines")
+                continue
         need(arch_values and all(item == arch for item in arch_values) and
              sdk_values and all(item == sdk_root for item in sdk_values) and
              target_values and all(item == target for item in target_values) and
              deployment and all(item == minimum for item in deployment),
              "Subtitle compile-command target flags differ from fixed policy")
+
+
+def subtitle_fribidi_compile_commands(commands, build, arch, sdk_root, target, minimum):
+    # Exact pinned 1.0.17 gen.tab/meson.build: 1 + 6*2 native objects.
+    root = "../../../../libfribidi-1.0.17-6949dcde/"
+    expected = {}
+    for program in ("gen-unicode-version", "gen-bidi-type-tab",
+                    "gen-joining-type-tab", "gen-arabic-shaping-tab",
+                    "gen-mirroring-tab", "gen-brackets-tab", "gen-brackets-type-tab"):
+        names = (program + ".c",) if program == "gen-unicode-version" else (program + ".c", "packtab.c")
+        for name in names:
+            expected[(root + "gen.tab/" + name, "gen.tab/" + program + ".p/" + name + ".o")] = True
+    # Pinned lib/meson.build's complete shipping source list (deprecated=true).
+    for name in ("fribidi.c", "fribidi-arabic.c", "fribidi-bidi.c", "fribidi-bidi-types.c",
+                 "fribidi-char-sets.c", "fribidi-char-sets-cap-rtl.c",
+                 "fribidi-char-sets-cp1255.c", "fribidi-char-sets-cp1256.c",
+                 "fribidi-char-sets-iso8859-6.c", "fribidi-char-sets-iso8859-8.c",
+                 "fribidi-char-sets-utf8.c", "fribidi-deprecated.c", "fribidi-joining.c",
+                 "fribidi-joining-types.c", "fribidi-mirroring.c", "fribidi-brackets.c",
+                 "fribidi-run.c", "fribidi-shape.c"):
+        expected[(root + "lib/" + name, "lib/libfribidi.a.p/" + name + ".o")] = False
+    need(type(commands) is list and len(commands) == len(expected),
+         "FriBidi compile-command set must contain exactly 13 native and 18 shipping rows")
+    seen = set()
+    for row in commands:
+        need(type(row) is dict and {"directory", "file", "output"} <= set(row) and
+             not set(row) - {"directory", "file", "output", "command", "arguments"} and
+             isinstance(row["file"], str) and isinstance(row["output"], str) and
+             row["directory"] == str(build),
+             "FriBidi compile-command metadata differs from the fixed build directory/schema")
+        identity = (row["file"], row["output"])
+        need(identity in expected and identity not in seen,
+             "FriBidi compile-command has an unknown or duplicate source/output role")
+        seen.add(identity)
+        subtitle_compile_command(row, arch, sdk_root, target, minimum,
+                                 (identity[0], identity[1], expected[identity]))
+    need(seen == set(expected), "FriBidi compile-command native/shipping closure is incomplete")
 
 
 def subtitle_pc(body, library, prefix):
@@ -2787,8 +2848,11 @@ def subtitle_record_contract(record, work, library, platform, arch, budget):
         need(type(commands) is list and 0 < len(commands) <= 100000,
              "Subtitle compile-command set is empty or unbounded")
         _, target, minimum, _, _, _, _ = subtitle_platform(platform, arch)
-        for command in commands:
-            subtitle_compile_command(command, arch, sdk_root, target, minimum)
+        if library == "libfribidi":
+            subtitle_fribidi_compile_commands(commands, build, arch, sdk_root, target, minimum)
+        else:
+            for command in commands:
+                subtitle_compile_command(command, arch, sdk_root, target, minimum)
         subtitle_build_options(
             generated["meson-info/intro-buildoptions.json"], library, prefix)
         subtitle_dependencies(generated["meson-info/intro-dependencies.json"])

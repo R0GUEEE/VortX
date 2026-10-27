@@ -1672,6 +1672,43 @@ objcpp_link_args = [{ldflags}]
                 if name == 'build.ninja':
                     return b'ninja_required_version = 1.10\n'
                 if name == 'compile_commands.json':
+                    if library == 'libfribidi':
+                        # Pinned gen.tab/meson.build native:true generators and
+                        # lib/meson.build's distinct shipping static-library list.
+                        root = '../../../../libfribidi-1.0.17-6949dcde/'
+                        rows = []
+                        for program in ('gen-unicode-version', 'gen-bidi-type-tab',
+                                        'gen-joining-type-tab', 'gen-arabic-shaping-tab',
+                                        'gen-mirroring-tab', 'gen-brackets-tab', 'gen-brackets-type-tab'):
+                            sources = ([program + '.c'] if program == 'gen-unicode-version'
+                                       else [program + '.c', 'packtab.c'])
+                            for source in sources:
+                                path = root + 'gen.tab/' + source
+                                output = 'gen.tab/' + program + '.p/' + source + '.o'
+                                rows.append({'directory': expected['buildDirectory'],
+                                             'command': ' '.join(['cc', '-UHAVE_CONFIG_H',
+                                                 '-DHAVE_STRINGIZE', '-DDONT_HAVE_FRIBIDI_CONFIG_H',
+                                                 '-o', output, '-c', path]),
+                                             'file': path, 'output': output})
+                        for source in ('fribidi.c', 'fribidi-arabic.c', 'fribidi-bidi.c',
+                                       'fribidi-bidi-types.c', 'fribidi-char-sets.c',
+                                       'fribidi-char-sets-cap-rtl.c', 'fribidi-char-sets-cp1255.c',
+                                       'fribidi-char-sets-cp1256.c', 'fribidi-char-sets-iso8859-6.c',
+                                       'fribidi-char-sets-iso8859-8.c', 'fribidi-char-sets-utf8.c',
+                                       'fribidi-deprecated.c', 'fribidi-joining.c',
+                                       'fribidi-joining-types.c', 'fribidi-mirroring.c',
+                                       'fribidi-brackets.c', 'fribidi-run.c', 'fribidi-shape.c'):
+                            path = root + 'lib/' + source
+                            output = 'lib/libfribidi.a.p/' + source + '.o'
+                            arguments = (['/usr/bin/clang'] + environment['CFLAGS'].split() +
+                                         ['-o', output, '-c', path])
+                            row = {'directory': expected['buildDirectory'],
+                                   'command': ' '.join(arguments), 'file': path, 'output': output}
+                            if source == 'fribidi-arabic.c':
+                                row['arguments'] = arguments
+                            rows.append(row)
+                        assert len(rows) == 31
+                        return json.dumps(rows).encode()
                     command = ' '.join(('clang', environment['CFLAGS'], '-c', 'fixture.c'))
                     extra_command = ' '.join(('clang', environment['CFLAGS'],
                                               '-c', 'fixture-extra.c'))
@@ -2169,6 +2206,11 @@ objcpp_link_args = [{ldflags}]
 
         consumer.subtitle_builds_receipt(subtitle_build_body, subtitle_zip_bodies,
                                          subtitle_archive_source_rows)
+        for row in subtitle_build_value['rows']:
+            fri_record = json.loads(base64.b64decode(
+                row['builds']['libfribidi']['record']['bodyBase64']))
+            MODULE._subtitle_record_contract(fri_record, Path('/fixture/work'), 'libfribidi',
+                                             row['platform'], row['arch'], [0])
 
         def subtitle_body_with_record_mutation(mutate):
             value = deepcopy(subtitle_build_value)
@@ -2293,28 +2335,28 @@ objcpp_link_args = [{ldflags}]
                  row for row in rows if row['name'] == 'prefix'
              ).update(value='/fixture/work/dist/foreign-prefix')),
             ('second-command-target', 'compile_commands.json',
-             lambda rows: rows[1]['arguments'].__setitem__(
-                 rows[1]['arguments'].index('-target') + 1,
+             lambda rows: rows[14]['arguments'].__setitem__(
+                 rows[14]['arguments'].index('-target') + 1,
                  'arm64-apple-ios99.0')),
             ('second-command-sdk', 'compile_commands.json',
-             lambda rows: rows[1]['arguments'].__setitem__(
-                 rows[1]['arguments'].index('-isysroot') + 1,
+             lambda rows: rows[14]['arguments'].__setitem__(
+                 rows[14]['arguments'].index('-isysroot') + 1,
                  '/fixture/Xcode/Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS.sdk')),
             ('second-command-minimum', 'compile_commands.json',
-             lambda rows: rows[1]['arguments'].__setitem__(
-                 rows[1]['arguments'].index('-mios-version-min=15.0'),
+             lambda rows: rows[14]['arguments'].__setitem__(
+                 rows[14]['arguments'].index('-mios-version-min=15.0'),
                  '-mios-version-min=16.0')),
             ('second-command-spelling-target', 'compile_commands.json',
-             lambda rows: rows[1].update(
-                 command=rows[1]['command'] + ' --target=arm64-apple-ios99.0')),
+             lambda rows: rows[14].update(
+                 command=rows[14]['command'] + ' --target=arm64-apple-ios99.0')),
             ('second-arguments-spelling-target', 'compile_commands.json',
-             lambda rows: rows[1]['arguments'].append('--target=arm64-apple-ios99.0')),
+             lambda rows: rows[14]['arguments'].append('--target=arm64-apple-ios99.0')),
             ('second-command-spelling-sysroot', 'compile_commands.json',
-             lambda rows: rows[1].update(
-                 command=rows[1]['command'] +
+             lambda rows: rows[14].update(
+                 command=rows[14]['command'] +
                  ' --sysroot=/fixture/Platforms/Other.platform/SDKs/Other.sdk')),
             ('second-arguments-spelling-sysroot', 'compile_commands.json',
-             lambda rows: rows[1]['arguments'].append(
+             lambda rows: rows[14]['arguments'].append(
                  '--sysroot=/fixture/Platforms/Other.platform/SDKs/Other.sdk')))
         for name, generated_name, mutate in generated_negative:
             with self.subTest(receipt='subtitle', mutation=name):
@@ -2323,6 +2365,100 @@ objcpp_link_args = [{ldflags}]
                 with self.assertRaises(ValueError):
                     consumer.subtitle_builds_receipt(observed_body, subtitle_zip_bodies,
                                                      subtitle_archive_source_rows)
+
+        def fri_native_arguments(rows):
+            rows[0]['arguments'] = rows[0].pop('command').split()
+
+        def fri_native_both(rows):
+            rows[0]['arguments'] = rows[0]['command'].split()
+
+        for name, mutate in (('native-arguments-only', fri_native_arguments),
+                             ('native-both-payloads', fri_native_both),
+                             ('unordered-exact-multiset', lambda rows: rows.reverse())):
+            with self.subTest(receipt='fribidi-roles-positive', mutation=name):
+                observed_body = subtitle_body_with_generated_mutation(
+                    'libfribidi', 'compile_commands.json', mutate)
+                consumer.subtitle_builds_receipt(observed_body, subtitle_zip_bodies,
+                                                 subtitle_archive_source_rows)
+                value = json.loads(observed_body)
+                record = json.loads(base64.b64decode(
+                    value['rows'][0]['builds']['libfribidi']['record']['bodyBase64']))
+                MODULE._subtitle_record_contract(record, Path('/fixture/work'),
+                                                 'libfribidi', 'ios', 'arm64', [0])
+
+        fri_root = '../../../../libfribidi-1.0.17-6949dcde/'
+        fri_negative = (
+            ('missing-native', lambda rows: rows.pop(0)),
+            ('duplicate-native', lambda rows: rows.__setitem__(1, deepcopy(rows[0]))),
+            ('duplicate-packtab-role', lambda rows: rows.__setitem__(2, deepcopy(rows[4]))),
+            ('unknown-native-program', lambda rows: rows[0].update(
+                output='gen.tab/gen-unknown.p/gen-unicode-version.c.o')),
+            ('native-foreign-directory', lambda rows: rows[0].update(directory='/fixture/foreign')),
+            ('native-target-source-metadata', lambda rows: rows[0].update(
+                file=fri_root + 'lib/fribidi.c')),
+            ('native-target-source-command', lambda rows: rows[0].update(
+                command=rows[0]['command'].replace(
+                    fri_root + 'gen.tab/gen-unicode-version.c', fri_root + 'lib/fribidi.c'))),
+            ('native-target-output-command', lambda rows: rows[0].update(
+                command=rows[0]['command'].replace(
+                    'gen.tab/gen-unicode-version.p/gen-unicode-version.c.o',
+                    'lib/libfribidi.a.p/fribidi.c.o'))),
+            ('native-extra-target-source', lambda rows: rows[0].update(
+                command=rows[0]['command'] + ' ' + fri_root + 'lib/fribidi.c')),
+            ('native-wrong-compiler', lambda rows: rows[0].update(
+                command=rows[0]['command'].replace('cc ', '/usr/bin/clang ', 1))),
+            ('native-target-flags', lambda rows: rows[0].update(
+                command=rows[0]['command'] + ' -target arm64-apple-ios15.0')),
+            ('native-conflicting-config', lambda rows: rows[0].update(
+                command=rows[0]['command'] + ' -DHAVE_CONFIG_H=1')),
+            ('native-split-config-command', lambda rows: rows[0].update(
+                command=rows[0]['command'] + ' -D HAVE_CONFIG_H=1')),
+            ('native-split-stringize-command', lambda rows: rows[0].update(
+                command=rows[0]['command'] + ' -U HAVE_STRINGIZE')),
+            ('native-split-config-arguments', lambda rows: rows[0].update(
+                arguments=rows[0]['command'].split() + ['-D', 'HAVE_CONFIG_H=1'])),
+            ('native-split-stringize-arguments', lambda rows: rows[0].update(
+                arguments=rows[0]['command'].split() + ['-U', 'HAVE_STRINGIZE'])),
+            ('native-spaced-config-token', lambda rows: rows[0].update(
+                arguments=rows[0]['command'].split() + ['-D HAVE_CONFIG_H=1'])),
+            ('native-forwarded-config-command', lambda rows: rows[0].update(
+                command=rows[0]['command'] + ' -Wp,-DHAVE_CONFIG_H=1')),
+            ('native-forwarded-config-arguments', lambda rows: rows[0].update(
+                arguments=rows[0]['command'].split() + ['-Xpreprocessor', '-DHAVE_CONFIG_H=1'])),
+            ('native-forwarded-config-clang', lambda rows: rows[0].update(
+                arguments=rows[0]['command'].split() + ['-Xclang', '-DHAVE_CONFIG_H=1'])),
+            ('native-joined-output-command', lambda rows: rows[0].update(
+                command=rows[0]['command'] + ' -o/fixture/foreign.o')),
+            ('native-joined-output-arguments', lambda rows: rows[0].update(
+                arguments=rows[0]['command'].split() + ['-o/fixture/foreign.o'])),
+            ('native-response-file', lambda rows: rows[0].update(
+                command=rows[0]['command'] + ' @/fixture/foreign.rsp')),
+            ('missing-shipping', lambda rows: rows.pop()),
+            ('duplicate-shipping', lambda rows: rows.__setitem__(-1, deepcopy(rows[-2]))),
+            ('shipping-missing-target-arch', lambda rows: rows[13].update(
+                command=rows[13]['command'].replace(' -arch arm64', '', 1))),
+            ('shipping-joined-output-command', lambda rows: rows[13].update(
+                command=rows[13]['command'] + ' -o/fixture/foreign.o')),
+            ('shipping-alternate-output-arguments', lambda rows: rows[14]['arguments'].append(
+                '--output=/fixture/foreign.o')),
+            ('shipping-response-file', lambda rows: rows[13].update(
+                command=rows[13]['command'] + ' @/fixture/foreign.rsp')),
+            ('shipping-forged-native-role', lambda rows: rows.__setitem__(13, deepcopy(rows[0]))),
+            ('shipping-unknown-source', lambda rows: rows[13].update(
+                file=fri_root + 'lib/unknown.c')))
+        for name, mutate in fri_negative:
+            with self.subTest(receipt='fribidi-roles-negative', mutation=name):
+                observed_body = subtitle_body_with_generated_mutation(
+                    'libfribidi', 'compile_commands.json', mutate)
+                with self.assertRaises(ValueError):
+                    consumer.subtitle_builds_receipt(observed_body, subtitle_zip_bodies,
+                                                     subtitle_archive_source_rows)
+                value = json.loads(observed_body)
+                record = json.loads(base64.b64decode(
+                    value['rows'][0]['builds']['libfribidi']['record']['bodyBase64']))
+                with self.assertRaises(ValueError):
+                    MODULE._subtitle_record_contract(record, Path('/fixture/work'),
+                                                     'libfribidi', 'ios', 'arm64', [0])
 
         makefile_negative = (
             ('wrong-makefile-cc', lambda body: body.replace(
