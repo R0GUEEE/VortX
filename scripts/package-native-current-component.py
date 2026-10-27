@@ -23,7 +23,7 @@ import zipfile
 CHUNK, MIB = 1024 * 1024, 1024 * 1024
 GIT = Path("/usr/bin/git")  # Do not execute a producer-controlled/PATH-selected command.
 PROFILE = "original-http-sparse-native-reference-reader-v2-dependencies-openssl410-crypto-subtitles-candidate"
-PROFILE_MANIFEST_SHA256 = "86767d925f69c56f6e440843439e2c330d183ca97b8b0f5c7ec3a57bb93c75a9"
+PROFILE_MANIFEST_SHA256 = "43fb50bcd3f2333c7fabf3c5cdf9031190449a7f69ecb413d5c3ba91cda8e6cc"
 NATIVE_UPGRADES_PROFILE = "native-upgrades-openssl410-crypto-subtitles-v5"
 SHADERC_WRAPPER_VERSION = "2026.1.0"
 SHADERC_REMOTE_URL = "https://github.com/mpvkit/libshaderc-build/releases/download/2026.1.0/Libshaderc_combined.xcframework.zip"
@@ -2429,7 +2429,8 @@ def subtitle_platform(platform, arch):
                "tvos": "-mtvos-version-min=15.0",
                "tvsimulator": "-mtvos-simulator-version-min=15.0",
                "macos": "-mmacosx-version-min=12.0"}[platform]
-    host = cpu + "-" + {"ios": "ios", "isimulator": "ios",
+    host_cpu = "aarch64" if cpu == "arm64" else cpu
+    host = host_cpu + "-" + {"ios": "ios", "isimulator": "ios",
                          "tvos": "tvos", "tvsimulator": "tvos",
                          "macos": "apple"}[platform] + "-darwin"
     subsystem = {"ios": "ios", "isimulator": "ios-simulator",

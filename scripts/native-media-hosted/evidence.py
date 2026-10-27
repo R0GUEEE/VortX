@@ -1716,7 +1716,8 @@ def _subtitle_platform(platform, arch):
                'tvos': '-mtvos-version-min=15.0',
                'tvsimulator': '-mtvos-simulator-version-min=15.0',
                'macos': '-mmacosx-version-min=12.0'}[platform]
-    host = cpu + '-' + ({'ios': 'ios', 'isimulator': 'ios',
+    host_cpu = 'aarch64' if cpu == 'arm64' else cpu
+    host = host_cpu + '-' + ({'ios': 'ios', 'isimulator': 'ios',
                          'tvos': 'tvos', 'tvsimulator': 'tvos',
                          'macos': 'apple'}[platform]) + '-darwin'
     subsystem = {'ios': 'ios', 'isimulator': 'ios-simulator',

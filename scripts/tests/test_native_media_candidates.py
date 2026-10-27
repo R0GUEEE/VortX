@@ -1158,6 +1158,19 @@ class NativeMediaProducer(unittest.TestCase):
 
         crypto_zip_bodies, crypto_thin_bodies, crypto_smb_headers, crypto_smb_pins = crypto_library_fixture()
 
+        # GNU configure's CPU spelling is separate from the Apple compiler target.
+        for platform, arch, _ in consumer.SUBTITLE_MATRIX:
+            producer_platform = MODULE._subtitle_platform(platform, arch)
+            consumer_platform = consumer.subtitle_platform(platform, arch)
+            self.assertEqual(producer_platform, consumer_platform)
+            host_cpu = 'x86_64' if arch == 'x86_64' else 'aarch64'
+            host_vendor = {'ios': 'ios', 'isimulator': 'ios', 'tvos': 'tvos',
+                           'tvsimulator': 'tvos', 'macos': 'apple'}[platform]
+            self.assertEqual(consumer_platform[3], host_cpu + '-' + host_vendor + '-darwin')
+            compiler_cpu = 'x86_64' if arch == 'x86_64' else 'arm64'
+            self.assertTrue(consumer_platform[1].startswith(compiler_cpu + '-apple-'))
+            self.assertEqual(consumer_platform[6], compiler_cpu)
+
         subtitle_library_specs = (
             ('Libunibreak', 'libunibreak', 'libunibreak.a', 'Libunibreak',
              'include/unibreakbase.h', 'lib/pkgconfig/libunibreak.pc',
@@ -2238,8 +2251,24 @@ objcpp_link_args = [{ldflags}]
                 build['record'] = crypto_inline(build['record']['path'], record_body)
             return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
 
+        def noncanonical_unibreak_host(record):
+            before = record['arguments'][0]
+            record['arguments'][0] = before.replace('--host=aarch64-', '--host=arm64-', 1)
+            self.assertNotEqual(record['arguments'][0], before)
+            # Keep both recorded configure traces coherent with the wrong argument.
+            for name in ('config.status', 'config.log'):
+                row = record['generatedConfiguration'][name]
+                body = base64.b64decode(row['bodyBase64'])
+                changed_body = body.replace(b'--host=aarch64-', b'--host=arm64-', 1)
+                self.assertNotEqual(changed_body, body)
+                row.update(bytes=len(changed_body),
+                           sha256=hashlib.sha256(changed_body).hexdigest(),
+                           bodyBase64=base64.b64encode(changed_body).decode('ascii'))
+
         subtitle_negative = (
             ('equal-fake-installed-header', subtitle_equal_fake_value, subtitle_build_body),
+            ('noncanonical-gnu-host', noncanonical_unibreak_host,
+             subtitle_body_with_record_mutation),
             ('wrong-source-root', lambda value: value.update(sourceDirectory='/fixture/work/dist/foreign-source'),
              subtitle_body_with_record_mutation),
             ('extra-option', lambda value: value['arguments'].append('--fixture-unapproved-option'),

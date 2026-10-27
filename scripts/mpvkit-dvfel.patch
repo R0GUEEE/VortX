@@ -22,7 +22,7 @@ index 9d9b0af52ea6978126a5828a474f6eaa85c63225..47fbf53d1a3c0bd3f4c92bb1c695465a
  
          .binaryTarget(
 diff --git a/Sources/BuildScripts/XCFrameworkBuild/main.swift b/Sources/BuildScripts/XCFrameworkBuild/main.swift
-index e5f872cf14336741fcd52076bd6f6ef9dab766d9..d8fae4fbe849cbe3976beea71dc1a932059afff3 100644
+index e5f872cf14336741fcd52076bd6f6ef9dab766d9..b37dcec889ea278e4d3e412a27e0af455011e752 100644
 --- a/Sources/BuildScripts/XCFrameworkBuild/main.swift
 +++ b/Sources/BuildScripts/XCFrameworkBuild/main.swift
 @@ -1,4 +1,6 @@
@@ -791,7 +791,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..d8fae4fbe849cbe3976beea71dc1a932
      }
  }
  
-@@ -814,9 +1380,122 @@
+@@ -814,9 +1380,123 @@
      }
  }
  
@@ -913,11 +913,12 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..d8fae4fbe849cbe3976beea71dc1a932
 +private class BuildUnibreak: PinnedSubtitleReleaseBuild {
 +    init() { super.init(library: .libunibreak) }
 +    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
-+        ["--host=\(platform.host(arch: arch))", "--with-pic", "--enable-static", "--disable-shared"]
++        let host = platform.host(arch: arch).replacingOccurrences(of: "arm64-", with: "aarch64-", options: .anchored)
++        return ["--host=\(host)", "--with-pic", "--enable-static", "--disable-shared"]
      }
  }
  
-@@ -826,29 +1505,321 @@
+@@ -826,29 +1506,321 @@
      }
  }
  
@@ -1254,7 +1255,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..d8fae4fbe849cbe3976beea71dc1a932
      }
  
      override func buildALL() throws {
-@@ -861,9 +1832,32 @@
+@@ -861,9 +1833,32 @@
      }
  }
  
@@ -1288,7 +1289,7 @@ index e5f872cf14336741fcd52076bd6f6ef9dab766d9..d8fae4fbe849cbe3976beea71dc1a932
      }
  }
  
-@@ -879,9 +1873,54 @@
+@@ -879,9 +1874,54 @@
      }
  }
  
